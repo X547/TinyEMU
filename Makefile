@@ -24,12 +24,12 @@
 
 # if set, network filesystem is enabled. libcurl and libcrypto
 # (openssl) must be installed.
-CONFIG_FS_NET=y
+#CONFIG_FS_NET=y
 # SDL support (optional)
 CONFIG_SDL=y
 # if set, compile the 128 bit emulator. Note: the 128 bit target does
 # not compile if gcc does not support the int128 type (32 bit hosts).
-CONFIG_INT128=y
+#CONFIG_INT128=y
 # build x86 emulator
 CONFIG_X86EMU=y
 # win32 build (not usable yet)
@@ -62,7 +62,7 @@ endif
 
 all: $(PROGS)
 
-EMU_OBJS:=virtio.o pci.o fs.o cutils.o iomem.o simplefb.o \
+EMU_OBJS:=virtio.o uart.o pci.o fs.o cutils.o iomem.o simplefb.o \
     json.o machine.o temu.o
 
 ifdef CONFIG_SLIRP
@@ -72,7 +72,8 @@ endif
 
 ifndef CONFIG_WIN32
 EMU_OBJS+=fs_disk.o
-EMU_LIBS=-lrt
+#EMU_LIBS=-lrt
+EMU_LIBS=-lnetwork
 endif
 ifdef CONFIG_FS_NET
 CFLAGS+=-DCONFIG_FS_NET

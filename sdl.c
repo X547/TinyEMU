@@ -84,7 +84,7 @@ static void sdl_update(FBDevice *fb_dev, void *opaque,
     SDL_UpdateRect(screen, r.x, r.y, r.w, r.h);
 }
 
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__HAIKU__)
 
 static int sdl_get_keycode(const SDL_KeyboardEvent *ev)
 {

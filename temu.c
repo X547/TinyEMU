@@ -36,7 +36,9 @@
 #include <termios.h>
 #include <sys/ioctl.h>
 #include <net/if.h>
+#ifndef __HAIKU__
 #include <linux/if_tun.h>
+#endif
 #endif
 #include <sys/stat.h>
 #include <signal.h>
@@ -346,7 +348,7 @@ static BlockDevice *block_device_init(const char *filename,
     return bs;
 }
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__HAIKU__)
 
 typedef struct {
     int fd;
@@ -763,7 +765,7 @@ int main(int argc, char **argv)
         } else
 #endif
         {
-#ifdef _WIN32
+#if defined(_WIN32)
             fprintf(stderr, "Filesystem access not supported yet\n");
             exit(1);
 #else
@@ -788,7 +790,7 @@ int main(int argc, char **argv)
                 exit(1);
         } else
 #endif
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__HAIKU__)
         if (!strcmp(p->tab_eth[i].driver, "tap")) {
             p->tab_eth[i].net = tun_open(p->tab_eth[i].ifname);
             if (!p->tab_eth[i].net)
@@ -805,16 +807,14 @@ int main(int argc, char **argv)
 #ifdef CONFIG_SDL
     if (p->display_device) {
         sdl_init(p->width, p->height);
-    } else
-#endif
-    {
-#ifdef _WIN32
-        fprintf(stderr, "Console not supported yet\n");
-        exit(1);
-#else
-        p->console = console_init(allow_ctrlc);
-#endif
     }
+#endif
+#ifdef _WIN32
+    fprintf(stderr, "Console not supported yet\n");
+    exit(1);
+#else
+    p->console = console_init(allow_ctrlc);
+#endif
     p->rtc_real_time = TRUE;
 
     s = virt_machine_init(p);

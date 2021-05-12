@@ -35,6 +35,7 @@
 #include "cutils.h"
 #include "iomem.h"
 #include "riscv_cpu.h"
+#include "uart.h"
 #include "virtio.h"
 #include "machine.h"
 
@@ -56,6 +57,7 @@ typedef struct RISCVMachine {
     /* HTIF */
     uint64_t htif_tohost, htif_fromhost;
 
+    SerialState *serial_state;
     VIRTIODevice *keyboard_dev;
     VIRTIODevice *mouse_dev;
 
@@ -74,6 +76,9 @@ typedef struct RISCVMachine {
 #define PLIC_BASE_ADDR 0x40100000
 #define PLIC_SIZE      0x00400000
 #define FRAMEBUFFER_BASE_ADDR 0x41000000
+#define UART_BASE_ADDR 0x10000000
+#define UART_SIZE 0x100
+#define UART_IRQ 10
 
 #define RTC_FREQ 10000000
 #define RTC_FREQ_DIV 16 /* arbitrary, relative to CPU freq to have a
@@ -191,6 +196,14 @@ static void htif_poll(RISCVMachine *s)
     }
 }
 #endif
+
+static void serial_write_cb(void *opaque, const uint8_t *buf, int buf_len)
+{
+    RISCVMachine *s = opaque;
+    if (s->common.console) {
+        s->common.console->write_data(s->common.console->opaque, buf, buf_len);
+    }
+}
 
 static uint32_t clint_read(void *opaque, uint32_t offset, int size_log2)
 {
@@ -696,6 +709,14 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
     fdt_prop_u32(s, "phandle", plic_phandle);
 
     fdt_end_node(s); /* plic */
+
+    fdt_begin_node_num(s, "serial", UART_BASE_ADDR);
+    fdt_prop_str(s, "compatible", "ns16550a");
+    fdt_prop_tab_u64_2(s, "reg", UART_BASE_ADDR, UART_SIZE);
+    tab[0] = plic_phandle;
+    tab[1] = UART_IRQ;
+    fdt_prop_tab_u32(s, "interrupts-extended", tab, 2);
+    fdt_end_node(s); /* serial */
     
     for(i = 0; i < m->virtio_count; i++) {
         fdt_begin_node_num(s, "virtio", VIRTIO_BASE_ADDR + i * VIRTIO_SIZE);
@@ -739,7 +760,7 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
     fdt_end_node(s); /* / */
 
     size = fdt_output(s, dst);
-#if 0
+#if 1
     {
         FILE *f;
         f = fopen("/tmp/riscvemu.dtb", "wb");
@@ -880,6 +901,9 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
     cpu_register_device(s->mem_map, HTIF_BASE_ADDR, 16,
                         s, htif_read, htif_write, DEVIO_SIZE32);
     s->common.console = p->console;
+
+    s->serial_state = serial_init(s->mem_map, UART_BASE_ADDR, &s->plic_irq[UART_IRQ],
+        serial_write_cb, s);
 
     memset(vbus, 0, sizeof(*vbus));
     vbus->mem_map = s->mem_map;

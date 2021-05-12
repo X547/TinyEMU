@@ -40,7 +40,7 @@
 #error CONFIG_RISCV_MAX_XLEN must be defined
 #endif
 
-//#define DUMP_INVALID_MEM_ACCESS
+#define DUMP_INVALID_MEM_ACCESS
 //#define DUMP_MMU_EXCEPTIONS
 //#define DUMP_INTERRUPTS
 //#define DUMP_INVALID_CSR
@@ -377,6 +377,8 @@ int target_read_slow(RISCVCPUState *s, mem_uint_t *pval,
 #ifdef DUMP_INVALID_MEM_ACCESS
             printf("target_read_slow: invalid physical address 0x");
             print_target_ulong(paddr);
+            printf(", PC: ");
+            print_target_ulong(s->pc);
             printf("\n");
 #endif
             return 0;
@@ -464,7 +466,10 @@ int target_write_slow(RISCVCPUState *s, target_ulong addr,
 #ifdef DUMP_INVALID_MEM_ACCESS
             printf("target_write_slow: invalid physical address 0x");
             print_target_ulong(paddr);
+            printf(", PC: ");
+            print_target_ulong(s->pc);
             printf("\n");
+            exit(1);
 #endif
         } else if (pr->is_ram) {
             phys_mem_set_dirty_bit(pr, paddr - pr->addr);
