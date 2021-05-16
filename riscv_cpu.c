@@ -29,6 +29,8 @@
 #include <assert.h>
 #include <fcntl.h>
 
+#include <OS.h> // system_time()
+
 #include "cutils.h"
 #include "iomem.h"
 #include "riscv_cpu.h"
@@ -747,6 +749,9 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
             }
         }
         val = (int64_t)s->insn_counter;
+        break;
+    case 0xc01: /* utime */
+        val = system_time();
         break;
     case 0xc80: /* mcycleh */
     case 0xc82: /* minstreth */
