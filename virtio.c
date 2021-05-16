@@ -93,7 +93,7 @@
 
 #define MAX_QUEUE 8
 #define MAX_CONFIG_SPACE_SIZE 256
-#define MAX_QUEUE_NUM 16
+#define MAX_QUEUE_NUM 32
 
 typedef struct {
     uint32_t ready; /* 0 or 1 */
@@ -977,8 +977,8 @@ static void virtio_config_change_notify(VIRTIODevice *s)
     set_irq(s->irq, 1);
 }
 
-/*********************************************************************/
-/* block device */
+
+//#pragma mark block device
 
 typedef struct {
     uint32_t type;
@@ -1131,8 +1131,8 @@ VIRTIODevice *virtio_block_init(VIRTIOBusDef *bus, BlockDevice *bs)
     return (VIRTIODevice *)s;
 }
 
-/*********************************************************************/
-/* network device */
+
+//#pragma mark network device
 
 typedef struct VIRTIONetDevice {
     VIRTIODevice common;
@@ -1257,8 +1257,8 @@ VIRTIODevice *virtio_net_init(VIRTIOBusDef *bus, EthernetDevice *es)
     return (VIRTIODevice *)s;
 }
 
-/*********************************************************************/
-/* console device */
+
+//#pragma mark console device
 
 typedef struct VIRTIOConsoleDevice {
     VIRTIODevice common;
@@ -1359,8 +1359,8 @@ VIRTIODevice *virtio_console_init(VIRTIOBusDef *bus, CharacterDevice *cs)
     return (VIRTIODevice *)s;
 }
 
-/*********************************************************************/
-/* input device */
+
+//#pragma mark input device
 
 enum {
     VIRTIO_INPUT_CFG_UNSET      = 0x00,
@@ -1643,8 +1643,8 @@ VIRTIODevice *virtio_input_init(VIRTIOBusDef *bus, VirtioInputTypeEnum type)
     return (VIRTIODevice *)s;
 }
 
-/*********************************************************************/
-/* 9p filesystem device */
+
+//#pragma mark 9p filesystem device
 
 typedef struct {
     struct list_head link;
