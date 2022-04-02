@@ -31,6 +31,9 @@
 #include <errno.h>
 #include <unistd.h>
 #include <time.h>
+#ifdef __HAIKU__
+#include <OS.h>
+#endif
 
 #include "cutils.h"
 #include "iomem.h"
@@ -80,7 +83,7 @@ typedef struct RISCVMachine {
 #define UART_SIZE 0x100
 #define UART_IRQ 10
 
-#define RTC_FREQ 10000000
+#define RTC_FREQ 1000000
 #define RTC_FREQ_DIV 16 /* arbitrary, relative to CPU freq to have a
                            10 MHz frequency */
 
@@ -150,6 +153,11 @@ static void htif_handle_cmd(RISCVMachine *s)
     } else if (device == 1 && cmd == 0) {
         /* request keyboard interrupt */
         s->htif_tohost = 0;
+#ifdef __HAIKU__
+    } else if (device == 2 && cmd == 0) {
+    	// get calendar time
+    	s->htif_fromhost = real_time_clock_usecs();
+#endif
     } else {
         printf("HTIF: unsupported tohost=0x%016" PRIx64 "\n", s->htif_tohost);
     }
@@ -274,9 +282,11 @@ static uint32_t plic_read(void *opaque, uint32_t offset, int size_log2)
     assert(size_log2 == 2);
     switch(offset) {
     case PLIC_HART_BASE:
+    case PLIC_HART_BASE + PLIC_HART_SIZE:
         val = 0;
         break;
     case PLIC_HART_BASE + 4:
+    case PLIC_HART_BASE + PLIC_HART_SIZE + 4:
         mask = s->plic_pending_irq & ~s->plic_served_irq;
         if (mask != 0) {
             i = ctz32(mask);
@@ -302,6 +312,7 @@ static void plic_write(void *opaque, uint32_t offset, uint32_t val,
     assert(size_log2 == 2);
     switch(offset) {
     case PLIC_HART_BASE + 4:
+    case PLIC_HART_BASE + PLIC_HART_SIZE + 4:
         val--;
         if (val < 32) {
             s->plic_served_irq &= ~(1 << val);
@@ -744,6 +755,7 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
     fdt_end_node(s); /* soc */
 
     fdt_begin_node(s, "chosen");
+    fdt_prop_str(s, "stdout-path", "/soc/serial@40100000");
     fdt_prop_str(s, "bootargs", cmd_line ? cmd_line : "");
     if (kernel_size > 0) {
         fdt_prop_tab_u64(s, "riscv,kernel-start", kernel_start);

@@ -1147,7 +1147,7 @@ typedef struct {
     uint16_t gso_size;
     uint16_t csum_start;
     uint16_t csum_offset;
-    uint16_t num_buffers;
+//  uint16_t num_buffers;
 } VIRTIONetHeader;
 
 static int virtio_net_recv_request(VIRTIODevice *s, int queue_idx,

@@ -28,6 +28,8 @@
 #include <inttypes.h>
 #include <assert.h>
 
+#include <OS.h>
+
 #include "cutils.h"
 #include "iomem.h"
 
@@ -106,7 +108,10 @@ static PhysMemoryRange *default_register_ram(PhysMemoryMap *s, uint64_t addr,
 
     pr = register_ram_entry(s, addr, size, devram_flags);
 
-    pr->phys_mem = mallocz(size);
+    //pr->phys_mem = mallocz(size);
+    if (create_area("VM memory", (void**)&pr->phys_mem, B_ANY_ADDRESS, size, B_NO_LOCK, B_READ_AREA | B_WRITE_AREA) < B_OK)
+        pr->phys_mem = 0;
+    
     if (!pr->phys_mem) {
         fprintf(stderr, "Could not allocate VM memory\n");
         exit(1);
@@ -178,7 +183,8 @@ void phys_mem_reset_dirty_bit(PhysMemoryRange *pr, size_t offset)
 
 static void default_free_ram(PhysMemoryMap *s, PhysMemoryRange *pr)
 {
-    free(pr->phys_mem);
+    //free(pr->phys_mem);
+    delete_area(area_for(pr->phys_mem));
 }
 
 PhysMemoryRange *cpu_register_device(PhysMemoryMap *s, uint64_t addr,

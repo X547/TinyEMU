@@ -2,6 +2,8 @@
  * User definable configuration options
  */
 
+#include <SupportDefs.h>
+
 /* Define if you want the connection to be probed */
 /* XXX Not working yet, so ignore this for now */
 #undef PROBE_CONN
@@ -137,7 +139,11 @@
 #define SIZEOF_INT 4
 
 /* Define to sizeof(char *) */
-#define SIZEOF_CHAR_P (HOST_LONG_BITS / 8)
+#ifdef B_HAIKU_64_BIT
+#define SIZEOF_CHAR_P 8
+#else
+#define SIZEOF_CHAR_P 4
+#endif
 
 /* Define if you have random() */
 #undef HAVE_RANDOM

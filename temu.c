@@ -461,9 +461,23 @@ static EthernetDevice *tun_open(const char *ifname)
 
 static Slirp *slirp_state;
 
+static void HexDump(const uint8_t *data, size_t size)
+{
+	size_t i;
+	for (i = 0; i < size; i++) {
+		printf(" %02x", data[i]);
+		if (i % 0x10 == 0xf)
+			printf("\n");
+	}
+	if (i % 0x10 != 0)
+		printf("\n");
+}
+
 static void slirp_write_packet(EthernetDevice *net,
                                const uint8_t *buf, int len)
 {
+    // printf("temu: slirp_write_packet(%d)\n", len);
+    // HexDump(buf, len);
     Slirp *slirp_state = net->opaque;
     slirp_input(slirp_state, buf, len);
 }
@@ -476,6 +490,8 @@ int slirp_can_output(void *opaque)
 
 void slirp_output(void *opaque, const uint8_t *pkt, int pkt_len)
 {
+    // printf("temu: slirp_output(%d)\n", pkt_len);
+    // HexDump(pkt, pkt_len);
     EthernetDevice *net = opaque;
     return net->device_write_packet(net, pkt, pkt_len);
 }
@@ -542,7 +558,7 @@ void virt_machine_run(VirtMachine *m)
     int fd_max, ret, delay;
     struct timeval tv;
 #ifndef _WIN32
-    int stdin_fd;
+    int stdin_fd = -1;
 #endif
     
     delay = virt_machine_get_sleep_duration(m, MAX_SLEEP_TIME);
@@ -581,7 +597,7 @@ void virt_machine_run(VirtMachine *m)
     }
     if (ret > 0) {
 #ifndef _WIN32
-        if (m->console_dev && FD_ISSET(stdin_fd, &rfds)) {
+        if (m->console_dev && stdin_fd >= 0 && FD_ISSET(stdin_fd, &rfds)) {
             uint8_t buf[128];
             int ret, len;
             len = virtio_console_get_write_len(m->console_dev);

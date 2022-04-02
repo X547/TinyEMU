@@ -114,7 +114,7 @@ int get_dns_addr(struct in_addr *pdns_addr)
             return 0;
         }
         old_stat = dns_addr_stat;
-        if (stat("/etc/resolv.conf", &dns_addr_stat) != 0)
+        if (stat("/boot/system/settings/network/resolv.conf", &dns_addr_stat) != 0)
             return -1;
         if ((dns_addr_stat.st_dev == old_stat.st_dev)
             && (dns_addr_stat.st_ino == old_stat.st_ino)
@@ -125,7 +125,7 @@ int get_dns_addr(struct in_addr *pdns_addr)
         }
     }
 
-    f = fopen("/etc/resolv.conf", "r");
+    f = fopen("/boot/system/settings/network/resolv.conf", "r");
     if (!f)
         return -1;
 

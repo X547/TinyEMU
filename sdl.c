@@ -129,16 +129,10 @@ static void sdl_handle_key_event(const SDL_KeyboardEvent *ev, VirtMachine *m)
 
     keycode = sdl_get_keycode(ev);
     if (keycode) {
-        if (keycode == 0x3a || keycode ==0x45) {
-            /* SDL does not generate key up for numlock & caps lock */
-            vm_send_key_event(m, TRUE, keycode);
-            vm_send_key_event(m, FALSE, keycode);
-        } else {
-            keypress = (ev->type == SDL_KEYDOWN);
-            if (keycode <= KEYCODE_MAX)
-                key_pressed[keycode] = keypress;
-            vm_send_key_event(m, keypress, keycode);
-        }
+        keypress = (ev->type == SDL_KEYDOWN);
+        if (keycode <= KEYCODE_MAX)
+            key_pressed[keycode] = keypress;
+        vm_send_key_event(m, keypress, keycode);
     } else if (ev->type == SDL_KEYUP) {
         /* workaround to reset the keyboard state (used when changing
            desktop with ctrl-alt-x on Linux) */

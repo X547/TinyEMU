@@ -280,6 +280,7 @@ static int get_phys_addr(RISCVCPUState *s,
             if (access == ACCESS_WRITE)
                 pte |= PTE_D_MASK;
             if (need_write) {
+            	return -1;
                 if (pte_size_log2 == 2)
                     phys_write_u32(s, pte_addr, pte);
                 else
@@ -838,6 +839,12 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
     case 0x344:
         val = s->mip;
         break;
+    case 0x3a0 ... 0x3a3: /* pmpcfg0..3 */
+        val = 0; /* not implemented */
+        break;
+    case 0x3b0 ... 0x3bf: /* pmpaddr0..15 */
+        val = 0; /* not implemented */
+        break;
     case 0xb00: /* mcycle */
     case 0xb02: /* minstret */
         val = (int64_t)s->insn_counter;
@@ -1018,6 +1025,12 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
     case 0x344:
         mask = MIP_SSIP | MIP_STIP;
         s->mip = (s->mip & ~mask) | (val & mask);
+        break;
+    case 0x3a0 ... 0x3a3: /* pmpcfg0..3 */
+        /* not implemented */
+        break;
+    case 0x3b0 ... 0x3bf: /* pmpaddr0..15 */
+        /* not implemented */
         break;
     default:
 #ifdef DUMP_INVALID_CSR
