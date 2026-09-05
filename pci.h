@@ -52,8 +52,13 @@ typedef struct PCIDevice PCIDevice;
 #define PCI_INTERRUPT_LINE	0x3c    /* 8 bits */
 #define PCI_INTERRUPT_PIN	0x3d    /* 8 bits */
 
-typedef void PCIBarSetFunc(void *opaque, int bar_num, uint32_t addr,
-                           BOOL enabled);
+/* Implemented by a device to learn where the guest mapped one of its BARs. */
+class PCIBarTarget {
+public:
+    virtual ~PCIBarTarget() = default;
+
+    virtual void SetBar(int bar_num, uint32_t addr, bool enabled) = 0;
+};
 
 PCIDevice *pci_register_device(PCIBus *b, const char *name, int devfn,
                                uint16_t vendor_id, uint16_t device_id,
@@ -61,10 +66,9 @@ PCIDevice *pci_register_device(PCIBus *b, const char *name, int devfn,
 PhysMemoryMap *pci_device_get_mem_map(PCIDevice *d);
 PhysMemoryMap *pci_device_get_port_map(PCIDevice *d);
 void pci_register_bar(PCIDevice *d, unsigned int bar_num,
-                      uint32_t size, int type,
-                      void *opaque, PCIBarSetFunc *bar_set);
+                      uint32_t size, int type, PCIBarTarget *bar_target);
 IRQSignal *pci_device_get_irq(PCIDevice *d, unsigned int irq_num);
-uint8_t *pci_device_get_dma_ptr(PCIDevice *d, uint64_t addr, BOOL is_rw);
+uint8_t *pci_device_get_dma_ptr(PCIDevice *d, uint64_t addr, bool is_rw);
 void pci_device_set_config8(PCIDevice *d, uint8_t addr, uint8_t val);
 void pci_device_set_config16(PCIDevice *d, uint8_t addr, uint16_t val);
 int pci_device_get_devfn(PCIDevice *d);

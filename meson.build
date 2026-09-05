@@ -22,11 +22,12 @@
 # THE SOFTWARE.
 #
 
-project('tinyemu', 'c',
+project('tinyemu', ['c', 'cpp'],
   version: files('VERSION'),
   license: 'MIT',
   default_options: [
     'c_std=gnu99',
+    'cpp_std=gnu++20',
     'warning_level=1',
     'buildtype=debugoptimized',
   ],
@@ -34,8 +35,9 @@ project('tinyemu', 'c',
 )
 
 cc = meson.get_compiler('c')
+cpp = meson.get_compiler('cpp')
 
-common_args = [
+common_defines = [
   '-D_FILE_OFFSET_BITS=64',
   '-D_LARGEFILE_SOURCE',
   '-D_GNU_SOURCE',
@@ -43,11 +45,23 @@ common_args = [
 ]
 
 # Silence the warnings the upstream sources trip over so that real problems
-# stay visible.
-common_args += cc.get_supported_arguments([
+# stay visible. The emulator is C++ and slirp stays C, so each compiler gets its
+# own probed list; common_defines keeps accumulating below and the two argument
+# lists are assembled at the point of use.
+common_warn_args = [
   '-Wno-unused-but-set-variable',
   '-Wno-format-truncation',
   '-Wno-stringop-truncation',
+]
+
+c_warn_args = cc.get_supported_arguments(common_warn_args)
+
+# C++ turns on -Wsign-compare as part of -Wall, which lights up ~35 upstream
+# comparisons that the C build never diagnosed. They predate the port, so they
+# are silenced here rather than left to drown out new problems.
+cpp_warn_args = cpp.get_supported_arguments(common_warn_args + [
+  '-Wno-class-memaccess',
+  '-Wno-sign-compare',
 ])
 
 # Dependencies needed by every target.
@@ -71,16 +85,16 @@ max_xlen = get_option('int128') ? 128 : 64
 if max_xlen == 128 and not cc.has_type('__int128')
   error('the int128 option requires a compiler supporting __int128')
 endif
-common_args += '-DCONFIG_RISCV_MAX_XLEN=@0@'.format(max_xlen)
+common_defines += '-DCONFIG_RISCV_MAX_XLEN=@0@'.format(max_xlen)
 
 x86emu = get_option('x86emu')
 if x86emu
-  common_args += '-DCONFIG_X86EMU'
+  common_defines += '-DCONFIG_X86EMU'
 endif
 
 sdl_dep = dependency('sdl', required: get_option('sdl'))
 if sdl_dep.found()
-  common_args += '-DCONFIG_SDL'
+  common_defines += '-DCONFIG_SDL'
   emu_deps += sdl_dep
 endif
 
@@ -95,10 +109,10 @@ endif
 
 fs_net_enabled = curl_dep.found() and (builtin_crypto or crypto_dep.found())
 if fs_net_enabled
-  common_args += '-DCONFIG_FS_NET'
+  common_defines += '-DCONFIG_FS_NET'
   emu_deps += curl_dep
   if builtin_crypto
-    common_args += '-DUSE_BUILTIN_CRYPTO'
+    common_defines += '-DUSE_BUILTIN_CRYPTO'
   else
     emu_deps += crypto_dep
   endif
@@ -108,59 +122,67 @@ endif
 # slirp
 
 if get_option('slirp')
-  common_args += '-DCONFIG_SLIRP'
+  common_defines += '-DCONFIG_SLIRP'
+  common_c_args = common_defines + c_warn_args
   subdir('slirp')
   emu_deps += slirp_dep
 endif
+
+common_args = common_defines + cpp_warn_args
 
 # ----------------------------------------------------------------------------
 # sources
 
 emu_sources = files(
-  'cutils.c',
-  'fs.c',
-  'fs_disk.c',
-  'iomem.c',
-  'json.c',
-  'machine.c',
-  'pci.c',
-  'riscv_machine.c',
-  'simplefb.c',
-  'softfp.c',
-  'temu.c',
-  'uart.c',
-  'virtio.c',
+  'cutils.cpp',
+  'fs.cpp',
+  'fs_disk.cpp',
+  'iomem.cpp',
+  'json.cpp',
+  'machine.cpp',
+  'pci.cpp',
+  'riscv_machine.cpp',
+  'simplefb.cpp',
+  'softfp.cpp',
+  'temu.cpp',
+  'uart.cpp',
+  'virtio.cpp',
+  'virtio_9p.cpp',
+  'virtio_block.cpp',
+  'virtio_console.cpp',
+  'virtio_input.cpp',
+  'virtio_net.cpp',
 )
 
 if x86emu
   emu_sources += files(
-    'ide.c',
-    'pckbd.c',
-    'ps2.c',
-    'vga.c',
-    'vmmouse.c',
-    'x86_cpu.c',
-    'x86_machine.c',
+    'ide.cpp',
+    'pckbd.cpp',
+    'ps2.cpp',
+    'vga.cpp',
+    'vmmouse.cpp',
+    'x86_cpu.cpp',
+    'x86_machine.cpp',
   )
 endif
 
 if sdl_dep.found()
-  emu_sources += files('sdl.c')
+  emu_sources += files('sdl.cpp')
 endif
 
 if fs_net_enabled
   emu_sources += files(
-    'block_net.c',
-    'fs_net.c',
-    'fs_utils.c',
-    'fs_wget.c',
+    'block_net.cpp',
+    'fs_net.cpp',
+    'fs_utils.cpp',
+    'fs_wget.cpp',
   )
   if builtin_crypto
-    emu_sources += files('aes.c', 'sha256.c')
+    emu_sources += files('aes.cpp', 'sha256.cpp')
   endif
 endif
 
-# riscv_cpu.c is compiled once per supported XLEN.
+# riscv_cpu.cpp is compiled once per supported XLEN.
 riscv_cpu_libs = []
 xlens = [32, 64]
 if max_xlen == 128
@@ -169,8 +191,8 @@ endif
 
 foreach xlen : xlens
   riscv_cpu_libs += static_library('riscv_cpu@0@'.format(xlen),
-    files('riscv_cpu.c'),
-    c_args: common_args + ['-DMAX_XLEN=@0@'.format(xlen)],
+    files('riscv_cpu.cpp'),
+    cpp_args: common_args + ['-DMAX_XLEN=@0@'.format(xlen)],
     dependencies: common_deps,
   )
 endforeach
@@ -180,7 +202,7 @@ endforeach
 
 executable('temu',
   emu_sources,
-  c_args: common_args,
+  cpp_args: common_args,
   link_with: riscv_cpu_libs,
   dependencies: common_deps + emu_deps,
   install: true,
@@ -188,15 +210,15 @@ executable('temu',
 
 if fs_net_enabled
   executable('build_filelist',
-    files('build_filelist.c', 'fs_utils.c', 'cutils.c'),
-    c_args: common_args,
+    files('build_filelist.cpp', 'fs_utils.cpp', 'cutils.cpp'),
+    cpp_args: common_args,
     dependencies: common_deps + [cc.find_library('m', required: false)],
     install: true,
   )
 
   executable('splitimg',
-    files('splitimg.c'),
-    c_args: common_args,
+    files('splitimg.cpp'),
+    cpp_args: common_args,
     dependencies: common_deps,
     install: true,
   )

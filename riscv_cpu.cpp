@@ -52,11 +52,15 @@
 //#define DUMP_CSR
 //#define CONFIG_LOGFILE
 
-#include "riscv_cpu_priv.h"
-
-#if FLEN > 0
+/* softfp is shared with the other XLEN builds, so it stays at global scope. */
 #include "softfp.h"
-#endif
+
+/* Each XLEN build defines its own RISCVCPUState. Giving them internal linkage
+   keeps three differently-shaped, polymorphic types with the same name from
+   emitting three conflicting vtables under one symbol. */
+namespace {
+
+#include "riscv_cpu_priv.h"
 
 #ifdef CONFIG_LOGFILE
 static FILE *log_file;
@@ -111,7 +115,7 @@ static void print_target_ulong(target_ulong a)
     fprint_target_ulong(stdout, a);
 }
 
-static char *reg_name[32] = {
+static const char *reg_name[32] = {
 "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2",
 "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5",
 "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7",
@@ -121,7 +125,7 @@ static char *reg_name[32] = {
 static void dump_regs(RISCVCPUState *s)
 {
     int i, cols;
-    const char priv_str[4] = "USHM";
+    const char priv_str[] = "USHM";
     cols = 256 / MAX_XLEN;
     printf("pc =");
     print_target_ulong(s->pc);
@@ -161,7 +165,7 @@ static __attribute__((unused)) void cpu_abort(RISCVCPUState *s)
 static __maybe_unused inline void phys_write_u ## size(RISCVCPUState *s, target_ulong addr,\
                                         uint_type val)                   \
 {\
-    PhysMemoryRange *pr = get_phys_mem_range(s->mem_map, addr);\
+    PhysMemoryRange *pr = s->mem_map->FindRange(addr);\
     if (!pr || !pr->is_ram)\
         return;\
     *(uint_type *)(pr->phys_mem + \
@@ -170,7 +174,7 @@ static __maybe_unused inline void phys_write_u ## size(RISCVCPUState *s, target_
 \
 static __maybe_unused inline uint_type phys_read_u ## size(RISCVCPUState *s, target_ulong addr) \
 {\
-    PhysMemoryRange *pr = get_phys_mem_range(s->mem_map, addr);\
+    PhysMemoryRange *pr = s->mem_map->FindRange(addr);\
     if (!pr || !pr->is_ram)\
         return 0;\
     return *(uint_type *)(pr->phys_mem + \
@@ -380,7 +384,7 @@ int target_read_slow(RISCVCPUState *s, mem_uint_t *pval,
             s->pending_exception = CAUSE_LOAD_PAGE_FAULT;
             return -1;
         }
-        pr = get_phys_mem_range(s->mem_map, paddr);
+        pr = s->mem_map->FindRange(paddr);
         if (!pr) {
 #ifdef DUMP_INVALID_MEM_ACCESS
             printf("target_read_slow: invalid physical address 0x");
@@ -421,13 +425,13 @@ int target_read_slow(RISCVCPUState *s, mem_uint_t *pval,
         } else {
             offset = paddr - pr->addr;
             if (((pr->devio_flags >> size_log2) & 1) != 0) {
-                ret = pr->read_func(pr->opaque, offset, size_log2);
+                ret = pr->io->DeviceRead(offset, size_log2);
             }
 #if MLEN >= 64
             else if ((pr->devio_flags & DEVIO_SIZE32) && size_log2 == 3) {
                 /* emulate 64 bit access */
-                ret = pr->read_func(pr->opaque, offset, 2);
-                ret |= (uint64_t)pr->read_func(pr->opaque, offset + 4, 2) << 32;
+                ret = pr->io->DeviceRead(offset, 2);
+                ret |= (uint64_t)pr->io->DeviceRead(offset + 4, 2) << 32;
                 
             }
 #endif
@@ -469,7 +473,7 @@ int target_write_slow(RISCVCPUState *s, target_ulong addr,
             s->pending_exception = CAUSE_STORE_PAGE_FAULT;
             return -1;
         }
-        pr = get_phys_mem_range(s->mem_map, paddr);
+        pr = s->mem_map->FindRange(paddr);
         if (!pr) {
 #ifdef DUMP_INVALID_MEM_ACCESS
             printf("target_write_slow: invalid physical address 0x");
@@ -480,7 +484,7 @@ int target_write_slow(RISCVCPUState *s, target_ulong addr,
             exit(1);
 #endif
         } else if (pr->is_ram) {
-            phys_mem_set_dirty_bit(pr, paddr - pr->addr);
+            pr->SetDirtyBit(paddr - pr->addr);
             tlb_idx = (addr >> PG_SHIFT) & (TLB_SIZE - 1);
             ptr = pr->phys_mem + (uintptr_t)(paddr - pr->addr);
             s->tlb_write[tlb_idx].vaddr = addr & ~PG_MASK;
@@ -511,14 +515,14 @@ int target_write_slow(RISCVCPUState *s, target_ulong addr,
         } else {
             offset = paddr - pr->addr;
             if (((pr->devio_flags >> size_log2) & 1) != 0) {
-                pr->write_func(pr->opaque, offset, val, size_log2);
+                pr->io->DeviceWrite(offset, val, size_log2);
             }
 #if MLEN >= 64
             else if ((pr->devio_flags & DEVIO_SIZE32) && size_log2 == 3) {
                 /* emulate 64 bit access */
-                pr->write_func(pr->opaque, offset,
+                pr->io->DeviceWrite(offset,
                                val & 0xffffffff, 2);
-                pr->write_func(pr->opaque, offset + 4,
+                pr->io->DeviceWrite(offset + 4,
                                (val >> 32) & 0xffffffff, 2);
             }
 #endif
@@ -559,7 +563,7 @@ static no_inline __exception int target_read_insn_slow(RISCVCPUState *s,
         s->pending_exception = CAUSE_FETCH_PAGE_FAULT;
         return -1;
     }
-    pr = get_phys_mem_range(s->mem_map, paddr);
+    pr = s->mem_map->FindRange(paddr);
     if (!pr || !pr->is_ram) {
         /* XXX: we only access to execute code from RAM */
         s->pending_tval = addr;
@@ -660,7 +664,7 @@ static void glue(riscv_cpu_flush_tlb_write_range_ram,
 static target_ulong get_mstatus(RISCVCPUState *s, target_ulong mask)
 {
     target_ulong val;
-    BOOL sd;
+    bool sd;
     val = s->mstatus | (s->fs << MSTATUS_FS_SHIFT);
     val &= mask;
     sd = ((val & MSTATUS_FS) == MSTATUS_FS) |
@@ -710,7 +714,7 @@ static void set_mstatus(RISCVCPUState *s, target_ulong val)
 /* return -1 if invalid CSR. 0 if OK. 'will_write' indicate that the
    csr will be written after (used for CSR access check) */
 static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
-                     BOOL will_write)
+                     bool will_write)
 {
     target_ulong val;
 
@@ -1066,7 +1070,7 @@ static void set_priv(RISCVCPUState *s, int priv)
 static void raise_exception2(RISCVCPUState *s, uint32_t cause,
                              target_ulong tval)
 {
-    BOOL deleg;
+    bool deleg;
     target_ulong causel;
     
 #if defined(DUMP_EXCEPTIONS) || defined(DUMP_MMU_EXCEPTIONS) || defined(DUMP_INTERRUPTS)
@@ -1289,7 +1293,7 @@ static void glue(riscv_cpu_set_mip, MAX_XLEN)(RISCVCPUState *s, uint32_t mask)
     s->mip |= mask;
     /* exit from power down if an interrupt is pending */
     if (s->power_down_flag && (s->mip & s->mie) != 0)
-        s->power_down_flag = FALSE;
+        s->power_down_flag = false;
 }
 
 static void glue(riscv_cpu_reset_mip, MAX_XLEN)(RISCVCPUState *s, uint32_t mask)
@@ -1302,7 +1306,7 @@ static uint32_t glue(riscv_cpu_get_mip, MAX_XLEN)(RISCVCPUState *s)
     return s->mip;
 }
 
-static BOOL glue(riscv_cpu_get_power_down, MAX_XLEN)(RISCVCPUState *s)
+static bool glue(riscv_cpu_get_power_down, MAX_XLEN)(RISCVCPUState *s)
 {
     return s->power_down_flag;
 }
@@ -1310,9 +1314,8 @@ static BOOL glue(riscv_cpu_get_power_down, MAX_XLEN)(RISCVCPUState *s)
 static RISCVCPUState *glue(riscv_cpu_init, MAX_XLEN)(PhysMemoryMap *mem_map)
 {
     RISCVCPUState *s;
-    
-    s = mallocz(sizeof(*s));
-    s->common.class_ptr = &glue(riscv_cpu_class, MAX_XLEN);
+
+    s = new RISCVCPUState();
     s->mem_map = mem_map;
     s->pc = 0x1000;
     s->priv = PRV_M;
@@ -1337,48 +1340,76 @@ static RISCVCPUState *glue(riscv_cpu_init, MAX_XLEN)(PhysMemoryMap *mem_map)
     return s;
 }
 
-static void glue(riscv_cpu_end, MAX_XLEN)(RISCVCPUState *s)
-{
-}
-
 static uint32_t glue(riscv_cpu_get_misa, MAX_XLEN)(RISCVCPUState *s)
 {
     return s->misa;
 }
 
-const RISCVCPUClass glue(riscv_cpu_class, MAX_XLEN) = {
-    glue(riscv_cpu_init, MAX_XLEN),
-    glue(riscv_cpu_end, MAX_XLEN),
-    glue(riscv_cpu_interp, MAX_XLEN),
-    glue(riscv_cpu_get_cycles, MAX_XLEN),
-    glue(riscv_cpu_set_mip, MAX_XLEN),
-    glue(riscv_cpu_reset_mip, MAX_XLEN),
-    glue(riscv_cpu_get_mip, MAX_XLEN),
-    glue(riscv_cpu_get_power_down, MAX_XLEN),
-    glue(riscv_cpu_get_misa, MAX_XLEN),
-    glue(riscv_cpu_flush_tlb_write_range_ram, MAX_XLEN),
-};
+/* The interpreter and its helpers stay plain functions over RISCVCPUState;
+   these overrides are the only bridge to the abstract interface. */
+void RISCVCPUState::Interp(int n_cycles)
+{
+    glue(riscv_cpu_interp, MAX_XLEN)(this, n_cycles);
+}
+
+uint64_t RISCVCPUState::Cycles()
+{
+    return glue(riscv_cpu_get_cycles, MAX_XLEN)(this);
+}
+
+void RISCVCPUState::SetMip(uint32_t mask)
+{
+    glue(riscv_cpu_set_mip, MAX_XLEN)(this, mask);
+}
+
+void RISCVCPUState::ResetMip(uint32_t mask)
+{
+    glue(riscv_cpu_reset_mip, MAX_XLEN)(this, mask);
+}
+
+uint32_t RISCVCPUState::Mip()
+{
+    return glue(riscv_cpu_get_mip, MAX_XLEN)(this);
+}
+
+bool RISCVCPUState::PowerDown()
+{
+    return glue(riscv_cpu_get_power_down, MAX_XLEN)(this);
+}
+
+uint32_t RISCVCPUState::Misa()
+{
+    return glue(riscv_cpu_get_misa, MAX_XLEN)(this);
+}
+
+void RISCVCPUState::FlushTlbWriteRangeRam(uint8_t *ram_ptr, size_t ram_size)
+{
+    glue(riscv_cpu_flush_tlb_write_range_ram, MAX_XLEN)(this, ram_ptr, ram_size);
+}
+
+} // anonymous namespace
+
+
+RISCVCPU *glue(riscv_cpu_create, MAX_XLEN)(PhysMemoryMap *mem_map)
+{
+    return glue(riscv_cpu_init, MAX_XLEN)(mem_map);
+}
 
 #if CONFIG_RISCV_MAX_XLEN == MAX_XLEN
-RISCVCPUState *riscv_cpu_init(PhysMemoryMap *mem_map, int max_xlen)
+RISCVCPU *riscv_cpu_create(PhysMemoryMap *mem_map, int max_xlen)
 {
-    const RISCVCPUClass *c;
-    switch(max_xlen) {
-    case 32:
-        c = &riscv_cpu_class32;
-        break;
-    case 64:
-        c = &riscv_cpu_class64;
-        break;
+    switch (max_xlen) {
+        case 32:
+            return riscv_cpu_create32(mem_map);
+        case 64:
+            return riscv_cpu_create64(mem_map);
 #if CONFIG_RISCV_MAX_XLEN == 128
-    case 128:
-        c = &riscv_cpu_class128;
-        break;
+        case 128:
+            return riscv_cpu_create128(mem_map);
 #endif
-    default:
-        return NULL;
+        default:
+            return nullptr;
     }
-    return c->riscv_cpu_init(mem_map);
 }
 #endif /* CONFIG_RISCV_MAX_XLEN == MAX_XLEN */
 

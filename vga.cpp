@@ -73,8 +73,37 @@
 #define MAX_TEXT_WIDTH 132
 #define MAX_TEXT_HEIGHT 60
 
-struct VGAState {
-    FBDevice *fb_dev;
+class VGAState;
+
+static uint32_t vga_ioport_read(VGAState *s, uint32_t addr);
+static void vga_ioport_write(VGAState *s, uint32_t addr, uint32_t val);
+
+
+/* The five legacy VGA port windows differ only by their base address. */
+template <uint32_t Base>
+class VGAPortIO final: public DeviceIO {
+private:
+    VGAState &fVga;
+
+public:
+    VGAPortIO(VGAState &vga): fVga(vga) {}
+
+    uint32_t DeviceRead(uint32_t addr, int size_log2) override
+    {
+        (void)size_log2;
+        return vga_ioport_read(&fVga, Base + addr);
+    }
+
+    void DeviceWrite(uint32_t addr, uint32_t val, int size_log2) override
+    {
+        (void)size_log2;
+        vga_ioport_write(&fVga, Base + addr, val);
+    }
+};
+
+
+class VGAState final: public FBDevice, public PCIBarTarget {
+public:
     int fb_page_count;
     PhysMemoryRange *mem_range;
     PhysMemoryRange *mem_range2;
@@ -117,6 +146,20 @@ struct VGAState {
     /* VBE extension */
     uint16_t vbe_index;
     uint16_t vbe_regs[VBE_DISPI_INDEX_NB];
+
+    void Refresh(SimpleFBDraw *draw) override;
+    void SetBar(int bar_num, uint32_t addr, bool enabled) override;
+
+    uint32_t VbeRead(uint32_t offset, int size_log2);
+    void VbeWrite(uint32_t offset, uint32_t val, int size_log2);
+
+    VGAPortIO<0x3c0> fIo3c0 {*this};
+    VGAPortIO<0x3b4> fIo3b4 {*this};
+    VGAPortIO<0x3d4> fIo3d4 {*this};
+    VGAPortIO<0x3ba> fIo3ba {*this};
+    VGAPortIO<0x3da> fIo3da {*this};
+    DeviceIOAdapter<VGAState, &VGAState::VbeRead,
+                    &VGAState::VbeWrite> fVbeIo {*this};
 };
 
 static void vga_draw_glyph8(uint8_t *d, int linesize,
@@ -210,16 +253,15 @@ static int update_palette16(VGAState *s, uint32_t *palette)
 
 /* the text refresh is just for debugging and initial boot message, so
    it is very incomplete */
-static void vga_text_refresh(VGAState *s,
-                             SimpleFBDrawFunc *redraw_func, void *opaque)
+static void vga_text_refresh(VGAState *s, SimpleFBDraw *draw)
 {
-    FBDevice *fb_dev = s->fb_dev;
+    FBDevice *fb_dev = s;
     int width, height, cwidth, cheight, cy, cx, x1, y1, width1, height1;
     int cx_min, cx_max, dup9;
     uint32_t ch_attr, line_offset, start_addr, ch_addr, ch_addr1, ch, cattr;
     uint8_t *vga_ram, *font_ptr, *dst;
     uint32_t fgcol, bgcol, cursor_offset, cursor_start, cursor_end;
-    BOOL full_update;
+    bool full_update;
 
     full_update = update_palette16(s, s->last_palette);
 
@@ -255,7 +297,7 @@ static void vga_text_refresh(VGAState *s,
         s->last_start_addr = start_addr;
         s->last_width = width;
         s->last_height = height;
-        full_update = TRUE;
+        full_update = true;
     }
        
     /* update cursor position */
@@ -337,27 +379,27 @@ static void vga_text_refresh(VGAState *s,
         }
         if (cx_max >= cx_min) {
             //            printf("redraw %d %d %d\n", cy, cx_min, cx_max);
-            redraw_func(fb_dev, opaque,
-                        x1 + cx_min * cwidth, y1 + cy * cheight,
-                        (cx_max - cx_min + 1) * cwidth, cheight);
+            draw->Draw(fb_dev,
+                       x1 + cx_min * cwidth, y1 + cy * cheight,
+                       (cx_max - cx_min + 1) * cwidth, cheight);
         }
         ch_addr1 += line_offset;
     }
 }
 
-static void vga_refresh(FBDevice *fb_dev,
-                        SimpleFBDrawFunc *redraw_func, void *opaque)
+void VGAState::Refresh(SimpleFBDraw *draw)
 {
-    VGAState *s = fb_dev->device_opaque;
+    VGAState *s = this;
+    FBDevice *fb_dev = this;
 
     if (!(s->ar_index & 0x20)) {
         /* blank */
     } else if (s->gr[0x06] & 1) {
         /* graphic mode (VBE) */
-        simplefb_refresh(fb_dev, redraw_func, opaque, s->mem_range, s->fb_page_count);
+        simplefb_refresh(fb_dev, draw, s->mem_range, s->fb_page_count);
     } else {
         /* text mode */
-        vga_text_refresh(s, redraw_func, opaque);
+        vga_text_refresh(s, draw);
     }
 }
 
@@ -606,27 +648,11 @@ static void vga_ioport_write(VGAState *s, uint32_t addr, uint32_t val)
     }
 }
 
-#define VGA_IO(base) \
-static uint32_t vga_read_ ## base(void *opaque, uint32_t addr, int size_log2)\
-{\
-    return vga_ioport_read(opaque, base + addr);\
-}\
-static void vga_write_ ## base(void *opaque, uint32_t addr, uint32_t val, int size_log2)\
-{\
-    return vga_ioport_write(opaque, base + addr, val);\
-}
 
-VGA_IO(0x3c0)
-VGA_IO(0x3b4)
-VGA_IO(0x3d4)
-VGA_IO(0x3ba)
-VGA_IO(0x3da)
-
-static void vbe_write(void *opaque, uint32_t offset,
-                      uint32_t val, int size_log2)
+void VGAState::VbeWrite(uint32_t offset, uint32_t val, int size_log2)
 {
-    VGAState *s = opaque;
-    FBDevice *fb_dev = s->fb_dev;
+    VGAState *s = this;
+    FBDevice *fb_dev = s;
     
     if (offset == 0) {
         s->vbe_index = val;
@@ -675,9 +701,9 @@ static void vbe_write(void *opaque, uint32_t offset,
     }
 }
 
-static uint32_t vbe_read(void *opaque, uint32_t offset, int size_log2)
+uint32_t VGAState::VbeRead(uint32_t offset, int size_log2)
 {
-    VGAState *s = opaque;
+    VGAState *s = this;
     uint32_t val;
 
     if (offset == 0) {
@@ -686,10 +712,10 @@ static uint32_t vbe_read(void *opaque, uint32_t offset, int size_log2)
         if (s->vbe_regs[VBE_DISPI_INDEX_ENABLE] & VBE_DISPI_GETCAPS) {
             switch(s->vbe_index) {
             case VBE_DISPI_INDEX_XRES:
-                val = s->fb_dev->width;
+                val = s->width;
                 break;
             case VBE_DISPI_INDEX_YRES:
-                val = s->fb_dev->height;
+                val = s->height;
                 break;
             case VBE_DISPI_INDEX_BPP:
                 val = 32;
@@ -712,18 +738,16 @@ static uint32_t vbe_read(void *opaque, uint32_t offset, int size_log2)
 }
 
 
-static void simplefb_bar_set(void *opaque, int bar_num,
-                              uint32_t addr, BOOL enabled)
+void VGAState::SetBar(int bar_num, uint32_t addr, bool enabled)
 {
-    VGAState *s = opaque;
+    VGAState *s = this;
     if (bar_num == 0)
-        phys_mem_set_addr(s->mem_range, addr, enabled);
+        s->mem_range->SetAddr(addr, enabled);
     else
-        phys_mem_set_addr(s->rom_range, addr, enabled);
+        s->rom_range->SetAddr(addr, enabled);
 }
 
-VGAState *pci_vga_init(PCIBus *bus, FBDevice *fb_dev,
-                       int width, int height,
+FBDevice *pci_vga_init(PCIBus *bus, int width, int height,
                        const uint8_t *vga_rom_buf, int vga_rom_size)
 {
     VGAState *s;
@@ -736,9 +760,9 @@ VGAState *pci_vga_init(PCIBus *bus, FBDevice *fb_dev,
     mem_map = pci_device_get_mem_map(d);
     port_map = pci_device_get_port_map(d);
 
-    s = mallocz(sizeof(*s));
-    s->fb_dev = fb_dev;
-    
+    s = new VGAState();
+    FBDevice *fb_dev = s;
+
     fb_dev->width = width;
     fb_dev->height = height;
     fb_dev->stride = width * 4;
@@ -747,7 +771,7 @@ VGAState *pci_vga_init(PCIBus *bus, FBDevice *fb_dev,
     s->fb_page_count = fb_dev->fb_size >> DEVRAM_PAGE_SIZE_LOG2;
 
     s->mem_range =
-        cpu_register_ram(mem_map, 0, fb_dev->fb_size,
+        mem_map->RegisterRam(0, fb_dev->fb_size,
                          DEVRAM_FLAG_DIRTY_BITS | DEVRAM_FLAG_DISABLED);
     
     fb_dev->fb_data = s->mem_range->phys_mem;
@@ -756,49 +780,39 @@ VGAState *pci_vga_init(PCIBus *bus, FBDevice *fb_dev,
     bar_size = 1;
     while (bar_size < fb_dev->fb_size)
         bar_size <<= 1;
-    pci_register_bar(d, 0, bar_size, PCI_ADDRESS_SPACE_MEM, s,
-                     simplefb_bar_set);
+    pci_register_bar(d, 0, bar_size, PCI_ADDRESS_SPACE_MEM, s);
 
     if (vga_rom_size > 0) {
         int rom_size;
         /* align to page size */
         rom_size = (vga_rom_size + DEVRAM_PAGE_SIZE - 1) & ~(DEVRAM_PAGE_SIZE - 1);
-        s->rom_range = cpu_register_ram(mem_map, 0, rom_size,
+        s->rom_range = mem_map->RegisterRam(0, rom_size,
                                         DEVRAM_FLAG_ROM | DEVRAM_FLAG_DISABLED);
         memcpy(s->rom_range->phys_mem, vga_rom_buf, vga_rom_size);
 
         bar_size = 1;
         while (bar_size < rom_size)
             bar_size <<= 1;
-        pci_register_bar(d, PCI_ROM_SLOT, bar_size, PCI_ADDRESS_SPACE_MEM, s,
-                         simplefb_bar_set);
+        pci_register_bar(d, PCI_ROM_SLOT, bar_size, PCI_ADDRESS_SPACE_MEM, s);
     }
 
     /* VGA memory (for simple text mode no need for callbacks) */
-    s->mem_range2 = cpu_register_ram(mem_map, 0xa0000, 0x20000, 0);
+    s->mem_range2 = mem_map->RegisterRam(0xa0000, 0x20000, 0);
     s->vga_ram = s->mem_range2->phys_mem;
         
     /* standard VGA ports */
     
-    cpu_register_device(port_map, 0x3c0, 16, s, vga_read_0x3c0, vga_write_0x3c0,
-                        DEVIO_SIZE8);
-    cpu_register_device(port_map, 0x3b4, 2, s, vga_read_0x3b4, vga_write_0x3b4,
-                        DEVIO_SIZE8);
-    cpu_register_device(port_map, 0x3d4, 2, s, vga_read_0x3d4, vga_write_0x3d4,
-                        DEVIO_SIZE8);
-    cpu_register_device(port_map, 0x3ba, 1, s, vga_read_0x3ba, vga_write_0x3ba,
-                        DEVIO_SIZE8);
-    cpu_register_device(port_map, 0x3da, 1, s, vga_read_0x3da, vga_write_0x3da,
-                        DEVIO_SIZE8);
-    
+    port_map->RegisterDevice(0x3c0, 16, &s->fIo3c0, DEVIO_SIZE8);
+    port_map->RegisterDevice(0x3b4, 2, &s->fIo3b4, DEVIO_SIZE8);
+    port_map->RegisterDevice(0x3d4, 2, &s->fIo3d4, DEVIO_SIZE8);
+    port_map->RegisterDevice(0x3ba, 1, &s->fIo3ba, DEVIO_SIZE8);
+    port_map->RegisterDevice(0x3da, 1, &s->fIo3da, DEVIO_SIZE8);
+
     /* VBE extension */
-    cpu_register_device(port_map, 0x1ce, 2, s, vbe_read, vbe_write, 
-                        DEVIO_SIZE16);
+    port_map->RegisterDevice(0x1ce, 2, &s->fVbeIo, DEVIO_SIZE16);
     
     s->vbe_regs[VBE_DISPI_INDEX_ID] = VBE_DISPI_ID5;
     s->vbe_regs[VBE_DISPI_INDEX_VIDEO_MEMORY_64K] = fb_dev->fb_size >> 16;
 
-    fb_dev->device_opaque = s;
-    fb_dev->refresh = vga_refresh;
     return s;
 }

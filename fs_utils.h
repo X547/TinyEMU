@@ -21,6 +21,8 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#pragma once
+
 #define HEAD_FILENAME "head"
 #define ROOT_FILENAME "files"
 
@@ -48,7 +50,7 @@ typedef enum {
 
 typedef uint64_t FSFileID;
 
-static inline BOOL isspace_nolf(int c)
+static inline bool isspace_nolf(int c)
 {
     return (c == ' ' || c == '\t');
 }
@@ -86,7 +88,7 @@ int parse_file_id(FSFileID *pval, const char **pp);
 char *file_id_to_filename(char *buf, FSFileID file_id);
 void encode_hex(char *str, const uint8_t *buf, int len);
 int decode_hex(uint8_t *buf, const char *str, int len);
-BOOL is_url(const char *path);
+bool is_url(const char *path);
 
 const char *skip_header(const char *p);
 int parse_tag(char *buf, int buf_size, const char *str, const char *tag);

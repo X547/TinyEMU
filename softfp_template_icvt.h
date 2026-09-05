@@ -36,7 +36,7 @@
 
 /* conversions between float and integers */
 static ICVT_INT glue(glue(glue(internal_cvt_sf, F_SIZE), _i), ICVT_SIZE)(F_UINT a, RoundingModeEnum rm,
-                                                                         uint32_t *pfflags, BOOL is_unsigned)
+                                                                         uint32_t *pfflags, bool is_unsigned)
 {
     uint32_t a_sign, addend, rnd_bits;
     int32_t a_exp;
@@ -111,21 +111,21 @@ ICVT_INT glue(glue(glue(cvt_sf, F_SIZE), _i), ICVT_SIZE)(F_UINT a, RoundingModeE
                                                           uint32_t *pfflags)
 {
     return glue(glue(glue(internal_cvt_sf, F_SIZE), _i), ICVT_SIZE)(a, rm, 
-                                                                    pfflags, FALSE);
+                                                                    pfflags, false);
 }
 
 ICVT_UINT glue(glue(glue(cvt_sf, F_SIZE), _u), ICVT_SIZE)(F_UINT a, RoundingModeEnum rm,
                                                           uint32_t *pfflags)
 {
     return glue(glue(glue(internal_cvt_sf, F_SIZE), _i), ICVT_SIZE) (a, rm, 
-                                                                     pfflags, TRUE);
+                                                                     pfflags, true);
 }
 
 /* conversions between float and integers */
 static F_UINT glue(glue(glue(internal_cvt_i, ICVT_SIZE), _sf), F_SIZE)(ICVT_INT a, 
                                                                        RoundingModeEnum rm,
                                                                        uint32_t *pfflags,
-                                                                       BOOL is_unsigned)
+                                                                       bool is_unsigned)
 {
     uint32_t a_sign;
     int32_t a_exp;
@@ -156,14 +156,14 @@ F_UINT glue(glue(glue(cvt_i, ICVT_SIZE), _sf), F_SIZE)(ICVT_INT a,
                                                        RoundingModeEnum rm,
                                                        uint32_t *pfflags)
 {
-    return glue(glue(glue(internal_cvt_i, ICVT_SIZE), _sf), F_SIZE)(a, rm, pfflags, FALSE);
+    return glue(glue(glue(internal_cvt_i, ICVT_SIZE), _sf), F_SIZE)(a, rm, pfflags, false);
 }
 
 F_UINT glue(glue(glue(cvt_u, ICVT_SIZE), _sf), F_SIZE)(ICVT_UINT a, 
                                                        RoundingModeEnum rm,
                                                        uint32_t *pfflags)
 {
-    return glue(glue(glue(internal_cvt_i, ICVT_SIZE), _sf), F_SIZE)(a, rm, pfflags, TRUE);
+    return glue(glue(glue(internal_cvt_i, ICVT_SIZE), _sf), F_SIZE)(a, rm, pfflags, true);
 }
 
 #undef ICVT_SIZE

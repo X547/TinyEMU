@@ -132,7 +132,7 @@ static F_UINT round_pack_sf(uint32_t a_sign, int a_exp, F_UINT a_mant,
 
     /* potentially subnormal */
     if (a_exp <= 0) {
-        BOOL is_subnormal;
+        bool is_subnormal;
         /* Note: we set the underflow flag if the rounded result
            is subnormal and inexact */
         is_subnormal = (a_exp < 0 || 
@@ -212,7 +212,7 @@ static F_UINT normalize2_sf(uint32_t a_sign, int a_exp, F_UINT a_mant1, F_UINT a
     return round_pack_sf(a_sign, a_exp, a_mant1, rm, pfflags);
 }
 
-BOOL issignan_sf(F_UINT a)
+bool issignan_sf(F_UINT a)
 {
     uint32_t a_exp1;
     F_UINT a_mant;
@@ -221,7 +221,7 @@ BOOL issignan_sf(F_UINT a)
     return (a_exp1 == (2 * EXP_MASK) && a_mant != 0);
 }
 
-BOOL isnan_sf(F_UINT a)
+bool isnan_sf(F_UINT a)
 {
     uint32_t a_exp;
     F_UINT a_mant;

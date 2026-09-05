@@ -21,23 +21,33 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#pragma once
+
 #include "json.h"
 
-typedef struct FBDevice FBDevice;
+class FBDevice;
 
-typedef void SimpleFBDrawFunc(FBDevice *fb_dev, void *opaque,
-                              int x, int y, int w, int h);
+/* Implemented by the display back end; called for each dirty rectangle. */
+class SimpleFBDraw {
+public:
+    virtual ~SimpleFBDraw() = default;
 
-struct FBDevice {
+    virtual void Draw(FBDevice *fb_dev, int x, int y, int w, int h) = 0;
+};
+
+
+class FBDevice {
+public:
     /* the following is set by the device */
-    int width;
-    int height;
-    int stride; /* current stride in bytes */
-    uint8_t *fb_data; /* current pointer to the pixel data */
-    int fb_size; /* frame buffer memory size (info only) */
-    void *device_opaque;
-    void (*refresh)(struct FBDevice *fb_dev,
-                    SimpleFBDrawFunc *redraw_func, void *opaque);
+    int width = 0;
+    int height = 0;
+    int stride = 0; /* current stride in bytes */
+    uint8_t *fb_data = nullptr; /* current pointer to the pixel data */
+    int fb_size = 0; /* frame buffer memory size (info only) */
+
+    virtual ~FBDevice() = default;
+
+    virtual void Refresh(SimpleFBDraw *draw) = 0;
 };
 
 #define MAX_DRIVE_DEVICE 4
@@ -87,8 +97,8 @@ typedef struct {
     const VirtMachineClass *vmc;
     char *machine_name;
     uint64_t ram_size;
-    BOOL rtc_real_time;
-    BOOL rtc_local_time;
+    bool rtc_real_time;
+    bool rtc_local_time;
     char *display_device; /* NULL means no display */
     int width, height; /* graphic width & height */
     CharacterDevice *console;
@@ -100,39 +110,49 @@ typedef struct {
     int eth_count;
 
     char *cmdline; /* bios or kernel command line */
-    BOOL accel_enable; /* enable acceleration (KVM) */
+    bool accel_enable; /* enable acceleration (KVM) */
     char *input_device; /* NULL means no input */
     
     /* kernel, bios and other auxiliary files */
     VMFileEntry files[VM_FILE_COUNT];
 } VirtMachineParams;
 
-typedef struct VirtMachine {
-    const VirtMachineClass *vmc;
+class VirtMachine {
+public:
+    const VirtMachineClass *vmc = nullptr;
     /* network */
-    EthernetDevice *net;
+    EthernetDevice *net = nullptr;
     /* console */
-    VIRTIODevice *console_dev;
-    CharacterDevice *console;
+    VIRTIODevice *console_dev = nullptr;
+    CharacterDevice *console = nullptr;
     /* graphics */
-    FBDevice *fb_dev;
-} VirtMachine;
+    FBDevice *fb_dev = nullptr;
 
-struct VirtMachineClass {
-    const char *machine_names;
-    void (*virt_machine_set_defaults)(VirtMachineParams *p);
-    VirtMachine *(*virt_machine_init)(const VirtMachineParams *p);
-    void (*virt_machine_end)(VirtMachine *s);
-    int (*virt_machine_get_sleep_duration)(VirtMachine *s, int delay);
-    void (*virt_machine_interp)(VirtMachine *s, int max_exec_cycle);
-    BOOL (*vm_mouse_is_absolute)(VirtMachine *s);
-    void (*vm_send_mouse_event)(VirtMachine *s1, int dx, int dy, int dz,
-                                unsigned int buttons);
-    void (*vm_send_key_event)(VirtMachine *s1, BOOL is_down, uint16_t key_code);
+    virtual ~VirtMachine() = default;
+
+    /* in ms */
+    virtual int GetSleepDuration(int delay) = 0;
+    virtual void Interp(int max_exec_cycle) = 0;
+    virtual bool MouseIsAbsolute() = 0;
+    virtual void SendMouseEvent(int dx, int dy, int dz,
+                                unsigned int buttons) = 0;
+    virtual void SendKeyEvent(bool is_down, uint16_t key_code) = 0;
 };
 
-extern const VirtMachineClass riscv_machine_class;
-extern const VirtMachineClass pc_machine_class;
+
+/* The parts of a machine type that exist before any instance does: its name
+   and its factory. */
+class VirtMachineClass {
+public:
+    virtual ~VirtMachineClass() = default;
+
+    virtual const char *MachineNames() const = 0;
+    virtual void SetDefaults(VirtMachineParams *p) const = 0;
+    virtual VirtMachine *Init(const VirtMachineParams *p) const = 0;
+};
+
+extern const VirtMachineClass &gRiscvMachineClass;
+extern const VirtMachineClass &gPcMachineClass;
 
 void __attribute__((format(printf, 1, 2))) vm_error(const char *fmt, ...);
 int vm_get_int(JSONValue obj, const char *name, int *pval);
@@ -141,56 +161,28 @@ int vm_get_int_opt(JSONValue obj, const char *name, int *pval, int def_val);
 void virt_machine_set_defaults(VirtMachineParams *p);
 void virt_machine_load_config_file(VirtMachineParams *p,
                                    const char *filename,
-                                   void (*start_cb)(void *opaque),
-                                   void *opaque);
+                                   StartCallback *start);
 void vm_add_cmdline(VirtMachineParams *p, const char *cmdline);
 char *get_file_path(const char *base_filename, const char *filename);
 void virt_machine_free_config(VirtMachineParams *p);
 VirtMachine *virt_machine_init(const VirtMachineParams *p);
-void virt_machine_end(VirtMachine *s);
-static inline int virt_machine_get_sleep_duration(VirtMachine *s, int delay)
-{
-    return s->vmc->virt_machine_get_sleep_duration(s, delay);
-}
-static inline void virt_machine_interp(VirtMachine *s, int max_exec_cycle)
-{
-    s->vmc->virt_machine_interp(s, max_exec_cycle);
-}
-static inline BOOL vm_mouse_is_absolute(VirtMachine *s)
-{
-    return s->vmc->vm_mouse_is_absolute(s);
-}
-static inline void vm_send_mouse_event(VirtMachine *s1, int dx, int dy, int dz,
-                                       unsigned int buttons)
-{
-    s1->vmc->vm_send_mouse_event(s1, dx, dy, dz, buttons);
-}
-static inline void vm_send_key_event(VirtMachine *s1, BOOL is_down, uint16_t key_code)
-{
-    s1->vmc->vm_send_key_event(s1, is_down, key_code);
-}
 
 /* gui */
 void sdl_refresh(VirtMachine *m);
 void sdl_init(int width, int height);
 
 /* simplefb.c */
-typedef struct SimpleFBState SimpleFBState;
-SimpleFBState *simplefb_init(PhysMemoryMap *map, uint64_t phys_addr,
-                             FBDevice *fb_dev, int width, int height);
-void simplefb_refresh(FBDevice *fb_dev,
-                      SimpleFBDrawFunc *redraw_func, void *opaque,
-                      PhysMemoryRange *mem_range,
-                      int fb_page_count);
+class SimpleFBState;
+FBDevice *simplefb_init(PhysMemoryMap *map, uint64_t phys_addr,
+                        int width, int height);
+void simplefb_refresh(FBDevice *fb_dev, SimpleFBDraw *draw,
+                      PhysMemoryRange *mem_range, int fb_page_count);
 
 /* vga.c */
-typedef struct VGAState VGAState;
-VGAState *pci_vga_init(PCIBus *bus, FBDevice *fb_dev,
-                       int width, int height,
+class VGAState;
+FBDevice *pci_vga_init(PCIBus *bus, int width, int height,
                        const uint8_t *vga_rom_buf, int vga_rom_size);
                       
 /* block_net.c */
-BlockDevice *block_device_init_http(const char *url,
-                                    int max_cache_size_kb,
-                                    void (*start_cb)(void *opaque),
-                                    void *start_opaque);
+BlockDevice *block_device_init_http(const char *url, int max_cache_size_kb,
+                                    StartCallback *start);

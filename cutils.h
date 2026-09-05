@@ -26,6 +26,12 @@
 
 #include <inttypes.h>
 
+/* slirp is built as C and includes this header, so the functions it shares
+   with the C++ emulator need C linkage. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define likely(x)       __builtin_expect(!!(x), 1)
 #define unlikely(x)     __builtin_expect(!!(x), 0)
 #define force_inline inline __attribute__((always_inline))
@@ -43,18 +49,6 @@
 #define countof(x) (sizeof(x) / sizeof(x[0]))
 
 #define DLL_PUBLIC __attribute__ ((visibility ("default")))
-
-#ifndef _BOOL_defined
-#define _BOOL_defined
-#undef FALSE
-#undef TRUE
-
-typedef int BOOL;
-enum {
-    FALSE = 0,
-    TRUE = 1,
-};
-#endif
 
 /* this test works at least with gcc */
 #if defined(__SIZEOF_INT128__)
@@ -190,5 +184,17 @@ void dbuf_write(DynBuf *s, size_t offset, const uint8_t *data, size_t len);
 void dbuf_putc(DynBuf *s, uint8_t c);
 void dbuf_putstr(DynBuf *s, const char *str);
 void dbuf_free(DynBuf *s);
+
+#ifdef __cplusplus
+}
+
+/* Typed wrapper for mallocz(); C++ has no implicit void* conversion. Only for
+   plain data — anything with a constructor or a vtable must use new. */
+template <typename T>
+T *mallocz_t(size_t size = sizeof(T))
+{
+    return static_cast<T *>(mallocz(size));
+}
+#endif
 
 #endif /* CUTILS_H */

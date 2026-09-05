@@ -81,12 +81,23 @@ typedef struct {
     int rptr, wptr, count;
 } PS2Queue;
 
-typedef struct {
+struct PS2State {
     PS2Queue queue;
     int32_t write_cmd;
-    void (*update_irq)(void *, int);
-    void *update_arg;
-} PS2State;
+    PS2IRQTarget *irq_target;
+    /* the keyboard and the mouse share one target, so each says which of
+       its two lines to raise */
+    bool is_aux;
+
+    void UpdateIRQ(int level)
+    {
+        if (is_aux) {
+            irq_target->UpdateAuxIRQ(level);
+        } else {
+            irq_target->UpdateKbdIRQ(level);
+        }
+    }
+};
 
 struct  PS2KbdState {
     PS2State common;
@@ -122,7 +133,7 @@ void ps2_queue(void *opaque, int b)
     if (++q->wptr == PS2_QUEUE_SIZE)
         q->wptr = 0;
     q->count++;
-    s->update_irq(s->update_arg, 1);
+    s->UpdateIRQ(1);
 }
 
 #define INPUT_MAKE_KEY_MIN 96
@@ -137,7 +148,7 @@ static const uint8_t linux_input_to_keycode_set1[INPUT_MAKE_KEY_MAX - INPUT_MAKE
 
 /* keycode is a Linux input layer keycode. We only support the PS/2
    keycode set 1 */
-void ps2_put_keycode(PS2KbdState *s, BOOL is_down, int keycode)
+void ps2_put_keycode(PS2KbdState *s, bool is_down, int keycode)
 {
     if (keycode >= INPUT_MAKE_KEY_MIN) {
         if (keycode > INPUT_MAKE_KEY_MAX)
@@ -171,9 +182,9 @@ uint32_t ps2_read_data(void *opaque)
             q->rptr = 0;
         q->count--;
         /* reading deasserts IRQ */
-        s->update_irq(s->update_arg, 0);
+        s->UpdateIRQ(0);
         /* reassert IRQs if data left */
-        s->update_irq(s->update_arg, q->count != 0);
+        s->UpdateIRQ(q->count != 0);
     }
     return val;
 }
@@ -468,22 +479,22 @@ static void ps2_reset(void *opaque)
     q->count = 0;
 }
 
-PS2KbdState *ps2_kbd_init(void (*update_irq)(void *, int), void *update_arg)
+PS2KbdState *ps2_kbd_init(PS2IRQTarget *irq_target)
 {
     PS2KbdState *s = (PS2KbdState *)mallocz(sizeof(PS2KbdState));
 
-    s->common.update_irq = update_irq;
-    s->common.update_arg = update_arg;
+    s->common.irq_target = irq_target;
+    s->common.is_aux = false;
     ps2_reset(&s->common);
     return s;
 }
 
-PS2MouseState *ps2_mouse_init(void (*update_irq)(void *, int), void *update_arg)
+PS2MouseState *ps2_mouse_init(PS2IRQTarget *irq_target)
 {
     PS2MouseState *s = (PS2MouseState *)mallocz(sizeof(PS2MouseState));
 
-    s->common.update_irq = update_irq;
-    s->common.update_arg = update_arg;
+    s->common.irq_target = irq_target;
+    s->common.is_aux = true;
     ps2_reset(&s->common);
     return s;
 }

@@ -45,8 +45,8 @@
 struct VMMouseState {
     PS2MouseState *ps2_mouse;
     int fifo_count, fifo_rindex, fifo_windex;
-    BOOL enabled;
-    BOOL absolute;
+    bool enabled;
+    bool absolute;
     uint32_t fifo_buf[FIFO_SIZE];
 };
 
@@ -65,7 +65,7 @@ static void read_data(VMMouseState *s, uint32_t *regs, int size)
     int i;
     if (size > 6 || size > s->fifo_count) {
         //        printf("vmmouse: read error req=%d count=%d\n", size, s->fifo_count);
-        s->enabled = FALSE;
+        s->enabled = false;
         return;
     }
     for(i = 0; i < size; i++) {
@@ -131,11 +131,11 @@ void vmmouse_handler(VMMouseState *s, uint32_t *regs)
         case 0x45414552: /* read id */
             if (s->fifo_count < FIFO_SIZE) {
                 put_queue(s, 0x3442554a);
-                s->enabled = TRUE;
+                s->enabled = true;
             }
             break;
         case 0x000000f5: /* disable */
-            s->enabled = FALSE;
+            s->enabled = false;
             break;
         case 0x4c455252: /* set relative */
             s->absolute = 0;
@@ -148,7 +148,7 @@ void vmmouse_handler(VMMouseState *s, uint32_t *regs)
     }
 }
 
-BOOL vmmouse_is_absolute(VMMouseState *s)
+bool vmmouse_is_absolute(VMMouseState *s)
 {
     return s->absolute;
 }
@@ -156,7 +156,7 @@ BOOL vmmouse_is_absolute(VMMouseState *s)
 VMMouseState *vmmouse_init(PS2MouseState *ps2_mouse)
 {
     VMMouseState *s;
-    s = mallocz(sizeof(*s));
+    s = static_cast<VMMouseState *>(mallocz(sizeof(*s)));
     s->ps2_mouse = ps2_mouse;
     return s;
 }

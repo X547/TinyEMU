@@ -80,7 +80,7 @@ static void copy_file(const char *src_filename, const char *dst_filename)
     FILE *fi, *fo;
     int len;
     
-    buf = malloc(COPY_BUF_LEN);
+    buf = static_cast<uint8_t *>(malloc(COPY_BUF_LEN));
     fi = fopen(src_filename, "rb");
     if (!fi) {
         perror(src_filename);

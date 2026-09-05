@@ -45,7 +45,7 @@ typedef struct JSONValue {
     union {
         JSONString *str;
         int int32;
-        BOOL b;
+        bool b;
         struct JSONObject *obj;
         struct JSONArray *array;
     } u;
@@ -81,12 +81,12 @@ JSONValue json_array_new(void);
 JSONValue json_array_get(JSONValue val, unsigned int idx);
 int json_array_set(JSONValue val, unsigned int idx, JSONValue prop_val);
 
-static inline BOOL json_is_error(JSONValue val)
+static inline bool json_is_error(JSONValue val)
 {
     return val.type == JSON_EXCEPTION;
 }
 
-static inline BOOL json_is_undefined(JSONValue val)
+static inline bool json_is_undefined(JSONValue val)
 {
     return val.type == JSON_UNDEFINED;
 }
@@ -115,7 +115,7 @@ static inline JSONValue json_int32_new(int v)
     return val;
 }
 
-static inline JSONValue json_bool_new(BOOL v)
+static inline JSONValue json_bool_new(bool v)
 {
     JSONValue val;
     val.type = JSON_BOOL;

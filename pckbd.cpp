@@ -84,17 +84,31 @@
 #define KBD_PENDING_KBD         1
 #define KBD_PENDING_AUX         2
 
-struct KBDState {
-    uint8_t write_cmd; /* if non zero, write data to port 60 is expected */
-    uint8_t status;
-    uint8_t mode;
+struct KBDState: public PS2IRQTarget {
+    uint8_t write_cmd = 0; /* if non zero, write data to port 60 is expected */
+    uint8_t status = 0;
+    uint8_t mode = 0;
     /* Bitmask of devices with data available.  */
-    uint8_t pending;
-    PS2KbdState *kbd;
-    PS2MouseState *mouse;
+    uint8_t pending = 0;
+    PS2KbdState *kbd = nullptr;
+    PS2MouseState *mouse = nullptr;
 
-    IRQSignal *irq_kbd;
-    IRQSignal *irq_mouse;
+    IRQSignal *irq_kbd = nullptr;
+    IRQSignal *irq_mouse = nullptr;
+
+    uint32_t DataRead(uint32_t offset, int size_log2);
+    void DataWrite(uint32_t offset, uint32_t val, int size_log2);
+    uint32_t StatusRead(uint32_t offset, int size_log2);
+    void CommandWrite(uint32_t offset, uint32_t val, int size_log2);
+
+    DeviceIOAdapter<KBDState, &KBDState::DataRead,
+                    &KBDState::DataWrite> fDataIo {*this};
+    DeviceIOAdapter<KBDState, &KBDState::StatusRead,
+                    &KBDState::CommandWrite> fCmdIo {*this};
+
+    /* PS2IRQTarget */
+    void UpdateKbdIRQ(int level) override;
+    void UpdateAuxIRQ(int level) override;
 };
 
 static void qemu_system_reset_request(void)
@@ -136,13 +150,13 @@ static void kbd_update_irq(KBDState *s)
                 irq_kbd_level = 1;
         }
     }
-    set_irq(s->irq_kbd, irq_kbd_level);
-    set_irq(s->irq_mouse, irq_mouse_level);
+    s->irq_kbd->Set(irq_kbd_level);
+    s->irq_mouse->Set(irq_mouse_level);
 }
 
-static void kbd_update_kbd_irq(void *opaque, int level)
+void KBDState::UpdateKbdIRQ(int level)
 {
-    KBDState *s = (KBDState *)opaque;
+    KBDState *s = this;
 
     if (level)
         s->pending |= KBD_PENDING_KBD;
@@ -151,9 +165,9 @@ static void kbd_update_kbd_irq(void *opaque, int level)
     kbd_update_irq(s);
 }
 
-static void kbd_update_aux_irq(void *opaque, int level)
+void KBDState::UpdateAuxIRQ(int level)
 {
-    KBDState *s = (KBDState *)opaque;
+    KBDState *s = this;
 
     if (level)
         s->pending |= KBD_PENDING_AUX;
@@ -162,9 +176,9 @@ static void kbd_update_aux_irq(void *opaque, int level)
     kbd_update_irq(s);
 }
 
-static uint32_t kbd_read_status(void *opaque, uint32_t addr, int size_log2)
+uint32_t KBDState::StatusRead(uint32_t addr, int size_log2)
 {
-    KBDState *s = opaque;
+    KBDState *s = this;
     int val;
     val = s->status;
 #if defined(DEBUG_KBD)
@@ -181,10 +195,9 @@ static void kbd_queue(KBDState *s, int b, int aux)
         ps2_queue(s->kbd, b);
 }
 
-static void kbd_write_command(void *opaque, uint32_t addr, uint32_t val,
-                              int size_log2)
+void KBDState::CommandWrite(uint32_t addr, uint32_t val, int size_log2)
 {
-    KBDState *s = opaque;
+    KBDState *s = this;
 
 #if defined(DEBUG_KBD)
     printf("kbd: write cmd=0x%02x\n", val);
@@ -254,9 +267,9 @@ static void kbd_write_command(void *opaque, uint32_t addr, uint32_t val,
     }
 }
 
-static uint32_t kbd_read_data(void *opaque, uint32_t addr, int size_log2)
+uint32_t KBDState::DataRead(uint32_t addr, int size_log2)
 {
-    KBDState *s = opaque;
+    KBDState *s = this;
     uint32_t val;
     if (s->pending == KBD_PENDING_AUX)
         val = ps2_read_data(s->mouse);
@@ -268,9 +281,9 @@ static uint32_t kbd_read_data(void *opaque, uint32_t addr, int size_log2)
     return val;
 }
 
-static void kbd_write_data(void *opaque, uint32_t addr, uint32_t val, int size_log2)
+void KBDState::DataWrite(uint32_t addr, uint32_t val, int size_log2)
 {
-    KBDState *s = opaque;
+    KBDState *s = this;
 
 #ifdef DEBUG_KBD
     printf("kbd: write data=0x%02x\n", val);
@@ -309,7 +322,7 @@ static void kbd_write_data(void *opaque, uint32_t addr, uint32_t val, int size_l
 
 static void kbd_reset(void *opaque)
 {
-    KBDState *s = opaque;
+    KBDState *s = static_cast<KBDState *>(opaque);
 
     s->mode = KBD_MODE_KBD_INT | KBD_MODE_MOUSE_INT;
     s->status = KBD_STAT_CMD | KBD_STAT_UNLOCKED;
@@ -322,19 +335,17 @@ KBDState *i8042_init(PS2KbdState **pkbd,
 {
     KBDState *s;
     
-    s = mallocz(sizeof(*s));
+    s = new KBDState();
     
     s->irq_kbd = kbd_irq;
     s->irq_mouse = mouse_irq;
 
     kbd_reset(s);
-    cpu_register_device(port_map, io_base, 1, s, kbd_read_data, kbd_write_data, 
-                        DEVIO_SIZE8);
-    cpu_register_device(port_map, io_base + 4, 1, s, kbd_read_status, kbd_write_command, 
-                        DEVIO_SIZE8);
+    port_map->RegisterDevice(io_base, 1, &s->fDataIo, DEVIO_SIZE8);
+    port_map->RegisterDevice(io_base + 4, 1, &s->fCmdIo, DEVIO_SIZE8);
 
-    s->kbd = ps2_kbd_init(kbd_update_kbd_irq, s);
-    s->mouse = ps2_mouse_init(kbd_update_aux_irq, s);
+    s->kbd = ps2_kbd_init(s);
+    s->mouse = ps2_mouse_init(s);
 
     *pkbd = s->kbd;
     *pmouse = s->mouse;

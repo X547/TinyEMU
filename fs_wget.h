@@ -21,6 +21,8 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#pragma once
+
 #ifdef USE_BUILTIN_CRYPTO
 #include "aes.h"
 #include "sha256.h"
@@ -37,36 +39,63 @@
 
 /* XHR */
 
-/* err < 0: error (no data provided)
+/* Receives the body of a transfer.
+   err < 0: error (no data provided)
    err = 0: end of transfer (data can be provided too)
    err = 1: data chunk
 */
-typedef void WGetWriteCallback(void *opaque, int err, void *data, size_t size);
-typedef size_t WGetReadCallback(void *opaque, void *data, size_t size);
+class WGetWriteHandler {
+public:
+    virtual ~WGetWriteHandler() = default;
+
+    virtual void WGetWrite(int err, void *data, size_t size) = 0;
+};
+
+/* Supplies the body of a POST. */
+class WGetReadHandler {
+public:
+    virtual ~WGetReadHandler() = default;
+
+    virtual size_t WGetRead(void *data, size_t size) = 0;
+};
+
 typedef struct XHRState XHRState;
 
 XHRState *fs_wget(const char *url, const char *user, const char *password,
-                  void *opaque, WGetWriteCallback *cb, BOOL single_write);
+                  WGetWriteHandler *write_handler, bool single_write);
 void fs_wget_free(XHRState *s);
 
 void fs_wget_init(void);
 void fs_wget_end(void);
 
-typedef BOOL FSNetEventLoopCompletionFunc(void *opaque);
+/* Return true to leave the event loop. */
+class FSNetEventLoopCompletion {
+public:
+    virtual ~FSNetEventLoopCompletion() = default;
+
+    virtual bool IsCompleted() = 0;
+};
+
 void fs_net_set_fdset(int *pfd_max, fd_set *rfds, fd_set *wfds, fd_set *efds,
                       int *ptimeout);
-void fs_net_event_loop(FSNetEventLoopCompletionFunc *cb, void *opaque);
+void fs_net_event_loop(FSNetEventLoopCompletion *completion);
 
 /* crypto */
 
 extern const uint8_t encrypted_file_magic[4];
 
-typedef int DecryptFileCB(void *opaque, const uint8_t *data, size_t len);
+/* Receives the plaintext of a decrypted transfer. */
+class DecryptFileHandler {
+public:
+    virtual ~DecryptFileHandler() = default;
+
+    virtual int DecryptWrite(const uint8_t *data, size_t len) = 0;
+};
+
 typedef struct DecryptFileState DecryptFileState;
 
 DecryptFileState *decrypt_file_init(AES_KEY *aes_state,
-                                    DecryptFileCB *write_cb,
-                                    void *opaque);
+                                    DecryptFileHandler *write_handler);
 int decrypt_file(DecryptFileState *s, const uint8_t *data,
                  size_t size);
 int decrypt_file_flush(DecryptFileState *s);
@@ -78,10 +107,15 @@ void pbkdf2_hmac_sha256(const uint8_t *pwd, int pwd_len,
 
 /* XHR file */
 
-typedef void FSWGetFileCB(FSDevice *fs, FSFile *f, int64_t size, void *opaque);
+/* Notified once a whole file has been fetched into the filesystem. */
+class FSWGetFileHandler {
+public:
+    virtual ~FSWGetFileHandler() = default;
+
+    virtual void FileLoaded(FSDevice *fs, FSFile *f, int64_t size) = 0;
+};
 
 void fs_wget_file2(FSDevice *fs, FSFile *f, const char *url,
                    const char *user, const char *password,
                    FSFile *posted_file, uint64_t post_data_len,
-                   FSWGetFileCB *cb, void *opaque,
-                   AES_KEY *aes_state);
+                   FSWGetFileHandler *handler, AES_KEY *aes_state);

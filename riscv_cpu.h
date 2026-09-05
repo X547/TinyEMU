@@ -41,78 +41,29 @@
 #define MIP_HEIP (1 << 10)
 #define MIP_MEIP (1 << 11)
 
-typedef struct RISCVCPUState RISCVCPUState;
+/* One implementation per supported XLEN; riscv_cpu.cpp is compiled once for
+   each and each build keeps its implementation class internal. */
+class RISCVCPU {
+public:
+    virtual ~RISCVCPU() = default;
 
-typedef struct {
-    RISCVCPUState *(*riscv_cpu_init)(PhysMemoryMap *mem_map);
-    void (*riscv_cpu_end)(RISCVCPUState *s);
-    void (*riscv_cpu_interp)(RISCVCPUState *s, int n_cycles);
-    uint64_t (*riscv_cpu_get_cycles)(RISCVCPUState *s);
-    void (*riscv_cpu_set_mip)(RISCVCPUState *s, uint32_t mask);
-    void (*riscv_cpu_reset_mip)(RISCVCPUState *s, uint32_t mask);
-    uint32_t (*riscv_cpu_get_mip)(RISCVCPUState *s);
-    BOOL (*riscv_cpu_get_power_down)(RISCVCPUState *s);
-    uint32_t (*riscv_cpu_get_misa)(RISCVCPUState *s);
-    void (*riscv_cpu_flush_tlb_write_range_ram)(RISCVCPUState *s,
-                                                uint8_t *ram_ptr, size_t ram_size);
-} RISCVCPUClass;
-
-typedef struct {
-    const RISCVCPUClass *class_ptr;
-} RISCVCPUCommonState;
+    virtual void Interp(int n_cycles) = 0;
+    virtual uint64_t Cycles() = 0;
+    virtual void SetMip(uint32_t mask) = 0;
+    virtual void ResetMip(uint32_t mask) = 0;
+    virtual uint32_t Mip() = 0;
+    virtual bool PowerDown() = 0;
+    virtual uint32_t Misa() = 0;
+    virtual void FlushTlbWriteRangeRam(uint8_t *ram_ptr, size_t ram_size) = 0;
+};
 
 int riscv_cpu_get_max_xlen(void);
 
-extern const RISCVCPUClass riscv_cpu_class32;
-extern const RISCVCPUClass riscv_cpu_class64;
-extern const RISCVCPUClass riscv_cpu_class128;
+/* Return nullptr if max_xlen is not supported by this build. */
+RISCVCPU *riscv_cpu_create(PhysMemoryMap *mem_map, int max_xlen);
 
-RISCVCPUState *riscv_cpu_init(PhysMemoryMap *mem_map, int max_xlen);
-static inline void riscv_cpu_end(RISCVCPUState *s)
-{
-    const RISCVCPUClass *c = ((RISCVCPUCommonState *)s)->class_ptr;
-    c->riscv_cpu_end(s);
-}
-static inline void riscv_cpu_interp(RISCVCPUState *s, int n_cycles)
-{
-    const RISCVCPUClass *c = ((RISCVCPUCommonState *)s)->class_ptr;
-    c->riscv_cpu_interp(s, n_cycles);
-}
-static inline uint64_t riscv_cpu_get_cycles(RISCVCPUState *s)
-{
-    const RISCVCPUClass *c = ((RISCVCPUCommonState *)s)->class_ptr;
-    return c->riscv_cpu_get_cycles(s);
-}
-static inline void riscv_cpu_set_mip(RISCVCPUState *s, uint32_t mask)
-{
-    const RISCVCPUClass *c = ((RISCVCPUCommonState *)s)->class_ptr;
-    c->riscv_cpu_set_mip(s, mask);
-}
-static inline void riscv_cpu_reset_mip(RISCVCPUState *s, uint32_t mask)
-{
-    const RISCVCPUClass *c = ((RISCVCPUCommonState *)s)->class_ptr;
-    c->riscv_cpu_reset_mip(s, mask);
-}
-static inline uint32_t riscv_cpu_get_mip(RISCVCPUState *s)
-{
-    const RISCVCPUClass *c = ((RISCVCPUCommonState *)s)->class_ptr;
-    return c->riscv_cpu_get_mip(s);
-}
-static inline BOOL riscv_cpu_get_power_down(RISCVCPUState *s)
-{
-    const RISCVCPUClass *c = ((RISCVCPUCommonState *)s)->class_ptr;
-    return c->riscv_cpu_get_power_down(s);
-}
-static inline uint32_t riscv_cpu_get_misa(RISCVCPUState *s)
-{
-    const RISCVCPUClass *c = ((RISCVCPUCommonState *)s)->class_ptr;
-    return c->riscv_cpu_get_misa(s);
-}
-static inline void riscv_cpu_flush_tlb_write_range_ram(RISCVCPUState *s,
-                                                       uint8_t *ram_ptr, size_t ram_size)
-{
-    const RISCVCPUClass *c = ((RISCVCPUCommonState *)s)->class_ptr;
-    c->riscv_cpu_flush_tlb_write_range_ram(s, ram_ptr, ram_size);
-}
+RISCVCPU *riscv_cpu_create32(PhysMemoryMap *mem_map);
+RISCVCPU *riscv_cpu_create64(PhysMemoryMap *mem_map);
+RISCVCPU *riscv_cpu_create128(PhysMemoryMap *mem_map);
 
 #endif /* RISCV_CPU_H */

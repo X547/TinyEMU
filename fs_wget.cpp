@@ -44,20 +44,12 @@
 struct XHRState {
     struct list_head link;
     CURL *eh;
-    void *opaque;
-    WGetWriteCallback *write_cb;
-    WGetReadCallback *read_cb;
+    WGetWriteHandler *write_handler;
+    WGetReadHandler *read_handler;
 
-    BOOL single_write;
+    bool single_write;
     DynBuf dbuf; /* used if single_write */
 };
-
-typedef struct {
-    struct list_head link;
-    int64_t timeout;
-    void (*cb)(void *opaque);
-    void *opaque;
-} AsyncCallState;
 
 static CURLM *curl_multi_ctx;
 static struct list_head xhr_list; /* list of XHRState.link */
@@ -80,13 +72,13 @@ void fs_wget_end(void)
 static size_t fs_wget_write_cb(char *ptr, size_t size, size_t nmemb,
                                void *userdata)
 {
-    XHRState *s = userdata;
+    XHRState *s = static_cast<XHRState *>(userdata);
     size *= nmemb;
 
     if (s->single_write) {
-        dbuf_write(&s->dbuf, s->dbuf.size, (void *)ptr, size);
+        dbuf_write(&s->dbuf, s->dbuf.size, reinterpret_cast<const uint8_t *>(ptr), size);
     } else {
-        s->write_cb(s->opaque, 1, ptr, size);
+        s->write_handler->WGetWrite(1, ptr, size);
     }
     return size;
 }
@@ -94,21 +86,20 @@ static size_t fs_wget_write_cb(char *ptr, size_t size, size_t nmemb,
 static size_t fs_wget_read_cb(char *ptr, size_t size, size_t nmemb,
                               void *userdata)
 {
-    XHRState *s = userdata;
+    XHRState *s = static_cast<XHRState *>(userdata);
     size *= nmemb;
-    return s->read_cb(s->opaque, ptr, size);
+    return s->read_handler->WGetRead(ptr, size);
 }
 
 XHRState *fs_wget2(const char *url, const char *user, const char *password,
-                   WGetReadCallback *read_cb, uint64_t post_data_len,
-                   void *opaque, WGetWriteCallback *write_cb, BOOL single_write)
+                   WGetReadHandler *read_handler, uint64_t post_data_len,
+                   WGetWriteHandler *write_handler, bool single_write)
 {
     XHRState *s;
-    s = mallocz(sizeof(*s));
+    s = static_cast<XHRState *>(mallocz(sizeof(*s)));
     s->eh = curl_easy_init();
-    s->opaque = opaque;
-    s->write_cb = write_cb;
-    s->read_cb = read_cb;
+    s->write_handler = write_handler;
+    s->read_handler = read_handler;
     s->single_write = single_write;
     dbuf_init(&s->dbuf);
     
@@ -174,12 +165,12 @@ void fs_net_set_fdset(int *pfd_max, fd_set *rfds, fd_set *wfds, fd_set *efds,
             /* signal the end of the transfer or error */
             if (http_code == 200) {
                 if (s->single_write) {
-                    s->write_cb(s->opaque, 0, s->dbuf.buf, s->dbuf.size);
+                    s->write_handler->WGetWrite(0, s->dbuf.buf, s->dbuf.size);
                 } else {
-                    s->write_cb(s->opaque, 0, NULL, 0);
+                    s->write_handler->WGetWrite(0, NULL, 0);
                 }
             } else {
-                s->write_cb(s->opaque, -http_code, NULL, 0);
+                s->write_handler->WGetWrite(-http_code, NULL, 0);
             }
             curl_multi_remove_handle(curl_multi_ctx, s->eh);
             curl_easy_cleanup(s->eh);
@@ -196,7 +187,7 @@ void fs_net_set_fdset(int *pfd_max, fd_set *rfds, fd_set *wfds, fd_set *efds,
         *ptimeout = min_int(*ptimeout, timeout);
 }
 
-void fs_net_event_loop(FSNetEventLoopCompletionFunc *cb, void *opaque)
+void fs_net_event_loop(FSNetEventLoopCompletion *completion)
 {
     fd_set rfds, wfds, efds;
     int timeout, fd_max;
@@ -212,8 +203,8 @@ void fs_net_event_loop(FSNetEventLoopCompletionFunc *cb, void *opaque)
         FD_ZERO(&efds);
         timeout = 10000;
         fs_net_set_fdset(&fd_max, &rfds, &wfds, &efds, &timeout);
-        if (cb) {
-            if (cb(opaque))
+        if (completion != nullptr) {
+            if (completion->IsCompleted())
                 break;
         } else {
             if (list_empty(&xhr_list))
@@ -226,9 +217,10 @@ void fs_net_event_loop(FSNetEventLoopCompletionFunc *cb, void *opaque)
 }
 
 XHRState *fs_wget(const char *url, const char *user, const char *password,
-                  void *opaque, WGetWriteCallback *cb, BOOL single_write)
+                  WGetWriteHandler *write_handler, bool single_write)
 {
-    return fs_wget2(url, user, password, NULL, 0, opaque, cb, single_write);
+    return fs_wget2(url, user, password, nullptr, 0, write_handler,
+                    single_write);
 }
 
 /***********************************************/
@@ -239,8 +231,7 @@ XHRState *fs_wget(const char *url, const char *user, const char *password,
 #define DEC_BUF_SIZE (256 * AES_BLOCK_SIZE)
 
 struct DecryptFileState {
-    DecryptFileCB *write_cb;
-    void *opaque;
+    DecryptFileHandler *write_handler;
     int dec_state;
     int dec_buf_pos;
     AES_KEY *aes_state;
@@ -249,13 +240,11 @@ struct DecryptFileState {
 };
 
 DecryptFileState *decrypt_file_init(AES_KEY *aes_state,
-                                    DecryptFileCB *write_cb,
-                                    void *opaque)
+                                    DecryptFileHandler *write_handler)
 {
     DecryptFileState *s;
-    s = mallocz(sizeof(*s));
-    s->write_cb = write_cb;
-    s->opaque = opaque;
+    s = static_cast<DecryptFileState *>(mallocz(sizeof(*s)));
+    s->write_handler = write_handler;
     s->aes_state = aes_state;
     return s;
 }
@@ -287,8 +276,8 @@ int decrypt_file(DecryptFileState *s, const uint8_t *data,
                 /* keep one block in case it is the padding */
                 len = s->dec_buf_pos - AES_BLOCK_SIZE;
                 AES_cbc_encrypt(s->dec_buf, s->dec_buf, len,
-                                s->aes_state, s->iv, FALSE);
-                ret = s->write_cb(s->opaque, s->dec_buf, len);
+                                s->aes_state, s->iv, false);
+                ret = s->write_handler->DecryptWrite(s->dec_buf, len);
                 if (ret < 0)
                     return ret;
                 memcpy(s->dec_buf, s->dec_buf + s->dec_buf_pos - AES_BLOCK_SIZE,
@@ -317,13 +306,13 @@ int decrypt_file_flush(DecryptFileState *s)
         (len % AES_BLOCK_SIZE) != 0)
         return -1;
     AES_cbc_encrypt(s->dec_buf, s->dec_buf, len,
-                    s->aes_state, s->iv, FALSE);
+                    s->aes_state, s->iv, false);
     pad_len = s->dec_buf[s->dec_buf_pos - 1];
     if (pad_len < 1 || pad_len > AES_BLOCK_SIZE)
         return -1;
     len -= pad_len;
     if (len != 0) {
-        ret = s->write_cb(s->opaque, s->dec_buf, len);
+        ret = s->write_handler->DecryptWrite(s->dec_buf, len);
         if (ret < 0)
             return ret;
     }
@@ -337,34 +326,41 @@ void decrypt_file_end(DecryptFileState *s)
 
 /* XHR file */
 
-typedef struct {
+/* Sinks the transfer into the destination file, decrypting it if needed, and
+   reports completion to the caller's handler. */
+struct FSWGetFileState:
+    public WGetWriteHandler,
+    public WGetReadHandler,
+    public DecryptFileHandler {
     FSDevice *fs;
     FSFile *f;
     int64_t pos;
-    FSWGetFileCB *cb;
-    void *opaque;
+    FSWGetFileHandler *handler;
     FSFile *posted_file;
     int64_t read_pos;
     DecryptFileState *dec_state;
-} FSWGetFileState;
 
-static int fs_wget_file_write_cb(void *opaque, const uint8_t *data,
-                                 size_t size)
+    void WGetWrite(int err, void *data, size_t size) override;
+    size_t WGetRead(void *data, size_t size) override;
+    int DecryptWrite(const uint8_t *data, size_t len) override;
+};
+
+int FSWGetFileState::DecryptWrite(const uint8_t *data, size_t size)
 {
-    FSWGetFileState *s = opaque;
+    FSWGetFileState *s = this;
     FSDevice *fs = s->fs;
     int ret;
 
-    ret = fs->fs_write(fs, s->f, s->pos, data, size);
+    ret = fs->Write(s->f, s->pos, data, size);
     if (ret < 0)
         return ret;
     s->pos += ret;
     return ret;
 }
 
-static void fs_wget_file_on_load(void *opaque, int err, void *data, size_t size)
+void FSWGetFileState::WGetWrite(int err, void *data, size_t size)
 {
-    FSWGetFileState *s = opaque;
+    FSWGetFileState *s = this;
     FSDevice *fs = s->fs;
     int ret;
     int64_t ret_size;
@@ -375,13 +371,13 @@ static void fs_wget_file_on_load(void *opaque, int err, void *data, size_t size)
         goto done;
     } else {
         if (s->dec_state) {
-            ret = decrypt_file(s->dec_state, data, size);
+            ret = decrypt_file(s->dec_state, static_cast<const uint8_t *>(data), size);
             if (ret >= 0 && err == 0) {
                 /* handle the end of file */
                 decrypt_file_flush(s->dec_state);
             }
         } else {
-            ret = fs_wget_file_write_cb(s, data, size);
+            ret = s->DecryptWrite(static_cast<const uint8_t *>(data), size);
         }
         if (ret < 0) {
             ret_size = ret;
@@ -390,23 +386,23 @@ static void fs_wget_file_on_load(void *opaque, int err, void *data, size_t size)
             /* end of transfer */
             ret_size = s->pos;
         done:
-            s->cb(fs, s->f, ret_size, s->opaque);
+            s->handler->FileLoaded(fs, s->f, ret_size);
             if (s->dec_state)
                 decrypt_file_end(s->dec_state);
-            free(s);
+            delete s;
         }
     }
 }
 
-static size_t fs_wget_file_read_cb(void *opaque, void *data, size_t size)
+size_t FSWGetFileState::WGetRead(void *data, size_t size)
 {
-    FSWGetFileState *s = opaque;
+    FSWGetFileState *s = this;
     FSDevice *fs = s->fs;
     int ret;
     
     if (!s->posted_file)
         return 0;
-    ret = fs->fs_read(fs, s->posted_file, s->read_pos, data, size);
+    ret = fs->Read(s->posted_file, s->read_pos, static_cast<uint8_t *>(data), size);
     if (ret < 0)
         return 0;
     s->read_pos += ret;
@@ -416,24 +412,22 @@ static size_t fs_wget_file_read_cb(void *opaque, void *data, size_t size)
 void fs_wget_file2(FSDevice *fs, FSFile *f, const char *url,
                    const char *user, const char *password,
                    FSFile *posted_file, uint64_t post_data_len,
-                   FSWGetFileCB *cb, void *opaque,
-                   AES_KEY *aes_state)
+                   FSWGetFileHandler *handler, AES_KEY *aes_state)
 {
     FSWGetFileState *s;
-    s = mallocz(sizeof(*s));
+    s = new FSWGetFileState();
     s->fs = fs;
     s->f = f;
     s->pos = 0;
-    s->cb = cb;
-    s->opaque = opaque;
+    s->handler = handler;
     s->posted_file = posted_file;
     s->read_pos = 0;
+    s->dec_state = nullptr;
     if (aes_state) {
-        s->dec_state = decrypt_file_init(aes_state, fs_wget_file_write_cb, s);
+        s->dec_state = decrypt_file_init(aes_state, s);
     }
-    
-    fs_wget2(url, user, password, fs_wget_file_read_cb, post_data_len,
-             s, fs_wget_file_on_load, FALSE);
+
+    fs_wget2(url, user, password, s, post_data_len, s, false);
 }
 
 /***********************************************/

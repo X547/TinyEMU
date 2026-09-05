@@ -5,6 +5,13 @@
 
 #include <netinet/in.h>
 
+/* slirp is built as C while the emulator embedding it is C++, so both the
+   entry points and the two callbacks the embedder must provide need C
+   linkage. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct Slirp;
 typedef struct Slirp Slirp;
 
@@ -43,6 +50,10 @@ void slirp_socket_recv(Slirp *slirp, struct in_addr guest_addr,
 size_t slirp_socket_can_recv(Slirp *slirp, struct in_addr guest_addr,
                              int guest_port);
 int slirp_get_time_ms(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #else /* !CONFIG_SLIRP */
 

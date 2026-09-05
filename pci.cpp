@@ -37,11 +37,10 @@ typedef struct {
     uint32_t size; /* 0 means no mapping defined */
     uint8_t type;
     uint8_t enabled; /* true if mapping is enabled */
-    void *opaque;
-    PCIBarSetFunc *bar_set;
+    PCIBarTarget *bar_target;
 } PCIIORegion;
 
-struct PCIDevice {
+struct PCIDevice: public IRQTarget {
     PCIBus *bus;
     uint8_t devfn;
     IRQSignal irq[4];
@@ -49,6 +48,8 @@ struct PCIDevice {
     uint8_t next_cap_offset; /* offset of the next capability */
     char *name; /* for debug only */
     PCIIORegion io_regions[PCI_NUM_REGIONS];
+
+    void SetIRQ(int irq_num, int level) override;
 };
 
 struct PCIBus {
@@ -67,9 +68,9 @@ static int bus_map_irq(PCIDevice *d, int irq_num)
     return (irq_num + slot_addend) & 3;
 }
 
-static void pci_device_set_irq(void *opaque, int irq_num, int level)
+void PCIDevice::SetIRQ(int irq_num, int level)
 {
-    PCIDevice *d = opaque;
+    PCIDevice *d = this;
     PCIBus *b = d->bus;
     uint32_t mask;
     int i, irq_level;
@@ -87,7 +88,7 @@ static void pci_device_set_irq(void *opaque, int irq_num, int level)
     for(i = 0; i < 8; i++)
         mask |= b->irq_state[irq_num][i];
     irq_level = (mask != 0);
-    set_irq(&b->irq[irq_num], irq_level);
+    b->irq[irq_num].Set(irq_level);
 }
 
 static int devfn_alloc(PCIBus *b)
@@ -116,7 +117,7 @@ PCIDevice *pci_register_device(PCIBus *b, const char *name, int devfn,
     if (b->device[devfn])
         return NULL;
 
-    d = mallocz(sizeof(PCIDevice));
+    d = new PCIDevice();
     d->bus = b;
     d->name = strdup(name);
     d->devfn = devfn;
@@ -129,7 +130,7 @@ PCIDevice *pci_register_device(PCIBus *b, const char *name, int devfn,
     d->next_cap_offset = 0x40;
     
     for(i = 0; i < 4; i++)
-        irq_init(&d->irq[i], pci_device_set_irq, d, i);
+        d->irq[i].Init(d, i);
     b->device[devfn] = d;
 
     return d;
@@ -181,8 +182,7 @@ PhysMemoryMap *pci_device_get_port_map(PCIDevice *d)
 }
 
 void pci_register_bar(PCIDevice *d, unsigned int bar_num,
-                      uint32_t size, int type,
-                      void *opaque, PCIBarSetFunc *bar_set)
+                      uint32_t size, int type, PCIBarTarget *bar_target)
 {
     PCIIORegion *r;
     uint32_t val, config_addr;
@@ -194,9 +194,8 @@ void pci_register_bar(PCIDevice *d, unsigned int bar_num,
     assert(r->size == 0);
     r->size = size;
     r->type = type;
-    r->enabled = FALSE;
-    r->opaque = opaque;
-    r->bar_set = bar_set;
+    r->enabled = false;
+    r->bar_target = bar_target;
     /* set the config value */
     val = 0;
     if (bar_num == PCI_ROM_SLOT) {
@@ -212,7 +211,7 @@ static void pci_update_mappings(PCIDevice *d)
 {
     int cmd, i, offset;
     uint32_t new_addr;
-    BOOL new_enabled;
+    bool new_enabled;
     PCIIORegion *r;
     
     cmd = get_le16(&d->config[PCI_COMMAND]);
@@ -225,17 +224,17 @@ static void pci_update_mappings(PCIDevice *d)
             offset = 0x10 + i * 4;
         }
         new_addr = get_le32(&d->config[offset]);
-        new_enabled = FALSE;
+        new_enabled = false;
         if (r->size != 0) {
             if ((r->type & PCI_ADDRESS_SPACE_IO) &&
                 (cmd & PCI_COMMAND_IO)) {
-                new_enabled = TRUE;
+                new_enabled = true;
             } else {
                 if (cmd & PCI_COMMAND_MEMORY) {
                     if (i == PCI_ROM_SLOT) {
                         new_enabled = (new_addr & 1);
                     } else {
-                        new_enabled = TRUE;
+                        new_enabled = true;
                     }
                 }
             }
@@ -243,11 +242,11 @@ static void pci_update_mappings(PCIDevice *d)
         if (new_enabled) {
             /* new address */
             new_addr = get_le32(&d->config[offset]) & ~(r->size - 1);
-            r->bar_set(r->opaque, i, new_addr, TRUE);
-            r->enabled = TRUE;
+            r->bar_target->SetBar(i, new_addr, true);
+            r->enabled = true;
         } else if (r->enabled) {
-            r->bar_set(r->opaque, i, 0, FALSE);
-            r->enabled = FALSE;
+            r->bar_target->SetBar(i, 0, false);
+            r->enabled = false;
         }
     }
 }
@@ -404,9 +403,9 @@ static uint32_t pci_data_read(PCIBus *s, uint32_t addr, int size_log2)
 
 /* warning: only valid for one DEVIO page. Return NULL if no memory at
    the given address */
-uint8_t *pci_device_get_dma_ptr(PCIDevice *d, uint64_t addr, BOOL is_rw)
+uint8_t *pci_device_get_dma_ptr(PCIDevice *d, uint64_t addr, bool is_rw)
 {
-    return phys_mem_get_ram_ptr(d->bus->mem_map, addr, is_rw);
+    return d->bus->mem_map->GetRamPtr(addr, is_rw);
 }
 
 void pci_device_set_config8(PCIDevice *d, uint8_t addr, uint8_t val)
@@ -442,32 +441,42 @@ int pci_add_capability(PCIDevice *d, const uint8_t *buf, int size)
 
 /* i440FX host bridge */
 
-struct I440FXState {
+struct I440FXState: public IRQTarget {
     PCIBus *pci_bus;
     PCIDevice *pci_dev;
     PCIDevice *piix3_dev;
     uint32_t config_reg;
     uint8_t pic_irq_state[16];
     IRQSignal *pic_irqs; /* 16 irqs */
+
+    uint32_t ReadAddr(uint32_t offset, int size_log2);
+    void WriteAddr(uint32_t offset, uint32_t data, int size_log2);
+    uint32_t ReadData(uint32_t offset, int size_log2);
+    void WriteData(uint32_t offset, uint32_t data, int size_log2);
+
+    DeviceIOAdapter<I440FXState, &I440FXState::ReadAddr,
+                    &I440FXState::WriteAddr> fAddrIo {*this};
+    DeviceIOAdapter<I440FXState, &I440FXState::ReadData,
+                    &I440FXState::WriteData> fDataIo {*this};
+
+    void SetIRQ(int irq_num, int level) override;
 };
 
-static void i440fx_write_addr(void *opaque, uint32_t offset,
-                              uint32_t data, int size_log2)
+void I440FXState::WriteAddr(uint32_t offset, uint32_t data, int size_log2)
 {
-    I440FXState *s = opaque;
+    I440FXState *s = this;
     s->config_reg = data;
 }
 
-static uint32_t i440fx_read_addr(void *opaque, uint32_t offset, int size_log2)
+uint32_t I440FXState::ReadAddr(uint32_t offset, int size_log2)
 {
-    I440FXState *s = opaque;
+    I440FXState *s = this;
     return s->config_reg;
 }
 
-static void i440fx_write_data(void *opaque, uint32_t offset,
-                              uint32_t data, int size_log2)
+void I440FXState::WriteData(uint32_t offset, uint32_t data, int size_log2)
 {
-    I440FXState *s = opaque;
+    I440FXState *s = this;
     if (s->config_reg & 0x80000000) {
         if (size_log2 == 2) {
             /* it is simpler to assume 32 bit config accesses are
@@ -479,9 +488,9 @@ static void i440fx_write_data(void *opaque, uint32_t offset,
     }
 }
 
-static uint32_t i440fx_read_data(void *opaque, uint32_t offset, int size_log2)
+uint32_t I440FXState::ReadData(uint32_t offset, int size_log2)
 {
-    I440FXState *s = opaque;
+    I440FXState *s = this;
     if (!(s->config_reg & 0x80000000))
         return val_ones[size_log2];
     if (size_log2 == 2) {
@@ -493,9 +502,9 @@ static uint32_t i440fx_read_data(void *opaque, uint32_t offset, int size_log2)
     }
 }
 
-static void i440fx_set_irq(void *opaque, int irq_num, int irq_level)
+void I440FXState::SetIRQ(int irq_num, int irq_level)
 {
-    I440FXState *s = opaque;
+    I440FXState *s = this;
     PCIDevice *hd = s->piix3_dev;
     int pic_irq;
     
@@ -508,7 +517,7 @@ static void i440fx_set_irq(void *opaque, int irq_num, int irq_level)
             s->pic_irq_state[pic_irq] |= 1 << irq_num;
         else
             s->pic_irq_state[pic_irq] &= ~(1 << irq_num);
-        set_irq(&s->pic_irqs[pic_irq], (s->pic_irq_state[pic_irq] != 0));
+        s->pic_irqs[pic_irq].Set((s->pic_irq_state[pic_irq] != 0));
     }
 }
 
@@ -521,22 +530,21 @@ I440FXState *i440fx_init(PCIBus **pbus, int *ppiix3_devfn,
     PCIDevice *d;
     int i;
     
-    s = mallocz(sizeof(*s));
+    s = new I440FXState();
     
-    b = mallocz(sizeof(PCIBus));
+    b = static_cast<PCIBus *>(mallocz(sizeof(PCIBus)));
     b->bus_num = 0;
     b->mem_map = mem_map;
     b->port_map = port_map;
 
     s->pic_irqs = pic_irqs;
     for(i = 0; i < 4; i++) {
-        irq_init(&b->irq[i], i440fx_set_irq, s, i);
+        b->irq[i].Init(s, i);
     }
     
-    cpu_register_device(port_map, 0xcf8, 1, s, i440fx_read_addr, i440fx_write_addr, 
-                        DEVIO_SIZE32);
-    cpu_register_device(port_map, 0xcfc, 4, s, i440fx_read_data, i440fx_write_data, 
-                        DEVIO_SIZE8 | DEVIO_SIZE16 | DEVIO_SIZE32);
+    port_map->RegisterDevice(0xcf8, 1, &s->fAddrIo, DEVIO_SIZE32);
+    port_map->RegisterDevice(0xcfc, 4, &s->fDataIo,
+                             DEVIO_SIZE8 | DEVIO_SIZE16 | DEVIO_SIZE32);
     d = pci_register_device(b, "i440FX", 0, 0x8086, 0x1237, 0x02, 0x0600);
     put_le16(&d->config[PCI_SUBSYSTEM_VENDOR_ID], 0x1af4); /* Red Hat, Inc. */
     put_le16(&d->config[PCI_SUBSYSTEM_ID], 0x1100); /* QEMU virtual machine */

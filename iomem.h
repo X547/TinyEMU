@@ -1,6 +1,6 @@
 /*
  * IO memory handling
- * 
+ *
  * Copyright (c) 2016-2017 Fabrice Bellard
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -21,18 +21,17 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-#ifndef IOMEM_H
-#define IOMEM_H
+#pragma once
 
-typedef void DeviceWriteFunc(void *opaque, uint32_t offset,
-                             uint32_t val, int size_log2);
-typedef uint32_t DeviceReadFunc(void *opaque, uint32_t offset, int size_log2);
+#include <stddef.h>
+#include <stdint.h>
+
 
 #define DEVIO_SIZE8  (1 << 0)
 #define DEVIO_SIZE16 (1 << 1)
 #define DEVIO_SIZE32 (1 << 2)
 /* not supported, could add specific 64 bit callbacks when needed */
-//#define DEVIO_SIZE64 (1 << 3) 
+//#define DEVIO_SIZE64 (1 << 3)
 #define DEVIO_DISABLED (1 << 4)
 
 #define DEVRAM_FLAG_ROM        (1 << 0) /* not writable */
@@ -41,108 +40,167 @@ typedef uint32_t DeviceReadFunc(void *opaque, uint32_t offset, int size_log2);
 #define DEVRAM_PAGE_SIZE_LOG2 12
 #define DEVRAM_PAGE_SIZE (1 << DEVRAM_PAGE_SIZE_LOG2)
 
-typedef struct PhysMemoryMap PhysMemoryMap;
+#define PHYS_MEM_RANGE_MAX 32
 
-typedef struct {
+class PhysMemoryMap;
+
+
+/* Implemented by a device to serve reads and writes of one mapped range. */
+class DeviceIO {
+public:
+    virtual ~DeviceIO() = default;
+
+    virtual uint32_t DeviceRead(uint32_t offset, int size_log2) = 0;
+    virtual void DeviceWrite(uint32_t offset, uint32_t val, int size_log2) = 0;
+};
+
+
+/* A device that maps several ranges needs one DeviceIO per range, so it holds
+   an adapter per range that forwards to a distinct pair of its own methods.
+   The member pointers are compile-time template arguments; the dispatch the
+   memory map performs is still virtual. */
+template <
+    typename Owner,
+    uint32_t (Owner::*ReadFn)(uint32_t offset, int size_log2),
+    void (Owner::*WriteFn)(uint32_t offset, uint32_t val, int size_log2)
+>
+class DeviceIOAdapter final: public DeviceIO {
+private:
+    Owner &fOwner;
+
+public:
+    DeviceIOAdapter(Owner &owner): fOwner(owner) {}
+
+    uint32_t DeviceRead(uint32_t offset, int size_log2) override
+    {
+        return (fOwner.*ReadFn)(offset, size_log2);
+    }
+
+    void DeviceWrite(uint32_t offset, uint32_t val, int size_log2) override
+    {
+        (fOwner.*WriteFn)(offset, val, size_log2);
+    }
+};
+
+
+/* Implemented by the CPU so the memory map can invalidate write TLB entries
+   when a RAM mapping moves or a dirty page is reclaimed. */
+class TlbFlushTarget {
+public:
+    virtual ~TlbFlushTarget() = default;
+
+    virtual void FlushTlbWriteRange(uint8_t *ram_addr, size_t ram_size) = 0;
+};
+
+
+struct PhysMemoryRange {
     PhysMemoryMap *map;
     uint64_t addr;
     uint64_t org_size; /* original size */
     uint64_t size; /* =org_size or 0 if the mapping is disabled */
-    BOOL is_ram;
+    bool is_ram;
     /* the following is used for RAM access */
     int devram_flags;
     uint8_t *phys_mem;
     int dirty_bits_size; /* in bytes */
-    uint32_t *dirty_bits; /* NULL if not used */
+    uint32_t *dirty_bits; /* nullptr if not used */
     uint32_t *dirty_bits_tab[2];
     int dirty_bits_index; /* 0-1 */
     /* the following is used for I/O access */
-    void *opaque;
-    DeviceReadFunc *read_func;
-    DeviceWriteFunc *write_func;
+    DeviceIO *io;
     int devio_flags;
-} PhysMemoryRange;
 
-#define PHYS_MEM_RANGE_MAX 32
+    /* Fetch the bitmap of dirty pages and reset it. */
+    const uint32_t *DirtyBits();
+    void ResetDirtyBit(size_t offset);
+    void SetAddr(uint64_t addr, bool enabled);
 
-struct PhysMemoryMap {
-    int n_phys_mem_range;
-    PhysMemoryRange phys_mem_range[PHYS_MEM_RANGE_MAX];
-    PhysMemoryRange *(*register_ram)(PhysMemoryMap *s, uint64_t addr,
-                                     uint64_t size, int devram_flags);
-    void (*free_ram)(PhysMemoryMap *s, PhysMemoryRange *pr);
-    const uint32_t *(*get_dirty_bits)(PhysMemoryMap *s, PhysMemoryRange *pr);
-    void (*set_ram_addr)(PhysMemoryMap *s, PhysMemoryRange *pr, uint64_t addr,
-                         BOOL enabled);
-    void *opaque;
-    void (*flush_tlb_write_range)(void *opaque, uint8_t *ram_addr,
-                                  size_t ram_size);
+    void SetDirtyBit(size_t offset)
+    {
+        if (dirty_bits == nullptr) {
+            return;
+        }
+        size_t page_index = offset >> DEVRAM_PAGE_SIZE_LOG2;
+        uint32_t mask = 1 << (page_index & 0x1f);
+        dirty_bits[page_index >> 5] |= mask;
+    }
+
+    bool IsDirtyBit(size_t offset) const
+    {
+        if (dirty_bits == nullptr) {
+            return true;
+        }
+        size_t page_index = offset >> DEVRAM_PAGE_SIZE_LOG2;
+        return (dirty_bits[page_index >> 5] >> (page_index & 0x1f)) & 1;
+    }
 };
 
 
-PhysMemoryMap *phys_mem_map_init(void);
-void phys_mem_map_end(PhysMemoryMap *s);
-PhysMemoryRange *register_ram_entry(PhysMemoryMap *s, uint64_t addr,
-                                    uint64_t size, int devram_flags);
-static inline PhysMemoryRange *cpu_register_ram(PhysMemoryMap *s, uint64_t addr,
-                                  uint64_t size, int devram_flags)
-{
-    return s->register_ram(s, addr, size, devram_flags);
-}
-PhysMemoryRange *cpu_register_device(PhysMemoryMap *s, uint64_t addr,
-                                     uint64_t size, void *opaque,
-                                     DeviceReadFunc *read_func, DeviceWriteFunc *write_func,
-                                     int devio_flags);
-PhysMemoryRange *get_phys_mem_range(PhysMemoryMap *s, uint64_t paddr);
-void phys_mem_set_addr(PhysMemoryRange *pr, uint64_t addr, BOOL enabled);
+/* The default implementation backs RAM with anonymous memory and keeps the
+   dirty bitmap itself; the x86 KVM path overrides the virtual methods to let
+   the kernel own both. */
+class PhysMemoryMap {
+private:
+    TlbFlushTarget *fTlbFlushTarget = nullptr;
+    int fRangeCount = 0;
+    PhysMemoryRange fRanges[PHYS_MEM_RANGE_MAX] {};
 
-static inline const uint32_t *phys_mem_get_dirty_bits(PhysMemoryRange *pr)
-{
-    PhysMemoryMap *map = pr->map;
-    return map->get_dirty_bits(map, pr);
-}
+protected:
+    /* Reserve and fill in a range descriptor without backing it with memory. */
+    PhysMemoryRange *RegisterRamEntry(uint64_t addr, uint64_t size,
+                                      int devram_flags);
 
-static inline void phys_mem_set_dirty_bit(PhysMemoryRange *pr, size_t offset)
-{
-    size_t page_index;
-    uint32_t mask, *dirty_bits_ptr;
-    if (pr->dirty_bits) {
-        page_index = offset >> DEVRAM_PAGE_SIZE_LOG2;
-        mask = 1 << (page_index & 0x1f);
-        dirty_bits_ptr = pr->dirty_bits + (page_index >> 5);
-        *dirty_bits_ptr |= mask;
-    }
-}
+public:
+    virtual ~PhysMemoryMap();
 
-static inline BOOL phys_mem_is_dirty_bit(PhysMemoryRange *pr, size_t offset)
-{
-    size_t page_index;
-    uint32_t *dirty_bits_ptr;
-    if (!pr->dirty_bits)
-        return TRUE;
-    page_index = offset >> DEVRAM_PAGE_SIZE_LOG2;
-    dirty_bits_ptr = pr->dirty_bits + (page_index >> 5);
-    return (*dirty_bits_ptr >> (page_index & 0x1f)) & 1;
-}
+    int RangeCount() const {return fRangeCount;}
+    PhysMemoryRange *RangeAt(int index) {return &fRanges[index];}
+    int IndexOfRange(const PhysMemoryRange *pr) const {return pr - fRanges;}
 
-void phys_mem_reset_dirty_bit(PhysMemoryRange *pr, size_t offset);
-uint8_t *phys_mem_get_ram_ptr(PhysMemoryMap *map, uint64_t paddr, BOOL is_rw);
+    void SetTlbFlushTarget(TlbFlushTarget *target) {fTlbFlushTarget = target;}
+    void FlushTlbWriteRange(uint8_t *ram_addr, size_t ram_size);
+
+    /* Return nullptr if not found. */
+    PhysMemoryRange *FindRange(uint64_t paddr);
+    /* Return nullptr if no valid RAM page. The access can only be done in
+       the page. */
+    uint8_t *GetRamPtr(uint64_t paddr, bool is_rw);
+
+    PhysMemoryRange *RegisterDevice(uint64_t addr, uint64_t size, DeviceIO *io,
+                                    int devio_flags);
+
+    virtual PhysMemoryRange *RegisterRam(uint64_t addr, uint64_t size,
+                                         int devram_flags);
+    virtual void FreeRam(PhysMemoryRange *pr);
+    virtual const uint32_t *GetDirtyBits(PhysMemoryRange *pr);
+    virtual void SetRamAddr(PhysMemoryRange *pr, uint64_t addr, bool enabled);
+};
+
 
 /* IRQ support */
 
-typedef void SetIRQFunc(void *opaque, int irq_num, int level);
+/* Implemented by an interrupt controller. */
+class IRQTarget {
+public:
+    virtual ~IRQTarget() = default;
 
-typedef struct {
-    SetIRQFunc *set_irq;
-    void *opaque;
-    int irq_num;
-} IRQSignal;
+    virtual void SetIRQ(int irq_num, int level) = 0;
+};
 
-void irq_init(IRQSignal *irq, SetIRQFunc *set_irq, void *opaque, int irq_num);
 
-static inline void set_irq(IRQSignal *irq, int level)
-{
-    irq->set_irq(irq->opaque, irq->irq_num, level);
-}
+/* One wire into an IRQTarget. Devices hold these by value, so it stays a
+   plain assignable object rather than an interface of its own. */
+class IRQSignal {
+private:
+    IRQTarget *fTarget = nullptr;
+    int fIrqNum = 0;
 
-#endif /* IOMEM_H */
+public:
+    void Init(IRQTarget *target, int irq_num)
+    {
+        fTarget = target;
+        fIrqNum = irq_num;
+    }
+
+    void Set(int level) {fTarget->SetIRQ(fIrqNum, level);}
+};

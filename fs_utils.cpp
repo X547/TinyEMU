@@ -39,6 +39,9 @@
 #include "fs_utils.h"
 
 /* last byte is the version */
+/* Needs an explicit extern: a namespace-scope const has internal linkage in
+   C++, which would hide it from fs_wget.cpp. */
+extern const uint8_t encrypted_file_magic[4];
 const uint8_t encrypted_file_magic[4] = { 0xfb, 0xa2, 0xe9, 0x01 };
 
 char *compose_path(const char *path, const char *name)
@@ -51,7 +54,7 @@ char *compose_path(const char *path, const char *name)
     } else {
         path_len = strlen(path);
         name_len = strlen(name);
-        d = malloc(path_len + 1 + name_len + 1);
+        d = static_cast<char *>(malloc(path_len + 1 + name_len + 1));
         q = d;
         memcpy(q, path, path_len);
         q += path_len;
@@ -99,7 +102,7 @@ char *quoted_str(const char *str)
     }
     return strdup(str);
  use_quote:
-    buf = malloc(strlen(str) * 4 + 2 + 1);
+    buf = static_cast<char *>(malloc(strlen(str) * 4 + 2 + 1));
     q = buf;
     s = str;
     *q++ = '"';
@@ -362,7 +365,7 @@ int parse_tag_version(const char *str)
     return version;
 }
 
-BOOL is_url(const char *path)
+bool is_url(const char *path)
 {
     return (strstart(path, "http:", NULL) ||
             strstart(path, "https:", NULL) ||

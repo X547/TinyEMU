@@ -21,6 +21,8 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#pragma once
+
 #include "iomem.h"
 
 typedef struct X86CPUState X86CPUState;
@@ -51,20 +53,30 @@ typedef struct {
 X86CPUState *x86_cpu_init(PhysMemoryMap *mem_map);
 void x86_cpu_end(X86CPUState *s);
 void x86_cpu_interp(X86CPUState *s, int max_cycles1);
-void x86_cpu_set_irq(X86CPUState *s, BOOL set);
+void x86_cpu_set_irq(X86CPUState *s, bool set);
 void x86_cpu_set_reg(X86CPUState *s, int reg, uint32_t val);
 uint32_t x86_cpu_get_reg(X86CPUState *s, int reg);
 void x86_cpu_set_seg(X86CPUState *s, int seg, const X86CPUSeg *sd);
-void x86_cpu_set_get_hard_intno(X86CPUState *s,
-                                int (*get_hard_intno)(void *opaque),
-                                void *opaque);
-void x86_cpu_set_get_tsc(X86CPUState *s,
-                         uint64_t (*get_tsc)(void *opaque),
-                         void *opaque);
-void x86_cpu_set_port_io(X86CPUState *s, 
-                         DeviceReadFunc *port_read, DeviceWriteFunc *port_write,
-                         void *opaque);
+/* Implemented by the machine, which owns the interrupt controller. */
+class X86HardIntnoSource {
+public:
+    virtual ~X86HardIntnoSource() = default;
+
+    virtual int HardIntno() = 0;
+};
+
+/* Implemented by the machine, which owns the time base. */
+class X86TscSource {
+public:
+    virtual ~X86TscSource() = default;
+
+    virtual uint64_t Tsc() = 0;
+};
+
+void x86_cpu_set_hard_intno_source(X86CPUState *s, X86HardIntnoSource *source);
+void x86_cpu_set_tsc_source(X86CPUState *s, X86TscSource *source);
+void x86_cpu_set_port_io(X86CPUState *s, DeviceIO *port_io);
 int64_t x86_cpu_get_cycles(X86CPUState *s);
-BOOL x86_cpu_get_power_down(X86CPUState *s);
+bool x86_cpu_get_power_down(X86CPUState *s);
 void x86_cpu_flush_tlb_write_range_ram(X86CPUState *s,
                                        uint8_t *ram_ptr, size_t ram_size);

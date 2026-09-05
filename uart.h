@@ -1,7 +1,7 @@
-#ifndef _UART_H_
-#define _UART_H_
+#pragma once
 
 #include <stddef.h>
+
 #include "cutils.h"
 #include "iomem.h"
 
@@ -35,24 +35,41 @@
 
 #define UART_FIFO_LENGTH    16      /* 16550A Fifo Length */
 
-typedef struct {
-    uint8_t divider; 
-    uint8_t rbr; /* receive register */
-    uint8_t ier;
-    uint8_t iir; /* read only */
-    uint8_t lcr;
-    uint8_t mcr;
-    uint8_t lsr; /* read only */
-    uint8_t msr;
-    uint8_t scr;
-    uint8_t fcr;
-    IRQSignal *irq;
-    void (*write_func)(void *opaque, const uint8_t *buf, int buf_len);
-    void *opaque;
-} SerialState;
+/* Implemented by whoever consumes the bytes the guest transmits. */
+class SerialOutput {
+public:
+    virtual ~SerialOutput() = default;
 
-SerialState *serial_init(PhysMemoryMap *port_map, int addr,
-                         IRQSignal *irq,
-                         void (*write_func)(void *opaque, const uint8_t *buf, int buf_len), void *opaque);
+    virtual void WriteData(const uint8_t *buf, int buf_len) = 0;
+};
 
-#endif	// _UART_H_
+
+class SerialState {
+private:
+    uint8_t fDivider = 0;
+    uint8_t fRbr = 0; /* receive register */
+    uint8_t fIer = 0;
+    uint8_t fIir = UART_IIR_NO_INT; /* read only */
+    uint8_t fLcr = 0;
+    uint8_t fMcr = 0;
+    uint8_t fLsr = UART_LSR_TEMT | UART_LSR_THRE; /* read only */
+    uint8_t fMsr = 0;
+    uint8_t fScr = 0;
+    uint8_t fFcr = 0;
+
+    IRQSignal *fIrq = nullptr;
+    SerialOutput *fOutput = nullptr;
+
+    void UpdateIRQ();
+
+public:
+    SerialState(PhysMemoryMap *port_map, int addr, IRQSignal *irq,
+                SerialOutput *output);
+
+    uint32_t Read(uint32_t offset, int size_log2);
+    void Write(uint32_t offset, uint32_t val, int size_log2);
+
+    void SendBreak();
+
+    DeviceIOAdapter<SerialState, &SerialState::Read, &SerialState::Write> fIo {*this};
+};

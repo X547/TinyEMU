@@ -82,7 +82,7 @@ int vm_get_int_opt(JSONValue obj, const char *name, int *pval, int def_val)
 }
 
 static int vm_get_str2(JSONValue obj, const char *name, const char **pstr,
-                      BOOL is_opt)
+                      bool is_opt)
 { 
     JSONValue val;
     val = json_object_get(obj, name);
@@ -105,12 +105,12 @@ static int vm_get_str2(JSONValue obj, const char *name, const char **pstr,
 
 static int vm_get_str(JSONValue obj, const char *name, const char **pstr)
 { 
-    return vm_get_str2(obj, name, pstr, FALSE);
+    return vm_get_str2(obj, name, pstr, false);
 }
 
 static int vm_get_str_opt(JSONValue obj, const char *name, const char **pstr)
 { 
-    return vm_get_str2(obj, name, pstr, TRUE);
+    return vm_get_str2(obj, name, pstr, true);
 }
 
 static char *strdup_null(const char *str)
@@ -167,7 +167,7 @@ static char *cmdline_subst(const char *cmdline)
     return (char *)dbuf.buf;
 }
 
-static BOOL find_name(const char *name, const char *name_list)
+static bool find_name(const char *name, const char *name_list)
 {
     size_t len;
     const char *p, *r;
@@ -177,33 +177,32 @@ static BOOL find_name(const char *name, const char *name_list)
         r = strchr(p, ',');
         if (!r) {
             if (!strcmp(name, p))
-                return TRUE;
+                return true;
             break;
         } else {
             len = r - p;
             if (len == strlen(name) && !memcmp(name, p, len))
-                return TRUE;
+                return true;
             p = r + 1;
         }
     }
-    return FALSE;
+    return false;
 }
 
 static const VirtMachineClass *virt_machine_list[] = {
-    &riscv_machine_class,
+    &gRiscvMachineClass,
 #ifdef CONFIG_X86EMU
-    &pc_machine_class,
+    &gPcMachineClass,
 #endif
     NULL,
 };
 
 static const VirtMachineClass *virt_machine_find_class(const char *machine_name)
 {
-    const VirtMachineClass *vmc, **pvmc;
-    
-    for(pvmc = virt_machine_list; *pvmc != NULL; pvmc++) {
-        vmc = *pvmc;
-        if (find_name(machine_name, vmc->machine_names))
+    for (const VirtMachineClass *vmc : virt_machine_list) {
+        if (vmc == NULL)
+            break;
+        if (find_name(machine_name, vmc->MachineNames()))
             return vmc;
     }
     return NULL;
@@ -244,7 +243,7 @@ static int virt_machine_parse_config(VirtMachineParams *p,
         vm_error("Unknown machine name: %s\n", p->machine_name);
         goto tag_fail;
     }
-    p->vmc->virt_machine_set_defaults(p);
+    p->vmc->SetDefaults(p);
 
     tag_name = "memory_size";
     if (vm_get_int(cfg, tag_name, &val) < 0)
@@ -366,9 +365,9 @@ static int virt_machine_parse_config(VirtMachineParams *p,
         goto tag_fail;
     if (str) {
         if (!strcmp(str, "none")) {
-            p->accel_enable = FALSE;
+            p->accel_enable = false;
         } else if (!strcmp(str, "auto")) {
-            p->accel_enable = TRUE;
+            p->accel_enable = true;
         } else {
             vm_error("unsupported 'accel' config: %s\n", str);
             return -1;
@@ -392,28 +391,74 @@ static int virt_machine_parse_config(VirtMachineParams *p,
     return -1;
 }
 
-typedef void FSLoadFileCB(void *opaque, uint8_t *buf, int buf_len);
+/* Receives a config or auxiliary file once it has been read, whether from
+   disk or over HTTP. */
+class FSLoadFileHandler {
+public:
+    virtual ~FSLoadFileHandler() = default;
 
-typedef struct {
+    virtual void FileLoaded(uint8_t *buf, int buf_len) = 0;
+};
+
+typedef struct VMConfigLoadState VMConfigLoadState;
+
+#ifdef CONFIG_FS_NET
+/* Bridges the HTTP transfer of a config file back into the loader. */
+class ConfigLoadWriteHandler final: public WGetWriteHandler {
+private:
+    VMConfigLoadState &fState;
+
+public:
+    ConfigLoadWriteHandler(VMConfigLoadState &state): fState(state) {}
+
+    void WGetWrite(int err, void *data, size_t size) override;
+};
+#endif
+
+
+/* The two stages of loading a config: the file itself, then each auxiliary
+   file it names. */
+class ConfigFileLoaded final: public FSLoadFileHandler {
+private:
+    VMConfigLoadState &fState;
+
+public:
+    ConfigFileLoaded(VMConfigLoadState &state): fState(state) {}
+
+    void FileLoaded(uint8_t *buf, int buf_len) override;
+};
+
+class AdditionalFileLoaded final: public FSLoadFileHandler {
+private:
+    VMConfigLoadState &fState;
+
+public:
+    AdditionalFileLoaded(VMConfigLoadState &state): fState(state) {}
+
+    void FileLoaded(uint8_t *buf, int buf_len) override;
+};
+
+struct VMConfigLoadState {
     VirtMachineParams *vm_params;
-    void (*start_cb)(void *opaque);
-    void *opaque;
-    
-    FSLoadFileCB *file_load_cb;
-    void *file_load_opaque;
-    int file_index;
-} VMConfigLoadState;
+    StartCallback *start;
 
-static void config_file_loaded(void *opaque, uint8_t *buf, int buf_len);
+    FSLoadFileHandler *file_load_handler;
+    int file_index;
+#ifdef CONFIG_FS_NET
+    ConfigLoadWriteHandler write_handler {*this};
+#endif
+    ConfigFileLoaded config_file_loaded {*this};
+    AdditionalFileLoaded additional_file_loaded {*this};
+};
+
 static void config_additional_file_load(VMConfigLoadState *s);
-static void config_additional_file_load_cb(void *opaque,
-                                           uint8_t *buf, int buf_len);
 
 /* XXX: win32, URL */
 char *get_file_path(const char *base_filename, const char *filename)
 {
     int len, len1;
-    char *fname, *p;
+    char *fname;
+    const char *p;
     
     if (!base_filename)
         goto done;
@@ -428,7 +473,7 @@ char *get_file_path(const char *base_filename, const char *filename)
     }
     len = p + 1 - base_filename;
     len1 = strlen(filename);
-    fname = malloc(len + len1 + 1);
+    fname = static_cast<char *>(malloc(len + len1 + 1));
     memcpy(fname, base_filename, len);
     memcpy(fname + len, filename, len1 + 1);
     return fname;
@@ -450,7 +495,7 @@ static int load_file(uint8_t **pbuf, const char *filename)
     fseek(f, 0, SEEK_END);
     size = ftell(f);
     fseek(f, 0, SEEK_SET);
-    buf = malloc(size);
+    buf = static_cast<uint8_t *>(malloc(size));
     if (fread(buf, 1, size, f) != size) {
         fprintf(stderr, "%s: read error\n", filename);
         exit(1);
@@ -461,58 +506,55 @@ static int load_file(uint8_t **pbuf, const char *filename)
 }
 
 #ifdef CONFIG_FS_NET
-static void config_load_file_cb(void *opaque, int err, void *data, size_t size)
+void ConfigLoadWriteHandler::WGetWrite(int err, void *data, size_t size)
 {
-    VMConfigLoadState *s = opaque;
+    VMConfigLoadState *s = &fState;
     
     //    printf("err=%d data=%p size=%ld\n", err, data, size);
     if (err < 0) {
         vm_error("Error %d while loading file\n", -err);
         exit(1);
     }
-    s->file_load_cb(s->file_load_opaque, data, size);
+    s->file_load_handler->FileLoaded(static_cast<uint8_t *>(data), size);
 }
 #endif
 
 static void config_load_file(VMConfigLoadState *s, const char *filename,
-                             FSLoadFileCB *cb, void *opaque)
+                             FSLoadFileHandler *handler)
 {
     //    printf("loading %s\n", filename);
 #ifdef CONFIG_FS_NET
     if (is_url(filename)) {
-        s->file_load_cb = cb;
-        s->file_load_opaque = opaque;
-        fs_wget(filename, NULL, NULL, s, config_load_file_cb, TRUE);
+        s->file_load_handler = handler;
+        fs_wget(filename, NULL, NULL, &s->write_handler, true);
     } else
 #endif
     {
         uint8_t *buf;
         int size;
         size = load_file(&buf, filename);
-        cb(opaque, buf, size);
+        handler->FileLoaded(buf, size);
         free(buf);
     }
 }
 
 void virt_machine_load_config_file(VirtMachineParams *p,
                                    const char *filename,
-                                   void (*start_cb)(void *opaque),
-                                   void *opaque)
+                                   StartCallback *start)
 {
     VMConfigLoadState *s;
     
-    s = mallocz(sizeof(*s));
+    s = new VMConfigLoadState();
     s->vm_params = p;
-    s->start_cb = start_cb;
-    s->opaque = opaque;
+    s->start = start;
     p->cfg_filename = strdup(filename);
 
-    config_load_file(s, filename, config_file_loaded, s);
+    config_load_file(s, filename, &s->config_file_loaded);
 }
 
-static void config_file_loaded(void *opaque, uint8_t *buf, int buf_len)
+void ConfigFileLoaded::FileLoaded(uint8_t *buf, int buf_len)
 {
-    VMConfigLoadState *s = opaque;
+    VMConfigLoadState *s = &fState;
     VirtMachineParams *p = s->vm_params;
 
     if (virt_machine_parse_config(p, (char *)buf, buf_len) < 0)
@@ -531,27 +573,26 @@ static void config_additional_file_load(VMConfigLoadState *s)
         s->file_index++;
     }
     if (s->file_index == VM_FILE_COUNT) {
-        if (s->start_cb)
-            s->start_cb(s->opaque);
-        free(s);
+        if (s->start != nullptr) {
+            s->start->Start();
+        }
+        delete s;
     } else {
         char *fname;
         
         fname = get_file_path(p->cfg_filename,
                               p->files[s->file_index].filename);
-        config_load_file(s, fname,
-                         config_additional_file_load_cb, s);
+        config_load_file(s, fname, &s->additional_file_loaded);
         free(fname);
     }
 }
 
-static void config_additional_file_load_cb(void *opaque,
-                                           uint8_t *buf, int buf_len)
+void AdditionalFileLoaded::FileLoaded(uint8_t *buf, int buf_len)
 {
-    VMConfigLoadState *s = opaque;
+    VMConfigLoadState *s = &fState;
     VirtMachineParams *p = s->vm_params;
 
-    p->files[s->file_index].buf = malloc(buf_len);
+    p->files[s->file_index].buf = static_cast<uint8_t *>(malloc(buf_len));
     memcpy(p->files[s->file_index].buf, buf, buf_len);
     p->files[s->file_index].len = buf_len;
 
@@ -562,14 +603,15 @@ static void config_additional_file_load_cb(void *opaque,
 
 void vm_add_cmdline(VirtMachineParams *p, const char *cmdline)
 {
-    char *new_cmdline, *old_cmdline;
+    char *new_cmdline;
+    const char *old_cmdline;
     if (cmdline[0] == '!') {
         new_cmdline = strdup(cmdline + 1);
     } else {
         old_cmdline = p->cmdline;
         if (!old_cmdline)
             old_cmdline = "";
-        new_cmdline = malloc(strlen(old_cmdline) + 1 + strlen(cmdline) + 1);
+        new_cmdline = static_cast<char *>(malloc(strlen(old_cmdline) + 1 + strlen(cmdline) + 1));
         strcpy(new_cmdline, old_cmdline);
         strcat(new_cmdline, " ");
         strcat(new_cmdline, cmdline);
@@ -607,16 +649,10 @@ void virt_machine_free_config(VirtMachineParams *p)
 
 VirtMachine *virt_machine_init(const VirtMachineParams *p)
 {
-    const VirtMachineClass *vmc = p->vmc;
-    return vmc->virt_machine_init(p);
+    return p->vmc->Init(p);
 }
 
 void virt_machine_set_defaults(VirtMachineParams *p)
 {
     memset(p, 0, sizeof(*p));
-}
-
-void virt_machine_end(VirtMachine *s)
-{
-    s->vmc->virt_machine_end(s);
 }

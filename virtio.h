@@ -57,58 +57,73 @@ void virtio_set_debug(VIRTIODevice *s, int debug_flags);
 
 /* block device */
 
-typedef void BlockDeviceCompletionFunc(void *opaque, int ret);
+/* Notified when an asynchronous block request finishes. */
+class BlockDeviceCompletion {
+public:
+    virtual ~BlockDeviceCompletion() = default;
 
-typedef struct BlockDevice BlockDevice;
+    virtual void Complete(int ret) = 0;
+};
 
-struct BlockDevice {
-    int64_t (*get_sector_count)(BlockDevice *bs);
-    int (*read_async)(BlockDevice *bs,
-                      uint64_t sector_num, uint8_t *buf, int n,
-                      BlockDeviceCompletionFunc *cb, void *opaque);
-    int (*write_async)(BlockDevice *bs,
-                       uint64_t sector_num, const uint8_t *buf, int n,
-                       BlockDeviceCompletionFunc *cb, void *opaque);
-    void *opaque;
+
+/* A completion pointer may be null when the caller does not care; requests
+   that finish synchronously return 0 without notifying. */
+class BlockDevice {
+public:
+    virtual ~BlockDevice() = default;
+
+    virtual int64_t SectorCount() = 0;
+    virtual int ReadAsync(uint64_t sector_num, uint8_t *buf, int n,
+                          BlockDeviceCompletion *completion) = 0;
+    virtual int WriteAsync(uint64_t sector_num, const uint8_t *buf, int n,
+                           BlockDeviceCompletion *completion) = 0;
 };
 
 VIRTIODevice *virtio_block_init(VIRTIOBusDef *bus, BlockDevice *bs);
 
 /* network device */
 
-typedef struct EthernetDevice EthernetDevice; 
+/* The device half of the link, implemented by virtio-net and installed on
+   the host-side EthernetDevice once the device exists. */
+class EthernetTarget {
+public:
+    virtual ~EthernetTarget() = default;
 
-struct EthernetDevice {
-    uint8_t mac_addr[6]; /* mac address of the interface */
-    void (*write_packet)(EthernetDevice *net,
-                         const uint8_t *buf, int len);
-    void *opaque;
-    void (*select_fill)(EthernetDevice *net, int *pfd_max,
-                        fd_set *rfds, fd_set *wfds, fd_set *efds,
-                        int *pdelay);
-    void (*select_poll)(EthernetDevice *net, 
-                        fd_set *rfds, fd_set *wfds, fd_set *efds,
-                        int select_ret);
-    /* the following is set by the device */
-    void *device_opaque;
-    BOOL (*device_can_write_packet)(EthernetDevice *net);
-    void (*device_write_packet)(EthernetDevice *net,
-                                const uint8_t *buf, int len);
-    void (*device_set_carrier)(EthernetDevice *net, BOOL carrier_state);
+    virtual bool CanWritePacket() = 0;
+    virtual void WritePacket(const uint8_t *buf, int len) = 0;
+    virtual void SetCarrier(bool carrier_state) = 0;
+};
+
+
+/* The host half of the link: a tun interface, slirp, ... */
+class EthernetDevice {
+public:
+    uint8_t mac_addr[6] {}; /* mac address of the interface */
+    EthernetTarget *target = nullptr; /* set by the device */
+
+    virtual ~EthernetDevice() = default;
+
+    virtual void WritePacket(const uint8_t *buf, int len) = 0;
+    virtual void SelectFill(int *pfd_max, fd_set *rfds, fd_set *wfds,
+                            fd_set *efds, int *pdelay) = 0;
+    virtual void SelectPoll(fd_set *rfds, fd_set *wfds, fd_set *efds,
+                            int select_ret) = 0;
 };
 
 VIRTIODevice *virtio_net_init(VIRTIOBusDef *bus, EthernetDevice *es);
 
 /* console device */
 
-typedef struct {
-    void *opaque;
-    void (*write_data)(void *opaque, const uint8_t *buf, int len);
-    int (*read_data)(void *opaque, uint8_t *buf, int len);
-} CharacterDevice;
+class CharacterDevice {
+public:
+    virtual ~CharacterDevice() = default;
+
+    virtual void WriteData(const uint8_t *buf, int len) = 0;
+    virtual int ReadData(uint8_t *buf, int len) = 0;
+};
 
 VIRTIODevice *virtio_console_init(VIRTIOBusDef *bus, CharacterDevice *cs);
-BOOL virtio_console_can_write_data(VIRTIODevice *s);
+bool virtio_console_can_write_data(VIRTIODevice *s);
 int virtio_console_get_write_len(VIRTIODevice *s);
 int virtio_console_write_data(VIRTIODevice *s, const uint8_t *buf, int buf_len);
 void virtio_console_resize_event(VIRTIODevice *s, int width, int height);
@@ -123,7 +138,7 @@ typedef enum {
 
 #define VIRTIO_INPUT_ABS_SCALE 32768
 
-int virtio_input_send_key_event(VIRTIODevice *s, BOOL is_down,
+int virtio_input_send_key_event(VIRTIODevice *s, bool is_down,
                                 uint16_t key_code);
 int virtio_input_send_mouse_event(VIRTIODevice *s, int dx, int dy, int dz,
                                   unsigned int buttons);

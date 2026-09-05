@@ -22,6 +22,8 @@
  * THE SOFTWARE.
  */
 
+#pragma once
+
 /* FSQID.type */
 #define P9_QTDIR 0x80
 #define P9_QTAPPEND 0x40
@@ -91,8 +93,13 @@
 #define P9_EPROTO    71
 #define P9_ENOTSUP   524
 
-typedef struct FSDevice FSDevice;
-typedef struct FSFile FSFile;
+class FSDevice;
+
+/* Opaque to callers; fs_disk and fs_net each derive their own file state. */
+class FSFile {
+public:
+    virtual ~FSFile() = default;
+};
 
 typedef struct {
     uint32_t f_bsize;
@@ -150,52 +157,71 @@ typedef struct {
     char *client_id;
 } FSLock;
 
-typedef void FSOpenCompletionFunc(FSDevice *fs, FSQID *qid, int err,
-                                  void *opaque);
+/* Notified when a deferred open completes. */
+class FSOpenCompletion {
+public:
+    virtual ~FSOpenCompletion() = default;
 
-struct FSDevice {
-    void (*fs_end)(FSDevice *s);
-    void (*fs_delete)(FSDevice *s, FSFile *f);
-    void (*fs_statfs)(FSDevice *fs, FSStatFS *st);
-    int (*fs_attach)(FSDevice *fs, FSFile **pf, FSQID *qid, uint32_t uid,
-                     const char *uname, const char *aname);
-    int (*fs_walk)(FSDevice *fs, FSFile **pf, FSQID *qids,
-                   FSFile *f, int n, char **names);
-    int (*fs_mkdir)(FSDevice *fs, FSQID *qid, FSFile *f,
-                    const char *name, uint32_t mode, uint32_t gid);
-    int (*fs_open)(FSDevice *fs, FSQID *qid, FSFile *f, uint32_t flags,
-                   FSOpenCompletionFunc *cb, void *opaque);
-    int (*fs_create)(FSDevice *fs, FSQID *qid, FSFile *f, const char *name, 
-                     uint32_t flags, uint32_t mode, uint32_t gid);
-    int (*fs_stat)(FSDevice *fs, FSFile *f, FSStat *st);
-    int (*fs_setattr)(FSDevice *fs, FSFile *f, uint32_t mask,
-                      uint32_t mode, uint32_t uid, uint32_t gid,
-                      uint64_t size, uint64_t atime_sec, uint64_t atime_nsec,
-                      uint64_t mtime_sec, uint64_t mtime_nsec);
-    void (*fs_close)(FSDevice *fs, FSFile *f);
-    int (*fs_readdir)(FSDevice *fs, FSFile *f, uint64_t offset,
-                      uint8_t *buf, int count);
-    int (*fs_read)(FSDevice *fs, FSFile *f, uint64_t offset,
-            uint8_t *buf, int count);
-    int (*fs_write)(FSDevice *fs, FSFile *f, uint64_t offset,
-             const uint8_t *buf, int count);
-    int (*fs_link)(FSDevice *fs, FSFile *df, FSFile *f, const char *name);
-    int (*fs_symlink)(FSDevice *fs, FSQID *qid,
-                      FSFile *f, const char *name, const char *symgt, uint32_t gid);
-    int (*fs_mknod)(FSDevice *fs, FSQID *qid,
-                    FSFile *f, const char *name, uint32_t mode, uint32_t major,
-                    uint32_t minor, uint32_t gid);
-    int (*fs_readlink)(FSDevice *fs, char *buf, int buf_size, FSFile *f);
-    int (*fs_renameat)(FSDevice *fs, FSFile *f, const char *name, 
-                       FSFile *new_f, const char *new_name);
-    int (*fs_unlinkat)(FSDevice *fs, FSFile *f, const char *name);
-    int (*fs_lock)(FSDevice *fs, FSFile *f, const FSLock *lock);
-    int (*fs_getlock)(FSDevice *fs, FSFile *f, FSLock *lock);
+    virtual void Complete(FSDevice *fs, FSQID *qid, int err) = 0;
+};
+
+
+/* Run once a network filesystem has finished loading its root. */
+class StartCallback {
+public:
+    virtual ~StartCallback() = default;
+
+    virtual void Start() = 0;
+};
+
+
+class FSDevice {
+public:
+    virtual ~FSDevice() = default;
+
+    virtual void End() = 0;
+    virtual void Delete(FSFile *f) = 0;
+    virtual void StatFS(FSStatFS *st) = 0;
+    virtual int Attach(FSFile **pf, FSQID *qid, uint32_t uid,
+                       const char *uname, const char *aname) = 0;
+    virtual int Walk(FSFile **pf, FSQID *qids, FSFile *f, int n,
+                     char **names) = 0;
+    virtual int Mkdir(FSQID *qid, FSFile *f, const char *name, uint32_t mode,
+                      uint32_t gid) = 0;
+    virtual int Open(FSQID *qid, FSFile *f, uint32_t flags,
+                     FSOpenCompletion *completion) = 0;
+    virtual int Create(FSQID *qid, FSFile *f, const char *name,
+                       uint32_t flags, uint32_t mode, uint32_t gid) = 0;
+    virtual int Stat(FSFile *f, FSStat *st) = 0;
+    virtual int SetAttr(FSFile *f, uint32_t mask,
+                        uint32_t mode, uint32_t uid, uint32_t gid,
+                        uint64_t size, uint64_t atime_sec, uint64_t atime_nsec,
+                        uint64_t mtime_sec, uint64_t mtime_nsec) = 0;
+    virtual void Close(FSFile *f) = 0;
+    virtual int ReadDir(FSFile *f, uint64_t offset, uint8_t *buf,
+                        int count) = 0;
+    virtual int Read(FSFile *f, uint64_t offset, uint8_t *buf, int count) = 0;
+    virtual int Write(FSFile *f, uint64_t offset, const uint8_t *buf,
+                      int count) = 0;
+    virtual int Link(FSFile *df, FSFile *f, const char *name) = 0;
+    virtual int Symlink(FSQID *qid, FSFile *f, const char *name,
+                        const char *symgt, uint32_t gid) = 0;
+    virtual int Mknod(FSQID *qid, FSFile *f, const char *name, uint32_t mode,
+                      uint32_t major, uint32_t minor, uint32_t gid) = 0;
+    virtual int ReadLink(char *buf, int buf_size, FSFile *f) = 0;
+    virtual int RenameAt(FSFile *f, const char *name, FSFile *new_f,
+                         const char *new_name) = 0;
+    virtual int UnlinkAt(FSFile *f, const char *name) = 0;
+    virtual int Lock(FSFile *f, const FSLock *lock) = 0;
+    virtual int GetLock(FSFile *f, FSLock *lock) = 0;
+
+    /* Replaces the upstream identity test that compared function pointers. */
+    virtual bool IsNet() const {return false;}
 };
 
 FSDevice *fs_disk_init(const char *root_path);
 FSDevice *fs_mem_init(void);
-FSDevice *fs_net_init(const char *url, void (*start)(void *opaque), void *opaque);
+FSDevice *fs_net_init(const char *url, StartCallback *start);
 void fs_net_set_pwd(FSDevice *fs, const char *pwd);
 void fs_export_file(const char *filename,
                     const uint8_t *buf, int buf_len);

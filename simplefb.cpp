@@ -37,24 +37,24 @@
 
 #define FB_ALLOC_ALIGN 65536
 
-struct SimpleFBState {
-    FBDevice *fb_dev;
-    int fb_page_count;
-    PhysMemoryRange *mem_range;
+class SimpleFBState final: public FBDevice {
+public:
+    int fb_page_count = 0;
+    PhysMemoryRange *mem_range = nullptr;
+
+    void Refresh(SimpleFBDraw *draw) override;
 };
 
 #define MAX_MERGE_DISTANCE 3
 
-void simplefb_refresh(FBDevice *fb_dev,
-                      SimpleFBDrawFunc *redraw_func, void *opaque,
-                      PhysMemoryRange *mem_range,
-                      int fb_page_count)
+void simplefb_refresh(FBDevice *fb_dev, SimpleFBDraw *draw,
+                      PhysMemoryRange *mem_range, int fb_page_count)
 {
     const uint32_t *dirty_bits;
     uint32_t dirty_val;
     int y0, y1, page_y0, page_y1, byte_pos, page_index, bit_pos;
 
-    dirty_bits = phys_mem_get_dirty_bits(mem_range);
+    dirty_bits = mem_range->DirtyBits();
     
     page_index = 0;
     y0 = y1 = 0;
@@ -79,8 +79,7 @@ void simplefb_refresh(FBDevice *fb_dev,
                     y1 = page_y1;
                 } else {
                     /* flush */
-                    redraw_func(fb_dev, opaque,
-                                0, y0, fb_dev->width, y1 - y0);
+                    draw->Draw(fb_dev, 0, y0, fb_dev->width, y1 - y0);
                     y0 = page_y0;
                     y1 = page_y1;
                 }
@@ -90,26 +89,22 @@ void simplefb_refresh(FBDevice *fb_dev,
     }
 
     if (y0 != y1) {
-        redraw_func(fb_dev, opaque,
-                    0, y0, fb_dev->width, y1 - y0);
+        draw->Draw(fb_dev, 0, y0, fb_dev->width, y1 - y0);
     }
 }
 
-static void simplefb_refresh1(FBDevice *fb_dev,
-                              SimpleFBDrawFunc *redraw_func, void *opaque)
+void SimpleFBState::Refresh(SimpleFBDraw *draw)
 {
-    SimpleFBState *s = fb_dev->device_opaque;
-    simplefb_refresh(fb_dev, redraw_func, opaque, s->mem_range,
-                     s->fb_page_count);
+    simplefb_refresh(this, draw, mem_range, fb_page_count);
 }
 
-SimpleFBState *simplefb_init(PhysMemoryMap *map, uint64_t phys_addr,
-                             FBDevice *fb_dev, int width, int height)
+FBDevice *simplefb_init(PhysMemoryMap *map, uint64_t phys_addr,
+                        int width, int height)
 {
     SimpleFBState *s;
-    
-    s = mallocz(sizeof(*s));
-    s->fb_dev = fb_dev;
+
+    s = new SimpleFBState();
+    FBDevice *fb_dev = s;
 
     fb_dev->width = width;
     fb_dev->height = height;
@@ -117,11 +112,9 @@ SimpleFBState *simplefb_init(PhysMemoryMap *map, uint64_t phys_addr,
     fb_dev->fb_size = (height * fb_dev->stride + FB_ALLOC_ALIGN - 1) & ~(FB_ALLOC_ALIGN - 1);
     s->fb_page_count = fb_dev->fb_size >> DEVRAM_PAGE_SIZE_LOG2;
 
-    s->mem_range = cpu_register_ram(map, phys_addr, fb_dev->fb_size,
+    s->mem_range = map->RegisterRam(phys_addr, fb_dev->fb_size,
                                     DEVRAM_FLAG_DIRTY_BITS);
     
     fb_dev->fb_data = s->mem_range->phys_mem;
-    fb_dev->device_opaque = s;
-    fb_dev->refresh = simplefb_refresh1;
     return s;
 }

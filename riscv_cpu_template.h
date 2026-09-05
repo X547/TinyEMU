@@ -1230,7 +1230,7 @@ static void no_inline glue(riscv_cpu_interp_x, XLEN)(RISCVCPUState *s,
             switch(funct3) {
             case 1: /* csrrw */
                 s->insn_counter = GET_INSN_COUNTER();
-                if (csr_read(s, &val2, imm, TRUE))
+                if (csr_read(s, &val2, imm, true))
                     goto illegal_insn;
                 val2 = (intx_t)val2;
                 err = csr_write(s, imm, val);
@@ -1315,7 +1315,7 @@ static void no_inline glue(riscv_cpu_interp_x, XLEN)(RISCVCPUState *s,
                     /* go to power down if no enabled interrupts are
                        pending */
                     if ((s->mip & s->mie) == 0) {
-                        s->power_down_flag = TRUE;
+                        s->power_down_flag = true;
                         s->pc = GET_PC() + 4;
                         goto done_interp;
                     }
@@ -1552,18 +1552,18 @@ static void no_inline glue(riscv_cpu_interp_x, XLEN)(RISCVCPUState *s,
             switch(funct3) {
             case 0:
                 s->fp_reg[rd] = fma_sf32(s->fp_reg[rs1], s->fp_reg[rs2],
-                                         s->fp_reg[rs3], rm, &s->fflags) | F32_HIGH;
+                                         s->fp_reg[rs3], RM(rm), &s->fflags) | F32_HIGH;
                 break;
 #if FLEN >= 64
             case 1:
                 s->fp_reg[rd] = fma_sf64(s->fp_reg[rs1], s->fp_reg[rs2],
-                                         s->fp_reg[rs3], rm, &s->fflags) | F64_HIGH;
+                                         s->fp_reg[rs3], RM(rm), &s->fflags) | F64_HIGH;
                 break;
 #endif
 #if FLEN >= 128
             case 3:
                 s->fp_reg[rd] = fma_sf128(s->fp_reg[rs1], s->fp_reg[rs2],
-                                          s->fp_reg[rs3], rm, &s->fflags);
+                                          s->fp_reg[rs3], RM(rm), &s->fflags);
                 break;
 #endif
             default:
@@ -1584,14 +1584,14 @@ static void no_inline glue(riscv_cpu_interp_x, XLEN)(RISCVCPUState *s,
                 s->fp_reg[rd] = fma_sf32(s->fp_reg[rs1],
                                          s->fp_reg[rs2],
                                          s->fp_reg[rs3] ^ FSIGN_MASK32,
-                                         rm, &s->fflags) | F32_HIGH;
+                                         RM(rm), &s->fflags) | F32_HIGH;
                 break;
 #if FLEN >= 64
             case 1:
                 s->fp_reg[rd] = fma_sf64(s->fp_reg[rs1],
                                          s->fp_reg[rs2],
                                          s->fp_reg[rs3] ^ FSIGN_MASK64,
-                                         rm, &s->fflags) | F64_HIGH;
+                                         RM(rm), &s->fflags) | F64_HIGH;
                 break;
 #endif
 #if FLEN >= 128
@@ -1599,7 +1599,7 @@ static void no_inline glue(riscv_cpu_interp_x, XLEN)(RISCVCPUState *s,
                 s->fp_reg[rd] = fma_sf128(s->fp_reg[rs1],
                                           s->fp_reg[rs2],
                                           s->fp_reg[rs3] ^ FSIGN_MASK128,
-                                          rm, &s->fflags);
+                                          RM(rm), &s->fflags);
                 break;
 #endif
             default:
@@ -1620,14 +1620,14 @@ static void no_inline glue(riscv_cpu_interp_x, XLEN)(RISCVCPUState *s,
                 s->fp_reg[rd] = fma_sf32(s->fp_reg[rs1] ^ FSIGN_MASK32,
                                          s->fp_reg[rs2],
                                          s->fp_reg[rs3],
-                                         rm, &s->fflags) | F32_HIGH;
+                                         RM(rm), &s->fflags) | F32_HIGH;
                 break;
 #if FLEN >= 64
             case 1:
                 s->fp_reg[rd] = fma_sf64(s->fp_reg[rs1] ^ FSIGN_MASK64,
                                          s->fp_reg[rs2],
                                          s->fp_reg[rs3],
-                                         rm, &s->fflags) | F64_HIGH;
+                                         RM(rm), &s->fflags) | F64_HIGH;
                 break;
 #endif
 #if FLEN >= 128
@@ -1635,7 +1635,7 @@ static void no_inline glue(riscv_cpu_interp_x, XLEN)(RISCVCPUState *s,
                 s->fp_reg[rd] = fma_sf128(s->fp_reg[rs1] ^ FSIGN_MASK128,
                                           s->fp_reg[rs2],
                                           s->fp_reg[rs3],
-                                          rm, &s->fflags);
+                                          RM(rm), &s->fflags);
                 break;
 #endif
             default:
@@ -1656,14 +1656,14 @@ static void no_inline glue(riscv_cpu_interp_x, XLEN)(RISCVCPUState *s,
                 s->fp_reg[rd] = fma_sf32(s->fp_reg[rs1] ^ FSIGN_MASK32,
                                          s->fp_reg[rs2],
                                          s->fp_reg[rs3] ^ FSIGN_MASK32,
-                                         rm, &s->fflags) | F32_HIGH;
+                                         RM(rm), &s->fflags) | F32_HIGH;
                 break;
 #if FLEN >= 64
             case 1:
                 s->fp_reg[rd] = fma_sf64(s->fp_reg[rs1] ^ FSIGN_MASK64,
                                          s->fp_reg[rs2],
                                          s->fp_reg[rs3] ^ FSIGN_MASK64,
-                                         rm, &s->fflags) | F64_HIGH;
+                                         RM(rm), &s->fflags) | F64_HIGH;
                 break;
 #endif
 #if FLEN >= 128
@@ -1671,7 +1671,7 @@ static void no_inline glue(riscv_cpu_interp_x, XLEN)(RISCVCPUState *s,
                 s->fp_reg[rd] = fma_sf128(s->fp_reg[rs1] ^ FSIGN_MASK128,
                                           s->fp_reg[rs2],
                                           s->fp_reg[rs3] ^ FSIGN_MASK128,
-                                          rm, &s->fflags);
+                                          RM(rm), &s->fflags);
                 break;
 #endif
             default:

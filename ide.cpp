@@ -191,47 +191,91 @@
 
 #define MAX_MULT_SECTORS 128
 
-typedef struct IDEState IDEState;
+struct IDEState;
 
-typedef void EndTransferFunc(IDEState *);
+/* What to run once the current PIO buffer is exhausted. A small closed set,
+   so an enum plus a switch replaces the state-machine function pointer. */
+enum class EndTransfer {
+    Stop,
+    SectorRead,
+    SectorReadEnd,
+    SectorWrite,
+    Identify,
+};
+
+/* Two outstanding request kinds, so two completion objects. */
+class IDEReadCompletion final: public BlockDeviceCompletion {
+private:
+    IDEState &fState;
+
+public:
+    IDEReadCompletion(IDEState &state): fState(state) {}
+
+    void Complete(int ret) override;
+};
+
+class IDEWriteCompletion final: public BlockDeviceCompletion {
+private:
+    IDEState &fState;
+
+public:
+    IDEWriteCompletion(IDEState &state): fState(state) {}
+
+    void Complete(int ret) override;
+};
 
 struct IDEState {
-    IDEIFState *ide_if;
-    BlockDevice *bs;
-    int cylinders, heads, sectors;
-    int mult_sectors;
-    int64_t nb_sectors;
+    IDEIFState *ide_if = nullptr;
+    BlockDevice *bs = nullptr;
+    int cylinders = 0, heads = 0, sectors = 0;
+    int mult_sectors = 0;
+    int64_t nb_sectors = 0;
 
     /* ide regs */
-    uint8_t feature;
-    uint8_t error;
-    uint16_t nsector; /* 0 is 256 to ease computations */
-    uint8_t sector;
-    uint8_t lcyl;
-    uint8_t hcyl;
-    uint8_t select;
-    uint8_t status;
+    uint8_t feature = 0;
+    uint8_t error = 0;
+    uint16_t nsector = 0; /* 0 is 256 to ease computations */
+    uint8_t sector = 0;
+    uint8_t lcyl = 0;
+    uint8_t hcyl = 0;
+    uint8_t select = 0;
+    uint8_t status = 0;
 
-    int io_nb_sectors;
-    int req_nb_sectors;
-    EndTransferFunc *end_transfer_func;
-    
-    int data_index;
-    int data_end;
-    uint8_t io_buffer[MAX_MULT_SECTORS*512 + 4];
+    int io_nb_sectors = 0;
+    int req_nb_sectors = 0;
+    EndTransfer end_transfer = EndTransfer::Stop;
+
+    int data_index = 0;
+    int data_end = 0;
+    uint8_t io_buffer[MAX_MULT_SECTORS*512 + 4] {};
+
+    IDEReadCompletion read_completion {*this};
+    IDEWriteCompletion write_completion {*this};
 };
 
 struct IDEIFState {
-    IRQSignal *irq;
-    IDEState *cur_drive;
-    IDEState *drives[2];
+    IRQSignal *irq = nullptr;
+    IDEState *cur_drive = nullptr;
+    IDEState *drives[2] {};
     /* 0x3f6 command */
-    uint8_t cmd;
+    uint8_t cmd = 0;
+
+    uint32_t DataRead(uint32_t offset, int size_log2);
+    void DataWrite(uint32_t offset, uint32_t val, int size_log2);
+    uint32_t PortRead(uint32_t offset, int size_log2);
+    void PortWrite(uint32_t offset, uint32_t val, int size_log2);
+    uint32_t StatusRead(uint32_t offset, int size_log2);
+    void CmdWrite(uint32_t offset, uint32_t val, int size_log2);
+
+    DeviceIOAdapter<IDEIFState, &IDEIFState::DataRead,
+                    &IDEIFState::DataWrite> fDataIo {*this};
+    DeviceIOAdapter<IDEIFState, &IDEIFState::PortRead,
+                    &IDEIFState::PortWrite> fPortIo {*this};
+    DeviceIOAdapter<IDEIFState, &IDEIFState::StatusRead,
+                    &IDEIFState::CmdWrite> fCmdIo {*this};
 };
 
-static void ide_sector_read_cb(void *opaque, int ret);
-static void ide_sector_read_cb_end(IDEState *s);
-static void ide_sector_write_cb2(void *opaque, int ret);
+static void ide_run_end_transfer(IDEState *s);
 
 static void padstr(char *str, const char *src, int len)
 {
@@ -314,22 +358,21 @@ static void ide_set_irq(IDEState *s)
 {
     IDEIFState *ide_if = s->ide_if;
     if (!(ide_if->cmd & IDE_CMD_DISABLE_IRQ)) {
-        set_irq(ide_if->irq, 1);
+        ide_if->irq->Set(1);
     }
 }
 
 /* prepare data transfer and tell what to do after */
-static void ide_transfer_start(IDEState *s, int size,
-                               EndTransferFunc *end_transfer_func)
+static void ide_transfer_start(IDEState *s, int size, EndTransfer end_transfer)
 {
-    s->end_transfer_func = end_transfer_func;
+    s->end_transfer = end_transfer;
     s->data_index = 0;
     s->data_end = size;
 }
 
 static void ide_transfer_stop(IDEState *s)
 {
-    s->end_transfer_func = ide_transfer_stop;
+    s->end_transfer = EndTransfer::Stop;
     s->data_index = 0;
     s->data_end = 0;
 }
@@ -382,15 +425,14 @@ static void ide_sector_read(IDEState *s)
     printf("read sector=%" PRId64 " count=%d\n", sector_num, n);
 #endif
     s->io_nb_sectors = n;
-    ret = s->bs->read_async(s->bs, sector_num, s->io_buffer, n, 
-                            ide_sector_read_cb, s);
+    ret = s->bs->ReadAsync(sector_num, s->io_buffer, n, &s->read_completion);
     if (ret < 0) {
         /* error */
         ide_abort_command(s);
         ide_set_irq(s);
     } else if (ret == 0) {
         /* synchronous case (needed for performance) */
-        ide_sector_read_cb(s, 0);
+        s->read_completion.Complete(0);
     } else {
         /* async case */
         s->status = READY_STAT | SEEK_STAT | BUSY_STAT;
@@ -398,19 +440,20 @@ static void ide_sector_read(IDEState *s)
     }
 }
 
-static void ide_sector_read_cb(void *opaque, int ret)
+void IDEReadCompletion::Complete(int ret)
 {
-    IDEState *s = opaque;
+    (void)ret;
+    IDEState *s = &fState;
     int n;
-    EndTransferFunc *func;
-    
+    EndTransfer func;
+
     n = s->io_nb_sectors;
     ide_set_sector(s, ide_get_sector(s) + n);
     s->nsector = (s->nsector - n) & 0xff;
     if (s->nsector == 0)
-        func = ide_sector_read_cb_end;
+        func = EndTransfer::SectorReadEnd;
     else
-        func = ide_sector_read;
+        func = EndTransfer::SectorRead;
     ide_transfer_start(s, 512 * n, func);
     ide_set_irq(s);
     s->status = READY_STAT | SEEK_STAT | DRQ_STAT;
@@ -436,24 +479,25 @@ static void ide_sector_write_cb1(IDEState *s)
     printf("write sector=%" PRId64 "  count=%d\n",
            sector_num, s->io_nb_sectors);
 #endif
-    ret = s->bs->write_async(s->bs, sector_num, s->io_buffer, s->io_nb_sectors, 
-                             ide_sector_write_cb2, s);
+    ret = s->bs->WriteAsync(sector_num, s->io_buffer, s->io_nb_sectors,
+                            &s->write_completion);
     if (ret < 0) {
         /* error */
         ide_abort_command(s);
         ide_set_irq(s);
     } else if (ret == 0) {
         /* synchronous case (needed for performance) */
-        ide_sector_write_cb2(s, 0);
+        s->write_completion.Complete(0);
     } else {
         /* async case */
         s->status = READY_STAT | SEEK_STAT | BUSY_STAT;
     }
 }
 
-static void ide_sector_write_cb2(void *opaque, int ret)
+void IDEWriteCompletion::Complete(int ret)
 {
-    IDEState *s = opaque;
+    (void)ret;
+    IDEState *s = &fState;
     int n;
 
     n = s->io_nb_sectors;
@@ -467,7 +511,7 @@ static void ide_sector_write_cb2(void *opaque, int ret)
         if (n > s->req_nb_sectors)
             n = s->req_nb_sectors;
         s->io_nb_sectors = n;
-        ide_transfer_start(s, 512 * n, ide_sector_write_cb1);
+        ide_transfer_start(s, 512 * n, EndTransfer::SectorWrite);
         s->status = READY_STAT | SEEK_STAT | DRQ_STAT;
     }
     ide_set_irq(s);
@@ -482,7 +526,7 @@ static void ide_sector_write(IDEState *s)
     if (n > s->req_nb_sectors)
         n = s->req_nb_sectors;
     s->io_nb_sectors = n;
-    ide_transfer_start(s, 512 * n, ide_sector_write_cb1);
+    ide_transfer_start(s, 512 * n, EndTransfer::SectorWrite);
     s->status = READY_STAT | SEEK_STAT | DRQ_STAT;
 }
 
@@ -490,6 +534,29 @@ static void ide_identify_cb(IDEState *s)
 {
     ide_transfer_stop(s);
     s->status = READY_STAT;
+}
+
+static void ide_run_end_transfer(IDEState *s)
+{
+    switch (s->end_transfer) {
+        case EndTransfer::Stop:
+            ide_transfer_stop(s);
+            break;
+        case EndTransfer::SectorRead:
+            ide_sector_read(s);
+            break;
+        case EndTransfer::SectorReadEnd:
+            ide_sector_read_cb_end(s);
+            break;
+        case EndTransfer::SectorWrite:
+            ide_sector_write_cb1(s);
+            break;
+        case EndTransfer::Identify:
+            ide_identify_cb(s);
+            break;
+        default:
+            break;
+    }
 }
 
 static void ide_exec_cmd(IDEState *s, int val)
@@ -501,7 +568,7 @@ static void ide_exec_cmd(IDEState *s, int val)
     case WIN_IDENTIFY:
         ide_identify(s);
         s->status = READY_STAT | SEEK_STAT | DRQ_STAT;
-        ide_transfer_start(s, 512, ide_identify_cb);
+        ide_transfer_start(s, 512, EndTransfer::Identify);
         ide_set_irq(s);
         break;
     case WIN_SPECIFY:
@@ -563,10 +630,9 @@ static void ide_exec_cmd(IDEState *s, int val)
     }
 }
 
-static void ide_ioport_write(void *opaque, uint32_t offset,
-                             uint32_t val, int size_log2)
+void IDEIFState::PortWrite(uint32_t offset, uint32_t val, int size_log2)
 {
-    IDEIFState *s1 = opaque;
+    IDEIFState *s1 = this;
     IDEState *s = s1->cur_drive;
     int addr = offset + 1;
     
@@ -618,9 +684,9 @@ static void ide_ioport_write(void *opaque, uint32_t offset,
     }
 }
 
-static uint32_t ide_ioport_read(void *opaque, uint32_t offset, int size_log2)
+uint32_t IDEIFState::PortRead(uint32_t offset, int size_log2)
 {
-    IDEIFState *s1 = opaque;
+    IDEIFState *s1 = this;
     IDEState *s = s1->cur_drive;
     int ret, addr = offset + 1;
 
@@ -652,7 +718,7 @@ static uint32_t ide_ioport_read(void *opaque, uint32_t offset, int size_log2)
         default:
         case 7:
             ret = s->status;
-            set_irq(s1->irq, 0);
+            s1->irq->Set(0);
             break;
         }
     }
@@ -662,9 +728,9 @@ static uint32_t ide_ioport_read(void *opaque, uint32_t offset, int size_log2)
     return ret;
 }
 
-static uint32_t ide_status_read(void *opaque, uint32_t offset, int size_log2)
+uint32_t IDEIFState::StatusRead(uint32_t offset, int size_log2)
 {
-    IDEIFState *s1 = opaque;
+    IDEIFState *s1 = this;
     IDEState *s = s1->cur_drive;
     int ret;
 
@@ -679,10 +745,9 @@ static uint32_t ide_status_read(void *opaque, uint32_t offset, int size_log2)
     return ret;
 }
 
-static void ide_cmd_write(void *opaque, uint32_t offset,
-                          uint32_t val, int size_log2)
+void IDEIFState::CmdWrite(uint32_t offset, uint32_t val, int size_log2)
 {
-    IDEIFState *s1 = opaque;
+    IDEIFState *s1 = this;
     IDEState *s;
     int i;
     
@@ -711,10 +776,9 @@ static void ide_cmd_write(void *opaque, uint32_t offset,
     s1->cmd = val;
 }
 
-static void ide_data_writew(void *opaque, uint32_t offset,
-                            uint32_t val, int size_log2)
+void IDEIFState::DataWrite(uint32_t offset, uint32_t val, int size_log2)
 {
-    IDEIFState *s1 = opaque;
+    IDEIFState *s1 = this;
     IDEState *s = s1->cur_drive;
     int p;
     uint8_t *tab;
@@ -728,12 +792,12 @@ static void ide_data_writew(void *opaque, uint32_t offset,
     p += 2;
     s->data_index = p;
     if (p >= s->data_end)
-        s->end_transfer_func(s);
+        ide_run_end_transfer(s);
 }
 
-static uint32_t ide_data_readw(void *opaque, uint32_t offset, int size_log2)
+uint32_t IDEIFState::DataRead(uint32_t offset, int size_log2)
 {
-    IDEIFState *s1 = opaque;
+    IDEIFState *s1 = this;
     IDEState *s = s1->cur_drive;
     int p, ret;
     uint8_t *tab;
@@ -747,7 +811,7 @@ static uint32_t ide_data_readw(void *opaque, uint32_t offset, int size_log2)
         p += 2;
         s->data_index = p;
         if (p >= s->data_end)
-            s->end_transfer_func(s);
+            ide_run_end_transfer(s);
     }
     return ret;
 }
@@ -758,13 +822,12 @@ static IDEState *ide_drive_init(IDEIFState *ide_if, BlockDevice *bs)
     uint32_t cylinders;
     uint64_t nb_sectors;
 
-    s = malloc(sizeof(*s));
-    memset(s, 0, sizeof(*s));
+    s = new IDEState();
 
     s->ide_if = ide_if;
     s->bs = bs;
 
-    nb_sectors = s->bs->get_sector_count(s->bs);
+    nb_sectors = s->bs->SectorCount();
     cylinders = nb_sectors / (16 * 63);
     if (cylinders > 16383)
         cylinders = 16383;
@@ -789,7 +852,7 @@ static IDEState *ide_drive_init(IDEIFState *ide_if, BlockDevice *bs)
     /* init I/O buffer */
     s->data_index = 0;
     s->data_end = 0;
-    s->end_transfer_func = ide_transfer_stop;
+    s->end_transfer = EndTransfer::Stop;
 
     s->req_nb_sectors = 0; /* temp for read/write */
     s->io_nb_sectors = 0; /* temp for read/write */
@@ -802,19 +865,15 @@ IDEIFState *ide_init(PhysMemoryMap *port_map, uint32_t addr, uint32_t addr2,
     int i;
     IDEIFState *s;
     
-    s = malloc(sizeof(IDEIFState));
-    memset(s, 0, sizeof(*s));
-    
+    s = new IDEIFState();
+
     s->irq = irq;
     s->cmd = 0;
 
-    cpu_register_device(port_map, addr, 1, s, ide_data_readw, ide_data_writew, 
-                        DEVIO_SIZE16);
-    cpu_register_device(port_map, addr + 1, 7, s, ide_ioport_read, ide_ioport_write, 
-                        DEVIO_SIZE8);
+    port_map->RegisterDevice(addr, 1, &s->fDataIo, DEVIO_SIZE16);
+    port_map->RegisterDevice(addr + 1, 7, &s->fPortIo, DEVIO_SIZE8);
     if (addr2) {
-        cpu_register_device(port_map, addr2, 1, s, ide_status_read, ide_cmd_write, 
-                            DEVIO_SIZE8);
+        port_map->RegisterDevice(addr2, 1, &s->fCmdIo, DEVIO_SIZE8);
     }
     
     for(i = 0; i < 2; i++) {

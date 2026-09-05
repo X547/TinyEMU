@@ -45,7 +45,7 @@ void x86_cpu_interp(X86CPUState *s, int max_cycles1)
 {
 }
 
-void x86_cpu_set_irq(X86CPUState *s, BOOL set)
+void x86_cpu_set_irq(X86CPUState *s, bool set)
 {
 }
 
@@ -62,22 +62,22 @@ void x86_cpu_set_seg(X86CPUState *s, int seg, const X86CPUSeg *sd)
 {
 }
 
-void x86_cpu_set_get_hard_intno(X86CPUState *s,
-                                int (*get_hard_intno)(void *opaque),
-                                void *opaque)
+void x86_cpu_set_hard_intno_source(X86CPUState *s, X86HardIntnoSource *source)
 {
+    (void)s;
+    (void)source;
 }
 
-void x86_cpu_set_get_tsc(X86CPUState *s,
-                         uint64_t (*get_tsc)(void *opaque),
-                         void *opaque)
+void x86_cpu_set_tsc_source(X86CPUState *s, X86TscSource *source)
 {
+    (void)s;
+    (void)source;
 }
 
-void x86_cpu_set_port_io(X86CPUState *s, 
-                         DeviceReadFunc *port_read, DeviceWriteFunc *port_write,
-                         void *opaque)
+void x86_cpu_set_port_io(X86CPUState *s, DeviceIO *port_io)
 {
+    (void)s;
+    (void)port_io;
 }
 
 int64_t x86_cpu_get_cycles(X86CPUState *s)
@@ -85,9 +85,9 @@ int64_t x86_cpu_get_cycles(X86CPUState *s)
     return 0;
 }
 
-BOOL x86_cpu_get_power_down(X86CPUState *s)
+bool x86_cpu_get_power_down(X86CPUState *s)
 {
-    return FALSE;
+    return false;
 }
 
 void x86_cpu_flush_tlb_write_range_ram(X86CPUState *s,

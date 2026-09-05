@@ -44,28 +44,65 @@
 
 /* RISCV machine */
 
-typedef struct RISCVMachine {
-    VirtMachine common;
-    PhysMemoryMap *mem_map;
-    int max_xlen;
-    RISCVCPUState *cpu_state;
-    uint64_t ram_size;
+class RISCVMachine final:
+    public VirtMachine,
+    public IRQTarget,
+    public TlbFlushTarget,
+    public SerialOutput {
+public:
+    PhysMemoryMap *mem_map = nullptr;
+    int max_xlen = 0;
+    RISCVCPU *cpu_state = nullptr;
+    uint64_t ram_size = 0;
     /* RTC */
-    BOOL rtc_real_time;
-    uint64_t rtc_start_time;
-    uint64_t timecmp;
+    bool rtc_real_time = false;
+    uint64_t rtc_start_time = 0;
+    uint64_t timecmp = 0;
     /* PLIC */
-    uint32_t plic_pending_irq, plic_served_irq;
+    uint32_t plic_pending_irq = 0, plic_served_irq = 0;
     IRQSignal plic_irq[32]; /* IRQ 0 is not used */
     /* HTIF */
-    uint64_t htif_tohost, htif_fromhost;
+    uint64_t htif_tohost = 0, htif_fromhost = 0;
 
-    SerialState *serial_state;
-    VIRTIODevice *keyboard_dev;
-    VIRTIODevice *mouse_dev;
+    SerialState *serial_state = nullptr;
+    VIRTIODevice *keyboard_dev = nullptr;
+    VIRTIODevice *mouse_dev = nullptr;
 
-    int virtio_count;
-} RISCVMachine;
+    int virtio_count = 0;
+
+    ~RISCVMachine() override;
+
+    /* memory-mapped register blocks */
+    uint32_t HtifRead(uint32_t offset, int size_log2);
+    void HtifWrite(uint32_t offset, uint32_t val, int size_log2);
+    uint32_t ClintRead(uint32_t offset, int size_log2);
+    void ClintWrite(uint32_t offset, uint32_t val, int size_log2);
+    uint32_t PlicRead(uint32_t offset, int size_log2);
+    void PlicWrite(uint32_t offset, uint32_t val, int size_log2);
+
+    DeviceIOAdapter<RISCVMachine, &RISCVMachine::HtifRead,
+                    &RISCVMachine::HtifWrite> fHtifIo {*this};
+    DeviceIOAdapter<RISCVMachine, &RISCVMachine::ClintRead,
+                    &RISCVMachine::ClintWrite> fClintIo {*this};
+    DeviceIOAdapter<RISCVMachine, &RISCVMachine::PlicRead,
+                    &RISCVMachine::PlicWrite> fPlicIo {*this};
+
+    /* IRQTarget */
+    void SetIRQ(int irq_num, int level) override;
+
+    /* TlbFlushTarget */
+    void FlushTlbWriteRange(uint8_t *ram_addr, size_t ram_size) override;
+
+    /* SerialOutput */
+    void WriteData(const uint8_t *buf, int buf_len) override;
+
+    /* VirtMachine */
+    int GetSleepDuration(int delay) override;
+    void Interp(int max_exec_cycle) override;
+    bool MouseIsAbsolute() override;
+    void SendMouseEvent(int dx, int dy, int dz, unsigned int buttons) override;
+    void SendKeyEvent(bool is_down, uint16_t key_code) override;
+};
 
 #define LOW_RAM_SIZE   0x00010000 /* 64KB */
 #define RAM_BASE_ADDR  0x80000000
@@ -101,16 +138,15 @@ static uint64_t rtc_get_time(RISCVMachine *m)
     if (m->rtc_real_time) {
         val = rtc_get_real_time(m) - m->rtc_start_time;
     } else {
-        val = riscv_cpu_get_cycles(m->cpu_state) / RTC_FREQ_DIV;
+        val = m->cpu_state->Cycles() / RTC_FREQ_DIV;
     }
     //    printf("rtc_time=%" PRId64 "\n", val);
     return val;
 }
 
-static uint32_t htif_read(void *opaque, uint32_t offset,
-                          int size_log2)
+uint32_t RISCVMachine::HtifRead(uint32_t offset, int size_log2)
 {
-    RISCVMachine *s = opaque;
+    RISCVMachine *s = this;
     uint32_t val;
 
     assert(size_log2 == 2);
@@ -147,7 +183,7 @@ static void htif_handle_cmd(RISCVMachine *s)
     } else if (device == 1 && cmd == 1) {
         uint8_t buf[1];
         buf[0] = s->htif_tohost & 0xff;
-        s->common.console->write_data(s->common.console->opaque, buf, 1);
+        s->console->WriteData(buf, 1);
         s->htif_tohost = 0;
         s->htif_fromhost = ((uint64_t)device << 56) | ((uint64_t)cmd << 48);
     } else if (device == 1 && cmd == 0) {
@@ -163,10 +199,9 @@ static void htif_handle_cmd(RISCVMachine *s)
     }
 }
 
-static void htif_write(void *opaque, uint32_t offset, uint32_t val,
-                       int size_log2)
+void RISCVMachine::HtifWrite(uint32_t offset, uint32_t val, int size_log2)
 {
-    RISCVMachine *s = opaque;
+    RISCVMachine *s = this;
 
     assert(size_log2 == 2);
     switch(offset) {
@@ -196,7 +231,7 @@ static void htif_poll(RISCVMachine *s)
     int ret;
 
     if (s->htif_fromhost == 0) {
-        ret = s->console->read_data(s->console->opaque, buf, 1);
+        ret = s->console->ReadData(buf, 1);
         if (ret == 1) {
             s->htif_fromhost = ((uint64_t)1 << 56) | ((uint64_t)0 << 48) |
                 buf[0];
@@ -205,17 +240,16 @@ static void htif_poll(RISCVMachine *s)
 }
 #endif
 
-static void serial_write_cb(void *opaque, const uint8_t *buf, int buf_len)
+void RISCVMachine::WriteData(const uint8_t *buf, int buf_len)
 {
-    RISCVMachine *s = opaque;
-    if (s->common.console) {
-        s->common.console->write_data(s->common.console->opaque, buf, buf_len);
+    if (console != nullptr) {
+        console->WriteData(buf, buf_len);
     }
 }
 
-static uint32_t clint_read(void *opaque, uint32_t offset, int size_log2)
+uint32_t RISCVMachine::ClintRead(uint32_t offset, int size_log2)
 {
-    RISCVMachine *m = opaque;
+    RISCVMachine *m = this;
     uint32_t val;
 
     assert(size_log2 == 2);
@@ -239,20 +273,19 @@ static uint32_t clint_read(void *opaque, uint32_t offset, int size_log2)
     return val;
 }
  
-static void clint_write(void *opaque, uint32_t offset, uint32_t val,
-                      int size_log2)
+void RISCVMachine::ClintWrite(uint32_t offset, uint32_t val, int size_log2)
 {
-    RISCVMachine *m = opaque;
+    RISCVMachine *m = this;
 
     assert(size_log2 == 2);
     switch(offset) {
     case 0x4000:
         m->timecmp = (m->timecmp & ~0xffffffff) | val;
-        riscv_cpu_reset_mip(m->cpu_state, MIP_MTIP);
+        m->cpu_state->ResetMip(MIP_MTIP);
         break;
     case 0x4004:
         m->timecmp = (m->timecmp & 0xffffffff) | ((uint64_t)val << 32);
-        riscv_cpu_reset_mip(m->cpu_state, MIP_MTIP);
+        m->cpu_state->ResetMip(MIP_MTIP);
         break;
     default:
         break;
@@ -261,22 +294,22 @@ static void clint_write(void *opaque, uint32_t offset, uint32_t val,
 
 static void plic_update_mip(RISCVMachine *s)
 {
-    RISCVCPUState *cpu = s->cpu_state;
+    RISCVCPU *cpu = s->cpu_state;
     uint32_t mask;
     mask = s->plic_pending_irq & ~s->plic_served_irq;
     if (mask) {
-        riscv_cpu_set_mip(cpu, MIP_MEIP | MIP_SEIP);
+        cpu->SetMip(MIP_MEIP | MIP_SEIP);
     } else {
-        riscv_cpu_reset_mip(cpu, MIP_MEIP | MIP_SEIP);
+        cpu->ResetMip(MIP_MEIP | MIP_SEIP);
     }
 }
 
 #define PLIC_HART_BASE 0x200000
 #define PLIC_HART_SIZE 0x1000
 
-static uint32_t plic_read(void *opaque, uint32_t offset, int size_log2)
+uint32_t RISCVMachine::PlicRead(uint32_t offset, int size_log2)
 {
-    RISCVMachine *s = opaque;
+    RISCVMachine *s = this;
     uint32_t val, mask;
     int i;
     assert(size_log2 == 2);
@@ -304,10 +337,9 @@ static uint32_t plic_read(void *opaque, uint32_t offset, int size_log2)
     return val;
 }
 
-static void plic_write(void *opaque, uint32_t offset, uint32_t val,
-                       int size_log2)
+void RISCVMachine::PlicWrite(uint32_t offset, uint32_t val, int size_log2)
 {
-    RISCVMachine *s = opaque;
+    RISCVMachine *s = this;
     
     assert(size_log2 == 2);
     switch(offset) {
@@ -324,22 +356,20 @@ static void plic_write(void *opaque, uint32_t offset, uint32_t val,
     }
 }
 
-static void plic_set_irq(void *opaque, int irq_num, int state)
+void RISCVMachine::SetIRQ(int irq_num, int level)
 {
-    RISCVMachine *s = opaque;
-    uint32_t mask;
-
-    mask = 1 << (irq_num - 1);
-    if (state) 
-        s->plic_pending_irq |= mask;
-    else
-        s->plic_pending_irq &= ~mask;
-    plic_update_mip(s);
+    uint32_t mask = 1 << (irq_num - 1);
+    if (level) {
+        plic_pending_irq |= mask;
+    } else {
+        plic_pending_irq &= ~mask;
+    }
+    plic_update_mip(this);
 }
 
-static uint8_t *get_ram_ptr(RISCVMachine *s, uint64_t paddr, BOOL is_rw)
+static uint8_t *get_ram_ptr(RISCVMachine *s, uint64_t paddr, bool is_rw)
 {
-    return phys_mem_get_ram_ptr(s->mem_map, paddr, is_rw);
+    return s->mem_map->GetRamPtr(paddr, is_rw);
 }
 
 /* FDT machine description */
@@ -385,7 +415,7 @@ typedef struct {
 static FDTState *fdt_init(void)
 {
     FDTState *s;
-    s = mallocz(sizeof(*s));
+    s = static_cast<FDTState *>(mallocz(sizeof(*s)));
     return s;
 }
 
@@ -394,7 +424,7 @@ static void fdt_alloc_len(FDTState *s, int len)
     int new_size;
     if (unlikely(len > s->tab_size)) {
         new_size = max_int(len, s->tab_size * 3 / 2);
-        s->tab = realloc(s->tab, new_size * sizeof(uint32_t));
+        s->tab = static_cast<uint32_t *>(realloc(s->tab, new_size * sizeof(uint32_t)));
         s->tab_size = new_size;
     }
 }
@@ -452,7 +482,7 @@ static int fdt_get_string_offset(FDTState *s, const char *name)
     new_len = s->string_table_len + name_size;
     if (new_len > s->string_table_size) {
         new_size = max_int(new_len, s->string_table_size * 3 / 2);
-        s->string_table = realloc(s->string_table, new_size);
+        s->string_table = static_cast<char *>(realloc(s->string_table, new_size));
         s->string_table_size = new_size;
     }
     pos = s->string_table_len;
@@ -467,7 +497,7 @@ static void fdt_prop(FDTState *s, const char *prop_name,
     fdt_put32(s, FDT_PROP);
     fdt_put32(s, data_len);
     fdt_put32(s, fdt_get_string_offset(s, prop_name));
-    fdt_put_data(s, data, data_len);
+    fdt_put_data(s, static_cast<const uint8_t *>(data), data_len);
 }
 
 static void fdt_prop_tab_u32(FDTState *s, const char *prop_name,
@@ -531,7 +561,7 @@ static void fdt_prop_tab_str(FDTState *s, const char *prop_name,
     }
     va_end(ap);
     
-    tab = malloc(size);
+    tab = static_cast<char *>(malloc(size));
     va_start(ap, prop_name);
     size = 0;
     for(;;) {
@@ -644,7 +674,7 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
     fdt_prop_str(s, "compatible", "riscv");
 
     max_xlen = m->max_xlen;
-    misa = riscv_cpu_get_misa(m->cpu_state);
+    misa = m->cpu_state->Misa();
     q = isa_string;
     q += snprintf(isa_string, sizeof(isa_string), "rv%d", max_xlen);
     for(i = 0; i < 26; i++) {
@@ -740,7 +770,7 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
         fdt_end_node(s); /* virtio */
     }
 
-    fb_dev = m->common.fb_dev;
+    fb_dev = m->fb_dev;
     if (fb_dev) {
         fdt_begin_node_num(s, "framebuffer", FRAMEBUFFER_BASE_ADDR);
         fdt_prop_str(s, "compatible", "simple-framebuffer");
@@ -798,7 +828,7 @@ static void copy_bios(RISCVMachine *s, const uint8_t *buf, int buf_len,
         exit(1);
     }
 
-    ram_ptr = get_ram_ptr(s, RAM_BASE_ADDR, TRUE);
+    ram_ptr = get_ram_ptr(s, RAM_BASE_ADDR, true);
     memcpy(ram_ptr, buf, buf_len);
 
     kernel_base = 0;
@@ -829,7 +859,7 @@ static void copy_bios(RISCVMachine *s, const uint8_t *buf, int buf_len,
         }
     }
     
-    ram_ptr = get_ram_ptr(s, 0, TRUE);
+    ram_ptr = get_ram_ptr(s, 0, true);
     
     fdt_addr = 0x1000 + 8 * 8;
 
@@ -848,15 +878,9 @@ static void copy_bios(RISCVMachine *s, const uint8_t *buf, int buf_len,
     q[4] = 0x00028067; /* jalr zero, t0, jump_addr */
 }
 
-static void riscv_flush_tlb_write_range(void *opaque, uint8_t *ram_addr,
-                                        size_t ram_size)
+void RISCVMachine::FlushTlbWriteRange(uint8_t *ram_addr, size_t ram_size)
 {
-    RISCVMachine *s = opaque;
-    riscv_cpu_flush_tlb_write_range_ram(s->cpu_state, ram_addr, ram_size);
-}
-
-static void riscv_machine_set_defaults(VirtMachineParams *p)
-{
+    cpu_state->FlushTlbWriteRangeRam(ram_addr, ram_size);
 }
 
 static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
@@ -878,16 +902,15 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
         return NULL;
     }
     
-    s = mallocz(sizeof(*s));
-    s->common.vmc = p->vmc;
+    s = new RISCVMachine();
+    s->vmc = p->vmc;
     s->ram_size = p->ram_size;
     s->max_xlen = max_xlen;
-    s->mem_map = phys_mem_map_init();
+    s->mem_map = new PhysMemoryMap();
     /* needed to handle the RAM dirty bits */
-    s->mem_map->opaque = s;
-    s->mem_map->flush_tlb_write_range = riscv_flush_tlb_write_range;
+    s->mem_map->SetTlbFlushTarget(s);
 
-    s->cpu_state = riscv_cpu_init(s->mem_map, max_xlen);
+    s->cpu_state = riscv_cpu_create(s->mem_map, max_xlen);
     if (!s->cpu_state) {
         vm_error("unsupported max_xlen=%d\n", max_xlen);
         /* XXX: should free resources */
@@ -895,27 +918,26 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
     }
     /* RAM */
     ram_flags = 0;
-    cpu_register_ram(s->mem_map, RAM_BASE_ADDR, p->ram_size, ram_flags);
-    cpu_register_ram(s->mem_map, 0x00000000, LOW_RAM_SIZE, 0);
+    s->mem_map->RegisterRam(RAM_BASE_ADDR, p->ram_size, ram_flags);
+    s->mem_map->RegisterRam(0x00000000, LOW_RAM_SIZE, 0);
     s->rtc_real_time = p->rtc_real_time;
     if (p->rtc_real_time) {
         s->rtc_start_time = rtc_get_real_time(s);
     }
     
-    cpu_register_device(s->mem_map, CLINT_BASE_ADDR, CLINT_SIZE, s,
-                        clint_read, clint_write, DEVIO_SIZE32);
-    cpu_register_device(s->mem_map, PLIC_BASE_ADDR, PLIC_SIZE, s,
-                        plic_read, plic_write, DEVIO_SIZE32);
+    s->mem_map->RegisterDevice(CLINT_BASE_ADDR, CLINT_SIZE, &s->fClintIo,
+                               DEVIO_SIZE32);
+    s->mem_map->RegisterDevice(PLIC_BASE_ADDR, PLIC_SIZE, &s->fPlicIo,
+                               DEVIO_SIZE32);
     for(i = 1; i < 32; i++) {
-        irq_init(&s->plic_irq[i], plic_set_irq, s, i);
+        s->plic_irq[i].Init(s, i);
     }
 
-    cpu_register_device(s->mem_map, HTIF_BASE_ADDR, 16,
-                        s, htif_read, htif_write, DEVIO_SIZE32);
-    s->common.console = p->console;
+    s->mem_map->RegisterDevice(HTIF_BASE_ADDR, 16, &s->fHtifIo, DEVIO_SIZE32);
+    s->console = p->console;
 
-    s->serial_state = serial_init(s->mem_map, UART_BASE_ADDR, &s->plic_irq[UART_IRQ],
-        serial_write_cb, s);
+    s->serial_state = new SerialState(s->mem_map, UART_BASE_ADDR,
+                                      &s->plic_irq[UART_IRQ], s);
 
     memset(vbus, 0, sizeof(*vbus));
     vbus->mem_map = s->mem_map;
@@ -925,7 +947,7 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
     /* virtio console */
     if (p->console) {
         vbus->irq = &s->plic_irq[irq_num];
-        s->common.console_dev = virtio_console_init(vbus, p->console);
+        s->console_dev = virtio_console_init(vbus, p->console);
         vbus->addr += VIRTIO_SIZE;
         irq_num++;
         s->virtio_count++;
@@ -935,7 +957,7 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
     for(i = 0; i < p->eth_count; i++) {
         vbus->irq = &s->plic_irq[irq_num];
         virtio_net_init(vbus, p->tab_eth[i].net);
-        s->common.net = p->tab_eth[i].net;
+        s->net = p->tab_eth[i].net;
         vbus->addr += VIRTIO_SIZE;
         irq_num++;
         s->virtio_count++;
@@ -965,15 +987,9 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
     }
 
     if (p->display_device) {
-        FBDevice *fb_dev;
-        fb_dev = mallocz(sizeof(*fb_dev));
-        s->common.fb_dev = fb_dev;
         if (!strcmp(p->display_device, "simplefb")) {
-            simplefb_init(s->mem_map,
-                          FRAMEBUFFER_BASE_ADDR,
-                          fb_dev,
-                          p->width, p->height);
-            
+            s->fb_dev = simplefb_init(s->mem_map, FRAMEBUFFER_BASE_ADDR,
+                                      p->width, p->height);
         } else {
             vm_error("unsupported display device: %s\n", p->display_device);
             exit(1);
@@ -1010,30 +1026,28 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
               p->files[VM_FILE_INITRD].buf, p->files[VM_FILE_INITRD].len,
               p->cmdline);
     
-    return (VirtMachine *)s;
+    return s;
 }
 
-static void riscv_machine_end(VirtMachine *s1)
+RISCVMachine::~RISCVMachine()
 {
-    RISCVMachine *s = (RISCVMachine *)s1;
     /* XXX: stop all */
-    riscv_cpu_end(s->cpu_state);
-    phys_mem_map_end(s->mem_map);
-    free(s);
+    delete cpu_state;
+    delete serial_state;
+    delete mem_map;
 }
 
 /* in ms */
-static int riscv_machine_get_sleep_duration(VirtMachine *s1, int delay)
+int RISCVMachine::GetSleepDuration(int delay)
 {
-    RISCVMachine *m = (RISCVMachine *)s1;
-    RISCVCPUState *s = m->cpu_state;
+    RISCVCPU *s = cpu_state;
     int64_t delay1;
-    
+
     /* wait for an event: the only asynchronous event is the RTC timer */
-    if (!(riscv_cpu_get_mip(s) & MIP_MTIP)) {
-        delay1 = m->timecmp - rtc_get_time(m);
+    if (!(s->Mip() & MIP_MTIP)) {
+        delay1 = timecmp - rtc_get_time(this);
         if (delay1 <= 0) {
-            riscv_cpu_set_mip(s, MIP_MTIP);
+            s->SetMip(MIP_MTIP);
             delay = 0;
         } else {
             /* convert delay to ms */
@@ -1042,48 +1056,55 @@ static int riscv_machine_get_sleep_duration(VirtMachine *s1, int delay)
                 delay = delay1;
         }
     }
-    if (!riscv_cpu_get_power_down(s))
+    if (!s->PowerDown())
         delay = 0;
     return delay;
 }
 
-static void riscv_machine_interp(VirtMachine *s1, int max_exec_cycle)
+void RISCVMachine::Interp(int max_exec_cycle)
 {
-    RISCVMachine *s = (RISCVMachine *)s1;
-    riscv_cpu_interp(s->cpu_state, max_exec_cycle);
+    cpu_state->Interp(max_exec_cycle);
 }
 
-static void riscv_vm_send_key_event(VirtMachine *s1, BOOL is_down,
-                                    uint16_t key_code)
+void RISCVMachine::SendKeyEvent(bool is_down, uint16_t key_code)
 {
-    RISCVMachine *s = (RISCVMachine *)s1;
-    if (s->keyboard_dev) {
-        virtio_input_send_key_event(s->keyboard_dev, is_down, key_code);
+    if (keyboard_dev != nullptr) {
+        virtio_input_send_key_event(keyboard_dev, is_down, key_code);
     }
 }
 
-static BOOL riscv_vm_mouse_is_absolute(VirtMachine *s)
+bool RISCVMachine::MouseIsAbsolute()
 {
-    return TRUE;
+    return true;
 }
 
-static void riscv_vm_send_mouse_event(VirtMachine *s1, int dx, int dy, int dz,
-                                      unsigned int buttons)
+void RISCVMachine::SendMouseEvent(int dx, int dy, int dz, unsigned int buttons)
 {
-    RISCVMachine *s = (RISCVMachine *)s1;
-    if (s->mouse_dev) {
-        virtio_input_send_mouse_event(s->mouse_dev, dx, dy, dz, buttons);
+    if (mouse_dev != nullptr) {
+        virtio_input_send_mouse_event(mouse_dev, dx, dy, dz, buttons);
     }
 }
 
-const VirtMachineClass riscv_machine_class = {
-    "riscv32,riscv64,riscv128",
-    riscv_machine_set_defaults,
-    riscv_machine_init,
-    riscv_machine_end,
-    riscv_machine_get_sleep_duration,
-    riscv_machine_interp,
-    riscv_vm_mouse_is_absolute,
-    riscv_vm_send_mouse_event,
-    riscv_vm_send_key_event,
+
+//#pragma mark - RiscvMachineClass
+
+class RiscvMachineClass final: public VirtMachineClass {
+public:
+    const char *MachineNames() const override
+    {
+        return "riscv32,riscv64,riscv128";
+    }
+
+    void SetDefaults(VirtMachineParams *p) const override
+    {
+        (void)p;
+    }
+
+    VirtMachine *Init(const VirtMachineParams *p) const override
+    {
+        return riscv_machine_init(p);
+    }
 };
+
+static const RiscvMachineClass sRiscvMachineClass;
+const VirtMachineClass &gRiscvMachineClass = sRiscvMachineClass;

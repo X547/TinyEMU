@@ -71,6 +71,11 @@ typedef uint128_t fp_uint;
 #else
 #error unsupported FLEN
 #endif
+
+/* The decoder keeps the rounding mode in a plain int because get_insn_rm()
+   reports an invalid encoding as -1. Every use site rejects the negative case
+   before reaching softfp, so the narrowing to RoundingModeEnum is safe there. */
+#define RM(rm) static_cast<RoundingModeEnum>(rm)
 #endif
 
 /* MLEN is the maximum memory access width */
@@ -169,9 +174,7 @@ typedef struct {
     uintptr_t mem_addend;
 } TLBEntry;
 
-struct RISCVCPUState {
-    RISCVCPUCommonState common; /* must be first */
-    
+struct RISCVCPUState: public RISCVCPU {
     target_ulong pc;
     target_ulong reg[32];
 
@@ -188,7 +191,7 @@ struct RISCVCPUState {
     
     int32_t n_cycles; /* only used inside the CPU loop */
     uint64_t insn_counter;
-    BOOL power_down_flag;
+    bool power_down_flag;
     int pending_exception; /* used during MMU exception handling */
     target_ulong pending_tval;
     
@@ -226,6 +229,15 @@ struct RISCVCPUState {
     TLBEntry tlb_read[TLB_SIZE];
     TLBEntry tlb_write[TLB_SIZE];
     TLBEntry tlb_code[TLB_SIZE];
+
+    void Interp(int n_cycles) override;
+    uint64_t Cycles() override;
+    void SetMip(uint32_t mask) override;
+    void ResetMip(uint32_t mask) override;
+    uint32_t Mip() override;
+    bool PowerDown() override;
+    uint32_t Misa() override;
+    void FlushTlbWriteRangeRam(uint8_t *ram_ptr, size_t ram_size) override;
 };
 
 #define target_read_slow glue(glue(riscv, MAX_XLEN), _read_slow)

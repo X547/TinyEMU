@@ -57,11 +57,15 @@
 
 #ifndef _WIN32
 
-typedef struct {
-    int stdin_fd;
-    int console_esc_state;
-    BOOL resize_pending;
-} STDIODevice;
+class STDIODevice final: public CharacterDevice {
+public:
+    int stdin_fd = 0;
+    int console_esc_state = 0;
+    bool resize_pending = false;
+
+    void WriteData(const uint8_t *buf, int len) override;
+    int ReadData(uint8_t *buf, int len) override;
+};
 
 static struct termios oldtty;
 static int old_fd0_flags;
@@ -73,7 +77,7 @@ static void term_exit(void)
     fcntl(0, F_SETFL, old_fd0_flags);
 }
 
-static void term_init(BOOL allow_ctrlc)
+static void term_init(bool allow_ctrlc)
 {
     struct termios tty;
 
@@ -98,15 +102,15 @@ static void term_init(BOOL allow_ctrlc)
     atexit(term_exit);
 }
 
-static void console_write(void *opaque, const uint8_t *buf, int len)
+void STDIODevice::WriteData(const uint8_t *buf, int len)
 {
     fwrite(buf, 1, len, stdout);
     fflush(stdout);
 }
 
-static int console_read(void *opaque, uint8_t *buf, int len)
+int STDIODevice::ReadData(uint8_t *buf, int len)
 {
-    STDIODevice *s = opaque;
+    STDIODevice *s = this;
     int ret, i, j;
     uint8_t ch;
     
@@ -157,7 +161,7 @@ static int console_read(void *opaque, uint8_t *buf, int len)
 static void term_resize_handler(int sig)
 {
     if (global_stdio_device)
-        global_stdio_device->resize_pending = TRUE;
+        global_stdio_device->resize_pending = true;
 }
 
 static void console_get_size(STDIODevice *s, int *pw, int *ph)
@@ -176,22 +180,20 @@ static void console_get_size(STDIODevice *s, int *pw, int *ph)
     *ph = height;
 }
 
-CharacterDevice *console_init(BOOL allow_ctrlc)
+CharacterDevice *console_init(bool allow_ctrlc)
 {
-    CharacterDevice *dev;
     STDIODevice *s;
     struct sigaction sig;
 
     term_init(allow_ctrlc);
 
-    dev = mallocz(sizeof(*dev));
-    s = mallocz(sizeof(*s));
+    s = new STDIODevice();
     s->stdin_fd = 0;
     /* Note: the glibc does not properly tests the return value of
        write() in printf, so some messages on stdout may be lost */
     fcntl(s->stdin_fd, F_SETFL, O_NONBLOCK);
 
-    s->resize_pending = TRUE;
+    s->resize_pending = true;
     global_stdio_device = s;
     
     /* use a signal to get the host terminal resize events */
@@ -200,10 +202,7 @@ CharacterDevice *console_init(BOOL allow_ctrlc)
     sig.sa_flags = 0;
     sigaction(SIGWINCH, &sig, NULL);
     
-    dev->opaque = s;
-    dev->write_data = console_write;
-    dev->read_data = console_read;
-    return dev;
+    return s;
 }
 
 #endif /* !_WIN32 */
@@ -216,26 +215,27 @@ typedef enum {
 
 #define SECTOR_SIZE 512
 
-typedef struct BlockDeviceFile {
-    FILE *f;
-    int64_t nb_sectors;
-    BlockDeviceModeEnum mode;
-    uint8_t **sector_table;
-} BlockDeviceFile;
+class BlockDeviceFile final: public BlockDevice {
+public:
+    FILE *f = nullptr;
+    int64_t nb_sectors = 0;
+    BlockDeviceModeEnum mode {};
+    uint8_t **sector_table = nullptr;
 
-static int64_t bf_get_sector_count(BlockDevice *bs)
-{
-    BlockDeviceFile *bf = bs->opaque;
-    return bf->nb_sectors;
-}
+    int64_t SectorCount() override {return nb_sectors;}
+    int ReadAsync(uint64_t sector_num, uint8_t *buf, int n,
+                  BlockDeviceCompletion *completion) override;
+    int WriteAsync(uint64_t sector_num, const uint8_t *buf, int n,
+                   BlockDeviceCompletion *completion) override;
+};
 
 //#define DUMP_BLOCK_READ
 
-static int bf_read_async(BlockDevice *bs,
-                         uint64_t sector_num, uint8_t *buf, int n,
-                         BlockDeviceCompletionFunc *cb, void *opaque)
+int BlockDeviceFile::ReadAsync(uint64_t sector_num, uint8_t *buf, int n,
+                               BlockDeviceCompletion *completion)
 {
-    BlockDeviceFile *bf = bs->opaque;
+    (void)completion;
+    BlockDeviceFile *bf = this;
     //    printf("bf_read_async: sector_num=%" PRId64 " n=%d\n", sector_num, n);
 #ifdef DUMP_BLOCK_READ
     {
@@ -267,11 +267,11 @@ static int bf_read_async(BlockDevice *bs,
     return 0;
 }
 
-static int bf_write_async(BlockDevice *bs,
-                          uint64_t sector_num, const uint8_t *buf, int n,
-                          BlockDeviceCompletionFunc *cb, void *opaque)
+int BlockDeviceFile::WriteAsync(uint64_t sector_num, const uint8_t *buf, int n,
+                                BlockDeviceCompletion *completion)
 {
-    BlockDeviceFile *bf = bs->opaque;
+    (void)completion;
+    BlockDeviceFile *bf = this;
     int ret;
 
     switch(bf->mode) {
@@ -290,7 +290,7 @@ static int bf_write_async(BlockDevice *bs,
                 return -1;
             for(i = 0; i < n; i++) {
                 if (!bf->sector_table[sector_num]) {
-                    bf->sector_table[sector_num] = malloc(SECTOR_SIZE);
+                    bf->sector_table[sector_num] = static_cast<uint8_t *>(malloc(SECTOR_SIZE));
                 }
                 memcpy(bf->sector_table[sector_num], buf, SECTOR_SIZE);
                 sector_num++;
@@ -309,7 +309,6 @@ static int bf_write_async(BlockDevice *bs,
 static BlockDevice *block_device_init(const char *filename,
                                       BlockDeviceModeEnum mode)
 {
-    BlockDevice *bs;
     BlockDeviceFile *bf;
     int64_t file_size;
     FILE *f;
@@ -329,58 +328,62 @@ static BlockDevice *block_device_init(const char *filename,
     fseek(f, 0, SEEK_END);
     file_size = ftello(f);
 
-    bs = mallocz(sizeof(*bs));
-    bf = mallocz(sizeof(*bf));
+    bf = new BlockDeviceFile();
 
     bf->mode = mode;
     bf->nb_sectors = file_size / 512;
     bf->f = f;
 
     if (mode == BF_MODE_SNAPSHOT) {
-        bf->sector_table = mallocz(sizeof(bf->sector_table[0]) *
-                                   bf->nb_sectors);
+        bf->sector_table = static_cast<uint8_t **>(mallocz(sizeof(bf->sector_table[0]) *
+                                   bf->nb_sectors));
     }
     
-    bs->opaque = bf;
-    bs->get_sector_count = bf_get_sector_count;
-    bs->read_async = bf_read_async;
-    bs->write_async = bf_write_async;
-    return bs;
+    return bf;
 }
 
 #if !defined(_WIN32) && !defined(__HAIKU__)
 
-typedef struct {
+class TunState final: public EthernetDevice {
+public:
     int fd;
-    BOOL select_filled;
-} TunState;
+    bool select_filled;
 
-static void tun_write_packet(EthernetDevice *net,
-                             const uint8_t *buf, int len)
+    void WritePacket(const uint8_t *buf, int len) override;
+    void SelectFill(int *pfd_max, fd_set *rfds, fd_set *wfds,
+                    fd_set *efds, int *pdelay) override;
+    void SelectPoll(fd_set *rfds, fd_set *wfds, fd_set *efds,
+                    int select_ret) override;
+};
+
+void TunState::WritePacket(const uint8_t *buf, int len)
 {
-    TunState *s = net->opaque;
+    TunState *s = this;
     write(s->fd, buf, len);
 }
 
-static void tun_select_fill(EthernetDevice *net, int *pfd_max,
-                            fd_set *rfds, fd_set *wfds, fd_set *efds,
-                            int *pdelay)
+void TunState::SelectFill(int *pfd_max, fd_set *rfds, fd_set *wfds,
+                          fd_set *efds, int *pdelay)
 {
-    TunState *s = net->opaque;
+    (void)wfds;
+    (void)efds;
+    (void)pdelay;
+    TunState *s = this;
     int net_fd = s->fd;
 
-    s->select_filled = net->device_can_write_packet(net);
+    s->select_filled = target->CanWritePacket();
     if (s->select_filled) {
         FD_SET(net_fd, rfds);
         *pfd_max = max_int(*pfd_max, net_fd);
     }
 }
 
-static void tun_select_poll(EthernetDevice *net, 
-                            fd_set *rfds, fd_set *wfds, fd_set *efds,
-                            int select_ret)
+void TunState::SelectPoll(fd_set *rfds, fd_set *wfds, fd_set *efds,
+                          int select_ret)
 {
-    TunState *s = net->opaque;
+    (void)wfds;
+    (void)efds;
+    TunState *s = this;
     int net_fd = s->fd;
     uint8_t buf[2048];
     int ret;
@@ -390,7 +393,7 @@ static void tun_select_poll(EthernetDevice *net,
     if (s->select_filled && FD_ISSET(net_fd, rfds)) {
         ret = read(net_fd, buf, sizeof(buf));
         if (ret > 0)
-            net->device_write_packet(net, buf, ret);
+            target->WritePacket(buf, ret);
     }
     
 }
@@ -417,7 +420,6 @@ static EthernetDevice *tun_open(const char *ifname)
 {
     struct ifreq ifr;
     int fd, ret;
-    EthernetDevice *net;
     TunState *s;
     
     fd = open("/dev/net/tun", O_RDWR);
@@ -436,20 +438,15 @@ static EthernetDevice *tun_open(const char *ifname)
     }
     fcntl(fd, F_SETFL, O_NONBLOCK);
 
-    net = mallocz(sizeof(*net));
-    net->mac_addr[0] = 0x02;
-    net->mac_addr[1] = 0x00;
-    net->mac_addr[2] = 0x00;
-    net->mac_addr[3] = 0x00;
-    net->mac_addr[4] = 0x00;
-    net->mac_addr[5] = 0x01;
-    s = mallocz(sizeof(*s));
+    s = new TunState();
     s->fd = fd;
-    net->opaque = s;
-    net->write_packet = tun_write_packet;
-    net->select_fill = tun_select_fill;
-    net->select_poll = tun_select_poll;
-    return net;
+    s->mac_addr[0] = 0x02;
+    s->mac_addr[1] = 0x00;
+    s->mac_addr[2] = 0x00;
+    s->mac_addr[3] = 0x00;
+    s->mac_addr[4] = 0x00;
+    s->mac_addr[5] = 0x01;
+    return s;
 }
 
 #endif /* !_WIN32 */
@@ -473,48 +470,46 @@ static void HexDump(const uint8_t *data, size_t size)
 		printf("\n");
 }
 
-static void slirp_write_packet(EthernetDevice *net,
-                               const uint8_t *buf, int len)
+class SlirpEthernetDevice final: public EthernetDevice {
+public:
+    Slirp *state = nullptr;
+
+    void WritePacket(const uint8_t *buf, int len) override
+    {
+        slirp_input(state, buf, len);
+    }
+
+    void SelectFill(int *pfd_max, fd_set *rfds, fd_set *wfds, fd_set *efds,
+                    int *pdelay) override
+    {
+        (void)pdelay;
+        slirp_select_fill(state, pfd_max, rfds, wfds, efds);
+    }
+
+    void SelectPoll(fd_set *rfds, fd_set *wfds, fd_set *efds,
+                    int select_ret) override
+    {
+        slirp_select_poll(state, rfds, wfds, efds, (select_ret <= 0));
+    }
+};
+
+/* Provided to slirp, which is compiled as C. */
+extern "C" int slirp_can_output(void *opaque)
 {
-    // printf("temu: slirp_write_packet(%d)\n", len);
-    // HexDump(buf, len);
-    Slirp *slirp_state = net->opaque;
-    slirp_input(slirp_state, buf, len);
+    EthernetDevice *net = static_cast<EthernetDevice *>(opaque);
+    return net->target->CanWritePacket();
 }
 
-int slirp_can_output(void *opaque)
+extern "C" void slirp_output(void *opaque, const uint8_t *pkt, int pkt_len)
 {
-    EthernetDevice *net = opaque;
-    return net->device_can_write_packet(net);
+    EthernetDevice *net = static_cast<EthernetDevice *>(opaque);
+    net->target->WritePacket(pkt, pkt_len);
 }
 
-void slirp_output(void *opaque, const uint8_t *pkt, int pkt_len)
-{
-    // printf("temu: slirp_output(%d)\n", pkt_len);
-    // HexDump(pkt, pkt_len);
-    EthernetDevice *net = opaque;
-    return net->device_write_packet(net, pkt, pkt_len);
-}
-
-static void slirp_select_fill1(EthernetDevice *net, int *pfd_max,
-                               fd_set *rfds, fd_set *wfds, fd_set *efds,
-                               int *pdelay)
-{
-    Slirp *slirp_state = net->opaque;
-    slirp_select_fill(slirp_state, pfd_max, rfds, wfds, efds);
-}
-
-static void slirp_select_poll1(EthernetDevice *net, 
-                               fd_set *rfds, fd_set *wfds, fd_set *efds,
-                               int select_ret)
-{
-    Slirp *slirp_state = net->opaque;
-    slirp_select_poll(slirp_state, rfds, wfds, efds, (select_ret <= 0));
-}
 
 static EthernetDevice *slirp_open(void)
 {
-    EthernetDevice *net;
+    SlirpEthernetDevice *net;
     struct in_addr net_addr  = { .s_addr = htonl(0x0a000200) }; /* 10.0.2.0 */
     struct in_addr mask = { .s_addr = htonl(0xffffff00) }; /* 255.255.255.0 */
     struct in_addr host = { .s_addr = htonl(0x0a000202) }; /* 10.0.2.2 */
@@ -528,10 +523,11 @@ static EthernetDevice *slirp_open(void)
         fprintf(stderr, "Only a single slirp instance is allowed\n");
         return NULL;
     }
-    net = mallocz(sizeof(*net));
+    net = new SlirpEthernetDevice();
 
     slirp_state = slirp_init(restricted, net_addr, mask, host, vhostname,
                              "", bootfile, dhcp, dns, net);
+    net->state = slirp_state;
     
     net->mac_addr[0] = 0x02;
     net->mac_addr[1] = 0x00;
@@ -539,11 +535,7 @@ static EthernetDevice *slirp_open(void)
     net->mac_addr[3] = 0x00;
     net->mac_addr[4] = 0x00;
     net->mac_addr[5] = 0x01;
-    net->opaque = slirp_state;
-    net->write_packet = slirp_write_packet;
-    net->select_fill = slirp_select_fill1;
-    net->select_poll = slirp_select_poll1;
-    
+
     return net;
 }
 
@@ -561,7 +553,7 @@ void virt_machine_run(VirtMachine *m)
     int stdin_fd = -1;
 #endif
     
-    delay = virt_machine_get_sleep_duration(m, MAX_SLEEP_TIME);
+    delay = m->GetSleepDuration(MAX_SLEEP_TIME);
     
     /* wait for an event */
     FD_ZERO(&rfds);
@@ -570,7 +562,7 @@ void virt_machine_run(VirtMachine *m)
     fd_max = -1;
 #ifndef _WIN32
     if (m->console_dev && virtio_console_can_write_data(m->console_dev)) {
-        STDIODevice *s = m->console->opaque;
+        STDIODevice *s = static_cast<STDIODevice *>(m->console);
         stdin_fd = s->stdin_fd;
         FD_SET(stdin_fd, &rfds);
         fd_max = stdin_fd;
@@ -579,12 +571,12 @@ void virt_machine_run(VirtMachine *m)
             int width, height;
             console_get_size(s, &width, &height);
             virtio_console_resize_event(m->console_dev, width, height);
-            s->resize_pending = FALSE;
+            s->resize_pending = false;
         }
     }
 #endif
     if (m->net) {
-        m->net->select_fill(m->net, &fd_max, &rfds, &wfds, &efds, &delay);
+        m->net->SelectFill(&fd_max, &rfds, &wfds, &efds, &delay);
     }
 #ifdef CONFIG_FS_NET
     fs_net_set_fdset(&fd_max, &rfds, &wfds, &efds, &delay);
@@ -593,7 +585,7 @@ void virt_machine_run(VirtMachine *m)
     tv.tv_usec = (delay % 1000) * 1000;
     ret = select(fd_max + 1, &rfds, &wfds, &efds, &tv);
     if (m->net) {
-        m->net->select_poll(m->net, &rfds, &wfds, &efds, ret);
+        m->net->SelectPoll(&rfds, &wfds, &efds, ret);
     }
     if (ret > 0) {
 #ifndef _WIN32
@@ -602,7 +594,7 @@ void virt_machine_run(VirtMachine *m)
             int ret, len;
             len = virtio_console_get_write_len(m->console_dev);
             len = min_int(len, sizeof(buf));
-            ret = m->console->read_data(m->console->opaque, buf, len);
+            ret = m->console->ReadData(buf, len);
             if (ret > 0) {
                 virtio_console_write_data(m->console_dev, buf, ret);
             }
@@ -614,7 +606,7 @@ void virt_machine_run(VirtMachine *m)
     sdl_refresh(m);
 #endif
     
-    virt_machine_interp(m, MAX_EXEC_CYCLE);
+    m->Interp(MAX_EXEC_CYCLE);
 }
 
 /*******************************************************/
@@ -648,17 +640,21 @@ void help(void)
 }
 
 #ifdef CONFIG_FS_NET
-static BOOL net_completed;
+static bool net_completed;
 
-static void net_start_cb(void *arg)
-{
-    net_completed = TRUE;
-}
+class NetStartCallback final: public StartCallback {
+public:
+    void Start() override {net_completed = true;}
+};
 
-static BOOL net_poll_cb(void *arg)
-{
-    return net_completed;
-}
+static NetStartCallback sNetStartCallback;
+
+class NetPollCompletion final: public FSNetEventLoopCompletion {
+public:
+    bool IsCompleted() override {return net_completed;}
+};
+
+static NetPollCompletion sNetPollCompletion;
 
 #endif
 
@@ -667,12 +663,12 @@ int main(int argc, char **argv)
     VirtMachine *s;
     const char *path, *cmdline, *build_preload_file;
     int c, option_index, i, ram_size, accel_enable;
-    BOOL allow_ctrlc;
+    bool allow_ctrlc;
     BlockDeviceModeEnum drive_mode;
     VirtMachineParams p_s, *p = &p_s;
 
     ram_size = -1;
-    allow_ctrlc = FALSE;
+    allow_ctrlc = false;
     (void)allow_ctrlc;
     drive_mode = BF_MODE_SNAPSHOT;
     accel_enable = -1;
@@ -686,7 +682,7 @@ int main(int argc, char **argv)
         case 0:
             switch(option_index) {
             case 1: /* ctrlc */
-                allow_ctrlc = TRUE;
+                allow_ctrlc = true;
                 break;
             case 2: /* rw */
                 drive_mode = BF_MODE_RW;
@@ -698,7 +694,7 @@ int main(int argc, char **argv)
                 cmdline = optarg;
                 break;
             case 5: /* no-accel */
-                accel_enable = FALSE;
+                accel_enable = false;
                 break;
             case 6: /* build-preload */
                 build_preload_file = optarg;
@@ -729,9 +725,9 @@ int main(int argc, char **argv)
 #ifdef CONFIG_FS_NET
     fs_wget_init();
 #endif
-    virt_machine_load_config_file(p, path, NULL, NULL);
+    virt_machine_load_config_file(p, path, nullptr);
 #ifdef CONFIG_FS_NET
-    fs_net_event_loop(NULL, NULL);
+    fs_net_event_loop(nullptr);
 #endif
 
     /* override some config parameters */
@@ -752,11 +748,11 @@ int main(int argc, char **argv)
         fname = get_file_path(p->cfg_filename, p->tab_drive[i].filename);
 #ifdef CONFIG_FS_NET
         if (is_url(fname)) {
-            net_completed = FALSE;
+            net_completed = false;
             drive = block_device_init_http(fname, 128 * 1024,
-                                           net_start_cb, NULL);
+                                           &sNetStartCallback);
             /* wait until the drive is initialized */
-            fs_net_event_loop(net_poll_cb, NULL);
+            fs_net_event_loop(&sNetPollCompletion);
         } else
 #endif
         {
@@ -772,12 +768,12 @@ int main(int argc, char **argv)
         path = p->tab_fs[i].filename;
 #ifdef CONFIG_FS_NET
         if (is_url(path)) {
-            fs = fs_net_init(path, NULL, NULL);
+            fs = fs_net_init(path, nullptr);
             if (!fs)
                 exit(1);
             if (build_preload_file)
                 fs_dump_cache_load(fs, build_preload_file);
-            fs_net_event_loop(NULL, NULL);
+            fs_net_event_loop(nullptr);
         } else
 #endif
         {
@@ -831,7 +827,7 @@ int main(int argc, char **argv)
 #else
     p->console = console_init(allow_ctrlc);
 #endif
-    p->rtc_real_time = TRUE;
+    p->rtc_real_time = true;
 
     s = virt_machine_init(p);
     if (!s)
@@ -839,13 +835,13 @@ int main(int argc, char **argv)
     
     virt_machine_free_config(p);
 
-    if (s->net) {
-        s->net->device_set_carrier(s->net, TRUE);
+    if (s->net != nullptr && s->net->target != nullptr) {
+        s->net->target->SetCarrier(true);
     }
     
     for(;;) {
         virt_machine_run(s);
     }
-    virt_machine_end(s);
+    delete s;
     return 0;
 }

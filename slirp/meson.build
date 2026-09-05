@@ -19,7 +19,7 @@ slirp_lib = static_library('slirp',
     'tcp_timer.c',
     'udp.c',
   ),
-  c_args: common_args,
+  c_args: common_c_args,
   dependencies: common_deps,
 )
 
