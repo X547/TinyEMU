@@ -136,6 +136,8 @@ typedef uint128_t mem_uint_t;
 
 /* mstatus CSR */
 
+#define MSTATUS_SIE_SHIFT 1
+#define MSTATUS_MIE_SHIFT 3
 #define MSTATUS_SPIE_SHIFT 5
 #define MSTATUS_MPIE_SHIFT 7
 #define MSTATUS_SPP_SHIFT 8
@@ -144,25 +146,20 @@ typedef uint128_t mem_uint_t;
 #define MSTATUS_UXL_SHIFT 32
 #define MSTATUS_SXL_SHIFT 34
 
-#define MSTATUS_UIE (1 << 0)
-#define MSTATUS_SIE (1 << 1)
-#define MSTATUS_HIE (1 << 2)
-#define MSTATUS_MIE (1 << 3)
-#define MSTATUS_UPIE (1 << 4)
+#define MSTATUS_SIE (1 << MSTATUS_SIE_SHIFT)
+#define MSTATUS_MIE (1 << MSTATUS_MIE_SHIFT)
 #define MSTATUS_SPIE (1 << MSTATUS_SPIE_SHIFT)
-#define MSTATUS_HPIE (1 << 6)
 #define MSTATUS_MPIE (1 << MSTATUS_MPIE_SHIFT)
 #define MSTATUS_SPP (1 << MSTATUS_SPP_SHIFT)
-#define MSTATUS_HPP (3 << 9)
 #define MSTATUS_MPP (3 << MSTATUS_MPP_SHIFT)
 #define MSTATUS_FS (3 << MSTATUS_FS_SHIFT)
 #define MSTATUS_XS (3 << 15)
 #define MSTATUS_MPRV (1 << 17)
 #define MSTATUS_SUM (1 << 18)
 #define MSTATUS_MXR (1 << 19)
-//#define MSTATUS_TVM (1 << 20)
-//#define MSTATUS_TW (1 << 21)
-//#define MSTATUS_TSR (1 << 22)
+#define MSTATUS_TVM (1 << 20)
+#define MSTATUS_TW (1 << 21)
+#define MSTATUS_TSR (1 << 22)
 #define MSTATUS_UXL_MASK ((uint64_t)3 << MSTATUS_UXL_SHIFT)
 #define MSTATUS_SXL_MASK ((uint64_t)3 << MSTATUS_SXL_SHIFT)
 
@@ -191,6 +188,10 @@ struct RISCVCPUState: public RISCVCPU {
     
     int32_t n_cycles; /* only used inside the CPU loop */
     uint64_t insn_counter;
+    /* mcycle and minstret are writable and both derive from insn_counter, so
+       each keeps the difference between its architectural value and it */
+    uint64_t mcycle_offset;
+    uint64_t minstret_offset;
     bool power_down_flag;
     int pending_exception; /* used during MMU exception handling */
     /* the machine's real time counter, shared with its timer device */

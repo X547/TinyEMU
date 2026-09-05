@@ -200,6 +200,15 @@ PHYS_MEM_READ_WRITE(64, uint64_t)
 #define PTE_A_MASK (1 << 6)
 #define PTE_D_MASK (1 << 7)
 
+/* Bits 63:54 of a 64 bit PTE are claimed by Svnapot (63), Svpbmt (62:61) and
+   future standard use (60:54). None of them are implemented here, so a PTE
+   that sets any of them is malformed and must fault. */
+#if MAX_XLEN >= 64
+#define PTE_RESERVED_MASK (((target_ulong)0x3ff) << 54)
+#else
+#define PTE_RESERVED_MASK 0
+#endif
+
 #define ACCESS_READ  0
 #define ACCESS_WRITE 1
 #define ACCESS_CODE  2
@@ -211,7 +220,7 @@ static int get_phys_addr(RISCVCPUState *s,
                          int access)
 {
     int mode, levels, pte_bits, pte_idx, pte_mask, pte_size_log2, xwr, priv;
-    int need_write, vaddr_shift, i, pte_addr_bits;
+    int vaddr_shift, i, pte_addr_bits;
     target_ulong pte_addr, pte, vaddr_mask, paddr;
 
     if ((s->mstatus & MSTATUS_MPRV) && access != ACCESS_CODE) {
@@ -271,46 +280,47 @@ static int get_phys_addr(RISCVCPUState *s,
         else
             pte = phys_read_u64(s, pte_addr);
         //printf("pte=0x%08" PRIx64 "\n", pte);
+        if ((pte & PTE_RESERVED_MASK) != 0)
+            return -1;
         if (!(pte & PTE_V_MASK))
             return -1; /* invalid PTE */
         paddr = (pte >> 10) << PG_SHIFT;
         xwr = (pte >> 1) & 7;
-        if (xwr != 0) {
-            if (xwr == 2 || xwr == 6)
+        if (xwr == 0) {
+            /* pointer to the next level; D, A and U are reserved there */
+            if (pte & (PTE_D_MASK | PTE_A_MASK | PTE_U_MASK))
                 return -1;
-            /* priviledge check */
-            if (priv == PRV_S) {
-                if ((pte & PTE_U_MASK) && !(s->mstatus & MSTATUS_SUM))
-                    return -1;
-            } else {
-                if (!(pte & PTE_U_MASK))
-                    return -1;
-            }
-            /* protection check */
-            /* MXR allows read access to execute-only pages */
-            if (s->mstatus & MSTATUS_MXR)
-                xwr |= (xwr >> 2);
-
-            if (((xwr >> access) & 1) == 0)
-                return -1;
-            need_write = !(pte & PTE_A_MASK) ||
-                (!(pte & PTE_D_MASK) && access == ACCESS_WRITE);
-            pte |= PTE_A_MASK;
-            if (access == ACCESS_WRITE)
-                pte |= PTE_D_MASK;
-            if (need_write) {
-            	return -1;
-                if (pte_size_log2 == 2)
-                    phys_write_u32(s, pte_addr, pte);
-                else
-                    phys_write_u64(s, pte_addr, pte);
-            }
-            vaddr_mask = ((target_ulong)1 << vaddr_shift) - 1;
-            *ppaddr = (vaddr & vaddr_mask) | (paddr  & ~vaddr_mask);
-            return 0;
-        } else {
             pte_addr = paddr;
+            continue;
         }
+        if (xwr == 2 || xwr == 6)
+            return -1;
+        /* priviledge check */
+        if (priv == PRV_S) {
+            if ((pte & PTE_U_MASK) && !(s->mstatus & MSTATUS_SUM))
+                return -1;
+        } else {
+            if (!(pte & PTE_U_MASK))
+                return -1;
+        }
+        /* protection check */
+        /* MXR allows read access to execute-only pages */
+        if (s->mstatus & MSTATUS_MXR)
+            xwr |= (xwr >> 2);
+
+        if (((xwr >> access) & 1) == 0)
+            return -1;
+        /* a superpage must be aligned to its own size */
+        vaddr_mask = ((target_ulong)1 << vaddr_shift) - 1;
+        if ((paddr & vaddr_mask) != 0)
+            return -1;
+        /* the A and D bits are never set by hardware: a page whose bits do
+           not already permit the access faults and lets software set them */
+        if (!(pte & PTE_A_MASK) ||
+            (!(pte & PTE_D_MASK) && access == ACCESS_WRITE))
+            return -1;
+        *ppaddr = (vaddr & vaddr_mask) | (paddr  & ~vaddr_mask);
+        return 0;
     }
     return -1;
 }
@@ -403,7 +413,9 @@ int target_read_slow(RISCVCPUState *s, mem_uint_t *pval,
             print_target_ulong(s->pc);
             printf("\n");
 #endif
-            return 0;
+            s->pending_tval = addr;
+            s->pending_exception = CAUSE_FAULT_LOAD;
+            return -1;
         } else if (pr->is_ram) {
             tlb_idx = (addr >> PG_SHIFT) & (TLB_SIZE - 1);
             ptr = pr->phys_mem + (uintptr_t)(paddr - pr->addr);
@@ -491,8 +503,10 @@ int target_write_slow(RISCVCPUState *s, target_ulong addr,
             printf(", PC: ");
             print_target_ulong(s->pc);
             printf("\n");
-            exit(1);
 #endif
+            s->pending_tval = addr;
+            s->pending_exception = CAUSE_FAULT_STORE;
+            return -1;
         } else if (pr->is_ram) {
             pr->SetDirtyBit(paddr - pr->addr);
             tlb_idx = (addr >> PG_SHIFT) & (TLB_SIZE - 1);
@@ -649,8 +663,7 @@ static void glue(riscv_cpu_flush_tlb_write_range_ram,
 }
 
 
-#define SSTATUS_MASK0 (MSTATUS_UIE | MSTATUS_SIE |       \
-                      MSTATUS_UPIE | MSTATUS_SPIE |     \
+#define SSTATUS_MASK0 (MSTATUS_SIE | MSTATUS_SPIE |     \
                       MSTATUS_SPP | \
                       MSTATUS_FS | MSTATUS_XS | \
                       MSTATUS_SUM | MSTATUS_MXR)
@@ -661,14 +674,19 @@ static void glue(riscv_cpu_flush_tlb_write_range_ram,
 #endif
 
 
-#define MSTATUS_MASK (MSTATUS_UIE | MSTATUS_SIE | MSTATUS_MIE |      \
-                      MSTATUS_UPIE | MSTATUS_SPIE | MSTATUS_MPIE |    \
+#define MSTATUS_MASK (MSTATUS_SIE | MSTATUS_MIE |      \
+                      MSTATUS_SPIE | MSTATUS_MPIE |    \
                       MSTATUS_SPP | MSTATUS_MPP | \
                       MSTATUS_FS | \
-                      MSTATUS_MPRV | MSTATUS_SUM | MSTATUS_MXR)
+                      MSTATUS_MPRV | MSTATUS_SUM | MSTATUS_MXR | \
+                      MSTATUS_TVM | MSTATUS_TW | MSTATUS_TSR)
 
-/* cycle and insn counters */
-#define COUNTEREN_MASK ((1 << 0) | (1 << 2))
+/* cycle, time and insn counters */
+#define COUNTEREN_MASK ((1 << 0) | (1 << 1) | (1 << 2))
+
+/* every synchronous cause that can be taken in a mode below M. Machine ECALL
+   (11), double trap (16) and the reserved causes 10 and 14 are read-only 0 */
+#define MEDELEG_MASK 0x0000b3ff
 
 /* return the complete mstatus with the SD bit */
 static target_ulong get_mstatus(RISCVCPUState *s, target_ulong mask)
@@ -697,7 +715,11 @@ static int get_base_from_xlen(int xlen)
 static void set_mstatus(RISCVCPUState *s, target_ulong val)
 {
     target_ulong mod, mask;
-    
+
+    /* MPP is WARL and 2 is not a supported mode */
+    if (((val >> MSTATUS_MPP_SHIFT) & 3) == PRV_H)
+        val = (val & ~(target_ulong)MSTATUS_MPP) | (s->mstatus & MSTATUS_MPP);
+
     /* flush the TLBs if change of MMU config */
     mod = s->mstatus ^ val;
     if ((mod & (MSTATUS_MPRV | MSTATUS_SUM | MSTATUS_MXR)) != 0 ||
@@ -713,12 +735,58 @@ static void set_mstatus(RISCVCPUState *s, target_ulong val)
         uxl = (val >> MSTATUS_UXL_SHIFT) & 3;
         if (uxl >= 1 && uxl <= get_base_from_xlen(MAX_XLEN))
             mask |= MSTATUS_UXL_MASK;
-        sxl = (val >> MSTATUS_UXL_SHIFT) & 3;
+        sxl = (val >> MSTATUS_SXL_SHIFT) & 3;
         if (sxl >= 1 && sxl <= get_base_from_xlen(MAX_XLEN))
             mask |= MSTATUS_SXL_MASK;
     }
 #endif
     s->mstatus = (s->mstatus & ~mask) | (val & mask);
+}
+
+/* mcounteren gates S-mode and, together with scounteren, U-mode access to the
+   counter CSRs. 'counter' is the index of the counter within either register */
+static bool counter_accessible(RISCVCPUState *s, int counter)
+{
+    uint32_t counteren;
+
+    if (s->priv >= PRV_M)
+        return true;
+    counteren = s->mcounteren;
+    if (s->priv < PRV_S)
+        counteren &= s->scounteren;
+    return ((counteren >> counter) & 1) != 0;
+}
+
+static uint64_t get_mcycle(RISCVCPUState *s)
+{
+    return s->insn_counter + s->mcycle_offset;
+}
+
+static uint64_t get_minstret(RISCVCPUState *s)
+{
+    return s->insn_counter + s->minstret_offset;
+}
+
+static void set_mcycle(RISCVCPUState *s, uint64_t val)
+{
+    s->mcycle_offset = val - s->insn_counter;
+}
+
+static void set_minstret(RISCVCPUState *s, uint64_t val)
+{
+    s->minstret_offset = val - s->insn_counter;
+}
+
+/* the counters are 64 bit whatever XLEN is, so RV32 writes one half at a
+   time and leaves the other one alone */
+static uint64_t counter_written(RISCVCPUState *s, uint64_t old_val,
+                                target_ulong val, bool high)
+{
+    if (s->cur_xlen != 32)
+        return val;
+    if (high)
+        return (old_val & 0xffffffff) | ((uint64_t)(uint32_t)val << 32);
+    return (old_val & ~(uint64_t)0xffffffff) | (uint32_t)val;
 }
 
 /* return -1 if invalid CSR. 0 if OK. 'will_write' indicate that the
@@ -751,48 +819,48 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
         val = s->fflags | (s->frm << 5);
         break;
 #endif
-    case 0xc00: /* ucycle */
-    case 0xc02: /* uinstret */
-        {
-            uint32_t counteren;
-            if (s->priv < PRV_M) {
-                if (s->priv < PRV_S)
-                    counteren = s->scounteren;
-                else
-                    counteren = s->mcounteren;
-                if (((counteren >> (csr & 0x1f)) & 1) == 0)
-                    goto invalid_csr;
-            }
-        }
-        val = (int64_t)s->insn_counter;
+    case 0xc00: /* cycle */
+        if (!counter_accessible(s, 0))
+            goto invalid_csr;
+        val = get_mcycle(s);
         break;
-    case 0xc01: /* utime */
+    case 0xc01: /* time */
+        if (!counter_accessible(s, 1))
+            goto invalid_csr;
         val = riscv_cpu_rtc_time(s);
         break;
-    case 0xc81: /* utimeh */
-        /* RV32 reads the 64 bit time counter as two halves */
-        if (s->cur_xlen != 32)
+    case 0xc02: /* instret */
+        if (!counter_accessible(s, 2))
+            goto invalid_csr;
+        val = get_minstret(s);
+        break;
+    case 0xc03 ... 0xc1f: /* hpmcounter3..31 */
+        if (!counter_accessible(s, csr & 0x1f))
+            goto invalid_csr;
+        val = 0;
+        break;
+    /* RV32 reads the 64 bit counters as two halves */
+    case 0xc80: /* cycleh */
+        if (s->cur_xlen != 32 || !counter_accessible(s, 0))
+            goto invalid_csr;
+        val = get_mcycle(s) >> 32;
+        break;
+    case 0xc81: /* timeh */
+        if (s->cur_xlen != 32 || !counter_accessible(s, 1))
             goto invalid_csr;
         val = riscv_cpu_rtc_time(s) >> 32;
         break;
-    case 0xc80: /* mcycleh */
-    case 0xc82: /* minstreth */
-        if (s->cur_xlen != 32)
+    case 0xc82: /* instreth */
+        if (s->cur_xlen != 32 || !counter_accessible(s, 2))
             goto invalid_csr;
-        {
-            uint32_t counteren;
-            if (s->priv < PRV_M) {
-                if (s->priv < PRV_S)
-                    counteren = s->scounteren;
-                else
-                    counteren = s->mcounteren;
-                if (((counteren >> (csr & 0x1f)) & 1) == 0)
-                    goto invalid_csr;
-            }
-        }
-        val = s->insn_counter >> 32;
+        val = get_minstret(s) >> 32;
         break;
-        
+    case 0xc83 ... 0xc9f: /* hpmcounter3..31h */
+        if (s->cur_xlen != 32 || !counter_accessible(s, csr & 0x1f))
+            goto invalid_csr;
+        val = 0;
+        break;
+
     case 0x100:
         val = get_mstatus(s, SSTATUS_MASK);
         break;
@@ -821,6 +889,8 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
         val = s->mip & s->mideleg;
         break;
     case 0x180:
+        if (s->priv < PRV_M && (s->mstatus & MSTATUS_TVM))
+            goto invalid_csr;
         val = s->satp;
         break;
     case 0x300:
@@ -867,6 +937,9 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
             goto invalid_csr;
         val = 0;
         break;
+    case 0x323 ... 0x33f: /* mhpmevent3..31 */
+        val = 0; /* the event counters are hardwired to zero */
+        break;
     case 0x3a0 ... 0x3a3: /* pmpcfg0..3 */
         val = 0; /* not implemented */
         break;
@@ -874,14 +947,28 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
         val = 0; /* not implemented */
         break;
     case 0xb00: /* mcycle */
+        val = get_mcycle(s);
+        break;
     case 0xb02: /* minstret */
-        val = (int64_t)s->insn_counter;
+        val = get_minstret(s);
+        break;
+    case 0xb03 ... 0xb1f: /* mhpmcounter3..31 */
+        val = 0;
         break;
     case 0xb80: /* mcycleh */
+        if (s->cur_xlen != 32)
+            goto invalid_csr;
+        val = get_mcycle(s) >> 32;
+        break;
     case 0xb82: /* minstreth */
         if (s->cur_xlen != 32)
             goto invalid_csr;
-        val = s->insn_counter >> 32;
+        val = get_minstret(s) >> 32;
+        break;
+    case 0xb83 ... 0xb9f: /* mhpmcounter3..31h */
+        if (s->cur_xlen != 32)
+            goto invalid_csr;
+        val = 0;
         break;
     /* Read-only machine identification registers. The privileged spec makes
        them mandatory; zero is the legal "not implemented" value. OpenSBI
@@ -982,10 +1069,14 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
         s->stval = val;
         break;
     case 0x144: /* sip */
-        mask = s->mideleg;
+        /* STIP and SEIP belong to their interrupt controllers; only the
+           software interrupt is writable from S-mode */
+        mask = s->mideleg & MIP_SSIP;
         s->mip = (s->mip & ~mask) | (val & mask);
         break;
     case 0x180:
+        if (s->priv < PRV_M && (s->mstatus & MSTATUS_TVM))
+            return -1;
         /* no ASID implemented */
 #if MAX_XLEN == 32
         {
@@ -1029,7 +1120,7 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
 #endif
         break;
     case 0x302:
-        mask = (1 << (CAUSE_STORE_PAGE_FAULT + 1)) - 1;
+        mask = MEDELEG_MASK;
         s->medeleg = (s->medeleg & ~mask) | (val & mask);
         break;
     case 0x303:
@@ -1037,7 +1128,8 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
         s->mideleg = (s->mideleg & ~mask) | (val & mask);
         break;
     case 0x304:
-        mask = MIP_MSIP | MIP_MTIP | MIP_SSIP | MIP_STIP | MIP_SEIP;
+        mask = MIP_MSIP | MIP_MTIP | MIP_MEIP |
+            MIP_SSIP | MIP_STIP | MIP_SEIP;
         s->mie = (s->mie & ~mask) | (val & mask);
         break;
     case 0x305:
@@ -1067,11 +1159,36 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
             return -1;
         /* only MBE/SBE live here and this implementation is little endian */
         break;
+    case 0x323 ... 0x33f: /* mhpmevent3..31 */
+        /* the event counters are hardwired to zero */
+        break;
     case 0x3a0 ... 0x3a3: /* pmpcfg0..3 */
         /* not implemented */
         break;
     case 0x3b0 ... 0x3bf: /* pmpaddr0..15 */
         /* not implemented */
+        break;
+    case 0xb00: /* mcycle */
+        set_mcycle(s, counter_written(s, get_mcycle(s), val, false));
+        break;
+    case 0xb02: /* minstret */
+        set_minstret(s, counter_written(s, get_minstret(s), val, false));
+        break;
+    case 0xb03 ... 0xb1f: /* mhpmcounter3..31 */
+        break;
+    case 0xb80: /* mcycleh */
+        if (s->cur_xlen != 32)
+            return -1;
+        set_mcycle(s, counter_written(s, get_mcycle(s), val, true));
+        break;
+    case 0xb82: /* minstreth */
+        if (s->cur_xlen != 32)
+            return -1;
+        set_minstret(s, counter_written(s, get_minstret(s), val, true));
+        break;
+    case 0xb83 ... 0xb9f: /* mhpmcounter3..31h */
+        if (s->cur_xlen != 32)
+            return -1;
         break;
     default:
 #ifdef DUMP_INVALID_CSR
@@ -1163,9 +1280,9 @@ static void raise_exception2(RISCVCPUState *s, uint32_t cause,
         s->sepc = s->pc;
         s->stval = tval;
         s->mstatus = (s->mstatus & ~MSTATUS_SPIE) |
-            (((s->mstatus >> s->priv) & 1) << MSTATUS_SPIE_SHIFT);
+            (((s->mstatus >> MSTATUS_SIE_SHIFT) & 1) << MSTATUS_SPIE_SHIFT);
         s->mstatus = (s->mstatus & ~MSTATUS_SPP) |
-            (s->priv << MSTATUS_SPP_SHIFT);
+            ((target_ulong)s->priv << MSTATUS_SPP_SHIFT);
         s->mstatus &= ~MSTATUS_SIE;
         set_priv(s, PRV_S);
         s->pc = s->stvec;
@@ -1174,9 +1291,9 @@ static void raise_exception2(RISCVCPUState *s, uint32_t cause,
         s->mepc = s->pc;
         s->mtval = tval;
         s->mstatus = (s->mstatus & ~MSTATUS_MPIE) |
-            (((s->mstatus >> s->priv) & 1) << MSTATUS_MPIE_SHIFT);
+            (((s->mstatus >> MSTATUS_MIE_SHIFT) & 1) << MSTATUS_MPIE_SHIFT);
         s->mstatus = (s->mstatus & ~MSTATUS_MPP) |
-            (s->priv << MSTATUS_MPP_SHIFT);
+            ((target_ulong)s->priv << MSTATUS_MPP_SHIFT);
         s->mstatus &= ~MSTATUS_MIE;
         set_priv(s, PRV_M);
         s->pc = s->mtvec;
@@ -1188,18 +1305,28 @@ static void raise_exception(RISCVCPUState *s, uint32_t cause)
     raise_exception2(s, cause, 0);
 }
 
+/* returning to anything below M drops the privilege MPRV borrows */
+static void clear_mprv_on_return(RISCVCPUState *s, int new_priv)
+{
+    if (new_priv != PRV_M && (s->mstatus & MSTATUS_MPRV)) {
+        s->mstatus &= ~MSTATUS_MPRV;
+        tlb_flush_all(s);
+    }
+}
+
 static void handle_sret(RISCVCPUState *s)
 {
     int spp, spie;
     spp = (s->mstatus >> MSTATUS_SPP_SHIFT) & 1;
     /* set the IE state to previous IE state */
     spie = (s->mstatus >> MSTATUS_SPIE_SHIFT) & 1;
-    s->mstatus = (s->mstatus & ~(1 << spp)) |
-        (spie << spp);
+    s->mstatus = (s->mstatus & ~MSTATUS_SIE) |
+        ((target_ulong)spie << MSTATUS_SIE_SHIFT);
     /* set SPIE to 1 */
     s->mstatus |= MSTATUS_SPIE;
     /* set SPP to U */
     s->mstatus &= ~MSTATUS_SPP;
+    clear_mprv_on_return(s, spp);
     set_priv(s, spp);
     s->pc = s->sepc;
 }
@@ -1210,12 +1337,13 @@ static void handle_mret(RISCVCPUState *s)
     mpp = (s->mstatus >> MSTATUS_MPP_SHIFT) & 3;
     /* set the IE state to previous IE state */
     mpie = (s->mstatus >> MSTATUS_MPIE_SHIFT) & 1;
-    s->mstatus = (s->mstatus & ~(1 << mpp)) |
-        (mpie << mpp);
+    s->mstatus = (s->mstatus & ~MSTATUS_MIE) |
+        ((target_ulong)mpie << MSTATUS_MIE_SHIFT);
     /* set MPIE to 1 */
     s->mstatus |= MSTATUS_MPIE;
     /* set MPP to U */
     s->mstatus &= ~MSTATUS_MPP;
+    clear_mprv_on_return(s, mpp);
     set_priv(s, mpp);
     s->pc = s->mepc;
 }
@@ -1247,15 +1375,26 @@ static inline uint32_t get_pending_irq_mask(RISCVCPUState *s)
     return pending_ints & enabled_ints;
 }
 
+/* the order the privileged spec requires simultaneous interrupts to be taken
+   in: MEI, MSI, MTI, SEI, SSI, STI */
+static const uint8_t irq_priority[] = { 11, 3, 7, 9, 1, 5 };
+
 static __exception int raise_interrupt(RISCVCPUState *s)
 {
     uint32_t mask;
+    size_t i;
     int irq_num;
 
     mask = get_pending_irq_mask(s);
     if (mask == 0)
         return 0;
     irq_num = ctz32(mask);
+    for(i = 0; i < countof(irq_priority); i++) {
+        if ((mask >> irq_priority[i]) & 1) {
+            irq_num = irq_priority[i];
+            break;
+        }
+    }
     raise_exception(s, irq_num | CAUSE_INTERRUPT);
     return -1;
 }
