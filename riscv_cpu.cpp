@@ -759,6 +759,12 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
     case 0xc01: /* utime */
         val = get_system_time();
         break;
+    case 0xc81: /* utimeh */
+        /* RV32 reads the 64 bit time counter as two halves */
+        if (s->cur_xlen != 32)
+            goto invalid_csr;
+        val = get_system_time() >> 32;
+        break;
     case 0xc80: /* mcycleh */
     case 0xc82: /* minstreth */
         if (s->cur_xlen != 32)
@@ -844,6 +850,13 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
     case 0x344:
         val = s->mip;
         break;
+    case 0x310: /* mstatush */
+        /* RV32 only. Holds the MBE/SBE endianness controls, both of which
+           are zero on this little endian implementation. */
+        if (s->cur_xlen != 32)
+            goto invalid_csr;
+        val = 0;
+        break;
     case 0x3a0 ... 0x3a3: /* pmpcfg0..3 */
         val = 0; /* not implemented */
         break;
@@ -859,6 +872,14 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
         if (s->cur_xlen != 32)
             goto invalid_csr;
         val = s->insn_counter >> 32;
+        break;
+    /* Read-only machine identification registers. The privileged spec makes
+       them mandatory; zero is the legal "not implemented" value. OpenSBI
+       reads all three unconditionally while printing its banner. */
+    case 0xf11: /* mvendorid */
+    case 0xf12: /* marchid */
+    case 0xf13: /* mimpid */
+        val = 0;
         break;
     case 0xf14:
         val = s->mhartid;
@@ -1030,6 +1051,11 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
     case 0x344:
         mask = MIP_SSIP | MIP_STIP;
         s->mip = (s->mip & ~mask) | (val & mask);
+        break;
+    case 0x310: /* mstatush */
+        if (s->cur_xlen != 32)
+            return -1;
+        /* only MBE/SBE live here and this implementation is little endian */
         break;
     case 0x3a0 ... 0x3a3: /* pmpcfg0..3 */
         /* not implemented */
