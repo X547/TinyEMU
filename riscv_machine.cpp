@@ -420,6 +420,13 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
 
     max_xlen = m->max_xlen;
     misa = m->cpu_state->Misa();
+
+    /* Extensions implemented outside of misa, which only has room for the
+       single letter ones. */
+    static const char *const multi_letter_ext[] = {
+        "zicsr", "zifencei", "zicntr", "sstc", "svadu", "svinval",
+    };
+
     q = isa_string;
     q += snprintf(isa_string, sizeof(isa_string), "rv%d", max_xlen);
     /* The single letter extensions must appear in the canonical order given
@@ -444,8 +451,36 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
     }
     /* Multi-letter extensions follow the single letter ones, each introduced
        by an underscore. */
-    snprintf(q, sizeof(isa_string) - (q - isa_string), "_sstc_svadu_svinval");
+    for (const char *ext: multi_letter_ext)
+        q += snprintf(q, sizeof(isa_string) - (q - isa_string), "_%s", ext);
     fdt.PropStr("riscv,isa", isa_string);
+
+    /* Linux 6.6 and later parse "riscv,isa-base" plus "riscv,isa-extensions"
+       instead, and a kernel built without CONFIG_RISCV_ISA_FALLBACK (Ubuntu's
+       generic riscv64 kernel, for one) discards any hart that carries only the
+       deprecated "riscv,isa". With every hart discarded there is no boot CPU
+       left and of_parse_and_init_cpus() hits a BUG() before the console is
+       even up, so both forms are emitted. */
+    fdt.PropStr("riscv,isa-base", max_xlen <= 32 ? "rv32i" : "rv64i");
+    {
+        /* A packed list of NUL terminated strings. The privilege modes 'S'
+           and 'U' are not extensions and have no place here, unlike in the
+           "riscv,isa" string above. */
+        static const char canonical[] = "imafdqch";
+        char ext_list[256], *p = ext_list;
+        for (const char *c = canonical; *c != '\0'; c++) {
+            if (misa & (1 << (*c - 'a'))) {
+                *p++ = *c;
+                *p++ = '\0';
+            }
+        }
+        for (const char *ext: multi_letter_ext) {
+            size_t len = strlen(ext) + 1;
+            memcpy(p, ext, len);
+            p += len;
+        }
+        fdt.Prop("riscv,isa-extensions", ext_list, p - ext_list);
+    }
 
     fdt.PropStr("mmu-type", max_xlen <= 32 ? "riscv,sv32" : "riscv,sv48");
     fdt.PropU32("clock-frequency", 2000000000);
