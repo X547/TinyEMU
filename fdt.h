@@ -25,6 +25,8 @@
 
 #include <stdint.h>
 
+#define FDT_MAX_RESERVATIONS 8
+
 
 /* Accumulates the structure and string blocks, then serialises them into the
    flat blob. Node names carrying a unit address are built with BeginNodeNum()
@@ -43,6 +45,12 @@ private:
 
     uint32_t fNextPhandle = 1;
 
+    struct {
+        uint64_t address;
+        uint64_t size;
+    } fReservations[FDT_MAX_RESERVATIONS] {};
+    int fReservationCount = 0;
+
     void AllocLen(int len);
     void Put32(uint32_t v);
     void PutData(const uint8_t *data, int len);
@@ -55,6 +63,12 @@ public:
     /* Phandles are handed out by the builder so that no two nodes can pick
        the same value. */
     uint32_t AllocPhandle() {return fNextPhandle++;}
+
+    /* Memory the guest must not allocate over, written to the blob's memory
+       reservation block. The firmware's own image goes here: nothing else
+       stops a guest kernel from treating it as free RAM and overwriting the
+       trap handler it is about to depend on. */
+    void AddReservation(uint64_t address, uint64_t size);
 
     void BeginNode(const char *name);
     void BeginNodeNum(const char *name, uint64_t n);

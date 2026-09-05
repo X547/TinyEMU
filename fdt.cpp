@@ -97,6 +97,20 @@ void FDTBuilder::PutData(const uint8_t *data, int len)
 }
 
 
+void FDTBuilder::AddReservation(uint64_t address, uint64_t size)
+{
+    if (size == 0) {
+        return;
+    }
+    if (fReservationCount >= FDT_MAX_RESERVATIONS) {
+        return;
+    }
+    fReservations[fReservationCount].address = address;
+    fReservations[fReservationCount].size = size;
+    fReservationCount++;
+}
+
+
 void FDTBuilder::BeginNode(const char *name)
 {
     Put32(FDT_BEGIN_NODE);
@@ -269,7 +283,14 @@ int FDTBuilder::Output(uint8_t *dst)
     }
     h->off_mem_rsvmap = cpu_to_be32(pos);
     re = (struct fdt_reserve_entry *)(dst + pos);
-    re->address = 0; /* no reserved entry */
+    for (int i = 0; i < fReservationCount; i++) {
+        re->address = cpu_to_be64(fReservations[i].address);
+        re->size = cpu_to_be64(fReservations[i].size);
+        re++;
+        pos += sizeof(struct fdt_reserve_entry);
+    }
+    /* the list is terminated by a zero sized entry */
+    re->address = 0;
     re->size = 0;
     pos += sizeof(struct fdt_reserve_entry);
 

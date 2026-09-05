@@ -380,6 +380,7 @@ static uint8_t *get_ram_ptr(RISCVMachine *s, uint64_t paddr, bool is_rw)
 /* FDT machine description */
 
 static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
+                           uint64_t firmware_size,
                            uint64_t kernel_start, uint64_t kernel_size,
                            uint64_t initrd_start, uint64_t initrd_size,
                            const char *cmd_line)
@@ -392,6 +393,11 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
     uint32_t tab[4];
 
     ctx.fdt = &fdt;
+
+    /* Keep the guest out of the firmware image. There is no PMP here, so
+       nothing else stops a kernel from allocating over the M mode trap
+       handler it depends on. */
+    fdt.AddReservation(RAM_BASE_ADDR, firmware_size);
 
     fdt.BeginNode("");
     fdt.PropU32("#address-cells", 2);
@@ -547,7 +553,7 @@ static void copy_bios(RISCVMachine *s, const uint8_t *buf, int buf_len,
                       const uint8_t *initrd_buf, int initrd_buf_len,
                       const char *cmd_line)
 {
-    uint32_t fdt_addr, align, kernel_base, initrd_base;
+    uint32_t fdt_addr, align, kernel_base, initrd_base, firmware_size;
     uint8_t *ram_ptr;
     uint32_t *q;
 
@@ -559,14 +565,19 @@ static void copy_bios(RISCVMachine *s, const uint8_t *buf, int buf_len,
     ram_ptr = get_ram_ptr(s, RAM_BASE_ADDR, true);
     memcpy(ram_ptr, buf, buf_len);
 
+    /* The firmware occupies everything up to the kernel: its BSS and heap
+       reach past the end of the image, so reserve the whole aligned block
+       rather than just the bytes that were copied. */
+    if (s->max_xlen == 32)
+        align = 4 << 20; /* 4 MB page align */
+    else
+        align = 2 << 20; /* 2 MB page align */
+    firmware_size = (buf_len + align - 1) & ~(align - 1);
+
     kernel_base = 0;
     if (kernel_buf_len > 0) {
         /* copy the kernel if present */
-        if (s->max_xlen == 32)
-            align = 4 << 20; /* 4 MB page align */
-        else
-            align = 2 << 20; /* 2 MB page align */
-        kernel_base = (buf_len + align - 1) & ~(align - 1);
+        kernel_base = firmware_size;
         memcpy(ram_ptr + kernel_base, kernel_buf, kernel_buf_len);
         if (kernel_buf_len + kernel_base > s->ram_size) {
             vm_error("kernel too big");
@@ -591,7 +602,7 @@ static void copy_bios(RISCVMachine *s, const uint8_t *buf, int buf_len,
 
     fdt_addr = 0x1000 + 8 * 8;
 
-    riscv_build_fdt(s, ram_ptr + fdt_addr,
+    riscv_build_fdt(s, ram_ptr + fdt_addr, firmware_size,
                     RAM_BASE_ADDR + kernel_base, kernel_buf_len,
                     RAM_BASE_ADDR + initrd_base, initrd_buf_len,
                     cmd_line);

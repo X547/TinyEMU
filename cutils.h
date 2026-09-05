@@ -84,6 +84,11 @@ static inline uint32_t bswap_32(uint32_t v)
     return ((v & 0xff000000) >> 24) | ((v & 0x00ff0000) >>  8) |
         ((v & 0x0000ff00) <<  8) | ((v & 0x000000ff) << 24);
 }
+
+static inline uint64_t bswap_64(uint64_t v)
+{
+    return ((uint64_t)bswap_32(v) << 32) | bswap_32(v >> 32);
+}
 #else
 #include <byteswap.h>
 #endif
@@ -147,10 +152,20 @@ static inline uint32_t cpu_to_be32(uint32_t v)
 {
     return v;
 }
+
+static inline uint64_t cpu_to_be64(uint64_t v)
+{
+    return v;
+}
 #else
 static inline uint32_t cpu_to_be32(uint32_t v)
 {
     return bswap_32(v);
+}
+
+static inline uint64_t cpu_to_be64(uint64_t v)
+{
+    return bswap_64(v);
 }
 #endif
 
