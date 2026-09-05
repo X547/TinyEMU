@@ -30,6 +30,7 @@
 
 #include "cutils.h"
 #include "fdt.h"
+#include "pci_host_dw.h"
 #include "pci_host_ecam.h"
 
 #define UART_REG_SIZE 0x100
@@ -302,6 +303,26 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
         }
         return new PCIHostECAMDevice(node->id != nullptr ? node->id : "pcie",
                                      bus_count, (uint64_t)mmio_size_mb << 20);
+    }
+
+    if (strcmp(type, "pci-host-designware") == 0) {
+        int mmio_size_mb;
+        const char *compatible;
+        if (!node_int_opt(node, "mmio_size", &mmio_size_mb,
+                          PCIE_DW_DEFAULT_MMIO_SIZE >> 20)) {
+            return nullptr;
+        }
+        /* Which controller this claims to be decides which driver binds to
+           it, so it is worth setting from the configuration rather than
+           being fixed here. */
+        if (vm_get_str_opt(node->props, "compatible", &compatible) < 0) {
+            return nullptr;
+        }
+        if (compatible == nullptr) {
+            compatible = PCIE_DW_DEFAULT_COMPATIBLE;
+        }
+        return new PCIHostDWDevice(node->id != nullptr ? node->id : "pcie",
+                                   compatible, (uint64_t)mmio_size_mb << 20);
     }
 
     if (strcmp(type, "virtio-block") == 0) {

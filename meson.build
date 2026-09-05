@@ -144,6 +144,7 @@ emu_sources = files(
   'json.cpp',
   'machine.cpp',
   'pci.cpp',
+  'pci_host_dw.cpp',
   'pci_host_ecam.cpp',
   'resource.cpp',
   'riscv_machine.cpp',

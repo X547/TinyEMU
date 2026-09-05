@@ -25,9 +25,10 @@
 
 #include <stdint.h>
 
-/* A PCI host bridge is the greediest device: an ECAM window, a memory
-   aperture and one line per INTx pin. */
-#define RESOURCE_MAX_PER_DEVICE 8
+/* A PCI host bridge is the greediest device: the Designware bridge takes a DBI
+   window, a configuration window, a memory aperture, one line per INTx pin and
+   one more for its MSI receiver, with a little room left over. */
+#define RESOURCE_MAX_PER_DEVICE 12
 #define ALLOCATOR_MAX_ENTRIES 128
 
 

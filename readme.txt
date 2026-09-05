@@ -141,6 +141,10 @@ Device types:
   pci-host-ecam-generic  ECAM PCIe host bridge; "bus_count" (ECAM window
                          size in MB, default 16), "mmio_size" (aperture size
                          in MB, default 256), and a nested PCI bus
+  pci-host-designware    Synopsys DesignWare PCIe root complex; "mmio_size"
+                         (aperture size in MB, default 256), "compatible"
+                         (which controller it claims to be, default
+                         "sifive,fu740-pcie"), and a nested PCI bus
   virtio-block           "file"
   virtio-9p              "file", "tag"
   virtio-net             "driver" ("user" or "tap"), "ifname" for tap
@@ -149,6 +153,20 @@ Device types:
 
 The virtio devices work on either transport: attached to the FDT bus they
 appear as virtio-mmio, and attached to a PCI bus they appear as PCI devices.
+
+The two PCI host bridges differ in more than their register layout. The ECAM
+one is a bare bus: devices sit on bus 0 and interrupt over INTx. The
+DesignWare one models a real root complex, so it has a root port of its own on
+bus 0 and devices are enumerated on bus 1 behind it, and it carries a message
+signalled interrupt receiver. Devices on a bus that has one advertise MSI-X
+and use it in preference to INTx; on a bus without one they do not offer it at
+all, because a guest that chose it would have nothing to collect the message.
+
+Which driver binds to the DesignWare bridge is decided by "compatible". The
+default names the SiFive FU740, which is what Haiku's DesignWare bus driver
+probes for. Linux's driver for that part wants clocks, resets and GPIOs that
+this machine does not model, so for Linux ask for "snps,dw-pcie" instead and
+its generic DesignWare host driver binds.
 
 MMIO addresses and interrupt lines are never written in the configuration
 file. They are allocated when the machine is built, checked against each

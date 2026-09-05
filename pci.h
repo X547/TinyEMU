@@ -60,11 +60,31 @@ public:
     virtual void SetBar(int bar_num, uint32_t addr, bool enabled) = 0;
 };
 
+/* Implemented by a host bridge that contains an MSI receiver. A message
+   signalled interrupt really is just a memory write by the device, so a bus
+   without one of these delivers it as exactly that. */
+class PCIMsiTarget {
+public:
+    virtual ~PCIMsiTarget() = default;
+
+    virtual void SendMsi(uint64_t addr, uint32_t data) = 0;
+};
+
 /* A bare PCI bus, with no host bridge attached yet. 'port_map' may be null on
    machines without a port I/O space. The caller wires the four INTx lines with
    pci_bus_set_irq(). */
 PCIBus *pci_bus_init(PhysMemoryMap *mem_map, PhysMemoryMap *port_map);
 void pci_bus_set_irq(PCIBus *b, int pin, const IRQSignal *sig);
+
+/* The bus number this bus answers configuration cycles for. Defaults to 0; a
+   bridge that puts its devices on a secondary bus sets it here. */
+void pci_bus_set_bus_num(PCIBus *b, int bus_num);
+
+/* Install the bus's MSI receiver. pci_bus_has_msi() lets a device decide
+   whether to advertise MSI-X at all: offering it on a bus where nothing would
+   ever collect the message would leave the guest with no interrupts. */
+void pci_bus_set_msi_target(PCIBus *b, PCIMsiTarget *target);
+bool pci_bus_has_msi(PCIBus *b);
 
 /* The INTx swizzle this bus applies, exposed so that a host bridge can derive
    its FDT "interrupt-map" from the very function that routes the interrupt at
@@ -86,8 +106,17 @@ void pci_register_bar(PCIDevice *d, unsigned int bar_num,
                       uint32_t size, int type, PCIBarTarget *bar_target);
 IRQSignal *pci_device_get_irq(PCIDevice *d, unsigned int irq_num);
 uint8_t *pci_device_get_dma_ptr(PCIDevice *d, uint64_t addr, bool is_rw);
+
+/* Post one MSI. Goes to the bus's PCIMsiTarget if it has one, and otherwise is
+   performed as the plain memory write it is defined to be. */
+void pci_device_send_msi(PCIDevice *d, uint64_t addr, uint32_t data);
+
 void pci_device_set_config8(PCIDevice *d, uint8_t addr, uint8_t val);
 void pci_device_set_config16(PCIDevice *d, uint8_t addr, uint16_t val);
+/* Read back a device's own configuration space. A device whose behaviour
+   depends on a register the guest writes through the generic config path (the
+   MSI-X control word, say) reads it here rather than shadowing the write. */
+uint32_t pci_device_get_config(PCIDevice *d, uint8_t addr, int size_log2);
 int pci_device_get_devfn(PCIDevice *d);
 int pci_add_capability(PCIDevice *d, const uint8_t *buf, int size);
 

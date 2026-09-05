@@ -59,6 +59,7 @@ struct PCIBus {
     PhysMemoryMap *port_map;
     uint32_t irq_state[4][8]; /* one bit per device */
     IRQSignal irq[4];
+    PCIMsiTarget *msi_target; /* null if the bridge has no MSI receiver */
 };
 
 int pci_bus_map_irq(int devfn, int irq_num)
@@ -412,6 +413,7 @@ PCIBus *pci_bus_init(PhysMemoryMap *mem_map, PhysMemoryMap *port_map)
     b->bus_num = 0;
     b->mem_map = mem_map;
     b->port_map = port_map;
+    b->msi_target = NULL;
     return b;
 }
 
@@ -419,6 +421,22 @@ void pci_bus_set_irq(PCIBus *b, int pin, const IRQSignal *sig)
 {
     assert(pin >= 0 && pin < 4);
     b->irq[pin] = *sig;
+}
+
+void pci_bus_set_bus_num(PCIBus *b, int bus_num)
+{
+    assert(bus_num >= 0 && bus_num < 256);
+    b->bus_num = bus_num;
+}
+
+void pci_bus_set_msi_target(PCIBus *b, PCIMsiTarget *target)
+{
+    b->msi_target = target;
+}
+
+bool pci_bus_has_msi(PCIBus *b)
+{
+    return b->msi_target != NULL;
 }
 
 uint32_t pci_bus_config_read(PCIBus *b, uint32_t addr, int size_log2)
@@ -439,6 +457,24 @@ uint8_t *pci_device_get_dma_ptr(PCIDevice *d, uint64_t addr, bool is_rw)
     return d->bus->mem_map->GetRamPtr(addr, is_rw);
 }
 
+void pci_device_send_msi(PCIDevice *d, uint64_t addr, uint32_t data)
+{
+    PCIBus *b = d->bus;
+
+    if (b->msi_target) {
+        b->msi_target->SendMsi(addr, data);
+        return;
+    }
+
+    /* No receiver on this bus: an MSI is architecturally a posted memory
+       write, so perform it. On a machine with no MSI controller the write
+       lands in RAM and nothing observes it, which is what the hardware would
+       do too. */
+    uint8_t *ptr = b->mem_map->GetRamPtr(addr, true);
+    if (ptr)
+        put_le32(ptr, data);
+}
+
 void pci_device_set_config8(PCIDevice *d, uint8_t addr, uint8_t val)
 {
     d->config[addr] = val;
@@ -447,6 +483,11 @@ void pci_device_set_config8(PCIDevice *d, uint8_t addr, uint8_t val)
 void pci_device_set_config16(PCIDevice *d, uint8_t addr, uint16_t val)
 {
     put_le16(&d->config[addr], val);
+}
+
+uint32_t pci_device_get_config(PCIDevice *d, uint8_t addr, int size_log2)
+{
+    return pci_device_config_read(d, addr, size_log2);
 }
 
 int pci_device_get_devfn(PCIDevice *d)

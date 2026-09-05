@@ -31,15 +31,33 @@
 #define MAX_QUEUE 8
 #define MAX_CONFIG_SPACE_SIZE 256
 
+/* Enough for one vector per queue plus the configuration change. */
+#define VIRTIO_MSIX_VECTOR_COUNT 16
+#define VIRTIO_MSIX_PBA_WORDS ((VIRTIO_MSIX_VECTOR_COUNT + 31) / 32)
+
+/* What a driver writes to a vector register to say "no interrupt", and what
+   it reads back if the device could not honour its choice. */
+#define VIRTIO_MSI_NO_VECTOR 0xffff
+
 typedef struct {
     uint32_t ready; /* 0 or 1 */
     uint32_t num;
     uint16_t last_avail_idx;
+    uint16_t msix_vector;
     virtio_phys_addr_t desc_addr;
     virtio_phys_addr_t avail_addr;
     virtio_phys_addr_t used_addr;
     bool manual_recv; /* if true, the device_recv() callback is not called */
 } QueueState;
+
+
+/* One MSI-X table entry, laid out as the guest sees it. */
+typedef struct {
+    uint32_t addr_lo;
+    uint32_t addr_hi;
+    uint32_t data;
+    uint32_t vector_ctrl; /* bit 0 masks the vector */
+} MsixEntry;
 
 class VIRTIOTransport;
 
@@ -59,6 +77,14 @@ struct VIRTIODevice: public PCIBarTarget {
     uint32_t device_features_sel = 0;
     uint32_t queue_sel = 0; /* currently selected queue */
     QueueState queue[MAX_QUEUE] {};
+
+    /* MSI-X, offered only on a bus whose bridge has somewhere to deliver a
+       message. 'msix_cap_offset' is < 0 when the capability is absent, which
+       is also how the rest of the code knows to stay on the INTx path. */
+    int msix_cap_offset = -1;
+    uint16_t config_msix_vector = VIRTIO_MSI_NO_VECTOR;
+    MsixEntry msix_table[VIRTIO_MSIX_VECTOR_COUNT] {};
+    uint32_t msix_pba[VIRTIO_MSIX_PBA_WORDS] {};
 
     /* device specific */
     uint32_t device_id = 0;
