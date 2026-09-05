@@ -1878,15 +1878,15 @@ static VirtMachine *pc_machine_init(const VirtMachineParams *p)
         const VMDriveEntry *de = &p->tab_drive[i];
 
         if (!de->device || !strcmp(de->device, "virtio")) {
-            virtio_block_init(vbus, p->tab_drive[i].block_dev);
+            virtio_block_init(vbus, p->tab_drive[i].node->block_dev);
             i++;
         } else if (!strcmp(de->device, "ide")) {
             BlockDevice *tab_bs[2];
             
-            tab_bs[0] = p->tab_drive[i++].block_dev;
+            tab_bs[0] = p->tab_drive[i++].node->block_dev;
             tab_bs[1] = NULL;
             if (i < p->drive_count)
-                tab_bs[1] = p->tab_drive[i++].block_dev;
+                tab_bs[1] = p->tab_drive[i++].node->block_dev;
             ide_init(s->port_map, 0x1f0, 0x3f6, &s->pic_irq[14], tab_bs);
             piix3_ide_init(pci_bus, piix3_devfn + 1);
         }
@@ -1894,7 +1894,7 @@ static VirtMachine *pc_machine_init(const VirtMachineParams *p)
     
     /* virtio filesystem */
     for(i = 0; i < p->fs_count; i++) {
-        virtio_9p_init(vbus, p->tab_fs[i].fs_dev,
+        virtio_9p_init(vbus, p->tab_fs[i].node->fs_dev,
                        p->tab_fs[i].tag);
     }
 
@@ -1936,8 +1936,8 @@ static VirtMachine *pc_machine_init(const VirtMachineParams *p)
     
     /* virtio net device */
     for(i = 0; i < p->eth_count; i++) {
-        virtio_net_init(vbus, p->tab_eth[i].net);
-        s->net = p->tab_eth[i].net;
+        virtio_net_init(vbus, p->tab_eth[i].node->net);
+        s->net = p->tab_eth[i].node->net;
     }
 
     if (p->files[VM_FILE_KERNEL].buf) {

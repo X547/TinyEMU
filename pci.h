@@ -60,6 +60,23 @@ public:
     virtual void SetBar(int bar_num, uint32_t addr, bool enabled) = 0;
 };
 
+/* A bare PCI bus, with no host bridge attached yet. 'port_map' may be null on
+   machines without a port I/O space. The caller wires the four INTx lines with
+   pci_bus_set_irq(). */
+PCIBus *pci_bus_init(PhysMemoryMap *mem_map, PhysMemoryMap *port_map);
+void pci_bus_set_irq(PCIBus *b, int pin, const IRQSignal *sig);
+
+/* The INTx swizzle this bus applies, exposed so that a host bridge can derive
+   its FDT "interrupt-map" from the very function that routes the interrupt at
+   run time. 'irq_num' and the result are 0-based (INTA = 0). */
+int pci_bus_map_irq(int devfn, int irq_num);
+
+/* Configuration space access by an arbitrary host bridge. 'addr' is
+   (bus << 16) | (devfn << 8) | register. */
+uint32_t pci_bus_config_read(PCIBus *b, uint32_t addr, int size_log2);
+void pci_bus_config_write(PCIBus *b, uint32_t addr, uint32_t data,
+                          int size_log2);
+
 PCIDevice *pci_register_device(PCIBus *b, const char *name, int devfn,
                                uint16_t vendor_id, uint16_t device_id,
                                uint8_t revision, uint16_t class_id);

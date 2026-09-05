@@ -61,11 +61,16 @@ struct PCIBus {
     IRQSignal irq[4];
 };
 
-static int bus_map_irq(PCIDevice *d, int irq_num)
+int pci_bus_map_irq(int devfn, int irq_num)
 {
     int slot_addend;
-    slot_addend = (d->devfn >> 3) - 1;
+    slot_addend = (devfn >> 3) - 1;
     return (irq_num + slot_addend) & 3;
+}
+
+static int bus_map_irq(PCIDevice *d, int irq_num)
+{
+    return pci_bus_map_irq(d->devfn, irq_num);
 }
 
 void PCIDevice::SetIRQ(int irq_num, int level)
@@ -401,6 +406,32 @@ static uint32_t pci_data_read(PCIBus *s, uint32_t addr, int size_log2)
     return pci_device_config_read(d, config_addr, size_log2);
 }
 
+PCIBus *pci_bus_init(PhysMemoryMap *mem_map, PhysMemoryMap *port_map)
+{
+    PCIBus *b = new PCIBus();
+    b->bus_num = 0;
+    b->mem_map = mem_map;
+    b->port_map = port_map;
+    return b;
+}
+
+void pci_bus_set_irq(PCIBus *b, int pin, const IRQSignal *sig)
+{
+    assert(pin >= 0 && pin < 4);
+    b->irq[pin] = *sig;
+}
+
+uint32_t pci_bus_config_read(PCIBus *b, uint32_t addr, int size_log2)
+{
+    return pci_data_read(b, addr, size_log2);
+}
+
+void pci_bus_config_write(PCIBus *b, uint32_t addr, uint32_t data,
+                          int size_log2)
+{
+    pci_data_write(b, addr, data, size_log2);
+}
+
 /* warning: only valid for one DEVIO page. Return NULL if no memory at
    the given address */
 uint8_t *pci_device_get_dma_ptr(PCIDevice *d, uint64_t addr, bool is_rw)
@@ -531,11 +562,8 @@ I440FXState *i440fx_init(PCIBus **pbus, int *ppiix3_devfn,
     int i;
     
     s = new I440FXState();
-    
-    b = static_cast<PCIBus *>(mallocz(sizeof(PCIBus)));
-    b->bus_num = 0;
-    b->mem_map = mem_map;
-    b->port_map = port_map;
+
+    b = pci_bus_init(mem_map, port_map);
 
     s->pic_irqs = pic_irqs;
     for(i = 0; i < 4; i++) {

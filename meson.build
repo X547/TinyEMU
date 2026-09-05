@@ -135,12 +135,17 @@ common_args = common_defines + cpp_warn_args
 
 emu_sources = files(
   'cutils.cpp',
+  'device.cpp',
+  'devices.cpp',
+  'fdt.cpp',
   'fs.cpp',
   'fs_disk.cpp',
   'iomem.cpp',
   'json.cpp',
   'machine.cpp',
   'pci.cpp',
+  'pci_host_ecam.cpp',
+  'resource.cpp',
   'riscv_machine.cpp',
   'simplefb.cpp',
   'softfp.cpp',

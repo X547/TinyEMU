@@ -82,6 +82,19 @@ int vm_get_int_opt(JSONValue obj, const char *name, int *pval, int def_val)
 }
 
 static int vm_get_str2(JSONValue obj, const char *name, const char **pstr,
+                       bool is_opt);
+
+int vm_get_str(JSONValue obj, const char *name, const char **pstr)
+{
+    return vm_get_str2(obj, name, pstr, false);
+}
+
+int vm_get_str_opt(JSONValue obj, const char *name, const char **pstr)
+{
+    return vm_get_str2(obj, name, pstr, true);
+}
+
+static int vm_get_str2(JSONValue obj, const char *name, const char **pstr,
                       bool is_opt)
 { 
     JSONValue val;
@@ -101,16 +114,6 @@ static int vm_get_str2(JSONValue obj, const char *name, const char **pstr,
     }
     *pstr = val.u.str->data;
     return 0;
-}
-
-static int vm_get_str(JSONValue obj, const char *name, const char **pstr)
-{ 
-    return vm_get_str2(obj, name, pstr, false);
-}
-
-static int vm_get_str_opt(JSONValue obj, const char *name, const char **pstr)
-{ 
-    return vm_get_str2(obj, name, pstr, true);
 }
 
 static char *strdup_null(const char *str)
@@ -208,14 +211,188 @@ static const VirtMachineClass *virt_machine_find_class(const char *machine_name)
     return NULL;
 }
 
+//#pragma mark - device tree
+
+static void free_device_list(VMDeviceNode *node)
+{
+    while (node != NULL) {
+        VMDeviceNode *next = node->next;
+        free_device_list(node->children);
+        free(node->type);
+        free(node->id);
+        free(node->filename);
+        free(node);
+        node = next;
+    }
+}
+
+void vm_walk_devices(VMDeviceNode *node, VMDeviceNodeVisitor visit,
+                     void *opaque)
+{
+    for (; node != NULL; node = node->next) {
+        visit(node, opaque);
+        vm_walk_devices(node->children, visit, opaque);
+    }
+}
+
+static int parse_bus(JSONValue bus_obj, VMDeviceNode *owner,
+                     VMDeviceNode **list_out);
+
+/* A device is { type: "...", id: "...", <device properties> }, plus an
+   optional "bus" object when the device provides one. */
+static VMDeviceNode *parse_device(JSONValue obj, VMDeviceNode *parent)
+{
+    const char *str;
+    VMDeviceNode *node;
+    JSONValue bus;
+
+    if (obj.type != JSON_OBJ) {
+        vm_error("device: object expected\n");
+        return NULL;
+    }
+
+    node = mallocz_t<VMDeviceNode>();
+    node->props = obj;
+    node->parent = parent;
+
+    if (vm_get_str(obj, "type", &str) < 0)
+        goto fail;
+    node->type = strdup(str);
+
+    if (vm_get_str_opt(obj, "id", &str) < 0)
+        goto fail;
+    node->id = strdup_null(str);
+
+    if (vm_get_str_opt(obj, "file", &str) < 0)
+        goto fail;
+    node->filename = strdup_null(str);
+
+    bus = json_object_get(obj, "bus");
+    if (!json_is_undefined(bus)) {
+        if (parse_bus(bus, node, &node->children) < 0)
+            goto fail;
+    }
+    return node;
+
+ fail:
+    free_device_list(node);
+    return NULL;
+}
+
+/* A bus is { type: "...", devices: [ ... ] }. */
+static int parse_bus(JSONValue bus_obj, VMDeviceNode *owner,
+                     VMDeviceNode **list_out)
+{
+    const char *bus_type;
+    JSONValue devices;
+    VMDeviceNode *first = NULL;
+    VMDeviceNode **tail = &first;
+    int count = 0;
+
+    *list_out = NULL;
+
+    if (bus_obj.type != JSON_OBJ) {
+        vm_error("bus: object expected\n");
+        return -1;
+    }
+    if (vm_get_str(bus_obj, "type", &bus_type) < 0)
+        return -1;
+
+    devices = json_object_get(bus_obj, "devices");
+    if (json_is_undefined(devices))
+        return 0;
+    if (devices.type != JSON_ARRAY) {
+        vm_error("%s bus: 'devices' must be an array\n", bus_type);
+        return -1;
+    }
+
+    for (int i = 0; i < devices.u.array->len; i++) {
+        VMDeviceNode *node = parse_device(json_array_get(devices, i), owner);
+        if (node == NULL) {
+            free_device_list(first);
+            return -1;
+        }
+        *tail = node;
+        tail = &node->next;
+        count++;
+    }
+    if (owner != NULL)
+        owner->child_count = count;
+    *list_out = first;
+    return 0;
+}
+
+/* Build the flat tab_* views the PC machine consumes. Only the description is
+   copied here; the back ends stay on the nodes so that opening a drive fills
+   in exactly one place. */
+static void flatten_visit(VMDeviceNode *node, void *opaque)
+{
+    VirtMachineParams *p = static_cast<VirtMachineParams *>(opaque);
+    const char *str;
+
+    if (!strcmp(node->type, "virtio-block") || !strcmp(node->type, "ide")) {
+        if (p->drive_count >= MAX_DRIVE_DEVICE) {
+            vm_error("Too many drives\n");
+            return;
+        }
+        VMDriveEntry *e = &p->tab_drive[p->drive_count++];
+        e->device = !strcmp(node->type, "ide") ? "ide" : "virtio";
+        e->filename = node->filename;
+        e->node = node;
+    } else if (!strcmp(node->type, "virtio-9p")) {
+        if (p->fs_count >= MAX_FS_DEVICE) {
+            vm_error("Too many filesystems\n");
+            return;
+        }
+        VMFSEntry *e = &p->tab_fs[p->fs_count++];
+        if (vm_get_str_opt(node->props, "tag", &str) < 0)
+            str = NULL;
+        e->tag = str;
+        e->filename = node->filename;
+        e->node = node;
+    } else if (!strcmp(node->type, "virtio-net")) {
+        if (p->eth_count >= MAX_ETH_DEVICE) {
+            vm_error("Too many ethernet interfaces\n");
+            return;
+        }
+        VMEthEntry *e = &p->tab_eth[p->eth_count++];
+        if (vm_get_str_opt(node->props, "driver", &str) < 0)
+            str = NULL;
+        e->driver = str;
+        if (vm_get_str_opt(node->props, "ifname", &str) < 0)
+            str = NULL;
+        e->ifname = str;
+        e->node = node;
+    } else if (!strcmp(node->type, "simplefb") ||
+               !strcmp(node->type, "vga")) {
+        free(p->display_device);
+        p->display_device = strdup(node->type);
+        vm_get_int_opt(node->props, "width", &p->width, 800);
+        vm_get_int_opt(node->props, "height", &p->height, 600);
+    } else if (!strcmp(node->type, "virtio-input")) {
+        if (p->input_device == NULL)
+            p->input_device = strdup("virtio");
+    } else if (!strcmp(node->type, "ps2")) {
+        free(p->input_device);
+        p->input_device = strdup("ps2");
+    }
+}
+
+static int flatten_device_tree(VirtMachineParams *p)
+{
+    vm_walk_devices(p->root_devices, flatten_visit, p);
+    return 0;
+}
+
+//#pragma mark - configuration
+
 static int virt_machine_parse_config(VirtMachineParams *p,
                                      char *config_file_str, int len)
 {
     int version, val;
     const char *tag_name, *str;
-    char buf1[256];
     JSONValue cfg, obj, el;
-    
+
     cfg = json_parse_value_len(config_file_str, len);
     if (json_is_error(cfg)) {
         vm_error("error: %s\n", json_get_error(cfg));
@@ -228,11 +405,13 @@ static int virt_machine_parse_config(VirtMachineParams *p,
     if (version != VM_CONFIG_VERSION) {
         if (version > VM_CONFIG_VERSION) {
             vm_error("The emulator is too old to run this VM: please upgrade\n");
-            return -1;
         } else {
-            vm_error("The VM configuration file is too old for this emulator version: please upgrade the VM configuration file\n");
-            return -1;
+            vm_error("This configuration file uses format version %d. Version "
+                     "%d declares devices hierarchically inside buses; see "
+                     "the sample configuration.\n",
+                     version, VM_CONFIG_VERSION);
         }
+        goto tag_fail;
     }
     
     if (vm_get_str(cfg, "machine", &str) < 0)
@@ -277,89 +456,21 @@ static int virt_machine_parse_config(VirtMachineParams *p,
         p->cmdline = cmdline_subst(str);
     }
     
-    for(;;) {
-        snprintf(buf1, sizeof(buf1), "drive%d", p->drive_count);
-        obj = json_object_get(cfg, buf1);
-        if (json_is_undefined(obj))
-            break;
-        if (p->drive_count >= MAX_DRIVE_DEVICE) {
-            vm_error("Too many drives\n");
-            return -1;
-        }
-        if (vm_get_str(obj, "file", &str) < 0)
-            goto tag_fail;
-        p->tab_drive[p->drive_count].filename = strdup(str);
-        if (vm_get_str_opt(obj, "device", &str) < 0)
-            goto tag_fail;
-        p->tab_drive[p->drive_count].device = strdup_null(str);
-        p->drive_count++;
-    }
-
-    for(;;) {
-        snprintf(buf1, sizeof(buf1), "fs%d", p->fs_count);
-        obj = json_object_get(cfg, buf1);
-        if (json_is_undefined(obj))
-            break;
-        if (p->fs_count >= MAX_DRIVE_DEVICE) {
-            vm_error("Too many filesystems\n");
-            return -1;
-        }
-        if (vm_get_str(obj, "file", &str) < 0)
-            goto tag_fail;
-        p->tab_fs[p->fs_count].filename = strdup(str);
-        if (vm_get_str_opt(obj, "tag", &str) < 0)
-            goto tag_fail;
-        if (!str) {
-            if (p->fs_count == 0)
-                strcpy(buf1, "/dev/root");
-            else
-                snprintf(buf1, sizeof(buf1), "/dev/root%d", p->fs_count);
-            str = buf1;
-        }
-        p->tab_fs[p->fs_count].tag = strdup(str);
-        p->fs_count++;
-    }
-
-    for(;;) {
-        snprintf(buf1, sizeof(buf1), "eth%d", p->eth_count);
-        obj = json_object_get(cfg, buf1);
-        if (json_is_undefined(obj))
-            break;
-        if (p->eth_count >= MAX_ETH_DEVICE) {
-            vm_error("Too many ethernet interfaces\n");
-            return -1;
-        }
-        if (vm_get_str(obj, "driver", &str) < 0)
-            goto tag_fail;
-        p->tab_eth[p->eth_count].driver = strdup(str);
-        if (!strcmp(str, "tap")) {
-            if (vm_get_str(obj, "ifname", &str) < 0)
-                goto tag_fail;
-            p->tab_eth[p->eth_count].ifname = strdup(str);
-        }
-        p->eth_count++;
-    }
-
-    p->display_device = NULL;
-    obj = json_object_get(cfg, "display0");
-    if (!json_is_undefined(obj)) {
-        if (vm_get_str(obj, "device", &str) < 0)
-            goto tag_fail;
-        p->display_device = strdup(str);
-        if (vm_get_int(obj, "width", &p->width) < 0)
-            goto tag_fail;
-        if (vm_get_int(obj, "height", &p->height) < 0)
-            goto tag_fail;
-        if (vm_get_str_opt(obj, "vga_bios", &str) < 0)
-            goto tag_fail;
-        if (str) {
-            p->files[VM_FILE_VGA_BIOS].filename = strdup(str);
-        }
-    }
-
-    if (vm_get_str_opt(cfg, "input_device", &str) < 0)
+    obj = json_object_get(cfg, "bus");
+    if (json_is_undefined(obj)) {
+        vm_error("expecting a 'bus' property describing the root bus\n");
         goto tag_fail;
-    p->input_device = strdup_null(str);
+    }
+    if (parse_bus(obj, NULL, &p->root_devices) < 0)
+        goto tag_fail;
+    if (flatten_device_tree(p) < 0)
+        goto tag_fail;
+
+    if (vm_get_str_opt(cfg, "vga_bios", &str) < 0)
+        goto tag_fail;
+    if (str) {
+        p->files[VM_FILE_VGA_BIOS].filename = strdup(str);
+    }
 
     if (vm_get_str_opt(cfg, "accel", &str) < 0)
         goto tag_fail;
@@ -383,10 +494,14 @@ static int virt_machine_parse_config(VirtMachineParams *p,
         }
         p->rtc_local_time = el.u.b;
     }
-    
-    json_free(cfg);
+
+    /* The device nodes hold JSONValues pointing into this tree, so it stays
+       alive until virt_machine_free_config(). */
+    p->cfg_json = cfg;
     return 0;
  tag_fail:
+    free_device_list(p->root_devices);
+    p->root_devices = NULL;
     json_free(cfg);
     return -1;
 }
@@ -623,31 +738,25 @@ void vm_add_cmdline(VirtMachineParams *p, const char *cmdline)
 void virt_machine_free_config(VirtMachineParams *p)
 {
     int i;
-    
+
     free(p->machine_name);
     free(p->cmdline);
     for(i = 0; i < VM_FILE_COUNT; i++) {
         free(p->files[i].filename);
         free(p->files[i].buf);
     }
-    for(i = 0; i < p->drive_count; i++) {
-        free(p->tab_drive[i].filename);
-        free(p->tab_drive[i].device);
-    }
-    for(i = 0; i < p->fs_count; i++) {
-        free(p->tab_fs[i].filename);
-        free(p->tab_fs[i].tag);
-    }
-    for(i = 0; i < p->eth_count; i++) {
-        free(p->tab_eth[i].driver);
-        free(p->tab_eth[i].ifname);
-    }
+    /* The tab_* entries only borrow their strings from the device tree and
+       from the parsed configuration, so both are released here instead. */
+    free_device_list(p->root_devices);
+    p->root_devices = NULL;
+    json_free(p->cfg_json);
+    p->cfg_json = json_undefined_new();
     free(p->input_device);
     free(p->display_device);
     free(p->cfg_filename);
 }
 
-VirtMachine *virt_machine_init(const VirtMachineParams *p)
+VirtMachine *virt_machine_init(VirtMachineParams *p)
 {
     return p->vmc->Init(p);
 }
@@ -655,4 +764,6 @@ VirtMachine *virt_machine_init(const VirtMachineParams *p)
 void virt_machine_set_defaults(VirtMachineParams *p)
 {
     memset(p, 0, sizeof(*p));
+    /* a zeroed JSONValue is a JSON_STR with a null payload, not "nothing" */
+    p->cfg_json = json_undefined_new();
 }

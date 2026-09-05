@@ -69,6 +69,10 @@ TinyEMU System Emulator by Fabrice Bellard
 3.1 Quick examples
 ------------------
 
+Note: the configuration files below are in the version 1 format, which is
+no longer supported. Use them as a source of images and write a version 2
+configuration for them; see sample-riscv64.cfg.
+
 - Use the VM images available from https://bellard.org/jslinux (no
   need to download them):
 
@@ -113,7 +117,47 @@ options are:
 Console keys:
 Press C-a x to exit the emulator, C-a h to get some help.
 
-3.3 Network usage
+3.3 Configuration file
+----------------------
+
+The configuration file is JSON with relaxed syntax (unquoted keys, trailing
+commas and /* */ comments are accepted). Format version 2 declares devices
+inside the bus they attach to; see sample-riscv64.cfg for a commented
+example.
+
+The root bus of an FDT machine is declared as:
+
+bus: { type: "fdt", devices: [ ... ] }
+
+Each entry of "devices" is an object with a "type" and whatever properties
+that type needs. A device that provides a bus of its own carries a nested
+"bus" object, so buses can be nested arbitrarily, for example
+FDT bus -> pci-host-ecam-generic -> PCI bus -> virtio device.
+
+Device types:
+
+  ns16550a               serial port; also supplies /chosen/stdout-path
+  simplefb               "width", "height"
+  pci-host-ecam-generic  ECAM PCIe host bridge; "bus_count" (ECAM window
+                         size in MB, default 16), "mmio_size" (aperture size
+                         in MB, default 256), and a nested PCI bus
+  virtio-block           "file"
+  virtio-9p              "file", "tag"
+  virtio-net             "driver" ("user" or "tap"), "ifname" for tap
+  virtio-console         uses the emulator console
+  virtio-input           "kind" ("keyboard", "mouse" or "tablet")
+
+The virtio devices work on either transport: attached to the FDT bus they
+appear as virtio-mmio, and attached to a PCI bus they appear as PCI devices.
+
+MMIO addresses and interrupt lines are never written in the configuration
+file. They are allocated when the machine is built, checked against each
+other and against the architectural ranges, and then described to the guest
+in the device tree from the values that were actually assigned. A device
+that does not fit, or a PCI aperture that would overlap something else, is
+reported instead of silently shadowing another mapping.
+
+3.4 Network usage
 -----------------
 
 The easiest way is to use the "user" mode network driver. No specific
@@ -127,16 +171,16 @@ interface and to redirect the virtual traffic to Internet thru a
 NAT. The exact configuration may depend on the Linux distribution and
 local firewall configuration.
 
-The VM configuration file must include:
+The VM configuration file must include, among the devices of a bus:
 
-eth0: { driver: "tap", ifname: "tap0" }
+{ type: "virtio-net", driver: "tap", ifname: "tap0" }
 
 and configure the network in the guest system with:
 
 ifconfig eth0 192.168.3.2
 route add -net 0.0.0.0 gw 192.168.3.1 eth0
 
-3.4 Network filesystem
+3.5 Network filesystem
 ----------------------
 
 TinyEMU supports the VirtIO 9P filesystem to access local or remote
@@ -151,7 +195,7 @@ simple web server is enough to serve the files.
 The '.preload' file gives a list of files to preload when opening a
 given file.
 
-3.5 Network block device
+3.6 Network block device
 ------------------------
 
 TinyEMU supports an HTTP block device. The disk image is split into

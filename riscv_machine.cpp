@@ -1,6 +1,6 @@
 /*
  * RISCV machine
- * 
+ *
  * Copyright (c) 2016-2017 Fabrice Bellard
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -41,6 +41,9 @@
 #include "uart.h"
 #include "virtio.h"
 #include "machine.h"
+#include "device.h"
+#include "devices.h"
+#include "fdt.h"
 
 /* RISCV machine */
 
@@ -51,6 +54,7 @@ class RISCVMachine final:
     public SerialOutput {
 public:
     PhysMemoryMap *mem_map = nullptr;
+    SystemBus *bus = nullptr;
     int max_xlen = 0;
     RISCVCPU *cpu_state = nullptr;
     uint64_t ram_size = 0;
@@ -60,15 +64,11 @@ public:
     uint64_t timecmp = 0;
     /* PLIC */
     uint32_t plic_pending_irq = 0, plic_served_irq = 0;
-    IRQSignal plic_irq[32]; /* IRQ 0 is not used */
     /* HTIF */
     uint64_t htif_tohost = 0, htif_fromhost = 0;
 
-    SerialState *serial_state = nullptr;
     VIRTIODevice *keyboard_dev = nullptr;
     VIRTIODevice *mouse_dev = nullptr;
-
-    int virtio_count = 0;
 
     ~RISCVMachine() override;
 
@@ -109,16 +109,19 @@ public:
 #define CLINT_BASE_ADDR 0x02000000
 #define CLINT_SIZE      0x000c0000
 #define HTIF_BASE_ADDR 0x40008000
-#define IDE_BASE_ADDR  0x40009000
-#define VIRTIO_BASE_ADDR 0x40010000
-#define VIRTIO_SIZE      0x1000
-#define VIRTIO_IRQ       1
+#define HTIF_SIZE      0x00001000
 #define PLIC_BASE_ADDR 0x40100000
 #define PLIC_SIZE      0x00400000
-#define FRAMEBUFFER_BASE_ADDR 0x41000000
-#define UART_BASE_ADDR 0x10000000
-#define UART_SIZE 0x100
-#define UART_IRQ 10
+
+/* Everything the configuration adds is placed in here. It is the one hole in
+   the architectural layout large enough for an ECAM window and a PCI aperture
+   as well as the MMIO devices, and it stays below 4 GB because PCI BARs are
+   32 bit. */
+#define DEVICE_WINDOW_BASE 0x10000000
+#define DEVICE_WINDOW_SIZE 0x30000000
+
+/* PLIC input lines; line 0 does not exist. */
+#define PLIC_NUM_SOURCES 32
 
 #define RTC_FREQ 1000000
 #define RTC_FREQ_DIV 16 /* arbitrary, relative to CPU freq to have a
@@ -224,22 +227,6 @@ void RISCVMachine::HtifWrite(uint32_t offset, uint32_t val, int size_log2)
     }
 }
 
-#if 0
-static void htif_poll(RISCVMachine *s)
-{
-    uint8_t buf[1];
-    int ret;
-
-    if (s->htif_fromhost == 0) {
-        ret = s->console->ReadData(buf, 1);
-        if (ret == 1) {
-            s->htif_fromhost = ((uint64_t)1 << 56) | ((uint64_t)0 << 48) |
-                buf[0];
-        }
-    }
-}
-#endif
-
 void RISCVMachine::WriteData(const uint8_t *buf, int buf_len)
 {
     if (console != nullptr) {
@@ -272,7 +259,7 @@ uint32_t RISCVMachine::ClintRead(uint32_t offset, int size_log2)
     }
     return val;
 }
- 
+
 void RISCVMachine::ClintWrite(uint32_t offset, uint32_t val, int size_log2)
 {
     RISCVMachine *m = this;
@@ -340,7 +327,7 @@ uint32_t RISCVMachine::PlicRead(uint32_t offset, int size_log2)
 void RISCVMachine::PlicWrite(uint32_t offset, uint32_t val, int size_log2)
 {
     RISCVMachine *s = this;
-    
+
     assert(size_log2 == 2);
     switch(offset) {
     case PLIC_HART_BASE + 4:
@@ -374,304 +361,38 @@ static uint8_t *get_ram_ptr(RISCVMachine *s, uint64_t paddr, bool is_rw)
 
 /* FDT machine description */
 
-#define FDT_MAGIC	0xd00dfeed
-#define FDT_VERSION	17
-
-struct fdt_header {
-    uint32_t magic;
-    uint32_t totalsize;
-    uint32_t off_dt_struct;
-    uint32_t off_dt_strings;
-    uint32_t off_mem_rsvmap;
-    uint32_t version;
-    uint32_t last_comp_version; /* <= 17 */
-    uint32_t boot_cpuid_phys;
-    uint32_t size_dt_strings;
-    uint32_t size_dt_struct;
-};
-
-struct fdt_reserve_entry {
-       uint64_t address;
-       uint64_t size;
-};
-
-#define FDT_BEGIN_NODE	1
-#define FDT_END_NODE	2
-#define FDT_PROP	3
-#define FDT_NOP		4
-#define FDT_END		9
-
-typedef struct {
-    uint32_t *tab;
-    int tab_len;
-    int tab_size;
-    int open_node_count;
-    
-    char *string_table;
-    int string_table_len;
-    int string_table_size;
-} FDTState;
-
-static FDTState *fdt_init(void)
-{
-    FDTState *s;
-    s = static_cast<FDTState *>(mallocz(sizeof(*s)));
-    return s;
-}
-
-static void fdt_alloc_len(FDTState *s, int len)
-{
-    int new_size;
-    if (unlikely(len > s->tab_size)) {
-        new_size = max_int(len, s->tab_size * 3 / 2);
-        s->tab = static_cast<uint32_t *>(realloc(s->tab, new_size * sizeof(uint32_t)));
-        s->tab_size = new_size;
-    }
-}
-
-static void fdt_put32(FDTState *s, int v)
-{
-    fdt_alloc_len(s, s->tab_len + 1);
-    s->tab[s->tab_len++] = cpu_to_be32(v);
-}
-
-/* the data is zero padded */
-static void fdt_put_data(FDTState *s, const uint8_t *data, int len)
-{
-    int len1;
-    
-    len1 = (len + 3) / 4;
-    fdt_alloc_len(s, s->tab_len + len1);
-    memcpy(s->tab + s->tab_len, data, len);
-    memset((uint8_t *)(s->tab + s->tab_len) + len, 0, -len & 3);
-    s->tab_len += len1;
-}
-
-static void fdt_begin_node(FDTState *s, const char *name)
-{
-    fdt_put32(s, FDT_BEGIN_NODE);
-    fdt_put_data(s, (uint8_t *)name, strlen(name) + 1);
-    s->open_node_count++;
-}
-
-static void fdt_begin_node_num(FDTState *s, const char *name, uint64_t n)
-{
-    char buf[256];
-    snprintf(buf, sizeof(buf), "%s@%" PRIx64, name, n);
-    fdt_begin_node(s, buf);
-}
-
-static void fdt_end_node(FDTState *s)
-{
-    fdt_put32(s, FDT_END_NODE);
-    s->open_node_count--;
-}
-
-static int fdt_get_string_offset(FDTState *s, const char *name)
-{
-    int pos, new_size, name_size, new_len;
-
-    pos = 0;
-    while (pos < s->string_table_len) {
-        if (!strcmp(s->string_table + pos, name))
-            return pos;
-        pos += strlen(s->string_table + pos) + 1;
-    }
-    /* add a new string */
-    name_size = strlen(name) + 1;
-    new_len = s->string_table_len + name_size;
-    if (new_len > s->string_table_size) {
-        new_size = max_int(new_len, s->string_table_size * 3 / 2);
-        s->string_table = static_cast<char *>(realloc(s->string_table, new_size));
-        s->string_table_size = new_size;
-    }
-    pos = s->string_table_len;
-    memcpy(s->string_table + pos, name, name_size);
-    s->string_table_len = new_len;
-    return pos;
-}
-
-static void fdt_prop(FDTState *s, const char *prop_name,
-                     const void *data, int data_len)
-{
-    fdt_put32(s, FDT_PROP);
-    fdt_put32(s, data_len);
-    fdt_put32(s, fdt_get_string_offset(s, prop_name));
-    fdt_put_data(s, static_cast<const uint8_t *>(data), data_len);
-}
-
-static void fdt_prop_tab_u32(FDTState *s, const char *prop_name,
-                             uint32_t *tab, int tab_len)
-{
-    int i;
-    fdt_put32(s, FDT_PROP);
-    fdt_put32(s, tab_len * sizeof(uint32_t));
-    fdt_put32(s, fdt_get_string_offset(s, prop_name));
-    for(i = 0; i < tab_len; i++)
-        fdt_put32(s, tab[i]);
-}
-
-static void fdt_prop_u32(FDTState *s, const char *prop_name, uint32_t val)
-{
-    fdt_prop_tab_u32(s, prop_name, &val, 1);
-}
-
-static void fdt_prop_tab_u64(FDTState *s, const char *prop_name,
-                             uint64_t v0)
-{
-    uint32_t tab[2];
-    tab[0] = v0 >> 32;
-    tab[1] = v0;
-    fdt_prop_tab_u32(s, prop_name, tab, 2);
-}
-
-static void fdt_prop_tab_u64_2(FDTState *s, const char *prop_name,
-                               uint64_t v0, uint64_t v1)
-{
-    uint32_t tab[4];
-    tab[0] = v0 >> 32;
-    tab[1] = v0;
-    tab[2] = v1 >> 32;
-    tab[3] = v1;
-    fdt_prop_tab_u32(s, prop_name, tab, 4);
-}
-
-static void fdt_prop_str(FDTState *s, const char *prop_name,
-                         const char *str)
-{
-    fdt_prop(s, prop_name, str, strlen(str) + 1);
-}
-
-/* NULL terminated string list */
-static void fdt_prop_tab_str(FDTState *s, const char *prop_name,
-                             ...)
-{
-    va_list ap;
-    int size, str_size;
-    char *ptr, *tab;
-
-    va_start(ap, prop_name);
-    size = 0;
-    for(;;) {
-        ptr = va_arg(ap, char *);
-        if (!ptr)
-            break;
-        str_size = strlen(ptr) + 1;
-        size += str_size;
-    }
-    va_end(ap);
-    
-    tab = static_cast<char *>(malloc(size));
-    va_start(ap, prop_name);
-    size = 0;
-    for(;;) {
-        ptr = va_arg(ap, char *);
-        if (!ptr)
-            break;
-        str_size = strlen(ptr) + 1;
-        memcpy(tab + size, ptr, str_size);
-        size += str_size;
-    }
-    va_end(ap);
-    
-    fdt_prop(s, prop_name, tab, size);
-    free(tab);
-}
-
-/* write the FDT to 'dst1'. return the FDT size in bytes */
-int fdt_output(FDTState *s, uint8_t *dst)
-{
-    struct fdt_header *h;
-    struct fdt_reserve_entry *re;
-    int dt_struct_size;
-    int dt_strings_size;
-    int pos;
-
-    assert(s->open_node_count == 0);
-    
-    fdt_put32(s, FDT_END);
-    
-    dt_struct_size = s->tab_len * sizeof(uint32_t);
-    dt_strings_size = s->string_table_len;
-
-    h = (struct fdt_header *)dst;
-    h->magic = cpu_to_be32(FDT_MAGIC);
-    h->version = cpu_to_be32(FDT_VERSION);
-    h->last_comp_version = cpu_to_be32(16);
-    h->boot_cpuid_phys = cpu_to_be32(0);
-    h->size_dt_strings = cpu_to_be32(dt_strings_size);
-    h->size_dt_struct = cpu_to_be32(dt_struct_size);
-
-    pos = sizeof(struct fdt_header);
-
-    h->off_dt_struct = cpu_to_be32(pos);
-    memcpy(dst + pos, s->tab, dt_struct_size);
-    pos += dt_struct_size;
-
-    /* align to 8 */
-    while ((pos & 7) != 0) {
-        dst[pos++] = 0;
-    }
-    h->off_mem_rsvmap = cpu_to_be32(pos);
-    re = (struct fdt_reserve_entry *)(dst + pos);
-    re->address = 0; /* no reserved entry */
-    re->size = 0;
-    pos += sizeof(struct fdt_reserve_entry);
-
-    h->off_dt_strings = cpu_to_be32(pos);
-    memcpy(dst + pos, s->string_table, dt_strings_size);
-    pos += dt_strings_size;
-
-    /* align to 8, just in case */
-    while ((pos & 7) != 0) {
-        dst[pos++] = 0;
-    }
-
-    h->totalsize = cpu_to_be32(pos);
-    return pos;
-}
-
-void fdt_end(FDTState *s)
-{
-    free(s->tab);
-    free(s->string_table);
-    free(s);
-}
-
 static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
                            uint64_t kernel_start, uint64_t kernel_size,
                            uint64_t initrd_start, uint64_t initrd_size,
                            const char *cmd_line)
 {
-    FDTState *s;
-    int size, max_xlen, i, cur_phandle, intc_phandle, plic_phandle;
+    FDTBuilder fdt;
+    FDTContext ctx;
+    int size, max_xlen, i;
     char isa_string[128], *q;
     uint32_t misa;
     uint32_t tab[4];
-    FBDevice *fb_dev;
-    
-    s = fdt_init();
 
-    cur_phandle = 1;
-    
-    fdt_begin_node(s, "");
-    fdt_prop_u32(s, "#address-cells", 2);
-    fdt_prop_u32(s, "#size-cells", 2);
-    fdt_prop_str(s, "compatible", "ucbbar,riscvemu-bar_dev");
-    fdt_prop_str(s, "model", "ucbbar,riscvemu-bare");
+    ctx.fdt = &fdt;
+
+    fdt.BeginNode("");
+    fdt.PropU32("#address-cells", 2);
+    fdt.PropU32("#size-cells", 2);
+    fdt.PropStr("compatible", "ucbbar,riscvemu-bar_dev");
+    fdt.PropStr("model", "ucbbar,riscvemu-bare");
 
     /* CPU list */
-    fdt_begin_node(s, "cpus");
-    fdt_prop_u32(s, "#address-cells", 1);
-    fdt_prop_u32(s, "#size-cells", 0);
-    fdt_prop_u32(s, "timebase-frequency", RTC_FREQ);
+    fdt.BeginNode("cpus");
+    fdt.PropU32("#address-cells", 1);
+    fdt.PropU32("#size-cells", 0);
+    fdt.PropU32("timebase-frequency", RTC_FREQ);
 
     /* cpu */
-    fdt_begin_node_num(s, "cpu", 0);
-    fdt_prop_str(s, "device_type", "cpu");
-    fdt_prop_u32(s, "reg", 0);
-    fdt_prop_str(s, "status", "okay");
-    fdt_prop_str(s, "compatible", "riscv");
+    fdt.BeginNodeNum("cpu", 0);
+    fdt.PropStr("device_type", "cpu");
+    fdt.PropU32("reg", 0);
+    fdt.PropStr("status", "okay");
+    fdt.PropStr("compatible", "riscv");
 
     max_xlen = m->max_xlen;
     misa = m->cpu_state->Misa();
@@ -682,135 +403,108 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
             *q++ = 'a' + i;
     }
     *q = '\0';
-    fdt_prop_str(s, "riscv,isa", isa_string);
-    
-    fdt_prop_str(s, "mmu-type", max_xlen <= 32 ? "riscv,sv32" : "riscv,sv48");
-    fdt_prop_u32(s, "clock-frequency", 2000000000);
+    fdt.PropStr("riscv,isa", isa_string);
 
-    fdt_begin_node(s, "interrupt-controller");
-    fdt_prop_u32(s, "#interrupt-cells", 1);
-    fdt_prop(s, "interrupt-controller", NULL, 0);
-    fdt_prop_str(s, "compatible", "riscv,cpu-intc");
-    intc_phandle = cur_phandle++;
-    fdt_prop_u32(s, "phandle", intc_phandle);
-    fdt_end_node(s); /* interrupt-controller */
-    
-    fdt_end_node(s); /* cpu */
-    
-    fdt_end_node(s); /* cpus */
+    fdt.PropStr("mmu-type", max_xlen <= 32 ? "riscv,sv32" : "riscv,sv48");
+    fdt.PropU32("clock-frequency", 2000000000);
 
-    fdt_begin_node_num(s, "memory", RAM_BASE_ADDR);
-    fdt_prop_str(s, "device_type", "memory");
-    tab[0] = (uint64_t)RAM_BASE_ADDR >> 32;
-    tab[1] = RAM_BASE_ADDR;
-    tab[2] = m->ram_size >> 32;
-    tab[3] = m->ram_size;
-    fdt_prop_tab_u32(s, "reg", tab, 4);
-    
-    fdt_end_node(s); /* memory */
+    fdt.BeginNode("interrupt-controller");
+    fdt.PropU32("#interrupt-cells", 1);
+    fdt.PropEmpty("interrupt-controller");
+    fdt.PropStr("compatible", "riscv,cpu-intc");
+    ctx.intc_phandle = fdt.AllocPhandle();
+    fdt.PropU32("phandle", ctx.intc_phandle);
+    fdt.EndNode(); /* interrupt-controller */
 
-    fdt_begin_node(s, "htif");
-    fdt_prop_str(s, "compatible", "ucb,htif0");
-    fdt_end_node(s); /* htif */
+    fdt.EndNode(); /* cpu */
 
-    fdt_begin_node(s, "soc");
-    fdt_prop_u32(s, "#address-cells", 2);
-    fdt_prop_u32(s, "#size-cells", 2);
-    fdt_prop_tab_str(s, "compatible",
-                     "ucbbar,riscvemu-bar-soc", "simple-bus", NULL);
-    fdt_prop(s, "ranges", NULL, 0);
+    fdt.EndNode(); /* cpus */
 
-    fdt_begin_node_num(s, "clint", CLINT_BASE_ADDR);
-    fdt_prop_str(s, "compatible", "riscv,clint0");
+    fdt.BeginNodeNum("memory", RAM_BASE_ADDR);
+    fdt.PropStr("device_type", "memory");
+    fdt.PropU64Range("reg", RAM_BASE_ADDR, m->ram_size);
+    fdt.EndNode(); /* memory */
 
-    tab[0] = intc_phandle;
+    fdt.BeginNode("htif");
+    fdt.PropStr("compatible", "ucb,htif0");
+    fdt.EndNode(); /* htif */
+
+    fdt.BeginNode("soc");
+    fdt.PropU32("#address-cells", 2);
+    fdt.PropU32("#size-cells", 2);
+    fdt.PropStrList("compatible",
+                    "ucbbar,riscvemu-bar-soc", "simple-bus", NULL);
+    fdt.PropEmpty("ranges");
+
+    fdt.BeginNodeNum("clint", CLINT_BASE_ADDR);
+    fdt.PropStr("compatible", "riscv,clint0");
+
+    tab[0] = ctx.intc_phandle;
     tab[1] = 3; /* M IPI irq */
-    tab[2] = intc_phandle;
+    tab[2] = ctx.intc_phandle;
     tab[3] = 7; /* M timer irq */
-    fdt_prop_tab_u32(s, "interrupts-extended", tab, 4);
+    fdt.PropTabU32("interrupts-extended", tab, 4);
 
-    fdt_prop_tab_u64_2(s, "reg", CLINT_BASE_ADDR, CLINT_SIZE);
-    
-    fdt_end_node(s); /* clint */
+    fdt.PropU64Range("reg", CLINT_BASE_ADDR, CLINT_SIZE);
 
-    fdt_begin_node_num(s, "plic", PLIC_BASE_ADDR);
-    fdt_prop_u32(s, "#interrupt-cells", 1);
-    fdt_prop(s, "interrupt-controller", NULL, 0);
-    fdt_prop_str(s, "compatible", "riscv,plic0");
-    fdt_prop_u32(s, "riscv,ndev", 31);
-    fdt_prop_tab_u64_2(s, "reg", PLIC_BASE_ADDR, PLIC_SIZE);
+    fdt.EndNode(); /* clint */
 
-    tab[0] = intc_phandle;
+    fdt.BeginNodeNum("plic", PLIC_BASE_ADDR);
+    fdt.PropU32("#interrupt-cells", 1);
+    /* Needed so that an "interrupt-map" naming this controller as the parent
+       has an unambiguous parent specifier length. */
+    fdt.PropU32("#address-cells", 0);
+    fdt.PropEmpty("interrupt-controller");
+    fdt.PropStr("compatible", "riscv,plic0");
+    fdt.PropU32("riscv,ndev", PLIC_NUM_SOURCES - 1);
+    fdt.PropU64Range("reg", PLIC_BASE_ADDR, PLIC_SIZE);
+
+    tab[0] = ctx.intc_phandle;
     tab[1] = 9; /* S ext irq */
-    tab[2] = intc_phandle;
+    tab[2] = ctx.intc_phandle;
     tab[3] = 11; /* M ext irq */
-    fdt_prop_tab_u32(s, "interrupts-extended", tab, 4);
+    fdt.PropTabU32("interrupts-extended", tab, 4);
 
-    plic_phandle = cur_phandle++;
-    fdt_prop_u32(s, "phandle", plic_phandle);
+    ctx.plic_phandle = fdt.AllocPhandle();
+    fdt.PropU32("phandle", ctx.plic_phandle);
 
-    fdt_end_node(s); /* plic */
+    fdt.EndNode(); /* plic */
 
-    fdt_begin_node_num(s, "serial", UART_BASE_ADDR);
-    fdt_prop_str(s, "compatible", "ns16550a");
-    fdt_prop_tab_u64_2(s, "reg", UART_BASE_ADDR, UART_SIZE);
-    tab[0] = plic_phandle;
-    tab[1] = UART_IRQ;
-    fdt_prop_tab_u32(s, "interrupts-extended", tab, 2);
-    fdt_end_node(s); /* serial */
-    
-    for(i = 0; i < m->virtio_count; i++) {
-        fdt_begin_node_num(s, "virtio", VIRTIO_BASE_ADDR + i * VIRTIO_SIZE);
-        fdt_prop_str(s, "compatible", "virtio,mmio");
-        fdt_prop_tab_u64_2(s, "reg", VIRTIO_BASE_ADDR + i * VIRTIO_SIZE,
-                           VIRTIO_SIZE);
-        tab[0] = plic_phandle;
-        tab[1] = VIRTIO_IRQ + i;
-        fdt_prop_tab_u32(s, "interrupts-extended", tab, 2);
-        fdt_end_node(s); /* virtio */
+    /* Every configured device describes itself from the resources it was
+       actually given, so the tree cannot drift from the mapping. */
+    m->bus->BuildFDTAll(ctx);
+
+    fdt.EndNode(); /* soc */
+
+    fdt.BeginNode("chosen");
+    if (ctx.stdout_path[0] != '\0') {
+        fdt.PropStr("stdout-path", ctx.stdout_path);
     }
-
-    fb_dev = m->fb_dev;
-    if (fb_dev) {
-        fdt_begin_node_num(s, "framebuffer", FRAMEBUFFER_BASE_ADDR);
-        fdt_prop_str(s, "compatible", "simple-framebuffer");
-        fdt_prop_tab_u64_2(s, "reg", FRAMEBUFFER_BASE_ADDR, fb_dev->fb_size);
-        fdt_prop_u32(s, "width", fb_dev->width);
-        fdt_prop_u32(s, "height", fb_dev->height);
-        fdt_prop_u32(s, "stride", fb_dev->stride);
-        fdt_prop_str(s, "format", "a8r8g8b8");
-        fdt_end_node(s); /* framebuffer */
-    }
-    
-    fdt_end_node(s); /* soc */
-
-    fdt_begin_node(s, "chosen");
-    fdt_prop_str(s, "stdout-path", "/soc/serial@40100000");
-    fdt_prop_str(s, "bootargs", cmd_line ? cmd_line : "");
+    fdt.PropStr("bootargs", cmd_line ? cmd_line : "");
     if (kernel_size > 0) {
-        fdt_prop_tab_u64(s, "riscv,kernel-start", kernel_start);
-        fdt_prop_tab_u64(s, "riscv,kernel-end", kernel_start + kernel_size);
+        fdt.PropU64("riscv,kernel-start", kernel_start);
+        fdt.PropU64("riscv,kernel-end", kernel_start + kernel_size);
     }
     if (initrd_size > 0) {
-        fdt_prop_tab_u64(s, "linux,initrd-start", initrd_start);
-        fdt_prop_tab_u64(s, "linux,initrd-end", initrd_start + initrd_size);
+        fdt.PropU64("linux,initrd-start", initrd_start);
+        fdt.PropU64("linux,initrd-end", initrd_start + initrd_size);
     }
-    
 
-    fdt_end_node(s); /* chosen */
-    
-    fdt_end_node(s); /* / */
+    fdt.EndNode(); /* chosen */
 
-    size = fdt_output(s, dst);
+    fdt.EndNode(); /* / */
+
+    size = fdt.Output(dst);
 #if 1
     {
         FILE *f;
         f = fopen("/tmp/riscvemu.dtb", "wb");
-        fwrite(dst, 1, size, f);
-        fclose(f);
+        if (f != NULL) {
+            fwrite(dst, 1, size, f);
+            fclose(f);
+        }
     }
 #endif
-    fdt_end(s);
     return size;
 }
 
@@ -858,9 +552,9 @@ static void copy_bios(RISCVMachine *s, const uint8_t *buf, int buf_len,
             exit(1);
         }
     }
-    
+
     ram_ptr = get_ram_ptr(s, 0, true);
-    
+
     fdt_addr = 0x1000 + 8 * 8;
 
     riscv_build_fdt(s, ram_ptr + fdt_addr,
@@ -869,7 +563,7 @@ static void copy_bios(RISCVMachine *s, const uint8_t *buf, int buf_len,
                     cmd_line);
 
     /* jump_addr = 0x80000000 */
-    
+
     q = (uint32_t *)(ram_ptr + 0x1000);
     q[0] = 0x297 + 0x80000000 - 0x1000; /* auipc t0, jump_addr */
     q[1] = 0x597; /* auipc a1, dtb */
@@ -883,13 +577,24 @@ void RISCVMachine::FlushTlbWriteRange(uint8_t *ram_addr, size_t ram_size)
     cpu_state->FlushTlbWriteRangeRam(ram_addr, ram_size);
 }
 
+/* Reserve the parts of the map the architecture fixes, so that anything the
+   configuration places is checked against them. */
+static bool riscv_claim_fixed_ranges(RISCVMachine *s)
+{
+    RangeAllocator &mmio = s->bus->MmioAlloc();
+
+    return mmio.Claim(0, LOW_RAM_SIZE, "low ram") &&
+        mmio.Claim(CLINT_BASE_ADDR, CLINT_SIZE, "clint") &&
+        mmio.Claim(HTIF_BASE_ADDR, HTIF_SIZE, "htif") &&
+        mmio.Claim(PLIC_BASE_ADDR, PLIC_SIZE, "plic") &&
+        mmio.Claim(RAM_BASE_ADDR, s->ram_size, "ram");
+}
+
 static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
 {
     RISCVMachine *s;
-    VIRTIODevice *blk_dev;
-    int irq_num, i, max_xlen, ram_flags;
-    VIRTIOBusDef vbus_s, *vbus = &vbus_s;
-
+    int max_xlen, ram_flags;
+    DeviceContext ctx;
 
     if (!strcmp(p->machine_name, "riscv32")) {
         max_xlen = 32;
@@ -901,7 +606,7 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
         vm_error("unsupported machine: %s\n", p->machine_name);
         return NULL;
     }
-    
+
     s = new RISCVMachine();
     s->vmc = p->vmc;
     s->ram_size = p->ram_size;
@@ -924,99 +629,40 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
     if (p->rtc_real_time) {
         s->rtc_start_time = rtc_get_real_time(s);
     }
-    
+
     s->mem_map->RegisterDevice(CLINT_BASE_ADDR, CLINT_SIZE, &s->fClintIo,
                                DEVIO_SIZE32);
     s->mem_map->RegisterDevice(PLIC_BASE_ADDR, PLIC_SIZE, &s->fPlicIo,
                                DEVIO_SIZE32);
-    for(i = 1; i < 32; i++) {
-        s->plic_irq[i].Init(s, i);
-    }
-
     s->mem_map->RegisterDevice(HTIF_BASE_ADDR, 16, &s->fHtifIo, DEVIO_SIZE32);
     s->console = p->console;
 
-    s->serial_state = new SerialState(s->mem_map, UART_BASE_ADDR,
-                                      &s->plic_irq[UART_IRQ], s);
-
-    memset(vbus, 0, sizeof(*vbus));
-    vbus->mem_map = s->mem_map;
-    vbus->addr = VIRTIO_BASE_ADDR;
-    irq_num = VIRTIO_IRQ;
-    
-    /* virtio console */
-    if (p->console) {
-        vbus->irq = &s->plic_irq[irq_num];
-        s->console_dev = virtio_console_init(vbus, p->console);
-        vbus->addr += VIRTIO_SIZE;
-        irq_num++;
-        s->virtio_count++;
-    }
-    
-    /* virtio net device */
-    for(i = 0; i < p->eth_count; i++) {
-        vbus->irq = &s->plic_irq[irq_num];
-        virtio_net_init(vbus, p->tab_eth[i].net);
-        s->net = p->tab_eth[i].net;
-        vbus->addr += VIRTIO_SIZE;
-        irq_num++;
-        s->virtio_count++;
+    s->bus = new SystemBus(s->mem_map, s, PLIC_NUM_SOURCES);
+    s->bus->MmioAlloc().SetWindow(DEVICE_WINDOW_BASE, DEVICE_WINDOW_SIZE);
+    if (!riscv_claim_fixed_ranges(s)) {
+        return NULL;
     }
 
-    /* virtio block device */
-    for(i = 0; i < p->drive_count; i++) {
-        vbus->irq = &s->plic_irq[irq_num];
-        blk_dev = virtio_block_init(vbus, p->tab_drive[i].block_dev);
-        (void)blk_dev;
-        vbus->addr += VIRTIO_SIZE;
-        irq_num++;
-        s->virtio_count++;
+    ctx.params = p;
+    ctx.console = p->console;
+    ctx.serial_output = s;
+
+    if (!device_build_tree(s->bus, p->root_devices, &ctx)) {
+        return NULL;
+    }
+    if (!s->bus->AllocateAll()) {
+        return NULL;
+    }
+    if (!s->bus->RealizeAll()) {
+        return NULL;
     }
 
-    /* virtio filesystem */
-    for(i = 0; i < p->fs_count; i++) {
-        VIRTIODevice *fs_dev;
-        vbus->irq = &s->plic_irq[irq_num];
-        fs_dev = virtio_9p_init(vbus, p->tab_fs[i].fs_dev,
-                                p->tab_fs[i].tag);
-        (void)fs_dev;
-        //        virtio_set_debug(fs_dev, VIRTIO_DEBUG_9P);
-        vbus->addr += VIRTIO_SIZE;
-        irq_num++;
-        s->virtio_count++;
-    }
+    s->console_dev = ctx.console_dev;
+    s->keyboard_dev = ctx.keyboard_dev;
+    s->mouse_dev = ctx.mouse_dev;
+    s->fb_dev = ctx.fb_dev;
+    s->net = ctx.net;
 
-    if (p->display_device) {
-        if (!strcmp(p->display_device, "simplefb")) {
-            s->fb_dev = simplefb_init(s->mem_map, FRAMEBUFFER_BASE_ADDR,
-                                      p->width, p->height);
-        } else {
-            vm_error("unsupported display device: %s\n", p->display_device);
-            exit(1);
-        }
-    }
-
-    if (p->input_device) {
-        if (!strcmp(p->input_device, "virtio")) {
-            vbus->irq = &s->plic_irq[irq_num];
-            s->keyboard_dev = virtio_input_init(vbus,
-                                                VIRTIO_INPUT_TYPE_KEYBOARD);
-            vbus->addr += VIRTIO_SIZE;
-            irq_num++;
-            s->virtio_count++;
-
-            vbus->irq = &s->plic_irq[irq_num];
-            s->mouse_dev = virtio_input_init(vbus,
-                                             VIRTIO_INPUT_TYPE_TABLET);
-            vbus->addr += VIRTIO_SIZE;
-            irq_num++;
-            s->virtio_count++;
-        } else {
-            vm_error("unsupported input device: %s\n", p->input_device);
-            exit(1);
-        }
-    }
-    
     if (!p->files[VM_FILE_BIOS].buf) {
         vm_error("No bios found");
     }
@@ -1025,7 +671,7 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
               p->files[VM_FILE_KERNEL].buf, p->files[VM_FILE_KERNEL].len,
               p->files[VM_FILE_INITRD].buf, p->files[VM_FILE_INITRD].len,
               p->cmdline);
-    
+
     return s;
 }
 
@@ -1033,7 +679,7 @@ RISCVMachine::~RISCVMachine()
 {
     /* XXX: stop all */
     delete cpu_state;
-    delete serial_state;
+    delete bus;
     delete mem_map;
 }
 

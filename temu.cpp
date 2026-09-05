@@ -658,11 +658,127 @@ static NetPollCompletion sNetPollCompletion;
 
 #endif
 
+/* Opening a back end needs things the configuration parser has no business
+   knowing about (block device modes, the network event loop), so it happens
+   here, once, over the same tree the machine will be built from. */
+struct BackendOpenState {
+    VirtMachineParams *p;
+    BlockDeviceModeEnum drive_mode;
+    const char *build_preload_file;
+};
+
+static void open_block_backend(VMDeviceNode *node, BackendOpenState *st)
+{
+    char *fname;
+
+    if (node->filename == nullptr) {
+        fprintf(stderr, "%s: expecting a 'file' property\n", node->type);
+        exit(1);
+    }
+    fname = get_file_path(st->p->cfg_filename, node->filename);
+#ifdef CONFIG_FS_NET
+    if (is_url(fname)) {
+        net_completed = false;
+        node->block_dev = block_device_init_http(fname, 128 * 1024,
+                                                 &sNetStartCallback);
+        /* wait until the drive is initialized */
+        fs_net_event_loop(&sNetPollCompletion);
+    } else
+#endif
+    {
+        node->block_dev = block_device_init(fname, st->drive_mode);
+    }
+    free(fname);
+    if (node->block_dev == nullptr) {
+        fprintf(stderr, "%s: could not open\n", node->filename);
+        exit(1);
+    }
+}
+
+static void open_fs_backend(VMDeviceNode *node, BackendOpenState *st)
+{
+    const char *path = node->filename;
+
+    if (path == nullptr) {
+        fprintf(stderr, "%s: expecting a 'file' property\n", node->type);
+        exit(1);
+    }
+#ifdef CONFIG_FS_NET
+    if (is_url(path)) {
+        node->fs_dev = fs_net_init(path, nullptr);
+        if (!node->fs_dev)
+            exit(1);
+        if (st->build_preload_file)
+            fs_dump_cache_load(node->fs_dev, st->build_preload_file);
+        fs_net_event_loop(nullptr);
+        return;
+    }
+#endif
+#if defined(_WIN32)
+    fprintf(stderr, "Filesystem access not supported yet\n");
+    exit(1);
+#else
+    {
+        char *fname = get_file_path(st->p->cfg_filename, path);
+        node->fs_dev = fs_disk_init(fname);
+        if (!node->fs_dev) {
+            fprintf(stderr, "%s: must be a directory\n", fname);
+            exit(1);
+        }
+        free(fname);
+    }
+#endif
+}
+
+static void open_net_backend(VMDeviceNode *node, BackendOpenState *st)
+{
+    const char *driver, *ifname;
+
+    (void)st;
+    if (vm_get_str(node->props, "driver", &driver) < 0)
+        exit(1);
+#ifdef CONFIG_SLIRP
+    if (!strcmp(driver, "user")) {
+        node->net = slirp_open();
+        if (!node->net)
+            exit(1);
+        return;
+    }
+#endif
+#if !defined(_WIN32) && !defined(__HAIKU__)
+    if (!strcmp(driver, "tap")) {
+        if (vm_get_str(node->props, "ifname", &ifname) < 0)
+            exit(1);
+        node->net = tun_open(ifname);
+        if (!node->net)
+            exit(1);
+        return;
+    }
+#else
+    (void)ifname;
+#endif
+    fprintf(stderr, "Unsupported network driver '%s'\n", driver);
+    exit(1);
+}
+
+static void open_device_backend(VMDeviceNode *node, void *opaque)
+{
+    BackendOpenState *st = static_cast<BackendOpenState *>(opaque);
+
+    if (!strcmp(node->type, "virtio-block") || !strcmp(node->type, "ide")) {
+        open_block_backend(node, st);
+    } else if (!strcmp(node->type, "virtio-9p")) {
+        open_fs_backend(node, st);
+    } else if (!strcmp(node->type, "virtio-net")) {
+        open_net_backend(node, st);
+    }
+}
+
 int main(int argc, char **argv)
 {
     VirtMachine *s;
     const char *path, *cmdline, *build_preload_file;
-    int c, option_index, i, ram_size, accel_enable;
+    int c, option_index, ram_size, accel_enable;
     bool allow_ctrlc;
     BlockDeviceModeEnum drive_mode;
     VirtMachineParams p_s, *p = &p_s;
@@ -742,80 +858,14 @@ int main(int argc, char **argv)
     }
     
     /* open the files & devices */
-    for(i = 0; i < p->drive_count; i++) {
-        BlockDevice *drive;
-        char *fname;
-        fname = get_file_path(p->cfg_filename, p->tab_drive[i].filename);
-#ifdef CONFIG_FS_NET
-        if (is_url(fname)) {
-            net_completed = false;
-            drive = block_device_init_http(fname, 128 * 1024,
-                                           &sNetStartCallback);
-            /* wait until the drive is initialized */
-            fs_net_event_loop(&sNetPollCompletion);
-        } else
-#endif
-        {
-            drive = block_device_init(fname, drive_mode);
-        }
-        free(fname);
-        p->tab_drive[i].block_dev = drive;
+    {
+        BackendOpenState st;
+        st.p = p;
+        st.drive_mode = drive_mode;
+        st.build_preload_file = build_preload_file;
+        vm_walk_devices(p->root_devices, open_device_backend, &st);
     }
 
-    for(i = 0; i < p->fs_count; i++) {
-        FSDevice *fs;
-        const char *path;
-        path = p->tab_fs[i].filename;
-#ifdef CONFIG_FS_NET
-        if (is_url(path)) {
-            fs = fs_net_init(path, nullptr);
-            if (!fs)
-                exit(1);
-            if (build_preload_file)
-                fs_dump_cache_load(fs, build_preload_file);
-            fs_net_event_loop(nullptr);
-        } else
-#endif
-        {
-#if defined(_WIN32)
-            fprintf(stderr, "Filesystem access not supported yet\n");
-            exit(1);
-#else
-            char *fname;
-            fname = get_file_path(p->cfg_filename, path);
-            fs = fs_disk_init(fname);
-            if (!fs) {
-                fprintf(stderr, "%s: must be a directory\n", fname);
-                exit(1);
-            }
-            free(fname);
-#endif
-        }
-        p->tab_fs[i].fs_dev = fs;
-    }
-
-    for(i = 0; i < p->eth_count; i++) {
-#ifdef CONFIG_SLIRP
-        if (!strcmp(p->tab_eth[i].driver, "user")) {
-            p->tab_eth[i].net = slirp_open();
-            if (!p->tab_eth[i].net)
-                exit(1);
-        } else
-#endif
-#if !defined(_WIN32) && !defined(__HAIKU__)
-        if (!strcmp(p->tab_eth[i].driver, "tap")) {
-            p->tab_eth[i].net = tun_open(p->tab_eth[i].ifname);
-            if (!p->tab_eth[i].net)
-                exit(1);
-        } else
-#endif
-        {
-            fprintf(stderr, "Unsupported network driver '%s'\n",
-                    p->tab_eth[i].driver);
-            exit(1);
-        }
-    }
-    
 #ifdef CONFIG_SDL
     if (p->display_device) {
         sdl_init(p->width, p->height);

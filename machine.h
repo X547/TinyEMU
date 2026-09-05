@@ -23,7 +23,21 @@
  */
 #pragma once
 
+#include <stdint.h>
+
 #include "json.h"
+
+/* This header is included both by the machines, which have already pulled in
+   iomem.h/virtio.h, and by the bus and resource code, which has not. */
+class BlockDevice;
+class CharacterDevice;
+class EthernetDevice;
+class FSDevice;
+class PhysMemoryMap;
+class StartCallback;
+struct PCIBus;
+struct PhysMemoryRange;
+struct VIRTIODevice;
 
 class FBDevice;
 
@@ -54,7 +68,7 @@ public:
 #define MAX_FS_DEVICE 4
 #define MAX_ETH_DEVICE 1
 
-#define VM_CONFIG_VERSION 1
+#define VM_CONFIG_VERSION 2
 
 typedef enum {
     VM_FILE_BIOS,
@@ -71,26 +85,56 @@ typedef struct {
     int len;
 } VMFileEntry;
 
+typedef struct VMDeviceNode VMDeviceNode;
+
+/* Flattened views of the device tree, for machines whose topology is fixed
+   and which therefore do not walk the tree themselves. The strings are
+   borrowed from the tree or from the parsed configuration, and the back end
+   lives on the node so that there is only ever one copy of it. */
 typedef struct {
-    char *device;
-    char *filename;
-    BlockDevice *block_dev;
+    const char *device;
+    const char *filename;
+    VMDeviceNode *node;
 } VMDriveEntry;
 
 typedef struct {
-    char *device;
-    char *tag; /* 9p mount tag */
-    char *filename;
-    FSDevice *fs_dev;
+    const char *tag; /* 9p mount tag */
+    const char *filename;
+    VMDeviceNode *node;
 } VMFSEntry;
 
 typedef struct {
-    char *driver;
-    char *ifname;
-    EthernetDevice *net;
+    const char *driver;
+    const char *ifname;
+    VMDeviceNode *node;
 } VMEthEntry;
 
 typedef struct VirtMachineClass VirtMachineClass;
+
+/* One node of the configuration's device tree. A node that declares child
+   devices provides a bus; the nesting in the config file is the nesting of
+   the buses in the machine.
+
+   'props' points into the parsed configuration, which VirtMachineParams keeps
+   alive for as long as the tree exists. The back end pointers are filled in
+   between parsing and machine construction, by whoever can open files and
+   sockets. */
+struct VMDeviceNode {
+    char *type;
+    char *id;
+    JSONValue props;
+
+    VMDeviceNode *parent;
+    VMDeviceNode *next; /* next sibling */
+    VMDeviceNode *children;
+    int child_count;
+
+    /* resolved back ends */
+    char *filename;
+    BlockDevice *block_dev;
+    FSDevice *fs_dev;
+    EthernetDevice *net;
+};
 
 typedef struct {
     char *cfg_filename;
@@ -112,7 +156,15 @@ typedef struct {
     char *cmdline; /* bios or kernel command line */
     bool accel_enable; /* enable acceleration (KVM) */
     char *input_device; /* NULL means no input */
-    
+
+    /* The device tree the configuration declares. Machines that describe
+       themselves to the guest (RISC-V/FDT) build directly from this; the PC
+       machine, whose topology is fixed, uses the flattened tab_* views
+       above. */
+    VMDeviceNode *root_devices;
+    /* the parsed configuration, kept alive because the nodes point into it */
+    JSONValue cfg_json;
+
     /* kernel, bios and other auxiliary files */
     VMFileEntry files[VM_FILE_COUNT];
 } VirtMachineParams;
@@ -157,6 +209,13 @@ extern const VirtMachineClass &gPcMachineClass;
 void __attribute__((format(printf, 1, 2))) vm_error(const char *fmt, ...);
 int vm_get_int(JSONValue obj, const char *name, int *pval);
 int vm_get_int_opt(JSONValue obj, const char *name, int *pval, int def_val);
+int vm_get_str(JSONValue obj, const char *name, const char **pstr);
+int vm_get_str_opt(JSONValue obj, const char *name, const char **pstr);
+
+/* Depth first walk over the configuration's device tree. */
+typedef void (*VMDeviceNodeVisitor)(VMDeviceNode *node, void *opaque);
+void vm_walk_devices(VMDeviceNode *node, VMDeviceNodeVisitor visit,
+                     void *opaque);
 
 void virt_machine_set_defaults(VirtMachineParams *p);
 void virt_machine_load_config_file(VirtMachineParams *p,
@@ -165,7 +224,7 @@ void virt_machine_load_config_file(VirtMachineParams *p,
 void vm_add_cmdline(VirtMachineParams *p, const char *cmdline);
 char *get_file_path(const char *base_filename, const char *filename);
 void virt_machine_free_config(VirtMachineParams *p);
-VirtMachine *virt_machine_init(const VirtMachineParams *p);
+VirtMachine *virt_machine_init(VirtMachineParams *p);
 
 /* gui */
 void sdl_refresh(VirtMachine *m);
