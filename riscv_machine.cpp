@@ -51,6 +51,7 @@ class RISCVMachine final:
     public VirtMachine,
     public IRQTarget,
     public TlbFlushTarget,
+    public RtcTimeSource,
     public SerialOutput {
 public:
     PhysMemoryMap *mem_map = nullptr;
@@ -93,6 +94,9 @@ public:
     /* TlbFlushTarget */
     void FlushTlbWriteRange(uint8_t *ram_addr, size_t ram_size) override;
 
+    /* RtcTimeSource */
+    uint64_t RtcTime() override;
+
     /* SerialOutput */
     void WriteData(const uint8_t *buf, int buf_len) override;
 
@@ -107,7 +111,11 @@ public:
 #define LOW_RAM_SIZE   0x00010000 /* 64KB */
 #define RAM_BASE_ADDR  0x80000000
 #define CLINT_BASE_ADDR 0x02000000
-#define CLINT_SIZE      0x000c0000
+/* The size of a SiFive CLINT. It must be exactly this: firmware splits the
+   region into its ACLINT MSWI and MTIMER halves by size, so declaring a
+   larger one moves mtimecmp somewhere this CLINT does not decode and the
+   timer silently never fires. */
+#define CLINT_SIZE      0x00010000
 #define HTIF_BASE_ADDR 0x40008000
 #define HTIF_SIZE      0x00001000
 #define PLIC_BASE_ADDR 0x40100000
@@ -241,6 +249,9 @@ uint32_t RISCVMachine::ClintRead(uint32_t offset, int size_log2)
 
     assert(size_log2 == 2);
     switch(offset) {
+    case 0: /* msip for hart 0 */
+        val = (m->cpu_state->Mip() & MIP_MSIP) != 0;
+        break;
     case 0xbff8:
         val = rtc_get_time(m);
         break;
@@ -266,6 +277,13 @@ void RISCVMachine::ClintWrite(uint32_t offset, uint32_t val, int size_log2)
 
     assert(size_log2 == 2);
     switch(offset) {
+    case 0: /* msip for hart 0: a software interrupt to this hart */
+        if (val & 1) {
+            m->cpu_state->SetMip(MIP_MSIP);
+        } else {
+            m->cpu_state->ResetMip(MIP_MSIP);
+        }
+        break;
     case 0x4000:
         m->timecmp = (m->timecmp & ~0xffffffff) | val;
         m->cpu_state->ResetMip(MIP_MTIP);
@@ -398,9 +416,25 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
     misa = m->cpu_state->Misa();
     q = isa_string;
     q += snprintf(isa_string, sizeof(isa_string), "rv%d", max_xlen);
-    for(i = 0; i < 26; i++) {
-        if (misa & (1 << i))
-            *q++ = 'a' + i;
+    /* The single letter extensions must appear in the canonical order given
+       by the ISA specification, not in misa bit order: Linux rejects a hart
+       whose riscv,isa does not begin with "rv<xlen>ima" and refuses to boot.
+       Any bit outside the canonical list is appended afterwards so that no
+       extension is silently dropped. */
+    {
+        static const char canonical[] = "iemafdgqlcbkjtpvnhsu";
+        uint32_t emitted = 0;
+        for (const char *p = canonical; *p != '\0'; p++) {
+            uint32_t bit = 1 << (*p - 'a');
+            if (misa & bit) {
+                *q++ = *p;
+                emitted |= bit;
+            }
+        }
+        for(i = 0; i < 26; i++) {
+            if ((misa & (1 << i)) && !(emitted & (1 << i)))
+                *q++ = 'a' + i;
+        }
     }
     *q = '\0';
     fdt.PropStr("riscv,isa", isa_string);
@@ -572,6 +606,11 @@ static void copy_bios(RISCVMachine *s, const uint8_t *buf, int buf_len,
     q[4] = 0x00028067; /* jalr zero, t0, jump_addr */
 }
 
+uint64_t RISCVMachine::RtcTime()
+{
+    return rtc_get_time(this);
+}
+
 void RISCVMachine::FlushTlbWriteRange(uint8_t *ram_addr, size_t ram_size)
 {
     cpu_state->FlushTlbWriteRangeRam(ram_addr, ram_size);
@@ -629,6 +668,8 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
     if (p->rtc_real_time) {
         s->rtc_start_time = rtc_get_real_time(s);
     }
+    /* the 'time' CSR must read the same counter as the CLINT */
+    s->cpu_state->SetRtcTimeSource(s);
 
     s->mem_map->RegisterDevice(CLINT_BASE_ADDR, CLINT_SIZE, &s->fClintIo,
                                DEVIO_SIZE32);

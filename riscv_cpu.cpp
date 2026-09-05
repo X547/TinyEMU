@@ -122,6 +122,16 @@ static const char *reg_name[32] = {
 "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6"
 };
 
+/* The machine supplies the counter so that the 'time' CSR agrees with the
+   timer device; without one, fall back to the host clock. */
+static uint64_t riscv_cpu_rtc_time(RISCVCPUState *s)
+{
+    if (s->rtc_time_source != nullptr) {
+        return s->rtc_time_source->RtcTime();
+    }
+    return get_system_time();
+}
+
 static void dump_regs(RISCVCPUState *s)
 {
     int i, cols;
@@ -757,13 +767,13 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
         val = (int64_t)s->insn_counter;
         break;
     case 0xc01: /* utime */
-        val = get_system_time();
+        val = riscv_cpu_rtc_time(s);
         break;
     case 0xc81: /* utimeh */
         /* RV32 reads the 64 bit time counter as two halves */
         if (s->cur_xlen != 32)
             goto invalid_csr;
-        val = get_system_time() >> 32;
+        val = riscv_cpu_rtc_time(s) >> 32;
         break;
     case 0xc80: /* mcycleh */
     case 0xc82: /* minstreth */
@@ -1406,6 +1416,11 @@ bool RISCVCPUState::PowerDown()
 uint32_t RISCVCPUState::Misa()
 {
     return glue(riscv_cpu_get_misa, MAX_XLEN)(this);
+}
+
+void RISCVCPUState::SetRtcTimeSource(RtcTimeSource *source)
+{
+    rtc_time_source = source;
 }
 
 void RISCVCPUState::FlushTlbWriteRangeRam(uint8_t *ram_ptr, size_t ram_size)

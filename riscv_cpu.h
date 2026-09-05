@@ -41,6 +41,18 @@
 #define MIP_HEIP (1 << 10)
 #define MIP_MEIP (1 << 11)
 
+/* Supplies the machine's real time counter. The 'time' CSR and the timer
+   device the firmware programs must read the same counter: firmware computes
+   a deadline as "now + delta" from one and writes it to the other, so two
+   clocks with different origins put every deadline arbitrarily far away. */
+class RtcTimeSource {
+public:
+    virtual ~RtcTimeSource() = default;
+
+    virtual uint64_t RtcTime() = 0;
+};
+
+
 /* One implementation per supported XLEN; riscv_cpu.cpp is compiled once for
    each and each build keeps its implementation class internal. */
 class RISCVCPU {
@@ -55,6 +67,7 @@ public:
     virtual bool PowerDown() = 0;
     virtual uint32_t Misa() = 0;
     virtual void FlushTlbWriteRangeRam(uint8_t *ram_ptr, size_t ram_size) = 0;
+    virtual void SetRtcTimeSource(RtcTimeSource *source) = 0;
 };
 
 int riscv_cpu_get_max_xlen(void);

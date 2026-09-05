@@ -193,6 +193,8 @@ struct RISCVCPUState: public RISCVCPU {
     uint64_t insn_counter;
     bool power_down_flag;
     int pending_exception; /* used during MMU exception handling */
+    /* the machine's real time counter, shared with its timer device */
+    RtcTimeSource *rtc_time_source;
     target_ulong pending_tval;
     
     /* CSRs */
@@ -238,6 +240,7 @@ struct RISCVCPUState: public RISCVCPU {
     bool PowerDown() override;
     uint32_t Misa() override;
     void FlushTlbWriteRangeRam(uint8_t *ram_ptr, size_t ram_size) override;
+    void SetRtcTimeSource(RtcTimeSource *source) override;
 };
 
 #define target_read_slow glue(glue(riscv, MAX_XLEN), _read_slow)
