@@ -132,6 +132,29 @@ static uint64_t riscv_cpu_rtc_time(RISCVCPUState *s)
     return get_system_time();
 }
 
+static void set_mip(RISCVCPUState *s, uint32_t mask)
+{
+    s->mip |= mask;
+    /* exit from power down if an interrupt is pending */
+    if (s->power_down_flag && (s->mip & s->mie) != 0)
+        s->power_down_flag = false;
+}
+
+/* Sstc drives STIP from the stimecmp comparator instead of leaving it to the
+   execution environment. Returns when the next interrupt falls due, or
+   UINT64_MAX when the comparator is not in charge or has already fired. */
+static uint64_t update_stimer(RISCVCPUState *s)
+{
+    if (!(s->menvcfg & MENVCFG_STCE))
+        return UINT64_MAX;
+    if (riscv_cpu_rtc_time(s) >= s->stimecmp) {
+        set_mip(s, MIP_STIP);
+        return UINT64_MAX;
+    }
+    s->mip &= ~MIP_STIP;
+    return s->stimecmp;
+}
+
 static void dump_regs(RISCVCPUState *s)
 {
     int i, cols;
@@ -314,11 +337,20 @@ static int get_phys_addr(RISCVCPUState *s,
         vaddr_mask = ((target_ulong)1 << vaddr_shift) - 1;
         if ((paddr & vaddr_mask) != 0)
             return -1;
-        /* the A and D bits are never set by hardware: a page whose bits do
-           not already permit the access faults and lets software set them */
+        /* Svadu updates the A and D bits in place; without it the access
+           faults and software sets them */
         if (!(pte & PTE_A_MASK) ||
-            (!(pte & PTE_D_MASK) && access == ACCESS_WRITE))
-            return -1;
+            (!(pte & PTE_D_MASK) && access == ACCESS_WRITE)) {
+            if (!(s->menvcfg & MENVCFG_ADUE))
+                return -1;
+            pte |= PTE_A_MASK;
+            if (access == ACCESS_WRITE)
+                pte |= PTE_D_MASK;
+            if (pte_size_log2 == 2)
+                phys_write_u32(s, pte_addr, pte);
+            else
+                phys_write_u64(s, pte_addr, pte);
+        }
         *ppaddr = (vaddr & vaddr_mask) | (paddr  & ~vaddr_mask);
         return 0;
     }
@@ -637,6 +669,9 @@ static void tlb_flush_all(RISCVCPUState *s)
     tlb_init(s);
 }
 
+/* Entries are cached per 4 KiB page with no record of the page size they came
+   from, so a superpage is spread over many slots and there is no way to find
+   the rest of them from one address. Everything goes. */
 static void tlb_flush_vaddr(RISCVCPUState *s, target_ulong vaddr)
 {
     tlb_flush_all(s);
@@ -684,9 +719,21 @@ static void glue(riscv_cpu_flush_tlb_write_range_ram,
 /* cycle, time and insn counters */
 #define COUNTEREN_MASK ((1 << 0) | (1 << 1) | (1 << 2))
 
+/* the time counter cannot be inhibited, and the event counters are hardwired
+   to zero, so only mcycle and minstret answer to mcountinhibit */
+#define MCOUNTINHIBIT_CY (1 << 0)
+#define MCOUNTINHIBIT_IR (1 << 2)
+#define MCOUNTINHIBIT_MASK (MCOUNTINHIBIT_CY | MCOUNTINHIBIT_IR)
+
 /* every synchronous cause that can be taken in a mode below M. Machine ECALL
    (11), double trap (16) and the reserved causes 10 and 14 are read-only 0 */
 #define MEDELEG_MASK 0x0000b3ff
+
+/* FIOM is settable in both environment configuration registers; ADUE and STCE
+   come with Svadu and Sstc. The remaining fields belong to extensions this
+   implementation does not provide and stay read-only zero. */
+#define MENVCFG_MASK (ENVCFG_FIOM | MENVCFG_ADUE | MENVCFG_STCE)
+#define SENVCFG_MASK (ENVCFG_FIOM)
 
 /* return the complete mstatus with the SD bit */
 static target_ulong get_mstatus(RISCVCPUState *s, target_ulong mask)
@@ -759,28 +806,44 @@ static bool counter_accessible(RISCVCPUState *s, int counter)
 
 static uint64_t get_mcycle(RISCVCPUState *s)
 {
-    return s->insn_counter + s->mcycle_offset;
+    if (s->mcountinhibit & MCOUNTINHIBIT_CY)
+        return s->mcycle_base;
+    return s->insn_counter + s->mcycle_base;
 }
 
 static uint64_t get_minstret(RISCVCPUState *s)
 {
-    return s->insn_counter + s->minstret_offset;
+    if (s->mcountinhibit & MCOUNTINHIBIT_IR)
+        return s->minstret_base;
+    return s->insn_counter + s->minstret_base;
 }
 
 static void set_mcycle(RISCVCPUState *s, uint64_t val)
 {
-    s->mcycle_offset = val - s->insn_counter;
+    if (s->mcountinhibit & MCOUNTINHIBIT_CY)
+        s->mcycle_base = val;
+    else
+        s->mcycle_base = val - s->insn_counter;
 }
 
 static void set_minstret(RISCVCPUState *s, uint64_t val)
 {
-    s->minstret_offset = val - s->insn_counter;
+    if (s->mcountinhibit & MCOUNTINHIBIT_IR)
+        s->minstret_base = val;
+    else
+        s->minstret_base = val - s->insn_counter;
 }
 
-/* the counters are 64 bit whatever XLEN is, so RV32 writes one half at a
-   time and leaves the other one alone */
-static uint64_t counter_written(RISCVCPUState *s, uint64_t old_val,
-                                target_ulong val, bool high)
+/* menvcfg.STCE hands stimecmp to S-mode; without it only M-mode may touch it */
+static bool stimecmp_accessible(RISCVCPUState *s)
+{
+    return s->priv >= PRV_M || (s->menvcfg & MENVCFG_STCE) != 0;
+}
+
+/* some CSRs are 64 bit whatever XLEN is, so RV32 writes one half at a time
+   through a companion CSR and leaves the other one alone */
+static uint64_t csr64_written(RISCVCPUState *s, uint64_t old_val,
+                              target_ulong val, bool high)
 {
     if (s->cur_xlen != 32)
         return val;
@@ -888,6 +951,19 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
     case 0x144: /* sip */
         val = s->mip & s->mideleg;
         break;
+    case 0x10a: /* senvcfg */
+        val = s->senvcfg;
+        break;
+    case 0x14d: /* stimecmp */
+        if (!stimecmp_accessible(s))
+            goto invalid_csr;
+        val = s->stimecmp;
+        break;
+    case 0x15d: /* stimecmph */
+        if (s->cur_xlen != 32 || !stimecmp_accessible(s))
+            goto invalid_csr;
+        val = s->stimecmp >> 32;
+        break;
     case 0x180:
         if (s->priv < PRV_M && (s->mstatus & MSTATUS_TVM))
             goto invalid_csr;
@@ -915,6 +991,14 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
     case 0x306:
         val = s->mcounteren;
         break;
+    case 0x30a: /* menvcfg */
+        val = s->menvcfg;
+        break;
+    case 0x31a: /* menvcfgh */
+        if (s->cur_xlen != 32)
+            goto invalid_csr;
+        val = s->menvcfg >> 32;
+        break;
     case 0x340:
         val = s->mscratch;
         break;
@@ -936,6 +1020,9 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
         if (s->cur_xlen != 32)
             goto invalid_csr;
         val = 0;
+        break;
+    case 0x320: /* mcountinhibit */
+        val = s->mcountinhibit;
         break;
     case 0x323 ... 0x33f: /* mhpmevent3..31 */
         val = 0; /* the event counters are hardwired to zero */
@@ -976,6 +1063,7 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
     case 0xf11: /* mvendorid */
     case 0xf12: /* marchid */
     case 0xf13: /* mimpid */
+    case 0xf15: /* mconfigptr */
         val = 0;
         break;
     case 0xf14:
@@ -1074,6 +1162,21 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
         mask = s->mideleg & MIP_SSIP;
         s->mip = (s->mip & ~mask) | (val & mask);
         break;
+    case 0x10a: /* senvcfg */
+        s->senvcfg = val & SENVCFG_MASK;
+        break;
+    case 0x14d: /* stimecmp */
+        if (!stimecmp_accessible(s))
+            return -1;
+        s->stimecmp = csr64_written(s, s->stimecmp, val, false);
+        update_stimer(s);
+        break;
+    case 0x15d: /* stimecmph */
+        if (s->cur_xlen != 32 || !stimecmp_accessible(s))
+            return -1;
+        s->stimecmp = csr64_written(s, s->stimecmp, val, true);
+        update_stimer(s);
+        break;
     case 0x180:
         if (s->priv < PRV_M && (s->mstatus & MSTATUS_TVM))
             return -1;
@@ -1090,7 +1193,8 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
             int mode, new_mode;
             mode = s->satp >> 60;
             new_mode = (val >> 60) & 0xf;
-            if (new_mode == 0 || (new_mode >= 8 && new_mode <= 9))
+            /* bare, or Sv39 through Sv57 */
+            if (new_mode == 0 || (new_mode >= 8 && new_mode <= 10))
                 mode = new_mode;
             s->satp = (val & (((uint64_t)1 << 44) - 1)) |
                 ((uint64_t)mode << 60);
@@ -1138,6 +1242,16 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
     case 0x306:
         s->mcounteren = val & COUNTEREN_MASK;
         break;
+    case 0x30a: /* menvcfg */
+    case 0x31a: /* menvcfgh */
+        if (csr == 0x31a && s->cur_xlen != 32)
+            return -1;
+        s->menvcfg = csr64_written(s, s->menvcfg, val, csr == 0x31a) &
+            MENVCFG_MASK;
+        update_stimer(s);
+        /* ADUE changes how the A and D bits of every PTE are interpreted */
+        tlb_flush_all(s);
+        return 2;
     case 0x340:
         s->mscratch = val;
         break;
@@ -1151,13 +1265,27 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
         s->mtval = val;
         break;
     case 0x344:
-        mask = MIP_SSIP | MIP_STIP;
+        /* with Sstc enabled STIP belongs to the stimecmp comparator */
+        mask = MIP_SSIP;
+        if (!(s->menvcfg & MENVCFG_STCE))
+            mask |= MIP_STIP;
         s->mip = (s->mip & ~mask) | (val & mask);
         break;
     case 0x310: /* mstatush */
         if (s->cur_xlen != 32)
             return -1;
         /* only MBE/SBE live here and this implementation is little endian */
+        break;
+    case 0x320: /* mcountinhibit */
+        {
+            /* read both counters under the old setting and put them back
+               under the new one, so that freezing and thawing preserve them */
+            uint64_t cycle = get_mcycle(s);
+            uint64_t instret = get_minstret(s);
+            s->mcountinhibit = val & MCOUNTINHIBIT_MASK;
+            set_mcycle(s, cycle);
+            set_minstret(s, instret);
+        }
         break;
     case 0x323 ... 0x33f: /* mhpmevent3..31 */
         /* the event counters are hardwired to zero */
@@ -1169,22 +1297,22 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
         /* not implemented */
         break;
     case 0xb00: /* mcycle */
-        set_mcycle(s, counter_written(s, get_mcycle(s), val, false));
+        set_mcycle(s, csr64_written(s, get_mcycle(s), val, false));
         break;
     case 0xb02: /* minstret */
-        set_minstret(s, counter_written(s, get_minstret(s), val, false));
+        set_minstret(s, csr64_written(s, get_minstret(s), val, false));
         break;
     case 0xb03 ... 0xb1f: /* mhpmcounter3..31 */
         break;
     case 0xb80: /* mcycleh */
         if (s->cur_xlen != 32)
             return -1;
-        set_mcycle(s, counter_written(s, get_mcycle(s), val, true));
+        set_mcycle(s, csr64_written(s, get_mcycle(s), val, true));
         break;
     case 0xb82: /* minstreth */
         if (s->cur_xlen != 32)
             return -1;
-        set_minstret(s, counter_written(s, get_minstret(s), val, true));
+        set_minstret(s, csr64_written(s, get_minstret(s), val, true));
         break;
     case 0xb83 ... 0xb9f: /* mhpmcounter3..31h */
         if (s->cur_xlen != 32)
@@ -1465,10 +1593,7 @@ static uint64_t glue(riscv_cpu_get_cycles, MAX_XLEN)(RISCVCPUState *s)
 
 static void glue(riscv_cpu_set_mip, MAX_XLEN)(RISCVCPUState *s, uint32_t mask)
 {
-    s->mip |= mask;
-    /* exit from power down if an interrupt is pending */
-    if (s->power_down_flag && (s->mip & s->mie) != 0)
-        s->power_down_flag = false;
+    set_mip(s, mask);
 }
 
 static void glue(riscv_cpu_reset_mip, MAX_XLEN)(RISCVCPUState *s, uint32_t mask)
@@ -1498,6 +1623,9 @@ static RISCVCPUState *glue(riscv_cpu_init, MAX_XLEN)(PhysMemoryMap *mem_map)
     s->mxl = get_base_from_xlen(MAX_XLEN);
     s->mstatus = ((uint64_t)s->mxl << MSTATUS_UXL_SHIFT) |
         ((uint64_t)s->mxl << MSTATUS_SXL_SHIFT);
+    /* the comparator starts beyond any reachable time so that enabling Sstc
+       does not immediately post a timer interrupt */
+    s->stimecmp = UINT64_MAX;
     s->misa |= MCPUID_SUPER | MCPUID_USER | MCPUID_I | MCPUID_M | MCPUID_A;
 #if FLEN >= 32
     s->misa |= MCPUID_F;
@@ -1545,6 +1673,11 @@ void RISCVCPUState::ResetMip(uint32_t mask)
 uint32_t RISCVCPUState::Mip()
 {
     return glue(riscv_cpu_get_mip, MAX_XLEN)(this);
+}
+
+uint64_t RISCVCPUState::UpdateSTimer()
+{
+    return update_stimer(this);
 }
 
 bool RISCVCPUState::PowerDown()

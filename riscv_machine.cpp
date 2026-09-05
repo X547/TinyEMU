@@ -442,7 +442,9 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
                 *q++ = 'a' + i;
         }
     }
-    *q = '\0';
+    /* Multi-letter extensions follow the single letter ones, each introduced
+       by an underscore. */
+    snprintf(q, sizeof(isa_string) - (q - isa_string), "_sstc_svadu_svinval");
     fdt.PropStr("riscv,isa", isa_string);
 
     fdt.PropStr("mmu-type", max_xlen <= 32 ? "riscv,sv32" : "riscv,sv48");
@@ -741,6 +743,7 @@ int RISCVMachine::GetSleepDuration(int delay)
 {
     RISCVCPU *s = cpu_state;
     int64_t delay1;
+    uint64_t stimecmp;
 
     /* wait for an event: the only asynchronous event is the RTC timer */
     if (!(s->Mip() & MIP_MTIP)) {
@@ -750,6 +753,18 @@ int RISCVMachine::GetSleepDuration(int delay)
             delay = 0;
         } else {
             /* convert delay to ms */
+            delay1 = delay1 / (RTC_FREQ / 1000);
+            if (delay1 < delay)
+                delay = delay1;
+        }
+    }
+    /* the supervisor timer runs off the same counter when Sstc is enabled */
+    stimecmp = s->UpdateSTimer();
+    if (stimecmp != UINT64_MAX) {
+        delay1 = stimecmp - rtc_get_time(this);
+        if (delay1 <= 0) {
+            delay = 0;
+        } else {
             delay1 = delay1 / (RTC_FREQ / 1000);
             if (delay1 < delay)
                 delay = delay1;

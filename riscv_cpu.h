@@ -64,6 +64,10 @@ public:
     virtual void SetMip(uint32_t mask) = 0;
     virtual void ResetMip(uint32_t mask) = 0;
     virtual uint32_t Mip() = 0;
+    /* Brings the Sstc supervisor timer interrupt up to date with the real time
+       counter and returns when the next one falls due, or UINT64_MAX when the
+       comparator is not driving it. */
+    virtual uint64_t UpdateSTimer() = 0;
     virtual bool PowerDown() = 0;
     virtual uint32_t Misa() = 0;
     virtual void FlushTlbWriteRangeRam(uint8_t *ram_ptr, size_t ram_size) = 0;

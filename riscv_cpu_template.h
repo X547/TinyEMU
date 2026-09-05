@@ -1324,9 +1324,18 @@ static void no_inline glue(riscv_cpu_interp_x, XLEN)(RISCVCPUState *s,
                         goto done_interp;
                     }
                     break;
+                case 0x180: /* sfence.w.inval */
+                case 0x181: /* sfence.inval.ir */
+                    /* every invalidation here takes effect at once, so the
+                       ordering these place around sinval.vma already holds */
+                    if (insn & 0x000fff80)
+                        goto illegal_insn;
+                    if (s->priv == PRV_U)
+                        goto illegal_insn;
+                    break;
                 default:
-                    if ((imm >> 5) == 0x09) {
-                        /* sfence.vma */
+                    /* sfence.vma and its sinval.vma counterpart */
+                    if ((imm >> 5) == 0x09 || (imm >> 5) == 0x0b) {
                         if (insn & 0x00007f80)
                             goto illegal_insn;
                         if (s->priv == PRV_U)

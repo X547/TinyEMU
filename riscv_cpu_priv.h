@@ -163,6 +163,11 @@ typedef uint128_t mem_uint_t;
 #define MSTATUS_UXL_MASK ((uint64_t)3 << MSTATUS_UXL_SHIFT)
 #define MSTATUS_SXL_MASK ((uint64_t)3 << MSTATUS_SXL_SHIFT)
 
+/* menvcfg and senvcfg CSRs. Both are 64 bit whatever XLEN is */
+#define ENVCFG_FIOM  ((uint64_t)1 << 0)
+#define MENVCFG_ADUE ((uint64_t)1 << 61)
+#define MENVCFG_STCE ((uint64_t)1 << 63)
+
 #define PG_SHIFT 12
 #define PG_MASK ((1 << PG_SHIFT) - 1)
 
@@ -188,10 +193,12 @@ struct RISCVCPUState: public RISCVCPU {
     
     int32_t n_cycles; /* only used inside the CPU loop */
     uint64_t insn_counter;
-    /* mcycle and minstret are writable and both derive from insn_counter, so
-       each keeps the difference between its architectural value and it */
-    uint64_t mcycle_offset;
-    uint64_t minstret_offset;
+    /* mcycle and minstret are writable and both derive from insn_counter.
+       While a counter runs its field holds the difference between the counter
+       and insn_counter; while mcountinhibit freezes it, the field holds the
+       counter's value outright. */
+    uint64_t mcycle_base;
+    uint64_t minstret_base;
     bool power_down_flag;
     int pending_exception; /* used during MMU exception handling */
     /* the machine's real time counter, shared with its timer device */
@@ -212,7 +219,9 @@ struct RISCVCPUState: public RISCVCPU {
     uint32_t medeleg;
     uint32_t mideleg;
     uint32_t mcounteren;
-    
+    uint32_t mcountinhibit;
+    uint64_t menvcfg;
+
     target_ulong stvec;
     target_ulong sscratch;
     target_ulong sepc;
@@ -224,6 +233,8 @@ struct RISCVCPUState: public RISCVCPU {
     uint64_t satp; /* currently 64 bit physical addresses max */
 #endif
     uint32_t scounteren;
+    uint64_t senvcfg;
+    uint64_t stimecmp;
 
     target_ulong load_res; /* for atomic LR/SC */
 
@@ -238,6 +249,7 @@ struct RISCVCPUState: public RISCVCPU {
     void SetMip(uint32_t mask) override;
     void ResetMip(uint32_t mask) override;
     uint32_t Mip() override;
+    uint64_t UpdateSTimer() override;
     bool PowerDown() override;
     uint32_t Misa() override;
     void FlushTlbWriteRangeRam(uint8_t *ram_ptr, size_t ram_size) override;
