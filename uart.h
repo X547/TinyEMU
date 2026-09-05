@@ -69,6 +69,11 @@ public:
     uint32_t Read(uint32_t offset, int size_log2);
     void Write(uint32_t offset, uint32_t val, int size_log2);
 
+    /* Host side receive path. There is a single holding register, so the
+       host must wait for the guest to take the previous byte. */
+    bool CanReceive() const {return (fLsr & UART_LSR_DR) == 0;}
+    void ReceiveByte(uint8_t ch);
+
     void SendBreak();
 
     DeviceIOAdapter<SerialState, &SerialState::Read, &SerialState::Write> fIo {*this};

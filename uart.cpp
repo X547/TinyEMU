@@ -29,6 +29,14 @@ void SerialState::UpdateIRQ()
 }
 
 
+void SerialState::ReceiveByte(uint8_t ch)
+{
+    fRbr = ch;
+    fLsr |= UART_LSR_DR;
+    UpdateIRQ();
+}
+
+
 void SerialState::Write(uint32_t offset, uint32_t val, int size_log2)
 {
     (void)size_log2;

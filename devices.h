@@ -42,6 +42,7 @@ struct DeviceContext {
     VIRTIODevice *keyboard_dev = nullptr;
     VIRTIODevice *mouse_dev = nullptr;
     FBDevice *fb_dev = nullptr;
+    SerialState *serial_console = nullptr;
     EthernetDevice *net = nullptr;
 };
 

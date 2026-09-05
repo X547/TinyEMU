@@ -45,6 +45,7 @@
 
 #include "cutils.h"
 #include "iomem.h"
+#include "uart.h"
 #include "virtio.h"
 #include "machine.h"
 #ifdef CONFIG_FS_NET
@@ -573,6 +574,14 @@ void virt_machine_run(VirtMachine *m)
             virtio_console_resize_event(m->console_dev, width, height);
             s->resize_pending = false;
         }
+    } else if (m->console_dev == nullptr && m->serial_console != nullptr &&
+               m->serial_console->CanReceive()) {
+        /* No virtio console, so the 16550 is the console and takes the
+           input. Its holding register fits one byte at a time. */
+        STDIODevice *s = static_cast<STDIODevice *>(m->console);
+        stdin_fd = s->stdin_fd;
+        FD_SET(stdin_fd, &rfds);
+        fd_max = stdin_fd;
     }
 #endif
     if (m->net) {
@@ -597,6 +606,12 @@ void virt_machine_run(VirtMachine *m)
             ret = m->console->ReadData(buf, len);
             if (ret > 0) {
                 virtio_console_write_data(m->console_dev, buf, ret);
+            }
+        } else if (m->console_dev == nullptr && m->serial_console != nullptr &&
+                   stdin_fd >= 0 && FD_ISSET(stdin_fd, &rfds)) {
+            uint8_t ch;
+            if (m->console->ReadData(&ch, 1) == 1) {
+                m->serial_console->ReceiveByte(ch);
             }
         }
 #endif

@@ -34,6 +34,7 @@ class CharacterDevice;
 class EthernetDevice;
 class FSDevice;
 class PhysMemoryMap;
+class SerialState;
 class StartCallback;
 struct PCIBus;
 struct PhysMemoryRange;
@@ -179,6 +180,9 @@ public:
     CharacterDevice *console = nullptr;
     /* graphics */
     FBDevice *fb_dev = nullptr;
+    /* 16550 console, when the machine has one. Console input goes here only
+       if no virtio console is present to take it. */
+    SerialState *serial_console = nullptr;
 
     virtual ~VirtMachine() = default;
 

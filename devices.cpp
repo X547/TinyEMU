@@ -52,13 +52,15 @@ static void fdt_prop_plic_irq(FDTContext &ctx, uint64_t line)
 
 class UartDevice final: public Device {
 private:
+    DeviceContext *fCtx;
     SerialOutput *fOutput;
     SerialState *fSerial = nullptr;
     Resource *fMmio = nullptr;
     Resource *fIrq = nullptr;
 
 public:
-    UartDevice(SerialOutput *output): Device("serial"), fOutput(output) {}
+    UartDevice(DeviceContext *ctx, SerialOutput *output):
+        Device("serial"), fCtx(ctx), fOutput(output) {}
 
     ~UartDevice() override {delete fSerial;}
 
@@ -74,6 +76,7 @@ public:
         SystemBus *sys = static_cast<SystemBus *>(ParentBus());
         fSerial = new SerialState(sys->MemMap(), fMmio->base,
                                   sys->IrqSignalFor(fIrq->base), fOutput);
+        fCtx->serial_console = fSerial;
         return true;
     }
 
@@ -277,7 +280,7 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
     VMDeviceNode *mutable_node = const_cast<VMDeviceNode *>(node);
 
     if (strcmp(type, "ns16550a") == 0) {
-        return new UartDevice(ctx->serial_output);
+        return new UartDevice(ctx, ctx->serial_output);
     }
 
     if (strcmp(type, "simplefb") == 0) {

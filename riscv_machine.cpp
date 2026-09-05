@@ -713,6 +713,7 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
     s->keyboard_dev = ctx.keyboard_dev;
     s->mouse_dev = ctx.mouse_dev;
     s->fb_dev = ctx.fb_dev;
+    s->serial_console = ctx.serial_console;
     s->net = ctx.net;
 
     if (!p->files[VM_FILE_BIOS].buf) {
