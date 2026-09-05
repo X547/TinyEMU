@@ -21,10 +21,6 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-#if defined(EMSCRIPTEN)
-#define USE_BUILTIN_CRYPTO
-#endif
-
 #ifdef USE_BUILTIN_CRYPTO
 #include "aes.h"
 #include "sha256.h"
@@ -56,12 +52,10 @@ void fs_wget_free(XHRState *s);
 void fs_wget_init(void);
 void fs_wget_end(void);
 
-#ifndef EMSCRIPTEN
 typedef BOOL FSNetEventLoopCompletionFunc(void *opaque);
 void fs_net_set_fdset(int *pfd_max, fd_set *rfds, fd_set *wfds, fd_set *efds,
                       int *ptimeout);
 void fs_net_event_loop(FSNetEventLoopCompletionFunc *cb, void *opaque);
-#endif
 
 /* crypto */
 

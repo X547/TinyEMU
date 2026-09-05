@@ -28,8 +28,10 @@
 #include <inttypes.h>
 #include <assert.h>
 #include <fcntl.h>
-
+#include <time.h>
+#ifdef __HAIKU__
 #include <OS.h> // system_time()
+#endif
 
 #include "cutils.h"
 #include "iomem.h"
@@ -56,15 +58,6 @@
 #include "softfp.h"
 #endif
 
-#ifdef USE_GLOBAL_STATE
-static RISCVCPUState riscv_cpu_global_state;
-#endif
-#ifdef USE_GLOBAL_VARIABLES
-#define code_ptr s->__code_ptr
-#define code_end s->__code_end
-#define code_to_pc_addend s->__code_to_pc_addend
-#endif
-
 #ifdef CONFIG_LOGFILE
 static FILE *log_file;
 
@@ -87,6 +80,18 @@ static void __attribute__((format(printf, 1, 2), unused)) log_printf(const char 
     va_start(ap, fmt);
     log_vprintf(fmt, ap);
     va_end(ap);
+}
+
+/* microseconds since boot */
+static uint64_t get_system_time(void)
+{
+#ifdef __HAIKU__
+    return system_time();
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+#endif
 }
 
 #if MAX_XLEN == 128
@@ -536,11 +541,7 @@ struct __attribute__((packed)) unaligned_u32 {
 /* unaligned access at an address known to be a multiple of 2 */
 static uint32_t get_insn32(uint8_t *ptr)
 {
-#if defined(EMSCRIPTEN)
-    return ((uint16_t *)ptr)[0] | (((uint16_t *)ptr)[1] << 16);
-#else
     return ((struct unaligned_u32 *)ptr)->u32;
-#endif
 }
 
 /* return 0 if OK, != 0 if exception */
@@ -752,7 +753,7 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
         val = (int64_t)s->insn_counter;
         break;
     case 0xc01: /* utime */
-        val = system_time();
+        val = get_system_time();
         break;
     case 0xc80: /* mcycleh */
     case 0xc82: /* minstreth */
@@ -1251,9 +1252,6 @@ static inline uint32_t get_field1(uint32_t val, int src_pos,
 
 static void glue(riscv_cpu_interp, MAX_XLEN)(RISCVCPUState *s, int n_cycles)
 {
-#ifdef USE_GLOBAL_STATE
-    s = &riscv_cpu_global_state;
-#endif
     uint64_t timeout;
 
     timeout = s->insn_counter + n_cycles;
@@ -1313,11 +1311,7 @@ static RISCVCPUState *glue(riscv_cpu_init, MAX_XLEN)(PhysMemoryMap *mem_map)
 {
     RISCVCPUState *s;
     
-#ifdef USE_GLOBAL_STATE
-    s = &riscv_cpu_global_state;
-#else
     s = mallocz(sizeof(*s));
-#endif
     s->common.class_ptr = &glue(riscv_cpu_class, MAX_XLEN);
     s->mem_map = mem_map;
     s->pc = 0x1000;
@@ -1345,9 +1339,6 @@ static RISCVCPUState *glue(riscv_cpu_init, MAX_XLEN)(PhysMemoryMap *mem_map)
 
 static void glue(riscv_cpu_end, MAX_XLEN)(RISCVCPUState *s)
 {
-#ifdef USE_GLOBAL_STATE
-    free(s);
-#endif
 }
 
 static uint32_t glue(riscv_cpu_get_misa, MAX_XLEN)(RISCVCPUState *s)
@@ -1373,12 +1364,6 @@ RISCVCPUState *riscv_cpu_init(PhysMemoryMap *mem_map, int max_xlen)
 {
     const RISCVCPUClass *c;
     switch(max_xlen) {
-        /* with emscripten we compile a single CPU */
-#if defined(EMSCRIPTEN)
-    case MAX_XLEN:
-        c = &glue(riscv_cpu_class, MAX_XLEN);
-        break;
-#else
     case 32:
         c = &riscv_cpu_class32;
         break;
@@ -1390,7 +1375,6 @@ RISCVCPUState *riscv_cpu_init(PhysMemoryMap *mem_map, int max_xlen)
         c = &riscv_cpu_class128;
         break;
 #endif
-#endif /* !EMSCRIPTEN */
     default:
         return NULL;
     }

@@ -197,9 +197,6 @@ FSDevice *fs_disk_init(const char *root_path);
 FSDevice *fs_mem_init(void);
 FSDevice *fs_net_init(const char *url, void (*start)(void *opaque), void *opaque);
 void fs_net_set_pwd(FSDevice *fs, const char *pwd);
-#ifdef EMSCRIPTEN
-void fs_import_file(const char *filename, uint8_t *buf, int buf_len);
-#endif
 void fs_export_file(const char *filename,
                     const uint8_t *buf, int buf_len);
 void fs_end(FSDevice *fs);

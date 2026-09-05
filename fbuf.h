@@ -2,11 +2,7 @@
 #define FBUF_H
 
 typedef struct {
-#if defined(EMSCRIPTEN)
-    int handle;
-#else
     uint8_t *data;
-#endif
     size_t allocated_size;
 } FileBuffer;
 

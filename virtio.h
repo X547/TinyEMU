@@ -31,11 +31,7 @@
 
 #define VIRTIO_PAGE_SIZE 4096
 
-#if defined(EMSCRIPTEN)
-#define VIRTIO_ADDR_BITS 32
-#else
 #define VIRTIO_ADDR_BITS 64
-#endif
 
 #if VIRTIO_ADDR_BITS == 64
 typedef uint64_t virtio_phys_addr_t;
@@ -87,14 +83,12 @@ struct EthernetDevice {
     void (*write_packet)(EthernetDevice *net,
                          const uint8_t *buf, int len);
     void *opaque;
-#if !defined(EMSCRIPTEN)
     void (*select_fill)(EthernetDevice *net, int *pfd_max,
                         fd_set *rfds, fd_set *wfds, fd_set *efds,
                         int *pdelay);
     void (*select_poll)(EthernetDevice *net, 
                         fd_set *rfds, fd_set *wfds, fd_set *efds,
                         int select_ret);
-#endif
     /* the following is set by the device */
     void *device_opaque;
     BOOL (*device_can_write_packet)(EthernetDevice *net);

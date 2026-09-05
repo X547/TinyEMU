@@ -300,9 +300,13 @@ struct tcpcb *tcp_drop(struct tcpcb *tp, int err);
 #define MAX_MRU 16384
 #endif
 
-#if !defined(_WIN32) && !defined(__HAIKU__)
+#ifndef _WIN32
+#ifndef min
 #define min(x,y) ((x) < (y) ? (x) : (y))
+#endif
+#ifndef max
 #define max(x,y) ((x) > (y) ? (x) : (y))
+#endif
 #endif
 
 #ifdef _WIN32

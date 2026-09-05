@@ -27,9 +27,7 @@
 #include <inttypes.h>
 #include <assert.h>
 #include <stdarg.h>
-#if !defined(__HAIKU__)
-#include <sys/statfs.h>
-#endif
+#include <sys/statvfs.h>
 #include <sys/stat.h>
 #if !defined(__HAIKU__)
 #include <sys/sysmacros.h>
@@ -148,17 +146,15 @@ static void stat_to_qid(FSQID *qid, const struct stat *st)
 
 static void fs_statfs(FSDevice *fs1, FSStatFS *st)
 {
-#if !defined(__HAIKU__)
     FSDeviceDisk *fs = (FSDeviceDisk *)fs1;
-    struct statfs st1;
-    statfs(fs->root_path, &st1);
+    struct statvfs st1;
+    statvfs(fs->root_path, &st1);
     st->f_bsize = st1.f_bsize;
     st->f_blocks = st1.f_blocks;
     st->f_bfree = st1.f_bfree;
     st->f_bavail = st1.f_bavail;
     st->f_files = st1.f_files;
     st->f_ffree = st1.f_ffree;
-#endif
 }
 
 static char *compose_path(const char *path, const char *name)

@@ -36,101 +36,10 @@
 #include "fs_utils.h"
 #include "fs_wget.h"
 
-#if defined(EMSCRIPTEN)
-#include <emscripten.h>
-#else
-#include <curl/multi.h>
-#endif
+#include <curl/curl.h>
 
 /***********************************************/
 /* HTTP get */
-
-#ifdef EMSCRIPTEN
-
-struct XHRState {
-    void *opaque;
-    WGetWriteCallback *cb;
-};
-
-static int downloading_count;
-
-void fs_wget_init(void)
-{
-}
-
-extern void fs_wget_update_downloading(int flag);
-
-static void fs_wget_update_downloading_count(int incr)
-{
-    int prev_state, state;
-    prev_state = (downloading_count > 0);
-    downloading_count += incr;
-    state = (downloading_count > 0);
-    if (prev_state != state)
-        fs_wget_update_downloading(state);
-}
-
-static void fs_wget_onerror(unsigned int handle, void *opaque, int status,
-                            const char *status_text)
-{
-    XHRState *s = opaque;
-    if (status <= 0)
-        status = -404; /* HTTP not found error */
-    else
-        status = -status;
-    fs_wget_update_downloading_count(-1);
-    if (s->cb)
-        s->cb(s->opaque, status, NULL, 0);
-}
-
-static void fs_wget_onload(unsigned int handle,
-                           void *opaque, void *data, unsigned int size)
-{
-    XHRState *s = opaque;
-    fs_wget_update_downloading_count(-1);
-    if (s->cb)
-        s->cb(s->opaque, 0, data, size);
-}
-
-extern int emscripten_async_wget3_data(const char* url, const char* requesttype, const char *user, const char *password, const uint8_t *post_data, int post_data_len, void *arg, int free, em_async_wget2_data_onload_func onload, em_async_wget2_data_onerror_func onerror, em_async_wget2_data_onprogress_func onprogress);
-
-XHRState *fs_wget2(const char *url, const char *user, const char *password,
-                   WGetReadCallback *read_cb, uint64_t post_data_len,
-                   void *opaque, WGetWriteCallback *cb, BOOL single_write)
-{
-    XHRState *s;
-    const char *request;
-    uint8_t *post_data;
-    
-    s = mallocz(sizeof(*s));
-    s->opaque = opaque;
-    s->cb = cb;
-
-    if (post_data_len != 0) {
-        request = "POST";
-        post_data = malloc(post_data_len);
-        read_cb(opaque, post_data, post_data_len);
-    } else {
-        request = "GET";
-        post_data = NULL;
-    }
-    fs_wget_update_downloading_count(1);
-
-    emscripten_async_wget3_data(url, request, user, password,
-                                post_data, post_data_len, s, 1, fs_wget_onload,
-                                fs_wget_onerror, NULL);
-    if (post_data_len != 0)
-        free(post_data);
-    return s;
-}
-
-void fs_wget_free(XHRState *s)
-{
-    s->cb = NULL;
-    s->opaque = NULL;
-}
-
-#else
 
 struct XHRState {
     struct list_head link;
@@ -315,8 +224,6 @@ void fs_net_event_loop(FSNetEventLoopCompletionFunc *cb, void *opaque)
         select(fd_max + 1, &rfds, &wfds, &efds, &tv);
     }
 }
-
-#endif /* !EMSCRIPTEN */
 
 XHRState *fs_wget(const char *url, const char *user, const char *password,
                   void *opaque, WGetWriteCallback *cb, BOOL single_write)

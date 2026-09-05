@@ -37,10 +37,6 @@
 #include "fs_wget.h"
 #include "fbuf.h"
 
-#if defined(EMSCRIPTEN)
-#include <emscripten.h>
-#endif
-
 /*
   TODO:
   - implement fs_lock/fs_getlock
@@ -50,15 +46,9 @@
 */
 
 //#define DEBUG_CACHE
-#if !defined(EMSCRIPTEN)
 #define DUMP_CACHE_LOAD
-#endif
 
-#if defined(EMSCRIPTEN)
-#define DEFAULT_INODE_CACHE_SIZE (64 * 1024 * 1024)
-#else
 #define DEFAULT_INODE_CACHE_SIZE (256 * 1024 * 1024)
-#endif
 
 typedef enum {
     FT_FIFO = 1,
@@ -266,7 +256,6 @@ static void fs_error_archive(FSOpenInfo *oi);
 static void dump_loaded_file(FSDevice *fs1, FSINode *n);
 #endif
 
-#if !defined(EMSCRIPTEN)
 /* file buffer (the content of the buffer can be stored elsewhere) */
 void file_buffer_init(FileBuffer *bs)
 {
@@ -307,7 +296,6 @@ void file_buffer_read(FileBuffer *bs, size_t offset, uint8_t *buf,
 {
     memcpy(buf, bs->data + offset, size);
 }
-#endif
 
 static int64_t to_blocks(FSDeviceMem *fs, uint64_t size)
 {
@@ -2089,10 +2077,6 @@ static void kernel_load_cb(FSDevice *fs, FSQID *qid, int err,
                            void *opaque);
 static int preload_parse(FSDevice *fs, const char *fname, BOOL is_new);
 
-#ifdef EMSCRIPTEN
-static FSDevice *fs_import_fs;
-#endif
-
 #define DEFAULT_IMPORT_FILE_PATH "/tmp"
 
 FSDevice *fs_net_init(const char *url, void (*start_cb)(void *opaque),
@@ -2104,10 +2088,6 @@ FSDevice *fs_net_init(const char *url, void (*start_cb)(void *opaque),
     fs_wget_init();
     
     fs = fs_mem_init();
-#ifdef EMSCRIPTEN
-    if (!fs_import_fs)
-        fs_import_fs = fs;
-#endif
     fs1 = (FSDeviceMem *)fs;
     fs1->import_dir = strdup(DEFAULT_IMPORT_FILE_PATH);
     
@@ -2866,45 +2846,7 @@ void fs_net_set_pwd(FSDevice *fs, const char *pwd)
 
 /* external file import */
 
-#ifdef EMSCRIPTEN
-
-void fs_import_file(const char *filename, uint8_t *buf, int buf_len)
-{
-    FSDevice *fs;
-    FSDeviceMem *fs1;
-    FSFile *fd, *root_fd;
-    FSQID qid;
-    
-    //    printf("importing file: %s len=%d\n", filename, buf_len);
-    fs = fs_import_fs;
-    if (!fs) {
-        free(buf);
-        return;
-    }
-    
-    assert(!fs->fs_attach(fs, &root_fd, &qid, 1000, "", ""));
-    fs1 = (FSDeviceMem *)fs;
-    fd = fs_walk_path(fs, root_fd, fs1->import_dir);
-    if (!fd)
-        goto fail;
-    fs_unlinkat(fs, root_fd, filename);
-    if (fs->fs_create(fs, &qid, fd, filename, P9_O_RDWR | P9_O_TRUNC,
-                      0600, 0) < 0)
-        goto fail;
-    fs->fs_write(fs, fd, 0, buf, buf_len);
- fail:
-    if (fd)
-        fs->fs_delete(fs, fd);
-    if (root_fd)
-        fs->fs_delete(fs, root_fd);
-    free(buf);
-}
-
-#else
-
 void fs_export_file(const char *filename,
                     const uint8_t *buf, int buf_len)
 {
 }
-
-#endif

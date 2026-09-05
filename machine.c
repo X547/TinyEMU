@@ -45,11 +45,7 @@ void __attribute__((format(printf, 1, 2))) vm_error(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
-#ifdef EMSCRIPTEN
-    vprintf(fmt, ap);
-#else
     vfprintf(stderr, fmt, ap);
-#endif
     va_end(ap);
 }
 
@@ -194,14 +190,7 @@ static BOOL find_name(const char *name, const char *name_list)
 }
 
 static const VirtMachineClass *virt_machine_list[] = {
-#if defined(EMSCRIPTEN)
-    /* only a single machine in the EMSCRIPTEN target */
-#ifndef CONFIG_X86EMU
     &riscv_machine_class,
-#endif    
-#else
-    &riscv_machine_class,
-#endif /* !EMSCRIPTEN */
 #ifdef CONFIG_X86EMU
     &pc_machine_class,
 #endif
@@ -446,12 +435,6 @@ char *get_file_path(const char *base_filename, const char *filename)
 }
 
 
-#ifdef EMSCRIPTEN
-static int load_file(uint8_t **pbuf, const char *filename)
-{
-    abort();
-}
-#else
 /* return -1 if error. */
 static int load_file(uint8_t **pbuf, const char *filename)
 {
@@ -476,7 +459,6 @@ static int load_file(uint8_t **pbuf, const char *filename)
     *pbuf = buf;
     return size;
 }
-#endif
 
 #ifdef CONFIG_FS_NET
 static void config_load_file_cb(void *opaque, int err, void *data, size_t size)

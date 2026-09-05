@@ -97,6 +97,12 @@ static void winsock_cleanup(void)
 
 #else
 
+#if defined(__HAIKU__)
+#define RESOLV_CONF_PATH "/boot/system/settings/network/resolv.conf"
+#else
+#define RESOLV_CONF_PATH "/etc/resolv.conf"
+#endif
+
 static struct stat dns_addr_stat;
 
 int get_dns_addr(struct in_addr *pdns_addr)
@@ -114,7 +120,7 @@ int get_dns_addr(struct in_addr *pdns_addr)
             return 0;
         }
         old_stat = dns_addr_stat;
-        if (stat("/boot/system/settings/network/resolv.conf", &dns_addr_stat) != 0)
+        if (stat(RESOLV_CONF_PATH, &dns_addr_stat) != 0)
             return -1;
         if ((dns_addr_stat.st_dev == old_stat.st_dev)
             && (dns_addr_stat.st_ino == old_stat.st_ino)
@@ -125,7 +131,7 @@ int get_dns_addr(struct in_addr *pdns_addr)
         }
     }
 
-    f = fopen("/boot/system/settings/network/resolv.conf", "r");
+    f = fopen(RESOLV_CONF_PATH, "r");
     if (!f)
         return -1;
 

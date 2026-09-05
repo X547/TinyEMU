@@ -27,13 +27,18 @@
 #include <inttypes.h>
 #include <assert.h>
 #include <stdarg.h>
-#include <sys/statfs.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <dirent.h>
 #include <errno.h>
+#if defined(__HAIKU__)
+/* Haiku has no device node major/minor numbers */
+#define major(dev) 0
+#define minor(dev) (dev)
+#else
 #include <sys/sysmacros.h>
+#endif
 
 #include "cutils.h"
 #include "fs_utils.h"

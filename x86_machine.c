@@ -986,18 +986,7 @@ static int pit_update_irq(PITState *pit)
 static void bios_debug_write(void *opaque, uint32_t offset,
                         uint32_t val, int size_log2)
 {
-#ifdef EMSCRIPTEN
-    static char line_buf[256];
-    static int line_buf_index;
-    line_buf[line_buf_index++] = val;
-    if (val == '\n' || line_buf_index >= sizeof(line_buf) - 1) {
-        line_buf[line_buf_index] = '\0';
-        printf("%s", line_buf);
-        line_buf_index = 0;
-    }
-#else
     putchar(val & 0xff);
-#endif
 }
 
 static uint32_t bios_debug_read(void *opaque, uint32_t offset, int size_log2)
@@ -1652,19 +1641,6 @@ static void kvm_exec(PCMachine *s)
 }
 #endif
 
-#if defined(EMSCRIPTEN)
-/* with Javascript clock_gettime() is not enough precise enough to
-   have a reliable TSC counter. XXX: increment the cycles during the
-   power down time */
-static uint64_t cpu_get_tsc(void *opaque)
-{
-    PCMachine *s = opaque;
-    uint64_t c;
-    c = x86_cpu_get_cycles(s->cpu_state);
-    return c;
-}
-#else
-
 #define TSC_FREQ 100000000
 
 static uint64_t cpu_get_tsc(void *opaque)
@@ -1675,7 +1651,6 @@ static uint64_t cpu_get_tsc(void *opaque)
     return (uint64_t)ts.tv_sec * TSC_FREQ +
         (ts.tv_nsec / (1000000000 / TSC_FREQ));
 }
-#endif
 
 static void pc_flush_tlb_write_range(void *opaque, uint8_t *ram_addr,
                                      size_t ram_size)

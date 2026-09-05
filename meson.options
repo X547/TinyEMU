@@ -1,0 +1,29 @@
+option('sdl',
+  type: 'feature',
+  value: 'auto',
+  description: 'SDL 1.2 graphical display support')
+
+option('fs_net',
+  type: 'feature',
+  value: 'disabled',
+  description: 'network filesystem support (requires libcurl and libcrypto)')
+
+option('builtin_crypto',
+  type: 'boolean',
+  value: false,
+  description: 'use the bundled AES/SHA256 code instead of libcrypto')
+
+option('x86emu',
+  type: 'boolean',
+  value: true,
+  description: 'build the x86 emulator')
+
+option('slirp',
+  type: 'boolean',
+  value: true,
+  description: 'build the user space network redirector')
+
+option('int128',
+  type: 'boolean',
+  value: false,
+  description: 'build the 128 bit RISC-V emulator (needs __int128)')

@@ -39,12 +39,6 @@
 
 #define CONFIG_EXT_C /* compressed instructions */
 
-#if defined(EMSCRIPTEN)
-#define USE_GLOBAL_STATE
-/* use local variables slows down the generated JS code */
-#define USE_GLOBAL_VARIABLES
-#endif
-
 #if MAX_XLEN == 32
 typedef uint32_t target_ulong;
 typedef int32_t target_long;
@@ -181,12 +175,6 @@ struct RISCVCPUState {
     target_ulong pc;
     target_ulong reg[32];
 
-#ifdef USE_GLOBAL_VARIABLES
-    /* faster to use global variables with emscripten */
-    uint8_t *__code_ptr, *__code_end;
-    target_ulong __code_to_pc_addend;
-#endif
-    
 #if FLEN > 0
     fp_uint fp_reg[32];
     uint32_t fflags;

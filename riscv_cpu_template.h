@@ -203,10 +203,8 @@ static void no_inline glue(riscv_cpu_interp_x, XLEN)(RISCVCPUState *s,
     uint32_t opcode, insn, rd, rs1, rs2, funct3;
     int32_t imm, cond, err;
     target_ulong addr, val, val2;
-#ifndef USE_GLOBAL_VARIABLES
     uint8_t *code_ptr, *code_end;
     target_ulong code_to_pc_addend;
-#endif
     uint64_t insn_counter_addend;
 #if FLEN > 0
     uint32_t rs3;
@@ -232,8 +230,7 @@ static void no_inline glue(riscv_cpu_interp_x, XLEN)(RISCVCPUState *s,
     code_end = NULL;
     code_to_pc_addend = s->pc;
     
-    /* we use a single execution loop to keep a simple control flow
-       for emscripten */
+    /* we use a single execution loop to keep a simple control flow */
     for(;;) {
         if (unlikely(code_ptr >= code_end)) {
             uint32_t tlb_idx;

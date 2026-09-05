@@ -25,28 +25,43 @@ TinyEMU System Emulator by Fabrice Bellard
 
 - small code, easy to modify, no external dependancies
 
-- Javascript demo version
-
 2) Installation
 ---------------
 
-- The libraries libcurl, OpenSSL and SDL should be installed. On a Fedora
-  system you can do it with:
+- Meson and Ninja are needed to build the project. The libraries libcurl,
+  OpenSSL and SDL 1.2 are optional. On a Fedora system you can install
+  everything with:
 
-  sudo dnf install openssl-devel libcurl-devel SDL-devel
+  sudo dnf install meson ninja-build openssl-devel libcurl-devel SDL-devel
 
-  It is possible to compile the programs without these libraries by
-  commenting CONFIG_FS_NET and/or CONFIG_SDL in the Makefile.
+- Configure and build:
 
-- Edit the Makefile to disable the 128 bit target if you compile on a
-  32 bit host (for the 128 bit RISCV target the compiler must support
-  the __int128 C extension).
+  meson setup build
+  meson compile -C build
 
-- Use 'make' to compile the binaries.
+- Build options (pass them to 'meson setup' as -Dname=value, or change
+  them later with 'meson configure build -Dname=value'):
 
-- You can optionally install the program to '/usr/local/bin' with:
+  sdl             SDL 1.2 graphical display (feature, default auto)
+  fs_net          network filesystem, needs libcurl and libcrypto
+                  (feature, default disabled)
+  builtin_crypto  use the bundled AES/SHA256 code instead of libcrypto
+                  (boolean, default false)
+  x86emu          build the x86 emulator (boolean, default true)
+  slirp           build the user space network redirector
+                  (boolean, default true)
+  int128          build the 128 bit RISCV target; the compiler must
+                  support the __int128 C extension, so this does not work
+                  on 32 bit hosts (boolean, default false)
 
-  make install
+  For example, to build with the network filesystem enabled and without
+  the x86 emulator:
+
+  meson setup build -Dfs_net=enabled -Dx86emu=false
+
+- You can optionally install the programs with:
+
+  meson install -C build
 
 3) Usage
 --------
@@ -172,14 +187,7 @@ addresses (0x40008000). A small modification was made in the
 display boot messages and to power off the virtual system. The OS
 should use the VirtIO console.
 
-4.4) Javascript version
-
-The Javascript version (JSLinux) can be compiled with Makefile.js and
-emscripten. A complete precompiled and preconfigured demo is available
-in the jslinux-yyyy-mm-dd.tar.gz archive (read the readme.txt file
-inside the archive).
-
-4.5) x86 emulator
+4.4) x86 emulator
 
 A small x86 emulator is included. It is not really an emulator because
 it uses the Linux KVM API to run the x86 code at near native

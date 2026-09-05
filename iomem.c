@@ -28,7 +28,11 @@
 #include <inttypes.h>
 #include <assert.h>
 
+#ifdef __HAIKU__
 #include <OS.h>
+#else
+#include <sys/mman.h>
+#endif
 
 #include "cutils.h"
 #include "iomem.h"
@@ -108,10 +112,17 @@ static PhysMemoryRange *default_register_ram(PhysMemoryMap *s, uint64_t addr,
 
     pr = register_ram_entry(s, addr, size, devram_flags);
 
-    //pr->phys_mem = mallocz(size);
+#ifdef __HAIKU__
     if (create_area("VM memory", (void**)&pr->phys_mem, B_ANY_ADDRESS, size, B_NO_LOCK, B_READ_AREA | B_WRITE_AREA) < B_OK)
-        pr->phys_mem = 0;
-    
+        pr->phys_mem = NULL;
+#else
+    pr->phys_mem = mmap(NULL, size, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (pr->phys_mem == MAP_FAILED)
+        pr->phys_mem = NULL;
+#endif
+
+
     if (!pr->phys_mem) {
         fprintf(stderr, "Could not allocate VM memory\n");
         exit(1);
@@ -183,8 +194,11 @@ void phys_mem_reset_dirty_bit(PhysMemoryRange *pr, size_t offset)
 
 static void default_free_ram(PhysMemoryMap *s, PhysMemoryRange *pr)
 {
-    //free(pr->phys_mem);
+#ifdef __HAIKU__
     delete_area(area_for(pr->phys_mem));
+#else
+    munmap(pr->phys_mem, pr->org_size);
+#endif
 }
 
 PhysMemoryRange *cpu_register_device(PhysMemoryMap *s, uint64_t addr,
