@@ -511,6 +511,147 @@ int pci_add_capability(PCIDevice *d, const uint8_t *buf, int size)
     return offset;
 }
 
+//#pragma mark - PCIMsixState
+
+/* All the bits an access of this size covers. */
+static uint32_t size_mask(int size_log2)
+{
+    if (size_log2 >= 2)
+        return 0xffffffff;
+    return (1u << (8 << size_log2)) - 1;
+}
+
+PCIMsixState::~PCIMsixState()
+{
+    delete[] fTable;
+    delete[] fPba;
+}
+
+bool PCIMsixState::Init(PCIDevice *dev, int bar_num, int vector_count,
+                        uint32_t table_offset, uint32_t pba_offset)
+{
+    uint8_t cap[PCI_MSIX_CAP_LEN];
+
+    assert(vector_count > 0 && vector_count <= 2048);
+
+    /* Offering the capability on a bus where nothing would ever collect the
+       message would leave the guest with no interrupts at all. */
+    if (!pci_bus_has_msi(dev->bus))
+        return false;
+
+    memset(cap, 0, sizeof(cap));
+    cap[0] = PCI_CAP_ID_MSIX;
+    put_le16(cap + PCI_MSIX_FLAGS, vector_count - 1);
+    put_le32(cap + PCI_MSIX_TABLE, table_offset | bar_num);
+    put_le32(cap + PCI_MSIX_PBA, pba_offset | bar_num);
+
+    int offset = pci_add_capability(dev, cap, sizeof(cap));
+    if (offset < 0)
+        return false;
+
+    fDev = dev;
+    fCapOffset = offset;
+    fVectorCount = vector_count;
+    fTable = new PCIMsixEntry[vector_count] {};
+    fPba = new uint32_t[(vector_count + 31) / 32] {};
+    return true;
+}
+
+bool PCIMsixState::Enabled() const
+{
+    if (fCapOffset < 0)
+        return false;
+    uint32_t ctrl = pci_device_get_config(fDev, fCapOffset + PCI_MSIX_FLAGS, 1);
+    return (ctrl & PCI_MSIX_FLAGS_ENABLE) != 0;
+}
+
+bool PCIMsixState::MaskedAll() const
+{
+    uint32_t ctrl = pci_device_get_config(fDev, fCapOffset + PCI_MSIX_FLAGS, 1);
+    return (ctrl & PCI_MSIX_FLAGS_MASKALL) != 0;
+}
+
+uint16_t PCIMsixState::AcceptVector(uint32_t vector) const
+{
+    if (vector < (uint32_t)fVectorCount)
+        return vector;
+    return PCI_MSIX_NO_VECTOR;
+}
+
+void PCIMsixState::Send(int vector)
+{
+    if (vector < 0 || vector >= fVectorCount)
+        return;
+
+    PCIMsixEntry *e = &fTable[vector];
+    if (MaskedAll() || (e->vector_ctrl & PCI_MSIX_ENTRY_CTRL_MASKBIT) != 0) {
+        fPba[vector >> 5] |= 1u << (vector & 31);
+        return;
+    }
+    fPba[vector >> 5] &= ~(1u << (vector & 31));
+    pci_device_send_msi(fDev, ((uint64_t)e->addr_hi << 32) | e->addr_lo,
+                        e->data);
+}
+
+uint32_t *PCIMsixState::TableSlot(uint32_t offset)
+{
+    /* The window is part of the BAR whether or not the capability naming it
+       was ever offered, so a guest can reach here on a bus that has no MSI
+       receiver. Without the capability there is no table to address. */
+    if (fCapOffset < 0)
+        return nullptr;
+
+    uint32_t index = offset / sizeof(PCIMsixEntry);
+    if (index >= (uint32_t)fVectorCount)
+        return nullptr;
+
+    PCIMsixEntry *e = &fTable[index];
+    switch ((offset / 4) % 4) {
+    case 0: return &e->addr_lo;
+    case 1: return &e->addr_hi;
+    case 2: return &e->data;
+    default: return &e->vector_ctrl;
+    }
+}
+
+uint32_t PCIMsixState::TableRead(uint32_t offset, int size_log2)
+{
+    const uint32_t *slot = TableSlot(offset);
+    if (slot == nullptr)
+        return 0;
+    return (*slot >> ((offset & 3) * 8)) & size_mask(size_log2);
+}
+
+void PCIMsixState::TableWrite(uint32_t offset, uint32_t val, int size_log2)
+{
+    uint32_t *slot = TableSlot(offset);
+    if (slot == nullptr)
+        return;
+
+    int shift = (offset & 3) * 8;
+    uint32_t mask = size_mask(size_log2) << shift;
+    uint32_t old = *slot;
+    *slot = (old & ~mask) | ((val << shift) & mask);
+
+    /* Lifting a vector's mask delivers whatever arrived while it was set. */
+    uint32_t index = offset / sizeof(PCIMsixEntry);
+    if (slot == &fTable[index].vector_ctrl &&
+        (old & PCI_MSIX_ENTRY_CTRL_MASKBIT) != 0 &&
+        (*slot & PCI_MSIX_ENTRY_CTRL_MASKBIT) == 0 &&
+        (fPba[index >> 5] & (1u << (index & 31))) != 0) {
+        Send(index);
+    }
+}
+
+uint32_t PCIMsixState::PbaRead(uint32_t offset, int size_log2)
+{
+    uint32_t index = offset / 4;
+    if (fCapOffset < 0 || index >= (uint32_t)((fVectorCount + 31) / 32))
+        return 0;
+    return (fPba[index] >> ((offset & 3) * 8)) & size_mask(size_log2);
+}
+
+
 /* i440FX host bridge */
 
 struct I440FXState: public IRQTarget {

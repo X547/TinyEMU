@@ -32,6 +32,9 @@
 #include "fdt.h"
 #include "pci_host_dw.h"
 #include "pci_host_ecam.h"
+#include "scsi.h"
+#include "usb.h"
+#include "xhci.h"
 
 #define UART_REG_SIZE 0x100
 #define FB_ALLOC_ALIGN 65536
@@ -325,6 +328,57 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
                                    compatible, (uint64_t)mmio_size_mb << 20);
     }
 
+    if (strcmp(type, "xhci") == 0) {
+        int usb2_ports, usb3_ports;
+        if (!node_int_opt(node, "usb2_ports", &usb2_ports,
+                          XHCI_DEFAULT_USB2_PORTS) ||
+            !node_int_opt(node, "usb3_ports", &usb3_ports,
+                          XHCI_DEFAULT_USB3_PORTS)) {
+            return nullptr;
+        }
+        return xhci_node_create(node->id != nullptr ? node->id : "xhci",
+                                usb2_ports, usb3_ports);
+    }
+
+    if (strcmp(type, "usb-hub") == 0) {
+        int ports, port;
+        if (!node_int_opt(node, "ports", &ports, 4) ||
+            !node_int_opt(node, "port", &port, 0)) {
+            return nullptr;
+        }
+        if (ports < 1 || ports > USB_MAX_PORTS) {
+            vm_error("usb-hub: 'ports' must be between 1 and %d\n",
+                     USB_MAX_PORTS);
+            return nullptr;
+        }
+        return usb_hub_node_create(ports, port);
+    }
+
+    if (strcmp(type, "usb-storage") == 0) {
+        int port;
+        if (!node_int_opt(node, "port", &port, 0)) {
+            return nullptr;
+        }
+        if (node->children == nullptr) {
+            vm_error("usb-storage: needs a nested SCSI bus with at least one "
+                     "device on it\n");
+            return nullptr;
+        }
+        return usb_storage_node_create(port);
+    }
+
+    if (strcmp(type, "scsi-disk") == 0) {
+        int lun;
+        if (!node_int_opt(node, "lun", &lun, -1)) {
+            return nullptr;
+        }
+        if (mutable_node->block_dev == nullptr) {
+            vm_error("scsi-disk: no block back end\n");
+            return nullptr;
+        }
+        return scsi_disk_node_create(mutable_node->block_dev, lun);
+    }
+
     if (strcmp(type, "virtio-block") == 0) {
         return new VirtioDevice("virtio-block", VIRTIO_KIND_BLOCK, ctx,
                                 mutable_node);
@@ -394,6 +448,16 @@ bool device_build_tree(Bus *bus, VMDeviceNode *nodes, DeviceContext *ctx)
             if (child == nullptr) {
                 vm_error("%s: device type '%s' does not provide a bus\n",
                          dev->Name(), node->type);
+                return false;
+            }
+            /* The nesting in the file is the nesting of the buses, so a name
+               that does not match the bus the device really provides is a
+               mistake in the configuration rather than something to ignore. */
+            if (node->child_bus_type != nullptr &&
+                strcmp(node->child_bus_type, child->Type()) != 0) {
+                vm_error("%s: device type '%s' provides a '%s' bus, but the "
+                         "configuration declares a '%s' bus\n", dev->Name(),
+                         node->type, child->Type(), node->child_bus_type);
                 return false;
             }
             if (!device_build_tree(child, node->children, ctx)) {

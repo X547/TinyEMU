@@ -70,6 +70,85 @@ public:
     virtual void SendMsi(uint64_t addr, uint32_t data) = 0;
 };
 
+/* MSI-X capability, as it sits in configuration space. */
+#define PCI_CAP_ID_MSIX          0x11
+#define PCI_MSIX_FLAGS           0x02 /* 16 bits */
+#define  PCI_MSIX_FLAGS_ENABLE   0x8000
+#define  PCI_MSIX_FLAGS_MASKALL  0x4000
+#define PCI_MSIX_TABLE           0x04
+#define PCI_MSIX_PBA             0x08
+#define PCI_MSIX_CAP_LEN         12
+
+/* Per vector mask, in an MSI-X table entry's control word. */
+#define PCI_MSIX_ENTRY_CTRL_MASKBIT 1
+
+/* What a driver writes to a vector register to say "no interrupt", and what
+   it reads back if the device could not honour its choice. */
+#define PCI_MSIX_NO_VECTOR 0xffff
+
+
+/* One MSI-X table entry, laid out as the guest sees it. */
+struct PCIMsixEntry {
+    uint32_t addr_lo;
+    uint32_t addr_hi;
+    uint32_t data;
+    uint32_t vector_ctrl; /* bit 0 masks the vector */
+};
+
+
+/* A device's MSI-X capability, together with the vector table and the pending
+   bit array that go with it. Both of those live inside one of the device's
+   BARs, so the device forwards the accesses that land in their windows to
+   TableRead/TableWrite/PbaRead; everything else about the mechanism -- the two
+   levels of masking, the pending bits, delivery -- is handled here.
+
+   Init() declines on a bus whose bridge has no MSI receiver, because a driver
+   that chose MSI-X there would have nothing to collect the message. The object
+   then reports itself absent, which is how the owning device knows to stay on
+   the INTx path. */
+class PCIMsixState {
+private:
+    PCIDevice *fDev = nullptr;
+    int fCapOffset = -1;
+    int fVectorCount = 0;
+    PCIMsixEntry *fTable = nullptr;
+    uint32_t *fPba = nullptr; /* one bit per vector */
+
+    bool MaskedAll() const;
+    uint32_t *TableSlot(uint32_t offset);
+
+public:
+    ~PCIMsixState();
+
+    /* Add the capability and allocate the table. 'table_offset' and
+       'pba_offset' are byte offsets within BAR 'bar_num', which the device
+       must map itself. Returns whether the capability was offered. */
+    bool Init(PCIDevice *dev, int bar_num, int vector_count,
+              uint32_t table_offset, uint32_t pba_offset);
+
+    bool Present() const {return fCapOffset >= 0;}
+    int VectorCount() const {return fVectorCount;}
+
+    /* True once the guest has turned the capability on. While it is on, the
+       device's INTx line must stay low. */
+    bool Enabled() const;
+
+    /* Accept a vector a driver assigned to one of the device's interrupt
+       sources. One that cannot be honoured reads back as PCI_MSIX_NO_VECTOR,
+       which is how the driver is told the request was refused. */
+    uint16_t AcceptVector(uint32_t vector) const;
+
+    /* Post one vector, or record it pending if it is masked. A masked vector
+       is delivered when the mask is lifted. */
+    void Send(int vector);
+
+    /* The table and the pending bit array are read and written a word at a
+       time like any other register. Offsets are relative to each window. */
+    uint32_t TableRead(uint32_t offset, int size_log2);
+    void TableWrite(uint32_t offset, uint32_t val, int size_log2);
+    uint32_t PbaRead(uint32_t offset, int size_log2);
+};
+
 /* A bare PCI bus, with no host bridge attached yet. 'port_map' may be null on
    machines without a port I/O space. The caller wires the four INTx lines with
    pci_bus_set_irq(). */

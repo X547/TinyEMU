@@ -33,11 +33,6 @@
 
 /* Enough for one vector per queue plus the configuration change. */
 #define VIRTIO_MSIX_VECTOR_COUNT 16
-#define VIRTIO_MSIX_PBA_WORDS ((VIRTIO_MSIX_VECTOR_COUNT + 31) / 32)
-
-/* What a driver writes to a vector register to say "no interrupt", and what
-   it reads back if the device could not honour its choice. */
-#define VIRTIO_MSI_NO_VECTOR 0xffff
 
 typedef struct {
     uint32_t ready; /* 0 or 1 */
@@ -50,14 +45,6 @@ typedef struct {
     bool manual_recv; /* if true, the device_recv() callback is not called */
 } QueueState;
 
-
-/* One MSI-X table entry, laid out as the guest sees it. */
-typedef struct {
-    uint32_t addr_lo;
-    uint32_t addr_hi;
-    uint32_t data;
-    uint32_t vector_ctrl; /* bit 0 masks the vector */
-} MsixEntry;
 
 class VIRTIOTransport;
 
@@ -79,12 +66,10 @@ struct VIRTIODevice: public PCIBarTarget {
     QueueState queue[MAX_QUEUE] {};
 
     /* MSI-X, offered only on a bus whose bridge has somewhere to deliver a
-       message. 'msix_cap_offset' is < 0 when the capability is absent, which
-       is also how the rest of the code knows to stay on the INTx path. */
-    int msix_cap_offset = -1;
-    uint16_t config_msix_vector = VIRTIO_MSI_NO_VECTOR;
-    MsixEntry msix_table[VIRTIO_MSIX_VECTOR_COUNT] {};
-    uint32_t msix_pba[VIRTIO_MSIX_PBA_WORDS] {};
+       message. When the capability is absent the state reports itself so, and
+       that is how the rest of the code knows to stay on the INTx path. */
+    PCIMsixState msix {};
+    uint16_t config_msix_vector = PCI_MSIX_NO_VECTOR;
 
     /* device specific */
     uint32_t device_id = 0;

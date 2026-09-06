@@ -148,16 +148,22 @@ emu_sources = files(
   'pci_host_ecam.cpp',
   'resource.cpp',
   'riscv_machine.cpp',
+  'scsi.cpp',
+  'scsi_disk.cpp',
   'simplefb.cpp',
   'softfp.cpp',
   'temu.cpp',
   'uart.cpp',
+  'usb.cpp',
+  'usb_hub.cpp',
+  'usb_storage.cpp',
   'virtio.cpp',
   'virtio_9p.cpp',
   'virtio_block.cpp',
   'virtio_console.cpp',
   'virtio_input.cpp',
   'virtio_net.cpp',
+  'xhci.cpp',
 )
 
 if x86emu

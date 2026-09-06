@@ -128,6 +128,17 @@ static inline void put_le64(uint8_t *ptr, uint64_t v)
     put_le32(ptr + 4, v >> 32);
 }
 
+static inline uint16_t get_be16(const uint8_t *d)
+{
+    return (d[0] << 8) | d[1];
+}
+
+static inline void put_be16(uint8_t *d, uint16_t v)
+{
+    d[0] = v >> 8;
+    d[1] = v >> 0;
+}
+
 static inline uint32_t get_be32(const uint8_t *d)
 {
     return (d[0] << 24) | (d[1] << 16) | (d[2] << 8) | d[3];

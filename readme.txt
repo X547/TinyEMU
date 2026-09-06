@@ -150,9 +150,35 @@ Device types:
   virtio-net             "driver" ("user" or "tap"), "ifname" for tap
   virtio-console         uses the emulator console
   virtio-input           "kind" ("keyboard", "mouse" or "tablet")
+  xhci                   USB 3.0 host controller on PCI; "usb2_ports"
+                         (default 4) and "usb3_ports" (default 2), and a
+                         nested USB bus
+  usb-hub                USB 2.0 hub; "ports" (default 4), "port" (which port
+                         of the parent to occupy, default the first free one),
+                         and a nested USB bus
+  usb-storage            USB mass storage, bulk-only transport; "port" as
+                         above, and a nested SCSI bus
+  scsi-disk              SCSI direct access block device; "file", and "lun"
+                         (default the first free logical unit)
 
 The virtio devices work on either transport: attached to the FDT bus they
 appear as virtio-mmio, and attached to a PCI bus they appear as PCI devices.
+
+The USB stack nests the same way everything else does, and the whole path from
+the PCI bus down to the image file is spelled out in the file:
+
+    PCI bus -> xhci -> USB bus -> usb-storage -> SCSI bus -> scsi-disk
+
+A hub may be inserted between the controller and a device, which puts that
+device one tier further down; the controller reaches it by the route string
+the guest programs, exactly as real hardware does. The controller advertises
+both a USB 2.0 and a USB 3.0 port set. The device models are high speed, so
+they occupy the USB 2.0 ports; the SuperSpeed ports exist because a controller
+without them is a shape some guest drivers handle poorly.
+
+A "usb-storage" with no SCSI device below it is an error rather than an empty
+drive, and the bus type named in each nested "bus" object is checked against
+the bus the device above it actually provides.
 
 The two PCI host bridges differ in more than their register layout. The ECAM
 one is a bare bus: devices sit on bus 0 and interrupt over INTx. The

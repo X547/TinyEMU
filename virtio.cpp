@@ -97,18 +97,6 @@
 
 #define VIRTIO_PCI_CAP_LEN 16
 
-/* MSI-X capability, as it sits in configuration space. */
-#define PCI_CAP_ID_MSIX          0x11
-#define PCI_MSIX_FLAGS           0x02 /* 16 bits */
-#define  PCI_MSIX_FLAGS_ENABLE   0x8000
-#define  PCI_MSIX_FLAGS_MASKALL  0x4000
-#define PCI_MSIX_TABLE           0x04
-#define PCI_MSIX_PBA             0x08
-#define PCI_MSIX_CAP_LEN         12
-
-/* Per vector mask, in an MSI-X table entry's control word. */
-#define PCI_MSIX_ENTRY_CTRL_MASKBIT 1
-
 /* Interrupt causes reported through the ISR register. */
 #define VIRTIO_INT_USED_RING 1
 #define VIRTIO_INT_CONFIG    2
@@ -134,7 +122,7 @@ static void virtio_reset(VIRTIODevice *s)
     s->queue_sel = 0;
     s->device_features_sel = 0;
     s->int_status = 0;
-    s->config_msix_vector = VIRTIO_MSI_NO_VECTOR;
+    s->config_msix_vector = PCI_MSIX_NO_VECTOR;
     for(i = 0; i < MAX_QUEUE; i++) {
         QueueState *qs = &s->queue[i];
         qs->ready = 0;
@@ -143,7 +131,7 @@ static void virtio_reset(VIRTIODevice *s)
         qs->avail_addr = 0;
         qs->used_addr = 0;
         qs->last_avail_idx = 0;
-        qs->msix_vector = VIRTIO_MSI_NO_VECTOR;
+        qs->msix_vector = PCI_MSIX_NO_VECTOR;
     }
     /* The MSI-X table itself survives a device reset: it belongs to the PCI
        function, not to the virtio protocol running on top of it. */
@@ -152,146 +140,18 @@ static void virtio_reset(VIRTIODevice *s)
 
 //#pragma mark - MSI-X
 
-/* True once the guest has turned the capability on. While it is on, the ISR
-   register plays no part and the INTx line must stay low. */
-static bool virtio_msix_enabled(VIRTIODevice *s)
-{
-    if (s->msix_cap_offset < 0)
-        return false;
-    uint32_t ctrl = pci_device_get_config(s->pci_dev,
-                                          s->msix_cap_offset + PCI_MSIX_FLAGS,
-                                          1);
-    return (ctrl & PCI_MSIX_FLAGS_ENABLE) != 0;
-}
-
-
-static bool virtio_msix_masked(VIRTIODevice *s)
-{
-    uint32_t ctrl = pci_device_get_config(s->pci_dev,
-                                          s->msix_cap_offset + PCI_MSIX_FLAGS,
-                                          1);
-    return (ctrl & PCI_MSIX_FLAGS_MASKALL) != 0;
-}
-
-
-/* Post one vector, or record it as pending if it is masked. A masked vector
-   is delivered when the mask is lifted, which is what the pending bit array
-   is for. */
-static void virtio_msix_send(VIRTIODevice *s, uint16_t vector)
-{
-    if (vector >= VIRTIO_MSIX_VECTOR_COUNT)
-        return;
-
-    MsixEntry *e = &s->msix_table[vector];
-    if (virtio_msix_masked(s) ||
-        (e->vector_ctrl & PCI_MSIX_ENTRY_CTRL_MASKBIT) != 0) {
-        s->msix_pba[vector >> 5] |= 1u << (vector & 31);
-        return;
-    }
-    s->msix_pba[vector >> 5] &= ~(1u << (vector & 31));
-    pci_device_send_msi(s->pci_dev,
-                        ((uint64_t)e->addr_hi << 32) | e->addr_lo, e->data);
-}
-
-
-/* Raise an interrupt for one cause, over whichever mechanism is in use. */
+/* Raise an interrupt for one cause, over whichever mechanism is in use. While
+   MSI-X is on, the ISR register plays no part and the INTx line stays low. */
 static void virtio_raise_irq(VIRTIODevice *s, uint32_t int_type,
                              uint16_t vector)
 {
-    if (virtio_msix_enabled(s)) {
-        if (vector != VIRTIO_MSI_NO_VECTOR)
-            virtio_msix_send(s, vector);
+    if (s->msix.Enabled()) {
+        if (vector != PCI_MSIX_NO_VECTOR)
+            s->msix.Send(vector);
         return;
     }
     s->int_status |= int_type;
     s->irq->Set(1);
-}
-
-
-/* Accept a vector a driver assigned to a queue or to configuration changes.
-   One it cannot be given reads back as "no vector", which is how the driver
-   is told the request was refused. */
-static uint16_t virtio_msix_accept(uint32_t vector)
-{
-    if (vector < VIRTIO_MSIX_VECTOR_COUNT)
-        return vector;
-    return VIRTIO_MSI_NO_VECTOR;
-}
-
-
-/* All the bits an access of this size covers. */
-static uint32_t virtio_size_mask(int size_log2)
-{
-    if (size_log2 >= 2)
-        return 0xffffffff;
-    return (1u << (8 << size_log2)) - 1;
-}
-
-
-/* The table and the pending bit array are both mapped into the device's BAR,
-   so they are read and written a word at a time like any other register. */
-static uint32_t *virtio_msix_table_slot(VIRTIODevice *s, uint32_t offset)
-{
-    /* The window is part of the BAR whether or not the capability naming it
-       was ever offered, so a guest can reach here on a bus that has no MSI
-       receiver. Without the capability there is no table to address. */
-    if (s->msix_cap_offset < 0)
-        return NULL;
-
-    uint32_t index = offset / sizeof(MsixEntry);
-    if (index >= VIRTIO_MSIX_VECTOR_COUNT)
-        return NULL;
-
-    MsixEntry *e = &s->msix_table[index];
-    switch ((offset / 4) % 4) {
-    case 0: return &e->addr_lo;
-    case 1: return &e->addr_hi;
-    case 2: return &e->data;
-    default: return &e->vector_ctrl;
-    }
-}
-
-
-static uint32_t virtio_msix_table_read(VIRTIODevice *s, uint32_t offset,
-                                       int size_log2)
-{
-    const uint32_t *slot = virtio_msix_table_slot(s, offset);
-    if (slot == NULL)
-        return 0;
-    return (*slot >> ((offset & 3) * 8)) & virtio_size_mask(size_log2);
-}
-
-
-static void virtio_msix_table_write(VIRTIODevice *s, uint32_t offset,
-                                    uint32_t val, int size_log2)
-{
-    uint32_t *slot = virtio_msix_table_slot(s, offset);
-    if (slot == NULL)
-        return;
-
-    int shift = (offset & 3) * 8;
-    uint32_t mask = virtio_size_mask(size_log2) << shift;
-    uint32_t old = *slot;
-    *slot = (old & ~mask) | ((val << shift) & mask);
-
-    /* Lifting a vector's mask delivers whatever arrived while it was set. */
-    uint32_t index = offset / sizeof(MsixEntry);
-    if (slot == &s->msix_table[index].vector_ctrl &&
-        (old & PCI_MSIX_ENTRY_CTRL_MASKBIT) != 0 &&
-        (*slot & PCI_MSIX_ENTRY_CTRL_MASKBIT) == 0 &&
-        (s->msix_pba[index >> 5] & (1u << (index & 31))) != 0) {
-        virtio_msix_send(s, index);
-    }
-}
-
-
-static uint32_t virtio_msix_pba_read(VIRTIODevice *s, uint32_t offset,
-                                     int size_log2)
-{
-    uint32_t index = offset / 4;
-    if (s->msix_cap_offset < 0 || index >= VIRTIO_MSIX_PBA_WORDS)
-        return 0;
-    return (s->msix_pba[index] >> ((offset & 3) * 8)) & virtio_size_mask(size_log2);
 }
 
 /* PCI and MMIO differ both in their register layout and in how the device
@@ -419,21 +279,9 @@ void virtio_init(VIRTIODevice *s, VIRTIOBusDef *bus,
         virtio_add_pci_capability(s, 2, bar_num,
                               VIRTIO_PCI_NOTIFY_OFFSET, 0x1000, 0); /* notify */
 
-        /* MSI-X is offered only where the bridge has a receiver for it.
-           Advertising it on a bus with nothing to collect the message would
-           leave a guest that picked it with no interrupts at all. */
-        if (pci_bus_has_msi(bus->pci_bus)) {
-            uint8_t cap[PCI_MSIX_CAP_LEN];
-            memset(cap, 0, sizeof(cap));
-            cap[0] = PCI_CAP_ID_MSIX;
-            put_le16(cap + PCI_MSIX_FLAGS, VIRTIO_MSIX_VECTOR_COUNT - 1);
-            put_le32(cap + PCI_MSIX_TABLE,
-                     VIRTIO_PCI_MSIX_TABLE_OFFSET | bar_num);
-            put_le32(cap + PCI_MSIX_PBA,
-                     VIRTIO_PCI_MSIX_PBA_OFFSET | bar_num);
-            s->msix_cap_offset = pci_add_capability(s->pci_dev, cap,
-                                                    sizeof(cap));
-        }
+        /* Declines by itself on a bus whose bridge has no MSI receiver. */
+        s->msix.Init(s->pci_dev, bar_num, VIRTIO_MSIX_VECTOR_COUNT,
+                     VIRTIO_PCI_MSIX_TABLE_OFFSET, VIRTIO_PCI_MSIX_PBA_OFFSET);
 
         s->transport = new VIRTIOPCITransport(*s);
         s->irq = pci_device_get_irq(s->pci_dev, 0);
@@ -1044,10 +892,10 @@ uint32_t VIRTIOPCITransport::DeviceRead(uint32_t offset1, int size_log2)
         val = virtio_config_read(s, offset, size_log2);
         break;
     case VIRTIO_PCI_MSIX_TABLE_OFFSET >> 12:
-        val = virtio_msix_table_read(s, offset, size_log2);
+        val = s->msix.TableRead(offset, size_log2);
         break;
     case VIRTIO_PCI_MSIX_PBA_OFFSET >> 12:
-        val = virtio_msix_pba_read(s, offset, size_log2);
+        val = s->msix.PbaRead(offset, size_log2);
         break;
     }
 #ifdef DEBUG_VIRTIO
@@ -1114,10 +962,10 @@ void VIRTIOPCITransport::DeviceWrite(uint32_t offset1, uint32_t val, int size_lo
                 s->queue[s->queue_sel].ready = val & 1;
                 break;
             case VIRTIO_PCI_MSIX_CONFIG:
-                s->config_msix_vector = virtio_msix_accept(val);
+                s->config_msix_vector = s->msix.AcceptVector(val);
                 break;
             case VIRTIO_PCI_QUEUE_MSIX_VECTOR:
-                s->queue[s->queue_sel].msix_vector = virtio_msix_accept(val);
+                s->queue[s->queue_sel].msix_vector = s->msix.AcceptVector(val);
                 break;
             }
         } else if (size_log2 == 0) {
@@ -1137,7 +985,7 @@ void VIRTIOPCITransport::DeviceWrite(uint32_t offset1, uint32_t val, int size_lo
         virtio_config_write(s, offset, val, size_log2);
         break;
     case VIRTIO_PCI_MSIX_TABLE_OFFSET >> 12:
-        virtio_msix_table_write(s, offset, val, size_log2);
+        s->msix.TableWrite(offset, val, size_log2);
         break;
     case VIRTIO_PCI_NOTIFY_OFFSET >> 12:
         if (val < MAX_QUEUE)

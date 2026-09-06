@@ -221,6 +221,7 @@ static void free_device_list(VMDeviceNode *node)
         free(node->type);
         free(node->id);
         free(node->filename);
+        free(node->child_bus_type);
         free(node);
         node = next;
     }
@@ -297,6 +298,10 @@ static int parse_bus(JSONValue bus_obj, VMDeviceNode *owner,
     }
     if (vm_get_str(bus_obj, "type", &bus_type) < 0)
         return -1;
+    /* Kept so that the machine can check it against the bus the owning device
+       really provides, rather than accepting any name at all. */
+    if (owner != NULL)
+        owner->child_bus_type = strdup(bus_type);
 
     devices = json_object_get(bus_obj, "devices");
     if (json_is_undefined(devices))

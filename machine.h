@@ -129,6 +129,9 @@ struct VMDeviceNode {
     VMDeviceNode *next; /* next sibling */
     VMDeviceNode *children;
     int child_count;
+    /* The bus type the configuration declared for those children, checked
+       against the bus the device actually provides. */
+    char *child_bus_type;
 
     /* resolved back ends */
     char *filename;
