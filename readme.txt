@@ -183,6 +183,17 @@ Device types:
                          unused on PCI), and a nested SD bus
   sd-card                SD memory card; "file", and "read_only"
   mmc-card               eMMC storage device; "file", and "read_only"
+  dwmac                  Synopsys DesignWare Ethernet QoS MAC on the FDT bus;
+                         "driver" and "ifname" as for virtio-net,
+                         "compatible" (which core the node claims to be,
+                         default "snps,dwmac-5.10a"; it must name a 4.x or
+                         5.x core, because that is the register layout this
+                         models), "phy_mode" (default "rgmii-id"), "quirks"
+                         (see below), and a nested MDIO bus
+  ethernet-phy           generic 10/100/1000 PHY on an MDIO bus; "reg" (its
+                         address, default the first free one) and "phy_id"
+                         (the identifier the guest reads, default one no
+                         vendor owns so that a generic driver binds)
 
 The virtio devices work on either transport: attached to the FDT bus they
 appear as virtio-mmio, and attached to a PCI bus they appear as PCI devices.
@@ -276,6 +287,59 @@ that did not. A card image larger than two gigabytes becomes a high capacity
 card, addressed in blocks; a smaller one is addressed in bytes and holds
 what its capacity fields can express, which for an image whose size is not a
 round number of allocation units is a little less than the file.
+
+The Ethernet MAC nests the same way, and the PHY it talks to is a device of
+its own on the MDIO bus the MAC provides:
+
+    FDT bus -> dwmac -> MDIO bus -> ethernet-phy
+
+Unlike a PCI bus, an MDIO bus is enumerated by the machine rather than by the
+guest, so it both allocates the addresses and describes its children in the
+device tree. A PHY that names no "reg" is placed like any other resource, and
+one that does cannot collide with one that does not. A "dwmac" with no PHY
+below it is an error rather than a MAC with a dead link.
+
+The MAC takes the same "user" and "tap" back ends virtio-net does, and only
+one network device may be declared in a machine: the emulator polls a single
+back end from its main loop, so a second would never receive anything.
+
+Descriptors are moved synchronously. Writing a transmit tail pointer drains
+the ring there and then, and a frame arriving from the back end is placed
+straight into the current receive descriptor; a frame that does not fit one
+descriptor is dropped rather than split, because neither reference driver
+reassembles one. Checksum offload, segmentation, timestamping, the hash
+filter and the statistics counters are all absent, and the feature registers
+say so, so a driver never asks for them.
+
+The MAC is a bare DesignWare core unless the configuration asks otherwise.
+"quirks" is an array of names, and a name that is not one of these is
+reported rather than ignored:
+
+  clocks           emit the clocks a StarFive style platform binding names,
+                   as one fixed clock standing in for all of them
+  link-on-reset    report the link again after a software reset
+  haiku            both, which is what Haiku's driver needs together
+
+Both exist for a driver written against a part that wraps this core in a
+platform binding rather than for the core itself. Such a driver refuses to
+probe when a clock that binding names is missing, and there is no clock
+controller in this machine to take one from. And where Linux learns the link
+state by polling the PHY over MDIO, a driver may instead learn it only from
+the announcement the MAC makes when its in band status changes -- which here
+happens before the guest has run, and is then thrown away by the software
+reset the driver performs before it starts listening. On real hardware the
+two do not collide, because negotiation finishes a second or so after the
+driver has started.
+
+Haiku's driver wants both, and its device manager binds on the part rather
+than on the core, so it also wants the name:
+
+    { type: "dwmac", driver: "user",
+      compatible: "starfive,jh7110-eqos-5.20", quirks: ["haiku"],
+      bus: { type: "mdio", devices: [ { type: "ethernet-phy", reg: 0 } ] } }
+
+The node keeps "snps,dwmac" as its last compatible entry whatever the first
+one says, so a generic driver still binds to it.
 
 The two PCI host bridges differ in more than their register layout. The ECAM
 one is a bare bus: devices sit on bus 0 and interrupt over INTx. The

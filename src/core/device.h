@@ -32,6 +32,7 @@
 class Bus;
 class Device;
 class FDTBuilder;
+class MDIOBus;
 struct PCIBus;
 
 
@@ -122,6 +123,10 @@ public:
     /* Non-null only for a PCI bus, so that bus-agnostic devices such as
        virtio can pick their transport. */
     virtual PCIBus *AsPCIBus() {return nullptr;}
+
+    /* Non-null only for an MDIO bus, so that a PHY can refuse to be attached
+       anywhere else. */
+    virtual MDIOBus *AsMDIOBus() {return nullptr;}
 
     /* Depth-first passes over the whole subtree. */
     bool AllocateAll();

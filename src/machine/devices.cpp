@@ -29,8 +29,10 @@
 #include <inttypes.h>
 
 #include "cutils.h"
+#include "dwmac.h"
 #include "fdt.h"
 #include "hid.h"
+#include "mdio.h"
 #include "nvme.h"
 #include "pci_bridge.h"
 #include "pci_host_dw.h"
@@ -250,6 +252,12 @@ public:
         case VIRTIO_KIND_NET:
             if (fNode->net == nullptr) {
                 vm_error("%s: no network back end\n", Name());
+                return false;
+            }
+            /* The emulator polls a single back end from its main loop, so a
+               second network device would simply never receive anything. */
+            if (fCtx->net != nullptr) {
+                vm_error("%s: only one network device is supported\n", Name());
                 return false;
             }
             fDev = virtio_net_init(&vbus, fNode->net);
@@ -531,6 +539,59 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
             return nullptr;
         }
         return scsi_disk_node_create(mutable_node->block_dev, lun);
+    }
+
+    if (strcmp(type, "dwmac") == 0) {
+        const char *compatible, *phy_mode;
+        /* Which controller this claims to be decides which driver binds to
+           it, so it is worth setting from the configuration rather than
+           being fixed here. */
+        if (vm_get_str_opt(node->props, "compatible", &compatible) < 0 ||
+            vm_get_str_opt(node->props, "phy_mode", &phy_mode) < 0) {
+            return nullptr;
+        }
+        if (compatible == nullptr) {
+            compatible = DWMAC_DEFAULT_COMPATIBLE;
+        }
+        if (phy_mode == nullptr) {
+            phy_mode = DWMAC_DEFAULT_PHY_MODE;
+        }
+        /* Deviations a guest needs are asked for by name, so that a
+           conformant driver gets a conformant MAC. */
+        uint32_t quirks = 0;
+        JSONValue list = json_object_get(node->props, "quirks");
+        if (!json_is_undefined(list)) {
+            if (list.type != JSON_ARRAY) {
+                vm_error("dwmac: 'quirks' must be an array of names\n");
+                return nullptr;
+            }
+            for (int i = 0; i < list.u.array->len; i++) {
+                JSONValue item = json_array_get(list, i);
+                if (item.type != JSON_STR) {
+                    vm_error("dwmac: 'quirks' must be an array of names\n");
+                    return nullptr;
+                }
+                uint32_t bits = dwmac_quirks_from_name(item.u.str->data);
+                if (bits == 0) {
+                    vm_error("dwmac: unknown quirk '%s'\n", item.u.str->data);
+                    return nullptr;
+                }
+                quirks |= bits;
+            }
+        }
+        return new DwmacDevice(ctx, mutable_node, compatible, phy_mode,
+                               quirks);
+    }
+
+    if (strcmp(type, "ethernet-phy") == 0) {
+        int address, phy_id;
+        /* Without an address the bus places the PHY, exactly as the MMIO
+           allocator places a device that names no base. */
+        if (!node_int_opt(node, "reg", &address, -1) ||
+            !node_int_opt(node, "phy_id", &phy_id, PHY_GENERIC_ID)) {
+            return nullptr;
+        }
+        return new PHYDevice(address, (uint32_t)phy_id);
     }
 
     if (strcmp(type, "virtio-block") == 0) {

@@ -130,6 +130,7 @@ inc = include_directories(
   'lib/crypto',
   'lib/softfp',
   'src/bus/hid',
+  'src/bus/mdio',
   'src/bus/pci',
   'src/bus/pci/host',
   'src/bus/scsi',
@@ -187,6 +188,7 @@ subdir('src/core')
 subdir('src/cpu/riscv')
 subdir('src/cpu/x86')
 subdir('src/bus/hid')
+subdir('src/bus/mdio')
 subdir('src/bus/pci')
 subdir('src/bus/scsi')
 subdir('src/bus/sd')

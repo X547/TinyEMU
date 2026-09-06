@@ -786,7 +786,8 @@ static void open_device_backend(VMDeviceNode *node, void *opaque)
         open_block_backend(node, st);
     } else if (!strcmp(node->type, "virtio-9p")) {
         open_fs_backend(node, st);
-    } else if (!strcmp(node->type, "virtio-net")) {
+    } else if (!strcmp(node->type, "virtio-net") ||
+               !strcmp(node->type, "dwmac")) {
         open_net_backend(node, st);
     }
 }

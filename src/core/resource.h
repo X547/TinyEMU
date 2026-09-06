@@ -34,8 +34,9 @@
 
 typedef enum {
     RES_NONE,
-    RES_MMIO, /* host physical address space */
-    RES_IRQ,  /* interrupt controller input line */
+    RES_MMIO,      /* host physical address space */
+    RES_IRQ,       /* interrupt controller input line */
+    RES_MDIO_ADDR, /* address on an MDIO bus */
 } ResourceTypeEnum;
 
 

@@ -355,7 +355,8 @@ static void flatten_visit(VMDeviceNode *node, void *opaque)
         e->tag = str;
         e->filename = node->filename;
         e->node = node;
-    } else if (!strcmp(node->type, "virtio-net")) {
+    } else if (!strcmp(node->type, "virtio-net") ||
+               !strcmp(node->type, "dwmac")) {
         if (p->eth_count >= MAX_ETH_DEVICE) {
             vm_error("Too many ethernet interfaces\n");
             return;
