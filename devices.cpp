@@ -30,6 +30,7 @@
 
 #include "cutils.h"
 #include "fdt.h"
+#include "nvme.h"
 #include "pci_host_dw.h"
 #include "pci_host_ecam.h"
 #include "scsi.h"
@@ -326,6 +327,51 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
         }
         return new PCIHostDWDevice(node->id != nullptr ? node->id : "pcie",
                                    compatible, (uint64_t)mmio_size_mb << 20);
+    }
+
+    if (strcmp(type, "nvme") == 0) {
+        /* Deviations a guest needs are asked for by name, so that a
+           conformant guest gets a conformant controller. */
+        uint32_t quirks = 0;
+        JSONValue list = json_object_get(node->props, "quirks");
+        if (!json_is_undefined(list)) {
+            if (list.type != JSON_ARRAY) {
+                vm_error("nvme: 'quirks' must be an array of names\n");
+                return nullptr;
+            }
+            for (int i = 0; i < list.u.array->len; i++) {
+                JSONValue item = json_array_get(list, i);
+                if (item.type != JSON_STR) {
+                    vm_error("nvme: 'quirks' must be an array of names\n");
+                    return nullptr;
+                }
+                uint32_t bits = nvme_quirks_from_name(item.u.str->data);
+                if (bits == 0) {
+                    vm_error("nvme: unknown quirk '%s'\n", item.u.str->data);
+                    return nullptr;
+                }
+                quirks |= bits;
+            }
+        }
+        if (node->children == nullptr) {
+            vm_error("nvme: needs a nested NVMe bus with at least one "
+                     "namespace on it\n");
+            return nullptr;
+        }
+        return nvme_node_create(node->id != nullptr ? node->id : "nvme",
+                                quirks);
+    }
+
+    if (strcmp(type, "nvme-ns") == 0) {
+        int nsid;
+        if (!node_int_opt(node, "nsid", &nsid, -1)) {
+            return nullptr;
+        }
+        if (mutable_node->block_dev == nullptr) {
+            vm_error("nvme-ns: no block back end\n");
+            return nullptr;
+        }
+        return nvme_namespace_node_create(mutable_node->block_dev, nsid);
     }
 
     if (strcmp(type, "xhci") == 0) {

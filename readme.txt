@@ -160,6 +160,10 @@ Device types:
                          above, and a nested SCSI bus
   scsi-disk              SCSI direct access block device; "file", and "lun"
                          (default the first free logical unit)
+  nvme                   NVM Express controller on PCI; "quirks" (see below)
+                         and a nested NVMe bus
+  nvme-ns                NVMe namespace; "file", and "nsid" (default the
+                         first free namespace id)
 
 The virtio devices work on either transport: attached to the FDT bus they
 appear as virtio-mmio, and attached to a PCI bus they appear as PCI devices.
@@ -179,6 +183,30 @@ without them is a shape some guest drivers handle poorly.
 A "usb-storage" with no SCSI device below it is an error rather than an empty
 drive, and the bus type named in each nested "bus" object is checked against
 the bus the device above it actually provides.
+
+The NVMe controller nests the same way, down to the image file:
+
+    PCI bus -> nvme -> NVMe bus -> nvme-ns
+
+It behaves as the specification describes unless the configuration asks
+otherwise. "quirks" is an array of names, and a name that is not one of these
+is reported rather than ignored:
+
+  no-enable-check      serve the admin queue as soon as AQA, ASQ and ACQ have
+                       been programmed, instead of waiting for CC.EN
+  nsid-zero            take namespace id 0 to mean namespace 1
+  loose-queue-create   accept a queue creation that asks for a discontiguous
+                       queue or names completion queue 0, and clamp a read
+                       that runs off the end of the namespace instead of
+                       failing it
+  poll-only            never drive the INTx pin, leaving the guest to poll
+  haiku                all four, which is what Haiku's RISC-V boot loader and
+                       disk driver between them need
+
+A completion queue interrupt is a level: it is asserted while the queue holds
+entries the host has not taken, and it clears when the host rings that queue's
+head doorbell. A guest whose handler does not drain the queue before returning
+will therefore re-enter it forever, which is what "poll-only" exists for.
 
 The two PCI host bridges differ in more than their register layout. The ECAM
 one is a bare bus: devices sit on bus 0 and interrupt over INTx. The

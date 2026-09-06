@@ -143,6 +143,7 @@ emu_sources = files(
   'iomem.cpp',
   'json.cpp',
   'machine.cpp',
+  'nvme.cpp',
   'pci.cpp',
   'pci_host_dw.cpp',
   'pci_host_ecam.cpp',
