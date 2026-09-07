@@ -140,11 +140,18 @@ Device types:
   simplefb               "width", "height"
   pci-host-ecam-generic  ECAM PCIe host bridge; "bus_count" (ECAM window
                          size in MB, default 16), "mmio_size" (aperture size
-                         in MB, default 256), and a nested PCI bus
-  pci-host-designware    Synopsys DesignWare PCIe root complex; "mmio_size"
-                         (aperture size in MB, default 256), "compatible"
-                         (which controller it claims to be, default
-                         "sifive,fu740-pcie"), and a nested PCI bus
+                         in MB, default 256), "mmio64_size" (size in MB of a
+                         second aperture above 4 GB, default 0 for none), and
+                         a nested PCI bus
+  pci-host-designware    Synopsys DesignWare PCIe root complex; "mmio_size",
+                         "mmio64_size" and "bus_count" as above (bus_count
+                         defaults to 16 and bounds only what the device tree
+                         advertises), "compatible" (which controller it
+                         claims to be, default "sifive,fu740-pcie"), and a
+                         nested PCI bus
+  pci-bridge             PCI Express switch; the devices nested in it sit
+                         behind it rather than on the bus above. Nest one
+                         inside another for a deeper hierarchy
   virtio-block           "file"
   virtio-9p              "file", "tag"
   virtio-net             "driver" ("user" or "tap"), "ifname" for tap
@@ -211,10 +218,10 @@ will therefore re-enter it forever, which is what "poll-only" exists for.
 The two PCI host bridges differ in more than their register layout. The ECAM
 one is a bare bus: devices sit on bus 0 and interrupt over INTx. The
 DesignWare one models a real root complex, so it has a root port of its own on
-bus 0 and devices are enumerated on bus 1 behind it, and it carries a message
-signalled interrupt receiver. Devices on a bus that has one advertise MSI-X
-and use it in preference to INTx; on a bus without one they do not offer it at
-all, because a guest that chose it would have nothing to collect the message.
+bus 0 and devices are enumerated behind it, and it carries a message signalled
+interrupt receiver. Devices on a bus that has one advertise MSI-X and use it
+in preference to INTx; on a bus without one they do not offer it at all,
+because a guest that chose it would have nothing to collect the message.
 
 Which driver binds to the DesignWare bridge is decided by "compatible". The
 default names the SiFive FU740, which is what Haiku's DesignWare bus driver
@@ -222,14 +229,52 @@ probes for. Linux's driver for that part wants clocks, resets and GPIOs that
 this machine does not model, so for Linux ask for "snps,dw-pcie" instead and
 its generic DesignWare host driver binds.
 
+Several host bridges may be declared side by side. Each reserves its own
+windows, takes its own interrupt lines and is described as a PCI domain of
+its own, so a guest names the devices behind them unambiguously.
+
+3.4 PCI topology
+----------------
+
+Both host bridges present a PCI Express hierarchy: every function on one
+carries a PCI Express capability, and so has the full 4096 byte configuration
+space rather than the conventional 256 bytes. A guest reads the extended
+capability chain at offset 0x100 like any other; what it finds there is a
+device serial number, which every function has one of.
+
+Where a device may sit is decided by the hierarchy, exactly as on hardware.
+The ECAM bridge's bus 0 is a root complex bus and holds as many devices as it
+has slots. A link, on the other hand, carries one device, so the bus behind
+the DesignWare root port and the bus behind any port of a switch each hold
+one. A configuration that names several devices in such a place is given the
+switch that has to sit between them: an upstream port, the bus inside it, and
+a downstream port for each device. That is what "pci-bridge" is, and it is
+also what the DesignWare bridge does with the devices declared under it, so
+a configuration written against the older bare-bus behaviour keeps working
+and simply finds its devices two tiers further down than it used to.
+
+INTx is swizzled at every tier the way a guest expects: a device's pin is
+swizzled by its slot at each bridge it passes, and the host bridge's device
+tree "interrupt-map" describes only the last step, so the table and the
+emulation are derived from the same routing function.
+
+Base address registers may be 64 bits wide, and the NVMe and xHCI controllers
+declare theirs that way because their specifications do. Such a register is a
+pair, sized and programmed as one, and takes the slot after it. By default the
+guest still places it below 4 GB, because that is the only aperture the device
+tree advertises; asking a host bridge for "mmio64_size" adds a second one
+above 4 GB for those registers to go in.
+
 MMIO addresses and interrupt lines are never written in the configuration
 file. They are allocated when the machine is built, checked against each
 other and against the architectural ranges, and then described to the guest
 in the device tree from the values that were actually assigned. A device
 that does not fit, or a PCI aperture that would overlap something else, is
-reported instead of silently shadowing another mapping.
+reported instead of silently shadowing another mapping. Apertures above 4 GB
+come from a window of their own, but are recorded in the same map, so several
+host bridges may each have one and an overlap is still reported.
 
-3.4 Network usage
+3.5 Network usage
 -----------------
 
 The easiest way is to use the "user" mode network driver. No specific
@@ -252,7 +297,7 @@ and configure the network in the guest system with:
 ifconfig eth0 192.168.3.2
 route add -net 0.0.0.0 gw 192.168.3.1 eth0
 
-3.5 Network filesystem
+3.6 Network filesystem
 ----------------------
 
 TinyEMU supports the VirtIO 9P filesystem to access local or remote
@@ -267,7 +312,7 @@ simple web server is enough to serve the files.
 The '.preload' file gives a list of files to preload when opening a
 given file.
 
-3.6 Network block device
+3.7 Network block device
 ------------------------
 
 TinyEMU supports an HTTP block device. The disk image is split into

@@ -25,6 +25,7 @@
 
 #include "device.h"
 #include "pci.h"
+#include "pci_bridge.h"
 #include "pci_host_ecam.h"
 
 /* The DBI window carries three things at once: the root complex's own
@@ -40,6 +41,10 @@
 #define PCIE_DW_CONFIG_SIZE 0x10000
 
 #define PCIE_DW_DEFAULT_MMIO_SIZE 0x10000000 /* 256 MB */
+
+/* Bus 0 holds the root port and the buses behind it hold everything else, so
+   the default leaves room for a few tiers of bridges. */
+#define PCIE_DW_DEFAULT_BUS_COUNT 16
 
 /* What a Haiku or Linux driver matches on. The default names the SiFive FU740
    because that is the variant Haiku's DesignWare driver probes for. */
@@ -89,16 +94,19 @@ private:
     PCIBus *fRootBus = nullptr; /* bus 0: the root port alone */
     PCIBus *fDevBus = nullptr;  /* the secondary bus, where devices live */
     PCIDevice *fRootPort = nullptr;
-    PCIBusWrapper *fChildBus = nullptr;
+    Bus *fChildBus = nullptr;
 
     Resource *fDbiRes = nullptr;
     Resource *fConfigRes = nullptr;
     Resource *fMmioRes = nullptr;
+    Resource *fMmio64Res = nullptr;
     Resource *fMsiIrqRes = nullptr;
     Resource *fIrqRes[4] {};
 
     const char *fCompatible;
     uint64_t fMmioSize;
+    uint64_t fMmio64Size;
+    int fBusCount;
 
     /* Port logic registers the guest may write and read back. Nothing here
        changes how the model behaves; they exist so that a driver's
@@ -128,7 +136,7 @@ private:
 
 public:
     PCIHostDWDevice(const char *name, const char *compatible,
-                    uint64_t mmio_size);
+                    uint64_t mmio_size, uint64_t mmio64_size, int bus_count);
     ~PCIHostDWDevice() override;
 
     bool Prepare() override;

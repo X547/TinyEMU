@@ -50,6 +50,10 @@ struct Resource {
     uint64_t size = 0;
     uint64_t align = 0; /* 0 means "natural": align to size */
     bool fixed = false; /* base is preassigned and must be honoured */
+    /* Take it from the space above 4 GB rather than the ordinary device
+       window. A PCI host bridge's 64 bit aperture is the only thing that
+       asks for this. */
+    bool high = false;
     bool assigned = false;
 
     uint64_t End() const {return base + size;}
@@ -75,6 +79,8 @@ private:
     const char *fName;
     uint64_t fWindowBase = 0;
     uint64_t fWindowSize = 0;
+    uint64_t fHighBase = 0;
+    uint64_t fHighSize = 0;
     int fCount = 0;
     AllocEntry fEntries[ALLOCATOR_MAX_ENTRIES] {};
 
@@ -88,16 +94,22 @@ public:
        still allowed; they just are not candidates for Alloc(). */
     void SetWindow(uint64_t base, uint64_t size);
 
+    /* A second region, above the 4 GB an ordinary device mapping has to stay
+       under. Everything claimed anywhere goes in the same list, so a machine
+       whose RAM reaches this far is still told about the overlap. */
+    void SetHighWindow(uint64_t base, uint64_t size);
+
     /* Reserve a fixed interval. Returns false and reports the conflicting
        owner if it overlaps something already claimed. */
     bool Claim(uint64_t base, uint64_t size, const char *owner);
 
-    /* Place 'size' bytes inside the window. 'align' of 0 means natural
-       alignment. Returns false if the window is exhausted. */
+    /* Place 'size' bytes inside the window, or inside the high one. 'align'
+       of 0 means natural alignment. Returns false if the window is
+       exhausted. */
     bool Alloc(uint64_t size, uint64_t align, const char *owner,
-               uint64_t *base_out);
+               uint64_t *base_out, bool high = false);
 
-    /* Assign one resource record, honouring res->fixed. */
+    /* Assign one resource record, honouring res->fixed and res->high. */
     bool Assign(Resource *res, const char *owner);
 
     const AllocEntry *FindOverlap(uint64_t base, uint64_t size) const;

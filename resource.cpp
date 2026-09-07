@@ -37,6 +37,13 @@ void RangeAllocator::SetWindow(uint64_t base, uint64_t size)
 }
 
 
+void RangeAllocator::SetHighWindow(uint64_t base, uint64_t size)
+{
+    fHighBase = base;
+    fHighSize = size;
+}
+
+
 int RangeAllocator::InsertIndex(uint64_t base) const
 {
     int i = 0;
@@ -99,8 +106,11 @@ bool RangeAllocator::Claim(uint64_t base, uint64_t size, const char *owner)
 
 
 bool RangeAllocator::Alloc(uint64_t size, uint64_t align, const char *owner,
-                           uint64_t *base_out)
+                           uint64_t *base_out, bool high)
 {
+    uint64_t window_base = high ? fHighBase : fWindowBase;
+    uint64_t window_size = high ? fHighSize : fWindowSize;
+
     if (size == 0) {
         *base_out = 0;
         return true;
@@ -111,8 +121,8 @@ bool RangeAllocator::Alloc(uint64_t size, uint64_t align, const char *owner,
 
     /* Walk the gaps between claimed intervals inside the window. The entry
        list is sorted, so one pass finds the lowest fit. */
-    uint64_t candidate = (fWindowBase + align - 1) & ~(align - 1);
-    uint64_t window_end = fWindowBase + fWindowSize;
+    uint64_t candidate = (window_base + align - 1) & ~(align - 1);
+    uint64_t window_end = window_base + window_size;
 
     for (int i = 0; i <= fCount; i++) {
         uint64_t gap_end;
@@ -141,7 +151,7 @@ bool RangeAllocator::Alloc(uint64_t size, uint64_t align, const char *owner,
 
     vm_error("%s: no free space for %s (size 0x%" PRIx64 ", align 0x%" PRIx64
              ") in window 0x%" PRIx64 "-0x%" PRIx64 "\n",
-             fName, owner, size, align, fWindowBase, window_end - 1);
+             fName, owner, size, align, window_base, window_end - 1);
     return false;
 }
 
@@ -156,7 +166,7 @@ bool RangeAllocator::Assign(Resource *res, const char *owner)
             return false;
         }
     } else {
-        if (!Alloc(res->size, res->align, owner, &res->base)) {
+        if (!Alloc(res->size, res->align, owner, &res->base, res->high)) {
             return false;
         }
     }

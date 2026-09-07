@@ -25,6 +25,7 @@
 
 #include "device.h"
 #include "pci.h"
+#include "pci_bridge.h"
 
 /* One ECAM function window is 4 KB, so one bus is 256 * 4 KB = 1 MB. */
 #define PCIE_ECAM_BUS_SHIFT 20
@@ -38,23 +39,6 @@
 #define PCIE_ECAM_DEFAULT_MMIO_SIZE 0x10000000 /* 256 MB */
 
 
-/* Wraps a PCIBus so devices can be attached through the generic Bus
-   interface. BAR placement is left to the guest, which is why this bus
-   assigns no resources of its own. */
-class PCIBusWrapper final: public Bus {
-private:
-    PCIBus *fBus;
-
-public:
-    PCIBusWrapper(Device *owner, PCIBus *bus): Bus(owner), fBus(bus) {}
-
-    const char *Type() const override {return "pci";}
-    PCIBus *AsPCIBus() override {return fBus;}
-
-    bool AssignResources(Device *dev) override;
-};
-
-
 /* An "pci-host-ecam-generic" bridge: an ECAM configuration window plus a
    memory aperture, both taken from the parent bus's MMIO space so that they
    are checked against every other static mapping. The FDT "interrupt-map" is
@@ -63,18 +47,21 @@ public:
 class PCIHostECAMDevice final: public Device {
 private:
     PCIBus *fPciBus = nullptr;
-    PCIBusWrapper *fChildBus = nullptr;
+    Bus *fChildBus = nullptr;
     Resource *fEcamRes = nullptr;
     Resource *fMmioRes = nullptr;
+    Resource *fMmio64Res = nullptr;
     Resource *fIrqRes[4] {};
     int fBusCount;
     uint64_t fMmioSize;
+    uint64_t fMmio64Size;
 
     uint32_t EcamRead(uint32_t offset, int size_log2);
     void EcamWrite(uint32_t offset, uint32_t val, int size_log2);
 
 public:
-    PCIHostECAMDevice(const char *name, int bus_count, uint64_t mmio_size);
+    PCIHostECAMDevice(const char *name, int bus_count, uint64_t mmio_size,
+                      uint64_t mmio64_size);
     ~PCIHostECAMDevice() override;
 
     bool Prepare() override;

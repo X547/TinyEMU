@@ -31,6 +31,7 @@
 #include "cutils.h"
 #include "fdt.h"
 #include "nvme.h"
+#include "pci_bridge.h"
 #include "pci_host_dw.h"
 #include "pci_host_ecam.h"
 #include "scsi.h"
@@ -298,22 +299,27 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
     }
 
     if (strcmp(type, "pci-host-ecam-generic") == 0) {
-        int bus_count, mmio_size_mb;
+        int bus_count, mmio_size_mb, mmio64_size_mb;
         if (!node_int_opt(node, "bus_count", &bus_count,
                           PCIE_ECAM_DEFAULT_BUS_COUNT) ||
             !node_int_opt(node, "mmio_size", &mmio_size_mb,
-                          PCIE_ECAM_DEFAULT_MMIO_SIZE >> 20)) {
+                          PCIE_ECAM_DEFAULT_MMIO_SIZE >> 20) ||
+            !node_int_opt(node, "mmio64_size", &mmio64_size_mb, 0)) {
             return nullptr;
         }
         return new PCIHostECAMDevice(node->id != nullptr ? node->id : "pcie",
-                                     bus_count, (uint64_t)mmio_size_mb << 20);
+                                     bus_count, (uint64_t)mmio_size_mb << 20,
+                                     (uint64_t)mmio64_size_mb << 20);
     }
 
     if (strcmp(type, "pci-host-designware") == 0) {
-        int mmio_size_mb;
+        int mmio_size_mb, mmio64_size_mb, bus_count;
         const char *compatible;
         if (!node_int_opt(node, "mmio_size", &mmio_size_mb,
-                          PCIE_DW_DEFAULT_MMIO_SIZE >> 20)) {
+                          PCIE_DW_DEFAULT_MMIO_SIZE >> 20) ||
+            !node_int_opt(node, "mmio64_size", &mmio64_size_mb, 0) ||
+            !node_int_opt(node, "bus_count", &bus_count,
+                          PCIE_DW_DEFAULT_BUS_COUNT)) {
             return nullptr;
         }
         /* Which controller this claims to be decides which driver binds to
@@ -326,7 +332,13 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
             compatible = PCIE_DW_DEFAULT_COMPATIBLE;
         }
         return new PCIHostDWDevice(node->id != nullptr ? node->id : "pcie",
-                                   compatible, (uint64_t)mmio_size_mb << 20);
+                                   compatible, (uint64_t)mmio_size_mb << 20,
+                                   (uint64_t)mmio64_size_mb << 20, bus_count);
+    }
+
+    if (strcmp(type, "pci-bridge") == 0) {
+        return pci_bridge_node_create(node->id != nullptr ? node->id
+                                                          : "pci-bridge");
     }
 
     if (strcmp(type, "nvme") == 0) {

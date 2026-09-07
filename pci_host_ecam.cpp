@@ -39,32 +39,14 @@
 #define PCI_RANGE_MMIO_64BIT  0x03000000
 
 
-//#pragma mark - PCIBusWrapper
-
-bool PCIBusWrapper::AssignResources(Device *dev)
-{
-    /* A PCI device's BARs are placed by the guest, so nothing here consumes
-       host address space. Anything a device does declare is a modelling
-       mistake worth reporting rather than silently dropping. */
-    for (int i = 0; i < dev->ResourceCount(); i++) {
-        Resource *res = dev->ResourceAt(i);
-        if (res->type != RES_NONE) {
-            vm_error("pci bus: device '%s' declared a resource, but PCI "
-                     "resources are assigned by the guest\n", dev->Name());
-            return false;
-        }
-    }
-    return true;
-}
-
-
 //#pragma mark - PCIHostECAMDevice
 
 PCIHostECAMDevice::PCIHostECAMDevice(const char *name, int bus_count,
-                                     uint64_t mmio_size):
+                                     uint64_t mmio_size, uint64_t mmio64_size):
     Device(name),
     fBusCount(bus_count),
-    fMmioSize(mmio_size)
+    fMmioSize(mmio_size),
+    fMmio64Size(mmio64_size)
 {
     if (fBusCount < 1) {
         fBusCount = 1;
@@ -104,6 +86,16 @@ bool PCIHostECAMDevice::Prepare()
         return false;
     }
 
+    /* The 64 bit aperture, if one was asked for, comes out of the space above
+       4 GB. It is allocated like everything else, so several host bridges may
+       each have one. */
+    if (fMmio64Size != 0) {
+        fMmio64Res = AddResource(RES_MMIO, fMmio64Size, 0x1000000, true);
+        if (fMmio64Res == nullptr) {
+            return false;
+        }
+    }
+
     /* One PLIC line per INTx pin. */
     for (int i = 0; i < 4; i++) {
         fIrqRes[i] = AddResource(RES_IRQ, 1);
@@ -113,8 +105,9 @@ bool PCIHostECAMDevice::Prepare()
     }
 
     fPciBus = pci_bus_init(sys->MemMap(), nullptr);
-    fChildBus = new PCIBusWrapper(this, fPciBus);
-    return true;
+    pci_bus_set_pcie(fPciBus, true);
+    fChildBus = pci_attach_bus_create(this, fPciBus);
+    return fChildBus != nullptr;
 }
 
 
@@ -137,42 +130,17 @@ bool PCIHostECAMDevice::Realize()
 }
 
 
-static uint32_t size_mask(int size_log2)
-{
-    if (size_log2 >= 2) {
-        return 0xffffffff;
-    }
-    return (1u << (8 << size_log2)) - 1;
-}
-
-
+/* An ECAM offset is already exactly the address the bus takes: the bus number
+   at bit 20, then devfn, then twelve bits of register. */
 uint32_t PCIHostECAMDevice::EcamRead(uint32_t offset, int size_log2)
 {
-    uint32_t bus = (offset >> PCIE_ECAM_BUS_SHIFT) & 0xff;
-    uint32_t devfn = (offset >> 12) & 0xff;
-    uint32_t reg = offset & 0xfff;
-
-    /* Extended (PCIe) configuration space is not implemented; reading all
-       ones is how the guest is told there is no capability there. */
-    if (reg >= 0x100) {
-        return size_mask(size_log2);
-    }
-    return pci_bus_config_read(fPciBus, (bus << 16) | (devfn << 8) | reg,
-                               size_log2);
+    return pci_bus_config_read(fPciBus, offset, size_log2);
 }
 
 
 void PCIHostECAMDevice::EcamWrite(uint32_t offset, uint32_t val, int size_log2)
 {
-    uint32_t bus = (offset >> PCIE_ECAM_BUS_SHIFT) & 0xff;
-    uint32_t devfn = (offset >> 12) & 0xff;
-    uint32_t reg = offset & 0xfff;
-
-    if (reg >= 0x100) {
-        return;
-    }
-    pci_bus_config_write(fPciBus, (bus << 16) | (devfn << 8) | reg, val,
-                         size_log2);
+    pci_bus_config_write(fPciBus, offset, val, size_log2);
 }
 
 
@@ -190,12 +158,18 @@ void PCIHostECAMDevice::BuildFDT(FDTContext &ctx)
     fdt->PropU32("#interrupt-cells", 1);
     fdt->PropU64Range("reg", fEcamRes->base, fEcamRes->size);
 
+    /* Each host bridge is a segment of its own, so that a machine with more
+       than one of them names its devices unambiguously. */
+    fdt->PropU32("linux,pci-domain", ctx.pci_domain++);
+
     tab[0] = 0;
     tab[1] = fBusCount - 1;
     fdt->PropTabU32("bus-range", tab, 2);
 
     /* One non-prefetchable 32 bit memory window, identity mapped: the PCI
-       side address equals the CPU side address. */
+       side address equals the CPU side address. A second, 64 bit window
+       follows it when the configuration asked for one; that is where a guest
+       can put a 64 bit BAR that does not have to live below 4 GB. */
     n = 0;
     tab[n++] = PCI_RANGE_MMIO;          /* child phys.hi */
     tab[n++] = fMmioRes->base >> 32;    /* child phys.mid */
@@ -204,6 +178,15 @@ void PCIHostECAMDevice::BuildFDT(FDTContext &ctx)
     tab[n++] = fMmioRes->base;
     tab[n++] = fMmioRes->size >> 32;    /* size */
     tab[n++] = fMmioRes->size;
+    if (fMmio64Res != nullptr) {
+        tab[n++] = PCI_RANGE_MMIO_64BIT;
+        tab[n++] = fMmio64Res->base >> 32;
+        tab[n++] = fMmio64Res->base;
+        tab[n++] = fMmio64Res->base >> 32;
+        tab[n++] = fMmio64Res->base;
+        tab[n++] = fMmio64Res->size >> 32;
+        tab[n++] = fMmio64Res->size;
+    }
     fdt->PropTabU32("ranges", tab, n);
 
     /* Only the device number and the pin select an entry. */

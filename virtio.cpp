@@ -201,7 +201,7 @@ uint8_t *VIRTIODevice::GetRamPtr(virtio_phys_addr_t paddr, bool is_rw)
 }
 
 
-void VIRTIODevice::SetBar(int bar_num, uint32_t addr, bool enabled)
+void VIRTIODevice::SetBar(int bar_num, uint64_t addr, bool enabled)
 {
     (void)bar_num;
     mem_range->SetAddr(addr, enabled);

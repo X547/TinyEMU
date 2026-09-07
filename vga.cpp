@@ -148,7 +148,7 @@ public:
     uint16_t vbe_regs[VBE_DISPI_INDEX_NB];
 
     void Refresh(SimpleFBDraw *draw) override;
-    void SetBar(int bar_num, uint32_t addr, bool enabled) override;
+    void SetBar(int bar_num, uint64_t addr, bool enabled) override;
 
     uint32_t VbeRead(uint32_t offset, int size_log2);
     void VbeWrite(uint32_t offset, uint32_t val, int size_log2);
@@ -738,7 +738,7 @@ uint32_t VGAState::VbeRead(uint32_t offset, int size_log2)
 }
 
 
-void VGAState::SetBar(int bar_num, uint32_t addr, bool enabled)
+void VGAState::SetBar(int bar_num, uint64_t addr, bool enabled)
 {
     VGAState *s = this;
     if (bar_num == 0)

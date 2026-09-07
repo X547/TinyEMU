@@ -40,7 +40,9 @@
 #define DEVRAM_PAGE_SIZE_LOG2 12
 #define DEVRAM_PAGE_SIZE (1 << DEVRAM_PAGE_SIZE_LOG2)
 
-#define PHYS_MEM_RANGE_MAX 32
+/* Every PCI BAR takes one of these, so a machine with several host bridges
+   and a device or two behind each needs rather more than a single bus does. */
+#define PHYS_MEM_RANGE_MAX 64
 
 class PhysMemoryMap;
 

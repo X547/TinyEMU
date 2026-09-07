@@ -33,9 +33,13 @@
 #include "machine.h"
 
 /* PCI address space codes for the high cell of a PCI address triplet. */
-#define PCI_RANGE_MMIO 0x02000000
+#define PCI_RANGE_MMIO       0x02000000
+#define PCI_RANGE_MMIO_64BIT 0x03000000
 
-/* Port logic registers, all relative to the start of the DBI window. */
+/* Port logic registers, all relative to the start of the DBI window. They
+   begin here, which is also where the root port's own configuration space
+   stops being visible: the two share the window, and the port logic wins. */
+#define DW_PORT_LOGIC_BASE  0x700
 #define DW_PORT_LINK_CTRL   0x710
 #define DW_PORT_DEBUG0      0x728
 #define DW_PORT_DEBUG1      0x72c
@@ -74,14 +78,6 @@
 #define DW_ROOT_PORT_VENDOR_ID 0x16c3
 #define DW_ROOT_PORT_DEVICE_ID 0xabcd
 
-#define PCI_HEADER_TYPE_BRIDGE 0x01
-#define PCI_CLASS_BRIDGE_PCI   0x0604
-#define PCI_PRIMARY_BUS        0x18
-#define PCI_SECONDARY_BUS      0x19
-#define PCI_SUBORDINATE_BUS    0x1a
-
-#define PCI_CAP_ID_EXP 0x10
-
 
 /* The byte lanes an access of this size at this offset covers, so that a
    partial write can be applied without disturbing the rest of the register.
@@ -109,11 +105,22 @@ static uint32_t size_mask(int size_log2)
 //#pragma mark - construction
 
 PCIHostDWDevice::PCIHostDWDevice(const char *name, const char *compatible,
-                                 uint64_t mmio_size):
+                                 uint64_t mmio_size, uint64_t mmio64_size,
+                                 int bus_count):
     Device(name),
     fCompatible(compatible),
-    fMmioSize(mmio_size)
+    fMmioSize(mmio_size),
+    fMmio64Size(mmio64_size),
+    fBusCount(bus_count)
 {
+    /* Bus 0 is the root port and bus 1 is what it forwards to, so there is
+       nothing useful to describe below two. */
+    if (fBusCount < 2) {
+        fBusCount = 2;
+    }
+    if (fBusCount > 256) {
+        fBusCount = 256;
+    }
 }
 
 
@@ -146,6 +153,15 @@ bool PCIHostDWDevice::Prepare()
         return false;
     }
 
+    /* The 64 bit aperture, if one was asked for, comes out of the space above
+       4 GB, allocated exactly as the ECAM bridge's is. */
+    if (fMmio64Size != 0) {
+        fMmio64Res = AddResource(RES_MMIO, fMmio64Size, 0x1000000, true);
+        if (fMmio64Res == nullptr) {
+            return false;
+        }
+    }
+
     /* The device tree lists the message signalled interrupt first, because
        that is the entry a driver reads to find this controller's own
        receiver. */
@@ -161,46 +177,33 @@ bool PCIHostDWDevice::Prepare()
     }
 
     fRootBus = pci_bus_init(sys->MemMap(), nullptr);
-    fDevBus = pci_bus_init(sys->MemMap(), nullptr);
-    pci_bus_set_bus_num(fDevBus, 1);
+    pci_bus_set_pcie(fRootBus, true);
 
     /* Devices signal through this controller's receiver rather than by
-       writing to memory, so they may advertise MSI-X. */
-    pci_bus_set_msi_target(fDevBus, this);
+       writing to memory, so they may advertise MSI-X. The buses behind the
+       root port inherit it. */
+    pci_bus_set_msi_target(fRootBus, this);
 
-    /* A real root port, so that the type 1 configuration write mask and the
-       capability list come from the same code every other device uses. */
-    fRootPort = pci_register_device(fRootBus, "dw-root-port", 0,
-                                    DW_ROOT_PORT_VENDOR_ID,
-                                    DW_ROOT_PORT_DEVICE_ID, 0x00,
-                                    PCI_CLASS_BRIDGE_PCI);
-    if (fRootPort == nullptr) {
+    /* A real root port, so that the type 1 configuration write mask, the
+       capability list and the bus routing all come from the same code every
+       other bridge uses. */
+    fDevBus = pci_bridge_init(fRootBus, 0, "dw-root-port",
+                              DW_ROOT_PORT_VENDOR_ID, DW_ROOT_PORT_DEVICE_ID,
+                              PCI_EXP_TYPE_ROOT_PORT, &fRootPort);
+    if (fDevBus == nullptr) {
         vm_error("%s: could not create the root port\n", Name());
         return false;
     }
-    pci_device_set_config8(fRootPort, 0x0e, PCI_HEADER_TYPE_BRIDGE);
+    /* Numbered as a driver that never reprograms it would find it. Once one
+       does, the routing follows what it wrote. */
     pci_device_set_config8(fRootPort, PCI_PRIMARY_BUS, 0);
     pci_device_set_config8(fRootPort, PCI_SECONDARY_BUS, 1);
-    pci_device_set_config8(fRootPort, PCI_SUBORDINATE_BUS, 1);
+    pci_device_set_config8(fRootPort, PCI_SUBORDINATE_BUS, fBusCount - 1);
 
-    /* A PCI Express capability, so that a guest walking the list finds the
-       port type it expects of a root port. Everything beyond the identifying
-       fields reads as zero. */
-    uint8_t cap[0x3c];
-    memset(cap, 0, sizeof(cap));
-    cap[0] = PCI_CAP_ID_EXP;
-    /* capability version 2, device/port type 4 (root port) */
-    put_le16(cap + 2, (2 << 0) | (4 << 4));
-    /* link capabilities and status: one lane at 2.5 GT/s */
-    put_le32(cap + 0x0c, (1 << 0) | (1 << 4));
-    put_le16(cap + 0x12, (1 << 0) | (1 << 4));
-    if (pci_add_capability(fRootPort, cap, sizeof(cap)) < 0) {
-        vm_error("%s: could not add the PCI Express capability\n", Name());
-        return false;
-    }
-
-    fChildBus = new PCIBusWrapper(this, fDevBus);
-    return true;
+    /* The bus behind the root port is one end of a link, so a configuration
+       naming several devices gets the switch that has to sit between them. */
+    fChildBus = pci_attach_bus_create(this, fDevBus);
+    return fChildBus != nullptr;
 }
 
 
@@ -220,6 +223,12 @@ bool PCIHostDWDevice::Realize()
             vm_error("%s: bad INTx line %d\n", Name(), (int)fIrqRes[i]->base);
             return false;
         }
+        /* The four pins of the bus behind the root port go straight to the
+           controller's lines rather than through the root port's own. That
+           is what the device tree describes: its "interrupt-map" keys on the
+           pin alone, and a guest reaches that pin by swizzling from the
+           device up to the root bus, so the last tier must not swizzle
+           again. */
         pci_bus_set_irq(fDevBus, i, sig);
         /* The root port raises nothing itself, but leaving its pins without
            a target would turn a modelling slip into a null dereference. */
@@ -296,8 +305,9 @@ PCIeDWAtuRegion *PCIHostDWDevice::AtuAt(uint32_t offset, uint32_t *reg_out)
 
 uint32_t PCIHostDWDevice::DbiRead(uint32_t offset, int size_log2)
 {
-    /* The root complex's own configuration space is the bottom of DBI. */
-    if (offset < 0x100) {
+    /* The root complex's own configuration space is the bottom of DBI, all
+       4 KB of it save for the tail the port logic registers take over. */
+    if (offset < DW_PORT_LOGIC_BASE) {
         return pci_bus_config_read(fRootBus, offset, size_log2);
     }
 
@@ -346,7 +356,7 @@ uint32_t PCIHostDWDevice::DbiRead(uint32_t offset, int size_log2)
 
 void PCIHostDWDevice::DbiWrite(uint32_t offset, uint32_t val, int size_log2)
 {
-    if (offset < 0x100) {
+    if (offset < DW_PORT_LOGIC_BASE) {
         pci_bus_config_write(fRootBus, offset, val, size_log2);
         return;
     }
@@ -473,21 +483,16 @@ bool PCIHostDWDevice::ConfigDecode(uint32_t offset, uint32_t *bus_addr_out)
     uint32_t devfn = (addr >> 16) & 0xff;
     uint32_t reg = addr & 0xfff;
 
-    /* Extended configuration space is not implemented, so a guest looking
-       there is told there is no capability. */
-    if (reg >= 0x100) {
+    /* This window reaches what is behind the root port. The root port itself
+       is the bottom of the DBI window instead, so letting a cycle for bus 0
+       through here would show it to a driver twice. Everything below is left
+       to the bus, which follows the numbers the guest programmed into the
+       bridges it found. */
+    if (bus == (uint32_t)pci_bus_get_bus_num(fRootBus)) {
         return false;
     }
 
-    /* Follow the bus number the guest actually programmed into the root
-       port, rather than assuming it kept the one set up here. */
-    uint32_t secondary = pci_device_get_config(fRootPort, PCI_SECONDARY_BUS, 0);
-    if (bus != secondary) {
-        return false;
-    }
-    pci_bus_set_bus_num(fDevBus, secondary);
-
-    *bus_addr_out = (bus << 16) | (devfn << 8) | reg;
+    *bus_addr_out = PCI_CONFIG_ADDR(bus, devfn, reg);
     return true;
 }
 
@@ -546,16 +551,21 @@ void PCIHostDWDevice::BuildFDT(FDTContext &ctx)
     fdt->PropTabU32("reg", tab, n);
     fdt->PropStrList("reg-names", "dbi", "config", nullptr);
 
-    /* Bus 0 carries the root port and bus 1 everything behind it. */
+    /* Each host bridge is a segment of its own, so that a machine with more
+       than one of them names its devices unambiguously. */
+    fdt->PropU32("linux,pci-domain", ctx.pci_domain++);
+
+    /* Bus 0 carries the root port and the rest are behind it. */
     n = 0;
     tab[n++] = 0;
-    tab[n++] = 1;
+    tab[n++] = fBusCount - 1;
     fdt->PropTabU32("bus-range", tab, n);
 
     fdt->PropU32("num-lanes", 1);
     fdt->PropEmpty("dma-coherent");
 
-    /* One non-prefetchable 32 bit memory window, identity mapped. */
+    /* One non-prefetchable 32 bit memory window, identity mapped, and a 64
+       bit one after it when the configuration asked for one. */
     n = 0;
     tab[n++] = PCI_RANGE_MMIO;       /* child phys.hi */
     tab[n++] = fMmioRes->base >> 32; /* child phys.mid */
@@ -564,6 +574,15 @@ void PCIHostDWDevice::BuildFDT(FDTContext &ctx)
     tab[n++] = fMmioRes->base;
     tab[n++] = fMmioRes->size >> 32; /* size */
     tab[n++] = fMmioRes->size;
+    if (fMmio64Res != nullptr) {
+        tab[n++] = PCI_RANGE_MMIO_64BIT;
+        tab[n++] = fMmio64Res->base >> 32;
+        tab[n++] = fMmio64Res->base;
+        tab[n++] = fMmio64Res->base >> 32;
+        tab[n++] = fMmio64Res->base;
+        tab[n++] = fMmio64Res->size >> 32;
+        tab[n++] = fMmio64Res->size;
+    }
     fdt->PropTabU32("ranges", tab, n);
 
     /* The message signalled interrupt comes first: that is the entry a driver

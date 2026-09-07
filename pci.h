@@ -32,10 +32,24 @@ typedef struct PCIDevice PCIDevice;
 /* bar type */
 #define PCI_ADDRESS_SPACE_MEM		0x00
 #define PCI_ADDRESS_SPACE_IO		0x01
+/* A memory BAR that carries a 64 bit address, and so occupies the slot it is
+   registered in and the one after it. */
+#define PCI_ADDRESS_SPACE_MEM_TYPE_64	0x04
 #define PCI_ADDRESS_SPACE_MEM_PREFETCH	0x08
 
 #define PCI_ROM_SLOT 6
 #define PCI_NUM_REGIONS 7
+
+/* Configuration space as conventional PCI defines it, and as PCI Express
+   extends it. Every device carries the larger one; on a bus whose host bridge
+   only reaches the first 256 bytes the rest is simply never addressed. */
+#define PCI_CONFIG_SIZE     0x100
+#define PCI_EXT_CONFIG_SIZE 0x1000
+
+/* Configuration addresses as this bus takes them, in the layout ECAM uses:
+   bus, then devfn, then a 12 bit register number. */
+#define PCI_CONFIG_ADDR(bus, devfn, reg) \
+    (((uint32_t)(bus) << 20) | ((uint32_t)(devfn) << 12) | (uint32_t)(reg))
 
 /* PCI config addresses */
 #define PCI_VENDOR_ID		0x00	/* 16 bits */
@@ -48,18 +62,66 @@ typedef struct PCIDevice PCIDevice;
 #define PCI_STATUS		0x06	/* 16 bits */
 #define  PCI_STATUS_CAP_LIST	(1 << 4)
 #define PCI_CLASS_PROG		0x09
+#define PCI_CLASS_DEVICE	0x0a	/* 16 bits */
+#define PCI_HEADER_TYPE		0x0e	/* 8 bits */
+#define  PCI_HEADER_TYPE_NORMAL	0x00
+#define  PCI_HEADER_TYPE_BRIDGE	0x01
+#define  PCI_HEADER_TYPE_MULTI	0x80	/* more than one function */
+#define PCI_BASE_ADDRESS_0	0x10
 #define PCI_SUBSYSTEM_VENDOR_ID	0x2c    /* 16 bits */
 #define PCI_SUBSYSTEM_ID	0x2e    /* 16 bits */
+#define PCI_ROM_ADDRESS		0x30	/* type 0 header */
 #define PCI_CAPABILITY_LIST	0x34    /* 8 bits */
 #define PCI_INTERRUPT_LINE	0x3c    /* 8 bits */
 #define PCI_INTERRUPT_PIN	0x3d    /* 8 bits */
 
-/* Implemented by a device to learn where the guest mapped one of its BARs. */
+/* Type 1 (PCI to PCI bridge) header. The window registers are here so that a
+   guest can program them and read them back; the address decoding this
+   emulator performs is flat, so nothing is gated on them. */
+#define PCI_PRIMARY_BUS		0x18	/* 8 bits */
+#define PCI_SECONDARY_BUS	0x19	/* 8 bits */
+#define PCI_SUBORDINATE_BUS	0x1a	/* 8 bits */
+#define PCI_SEC_LATENCY_TIMER	0x1b	/* 8 bits */
+#define PCI_IO_BASE		0x1c	/* 8 bits, 4 KB units */
+#define PCI_IO_LIMIT		0x1d	/* 8 bits */
+#define PCI_SEC_STATUS		0x1e	/* 16 bits */
+#define PCI_MEMORY_BASE		0x20	/* 16 bits, 1 MB units */
+#define PCI_MEMORY_LIMIT	0x22	/* 16 bits */
+#define PCI_PREF_MEMORY_BASE	0x24	/* 16 bits */
+#define PCI_PREF_MEMORY_LIMIT	0x26	/* 16 bits */
+#define  PCI_PREF_RANGE_TYPE_64	0x01	/* in the low nibble of both */
+#define PCI_PREF_BASE_UPPER32	0x28	/* 32 bits */
+#define PCI_PREF_LIMIT_UPPER32	0x2c	/* 32 bits */
+#define PCI_IO_BASE_UPPER16	0x30	/* 16 bits */
+#define PCI_IO_LIMIT_UPPER16	0x32	/* 16 bits */
+#define PCI_ROM_ADDRESS1	0x38	/* type 1 header */
+#define PCI_BRIDGE_CONTROL	0x3e	/* 16 bits */
+
+#define PCI_CLASS_BRIDGE_PCI	0x0604
+
+/* PCI Express capability, and the device/port types a function may report in
+   it. Which one a function claims is what tells a guest whether it is looking
+   at an endpoint, the port of a root complex, or the port of a switch. */
+#define PCI_CAP_ID_EXP		0x10
+#define PCI_EXP_CAP_LEN		0x3c	/* capability version 2 */
+#define PCI_EXP_TYPE_ENDPOINT	0x0
+#define PCI_EXP_TYPE_ROOT_PORT	0x4
+#define PCI_EXP_TYPE_UPSTREAM	0x5
+#define PCI_EXP_TYPE_DOWNSTREAM	0x6
+
+/* Extended capabilities live above the conventional 256 bytes and are a
+   forward chain starting at this offset. A zero header there is how a guest
+   is told there are none. */
+#define PCI_EXT_CAP_START	0x100
+#define PCI_EXT_CAP_ID_DSN	0x0003	/* device serial number */
+
+/* Implemented by a device to learn where the guest mapped one of its BARs.
+   The address is 64 bits wide because a BAR may be. */
 class PCIBarTarget {
 public:
     virtual ~PCIBarTarget() = default;
 
-    virtual void SetBar(int bar_num, uint32_t addr, bool enabled) = 0;
+    virtual void SetBar(int bar_num, uint64_t addr, bool enabled) = 0;
 };
 
 /* Implemented by a host bridge that contains an MSI receiver. A message
@@ -157,23 +219,39 @@ public:
 PCIBus *pci_bus_init(PhysMemoryMap *mem_map, PhysMemoryMap *port_map);
 void pci_bus_set_irq(PCIBus *b, int pin, const IRQSignal *sig);
 
-/* The bus number this bus answers configuration cycles for. Defaults to 0; a
-   bridge that puts its devices on a secondary bus sets it here. */
+/* The bus number this bus answers configuration cycles for. Defaults to 0.
+   Only meaningful for a root bus: the number of a bus behind a bridge is the
+   one the guest programmed into that bridge's secondary bus register, and is
+   read from there on every access. */
 void pci_bus_set_bus_num(PCIBus *b, int bus_num);
+int pci_bus_get_bus_num(PCIBus *b);
+
+/* True for a bus a host bridge owns directly, as opposed to one behind a
+   PCI to PCI bridge. */
+bool pci_bus_is_root(PCIBus *b);
+
+/* Whether this is a PCI Express hierarchy. Devices registered on such a bus
+   are given a PCI Express capability, which is what makes their extended
+   configuration space meaningful. Inherited by the buses behind bridges. */
+void pci_bus_set_pcie(PCIBus *b, bool is_pcie);
+bool pci_bus_is_pcie(PCIBus *b);
 
 /* Install the bus's MSI receiver. pci_bus_has_msi() lets a device decide
    whether to advertise MSI-X at all: offering it on a bus where nothing would
-   ever collect the message would leave the guest with no interrupts. */
+   ever collect the message would leave the guest with no interrupts. A bus
+   behind a bridge uses the receiver of the hierarchy it hangs from. */
 void pci_bus_set_msi_target(PCIBus *b, PCIMsiTarget *target);
 bool pci_bus_has_msi(PCIBus *b);
 
-/* The INTx swizzle this bus applies, exposed so that a host bridge can derive
-   its FDT "interrupt-map" from the very function that routes the interrupt at
-   run time. 'irq_num' and the result are 0-based (INTA = 0). */
+/* The INTx swizzle a root bus applies, exposed so that a host bridge can
+   derive its FDT "interrupt-map" from the very function that routes the
+   interrupt at run time. 'irq_num' and the result are 0-based (INTA = 0). */
 int pci_bus_map_irq(int devfn, int irq_num);
 
 /* Configuration space access by an arbitrary host bridge. 'addr' is
-   (bus << 16) | (devfn << 8) | register. */
+   PCI_CONFIG_ADDR(bus, devfn, register), and the register is 12 bits wide so
+   that extended configuration space is reachable. The bus routes the cycle
+   down through any bridge whose programmed bus range contains it. */
 uint32_t pci_bus_config_read(PCIBus *b, uint32_t addr, int size_log2);
 void pci_bus_config_write(PCIBus *b, uint32_t addr, uint32_t data,
                           int size_log2);
@@ -181,10 +259,32 @@ void pci_bus_config_write(PCIBus *b, uint32_t addr, uint32_t data,
 PCIDevice *pci_register_device(PCIBus *b, const char *name, int devfn,
                                uint16_t vendor_id, uint16_t device_id,
                                uint8_t revision, uint16_t class_id);
+
+/* Add a type 1 function at 'devfn' of 'parent' and return the secondary bus
+   it owns. Configuration cycles reach that bus once the guest has programmed
+   the bridge's bus numbers, and its four INTx lines land on the bridge's own
+   pins, so each tier applies the swizzle hardware applies. 'port_type' is the
+   PCI Express port type to report, and is ignored on a bus that is not PCI
+   Express. */
+PCIBus *pci_bridge_init(PCIBus *parent, int devfn, const char *name,
+                        uint16_t vendor_id, uint16_t device_id, int port_type,
+                        PCIDevice **pdev);
+
+/* The port type a bridge added to this bus should report. A bus a host bridge
+   owns takes root ports; below one of those the tiers alternate, because a
+   switch is an upstream port, an internal bus, and the downstream ports on
+   it. Reporting anything else makes a guest correct the type itself. */
+int pci_bus_bridge_port_type(PCIBus *b);
+
 PhysMemoryMap *pci_device_get_mem_map(PCIDevice *d);
 PhysMemoryMap *pci_device_get_port_map(PCIDevice *d);
+
+/* Declare one base address register. A memory BAR asking for
+   PCI_ADDRESS_SPACE_MEM_TYPE_64 is programmed by the guest as a pair of
+   registers and consumes 'bar_num' and 'bar_num' + 1; only the first of the
+   two is ever reported to the PCIBarTarget. */
 void pci_register_bar(PCIDevice *d, unsigned int bar_num,
-                      uint32_t size, int type, PCIBarTarget *bar_target);
+                      uint64_t size, int type, PCIBarTarget *bar_target);
 IRQSignal *pci_device_get_irq(PCIDevice *d, unsigned int irq_num);
 uint8_t *pci_device_get_dma_ptr(PCIDevice *d, uint64_t addr, bool is_rw);
 
@@ -192,14 +292,28 @@ uint8_t *pci_device_get_dma_ptr(PCIDevice *d, uint64_t addr, bool is_rw);
    performed as the plain memory write it is defined to be. */
 void pci_device_send_msi(PCIDevice *d, uint64_t addr, uint32_t data);
 
-void pci_device_set_config8(PCIDevice *d, uint8_t addr, uint8_t val);
-void pci_device_set_config16(PCIDevice *d, uint8_t addr, uint16_t val);
+void pci_device_set_config8(PCIDevice *d, uint16_t addr, uint8_t val);
+void pci_device_set_config16(PCIDevice *d, uint16_t addr, uint16_t val);
 /* Read back a device's own configuration space. A device whose behaviour
    depends on a register the guest writes through the generic config path (the
    MSI-X control word, say) reads it here rather than shadowing the write. */
-uint32_t pci_device_get_config(PCIDevice *d, uint8_t addr, int size_log2);
+uint32_t pci_device_get_config(PCIDevice *d, uint16_t addr, int size_log2);
 int pci_device_get_devfn(PCIDevice *d);
+
+/* Append to the conventional capability list, below 256 bytes. */
 int pci_add_capability(PCIDevice *d, const uint8_t *buf, int size);
+
+/* Append to the extended capability chain, above 256 bytes. 'body' is what
+   follows the four byte capability header. Extended configuration space is
+   read only here, so a capability added this way is one a guest inspects
+   rather than programs. */
+int pci_add_ext_capability(PCIDevice *d, uint16_t cap_id, int version,
+                           const uint8_t *body, int body_size);
+
+/* Add a PCI Express capability reporting 'port_type'. Called for you when a
+   device is registered on a bus marked PCI Express, so a device only needs
+   this to correct the type it was given. */
+int pci_add_pcie_capability(PCIDevice *d, int port_type);
 
 typedef struct I440FXState I440FXState;
 

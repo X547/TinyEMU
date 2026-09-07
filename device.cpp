@@ -44,7 +44,7 @@ Device::~Device()
 
 
 Resource *Device::AddResource(ResourceTypeEnum type, uint64_t size,
-                              uint64_t align)
+                              uint64_t align, bool high)
 {
     if (fResourceCount >= RESOURCE_MAX_PER_DEVICE) {
         vm_error("%s: too many resources\n", fName);
@@ -56,6 +56,7 @@ Resource *Device::AddResource(ResourceTypeEnum type, uint64_t size,
     res->size = size;
     res->align = align;
     res->fixed = false;
+    res->high = high;
     res->assigned = false;
     return res;
 }

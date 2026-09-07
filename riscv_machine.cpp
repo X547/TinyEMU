@@ -123,10 +123,17 @@ public:
 
 /* Everything the configuration adds is placed in here. It is the one hole in
    the architectural layout large enough for an ECAM window and a PCI aperture
-   as well as the MMIO devices, and it stays below 4 GB because PCI BARs are
-   32 bit. */
+   as well as the MMIO devices, and it stays below 4 GB because that is where
+   anything a 32 bit BAR must reach has to live. */
 #define DEVICE_WINDOW_BASE 0x10000000
 #define DEVICE_WINDOW_SIZE 0x30000000
+
+/* And a second window for the few things that may sit above 4 GB: a PCI host
+   bridge's 64 bit aperture is the only one. It starts far enough up that no
+   plausible amount of RAM reaches it, and overlaps are reported all the same
+   because every claim goes in the same map. */
+#define HIGH_DEVICE_WINDOW_BASE 0x1000000000ull
+#define HIGH_DEVICE_WINDOW_SIZE 0x1000000000ull
 
 /* PLIC input lines; line 0 does not exist. */
 #define PLIC_NUM_SOURCES 32
@@ -728,6 +735,8 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
 
     s->bus = new SystemBus(s->mem_map, s, PLIC_NUM_SOURCES);
     s->bus->MmioAlloc().SetWindow(DEVICE_WINDOW_BASE, DEVICE_WINDOW_SIZE);
+    s->bus->MmioAlloc().SetHighWindow(HIGH_DEVICE_WINDOW_BASE,
+                                      HIGH_DEVICE_WINDOW_SIZE);
     if (!riscv_claim_fixed_ranges(s)) {
         return NULL;
     }

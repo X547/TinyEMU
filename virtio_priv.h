@@ -91,7 +91,7 @@ struct VIRTIODevice: public PCIBarTarget {
        one page */
     uint8_t *GetRamPtr(virtio_phys_addr_t paddr, bool is_rw);
 
-    void SetBar(int bar_num, uint32_t addr, bool enabled) override;
+    void SetBar(int bar_num, uint64_t addr, bool enabled) override;
 };
 
 

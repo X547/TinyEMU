@@ -506,7 +506,7 @@ public:
     bool Realize() override;
     Bus *ChildBus() override {return fChildBus;}
 
-    void SetBar(int bar_num, uint32_t addr, bool enabled) override;
+    void SetBar(int bar_num, uint64_t addr, bool enabled) override;
     uint32_t DeviceRead(uint32_t offset, int size_log2) override;
     void DeviceWrite(uint32_t offset, uint32_t val, int size_log2) override;
 
@@ -2331,7 +2331,7 @@ void XHCIDevice::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
 }
 
 
-void XHCIDevice::SetBar(int bar_num, uint32_t addr, bool enabled)
+void XHCIDevice::SetBar(int bar_num, uint64_t addr, bool enabled)
 {
     (void)bar_num;
     fMemRange->SetAddr(addr, enabled);
@@ -2380,7 +2380,11 @@ bool XHCIDevice::Realize()
     fMemRange = mem_map->RegisterDevice(0, XHCI_BAR_SIZE, this,
                                         DEVIO_SIZE8 | DEVIO_SIZE16 |
                                             DEVIO_SIZE32 | DEVIO_DISABLED);
-    pci_register_bar(fPciDev, 0, XHCI_BAR_SIZE, PCI_ADDRESS_SPACE_MEM, this);
+    /* The specification defines BAR 0 as a 64 bit register pair, so it takes
+       the slot after it too. */
+    pci_register_bar(fPciDev, 0, XHCI_BAR_SIZE,
+                     PCI_ADDRESS_SPACE_MEM | PCI_ADDRESS_SPACE_MEM_TYPE_64,
+                     this);
 
     /* Give every port its powered, empty state now. The devices declared
        below this one are attached as they are realized, and each of those

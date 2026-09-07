@@ -43,6 +43,9 @@ struct FDTContext {
     FDTBuilder *fdt = nullptr;
     uint32_t intc_phandle = 0; /* per-hart interrupt controller */
     uint32_t plic_phandle = 0;
+    /* Handed out to PCI host bridges as they emit their nodes, so that a
+       machine with more than one names its devices unambiguously. */
+    uint32_t pci_domain = 0;
     char stdout_path[128] = {};
 };
 
@@ -66,7 +69,7 @@ public:
        Realize() and BuildFDT() so the mapping and its description come from
        one value. */
     Resource *AddResource(ResourceTypeEnum type, uint64_t size,
-                          uint64_t align = 0);
+                          uint64_t align = 0, bool high = false);
     Resource *AddFixedResource(ResourceTypeEnum type, uint64_t base,
                                uint64_t size);
     int ResourceCount() const {return fResourceCount;}
@@ -107,8 +110,11 @@ public:
     int DeviceCount() const {return fDeviceCount;}
     Device *DeviceAt(int index) {return fDevices[index];}
 
-    /* Takes ownership. Calls Prepare() once the parent link is set. */
-    bool AddDevice(Device *dev);
+    /* Takes ownership. Calls Prepare() once the parent link is set. A bus
+       that has to interpose something between itself and its children (a
+       PCI Express switch puts each of them behind a port of its own)
+       overrides this and adds the device further down. */
+    virtual bool AddDevice(Device *dev);
 
     /* Assign the resource records a child declared. */
     virtual bool AssignResources(Device *dev) = 0;
