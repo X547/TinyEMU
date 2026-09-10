@@ -75,6 +75,7 @@
 #define USB_FEATURE_REMOTE_WAKEUP   0x01
 
 /* Interface class codes this tree uses. */
+#define USB_CLASS_HID               0x03
 #define USB_CLASS_HUB               0x09
 #define USB_CLASS_MASS_STORAGE      0x08
 

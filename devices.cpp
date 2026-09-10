@@ -30,6 +30,7 @@
 
 #include "cutils.h"
 #include "fdt.h"
+#include "hid.h"
 #include "nvme.h"
 #include "pci_bridge.h"
 #include "pci_host_dw.h"
@@ -151,6 +152,27 @@ public:
 
 //#pragma mark - VirtioDevice
 
+/* A virtio input device as a machine input target. */
+class VirtioInputTarget final: public InputEventTarget {
+private:
+    VIRTIODevice *fDev;
+    bool fAbsolute;
+
+public:
+    VirtioInputTarget(VIRTIODevice *dev, bool absolute):
+        fDev(dev), fAbsolute(absolute) {}
+
+    void SendKeyEvent(bool is_down, uint16_t key_code) override
+        {virtio_input_send_key_event(fDev, is_down, key_code);}
+
+    void SendMouseEvent(int dx, int dy, int dz,
+                        unsigned int buttons) override
+        {virtio_input_send_mouse_event(fDev, dx, dy, dz, buttons);}
+
+    bool MouseIsAbsolute() override {return fAbsolute;}
+};
+
+
 typedef enum {
     VIRTIO_KIND_BLOCK,
     VIRTIO_KIND_NET,
@@ -174,11 +196,14 @@ private:
     Resource *fMmio = nullptr;
     Resource *fIrq = nullptr;
     VIRTIODevice *fDev = nullptr;
+    VirtioInputTarget *fInputTarget = nullptr;
 
 public:
     VirtioDevice(const char *name, VirtioKindEnum kind, DeviceContext *ctx,
                  VMDeviceNode *node):
         Device(name), fKind(kind), fCtx(ctx), fNode(node) {}
+
+    ~VirtioDevice() override {delete fInputTarget;}
 
     void SetInputType(VirtioInputTypeEnum type) {fInputType = type;}
     void SetTag(const char *tag) {fTag = tag;}
@@ -245,10 +270,15 @@ public:
             break;
         case VIRTIO_KIND_INPUT:
             fDev = virtio_input_init(&vbus, fInputType);
+            if (fDev == nullptr) {
+                break;
+            }
+            fInputTarget = new VirtioInputTarget(
+                fDev, fInputType == VIRTIO_INPUT_TYPE_TABLET);
             if (fInputType == VIRTIO_INPUT_TYPE_KEYBOARD) {
-                fCtx->keyboard_dev = fDev;
+                fCtx->keyboard = fInputTarget;
             } else {
-                fCtx->mouse_dev = fDev;
+                fCtx->mouse = fInputTarget;
             }
             break;
         }
@@ -412,6 +442,30 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
             return nullptr;
         }
         return usb_hub_node_create(ports, port);
+    }
+
+    if (strcmp(type, "usb-hid") == 0) {
+        int port;
+        if (!node_int_opt(node, "port", &port, 0)) {
+            return nullptr;
+        }
+        if (node->children == nullptr) {
+            vm_error("usb-hid: needs a nested HID bus with at least one "
+                     "function on it\n");
+            return nullptr;
+        }
+        return usb_hid_node_create(port);
+    }
+
+    if (strcmp(type, "hid-keyboard") == 0 || strcmp(type, "hid-tablet") == 0) {
+        int index;
+        if (!node_int_opt(node, "index", &index, -1)) {
+            return nullptr;
+        }
+        if (strcmp(type, "hid-keyboard") == 0) {
+            return hid_keyboard_node_create(ctx, index);
+        }
+        return hid_tablet_node_create(ctx, index);
     }
 
     if (strcmp(type, "usb-storage") == 0) {

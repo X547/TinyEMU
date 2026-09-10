@@ -51,6 +51,26 @@ public:
 };
 
 
+/* A device that takes host input events. Which device model holds the
+   keyboard and the pointer is not the front end's business. */
+class InputEventTarget {
+public:
+    virtual ~InputEventTarget() = default;
+
+    /* 'key_code' is a Linux evdev key code, which is what the front ends
+       produce. */
+    virtual void SendKeyEvent(bool is_down, uint16_t key_code)
+        {(void)is_down; (void)key_code;}
+
+    /* When MouseIsAbsolute(), dx and dy are a position in 0..32767 rather
+       than a displacement. */
+    virtual void SendMouseEvent(int dx, int dy, int dz, unsigned int buttons)
+        {(void)dx; (void)dy; (void)dz; (void)buttons;}
+
+    virtual bool MouseIsAbsolute() {return false;}
+};
+
+
 class FBDevice {
 public:
     /* the following is set by the device */

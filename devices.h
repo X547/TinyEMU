@@ -39,8 +39,10 @@ struct DeviceContext {
 
     /* filled in as devices are realized */
     VIRTIODevice *console_dev = nullptr;
-    VIRTIODevice *keyboard_dev = nullptr;
-    VIRTIODevice *mouse_dev = nullptr;
+    /* Whichever devices claimed the keyboard and the pointer roles; the last
+       one realized wins. */
+    InputEventTarget *keyboard = nullptr;
+    InputEventTarget *mouse = nullptr;
     FBDevice *fb_dev = nullptr;
     SerialState *serial_console = nullptr;
     EthernetDevice *net = nullptr;

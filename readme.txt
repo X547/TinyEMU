@@ -165,6 +165,11 @@ Device types:
                          and a nested USB bus
   usb-storage            USB mass storage, bulk-only transport; "port" as
                          above, and a nested SCSI bus
+  usb-hid                USB HID class device, the HID bus over USB; "port" as
+                         above, and a nested HID bus
+  hid-keyboard           HID keyboard; "index" (which function of the
+                         transport to be, default the first free one)
+  hid-tablet             HID absolute pointing device; "index" as above
   scsi-disk              SCSI direct access block device; "file", and "lun"
                          (default the first free logical unit)
   nvme                   NVM Express controller on PCI; "quirks" (see below)
@@ -190,6 +195,21 @@ without them is a shape some guest drivers handle poorly.
 A "usb-storage" with no SCSI device below it is an error rather than an empty
 drive, and the bus type named in each nested "bus" object is checked against
 the bus the device above it actually provides.
+
+Input devices nest the same way:
+
+    PCI bus -> xhci -> USB bus -> usb-hid -> HID bus -> hid-keyboard
+
+A HID function is a report descriptor and the reports that go with it, and
+knows nothing about the transport carrying it, so the planned I2C and SPI
+transports will take the same "hid-keyboard" and "hid-tablet" nodes. A
+"usb-hid" carries up to four of them, each on an interface and an interrupt
+endpoint of its own; a guest whose driver binds one function per USB device
+rather than per interface needs a "usb-hid" for each instead.
+
+Whichever devices are realized last holding the keyboard and the pointer roles
+are the ones the emulator window sends its events to, so a configuration
+should declare either "virtio-input" or HID functions, not both.
 
 The NVMe controller nests the same way, down to the image file:
 

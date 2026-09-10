@@ -68,8 +68,10 @@ public:
     /* HTIF */
     uint64_t htif_tohost = 0, htif_fromhost = 0;
 
-    VIRTIODevice *keyboard_dev = nullptr;
-    VIRTIODevice *mouse_dev = nullptr;
+    /* Whichever devices the configuration gave the keyboard and the pointer
+       roles to; null when it declared none. */
+    InputEventTarget *keyboard = nullptr;
+    InputEventTarget *mouse = nullptr;
 
     ~RISCVMachine() override;
 
@@ -756,8 +758,8 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
     }
 
     s->console_dev = ctx.console_dev;
-    s->keyboard_dev = ctx.keyboard_dev;
-    s->mouse_dev = ctx.mouse_dev;
+    s->keyboard = ctx.keyboard;
+    s->mouse = ctx.mouse;
     s->fb_dev = ctx.fb_dev;
     s->serial_console = ctx.serial_console;
     s->net = ctx.net;
@@ -826,20 +828,22 @@ void RISCVMachine::Interp(int max_exec_cycle)
 
 void RISCVMachine::SendKeyEvent(bool is_down, uint16_t key_code)
 {
-    if (keyboard_dev != nullptr) {
-        virtio_input_send_key_event(keyboard_dev, is_down, key_code);
+    if (keyboard != nullptr) {
+        keyboard->SendKeyEvent(is_down, key_code);
     }
 }
 
 bool RISCVMachine::MouseIsAbsolute()
 {
-    return true;
+    /* With no pointer the answer only decides which coordinates the front
+       end computes and then throws away. */
+    return mouse == nullptr || mouse->MouseIsAbsolute();
 }
 
 void RISCVMachine::SendMouseEvent(int dx, int dy, int dz, unsigned int buttons)
 {
-    if (mouse_dev != nullptr) {
-        virtio_input_send_mouse_event(mouse_dev, dx, dy, dz, buttons);
+    if (mouse != nullptr) {
+        mouse->SendMouseEvent(dx, dy, dz, buttons);
     }
 }
 

@@ -343,8 +343,15 @@ USBStatusEnum USBHub::SetPortFeature(int port, int feature)
         if (p.port.dev != nullptr) {
             p.port.dev->Reset();
             /* The reset completes at once, so the port comes back enabled
-               with the reset change pending. */
-            p.status |= PORT_STAT_ENABLE | PORT_STAT_HIGH_SPEED;
+               with the reset change pending. The speed is known only after the
+               reset; neither bit set means full speed. */
+            p.status |= PORT_STAT_ENABLE;
+            p.status &= ~(PORT_STAT_LOW_SPEED | PORT_STAT_HIGH_SPEED);
+            if (p.port.dev->Speed() == USB_SPEED_LOW) {
+                p.status |= PORT_STAT_LOW_SPEED;
+            } else if (p.port.dev->Speed() == USB_SPEED_HIGH) {
+                p.status |= PORT_STAT_HIGH_SPEED;
+            }
             p.status &= ~PORT_STAT_SUSPEND;
             p.change |= PORT_CHG_RESET;
             NotifyChange();
