@@ -2,7 +2,7 @@
 #define __COMMON_H__
 
 #include <stdlib.h>
-#include "../cutils.h"
+#include "cutils.h"
 #include "slirp_config.h"
 
 #ifdef _WIN32

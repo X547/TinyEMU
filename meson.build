@@ -119,129 +119,106 @@ if fs_net_enabled
 endif
 
 # ----------------------------------------------------------------------------
+# include path
+#
+# Includes stay unqualified ("pci.h", not "bus/pci/pci.h"), so every directory
+# holding a header is on the search path. 'lib' is there so that temu.cpp's
+# "slirp/libslirp.h" resolves to lib/slirp/.
+
+inc = include_directories(
+  'lib',
+  'lib/crypto',
+  'lib/softfp',
+  'src/bus/hid',
+  'src/bus/pci',
+  'src/bus/pci/host',
+  'src/bus/scsi',
+  'src/bus/usb',
+  'src/bus/usb/host',
+  'src/bus/virtio',
+  'src/core',
+  'src/cpu/riscv',
+  'src/cpu/x86',
+  'src/device/char',
+  'src/device/display',
+  'src/device/fs',
+  'src/device/input',
+  'src/device/net',
+  'src/device/storage',
+  'src/fs',
+  'src/machine',
+)
+
+# ----------------------------------------------------------------------------
 # slirp
+#
+# Comes before common_args is frozen below, because it is the last thing to add
+# to common_defines.
 
 if get_option('slirp')
   common_defines += '-DCONFIG_SLIRP'
   common_c_args = common_defines + c_warn_args
-  subdir('slirp')
+  subdir('lib/slirp')
   emu_deps += slirp_dep
 endif
 
 common_args = common_defines + cpp_warn_args
 
+# Every emulator library is built the same way; each subdirectory appends its
+# own to emu_libs.
+lib_kwargs = {
+  'cpp_args': common_args,
+  'include_directories': inc,
+  'dependencies': common_deps + emu_deps,
+  'install': false,
+}
+
+emu_libs = []
+
 # ----------------------------------------------------------------------------
 # sources
 
-emu_sources = files(
-  'cutils.cpp',
-  'device.cpp',
-  'devices.cpp',
-  'fdt.cpp',
-  'fs.cpp',
-  'fs_disk.cpp',
-  'hid.cpp',
-  'hid_keyboard.cpp',
-  'hid_tablet.cpp',
-  'iomem.cpp',
-  'json.cpp',
-  'machine.cpp',
-  'nvme.cpp',
-  'pci.cpp',
-  'pci_bridge.cpp',
-  'pci_host_dw.cpp',
-  'pci_host_ecam.cpp',
-  'resource.cpp',
-  'riscv_machine.cpp',
-  'scsi.cpp',
-  'scsi_disk.cpp',
-  'simplefb.cpp',
-  'softfp.cpp',
-  'temu.cpp',
-  'uart.cpp',
-  'usb.cpp',
-  'usb_hid.cpp',
-  'usb_hub.cpp',
-  'usb_storage.cpp',
-  'virtio.cpp',
-  'virtio_9p.cpp',
-  'virtio_block.cpp',
-  'virtio_console.cpp',
-  'virtio_input.cpp',
-  'virtio_net.cpp',
-  'xhci.cpp',
-)
+subdir('lib/softfp')
+subdir('lib/crypto')
 
-if x86emu
-  emu_sources += files(
-    'ide.cpp',
-    'pci_host_i440fx.cpp',
-    'pckbd.cpp',
-    'ps2.cpp',
-    'vga.cpp',
-    'vmmouse.cpp',
-    'x86_cpu.cpp',
-    'x86_machine.cpp',
-  )
-endif
+subdir('src/core')
+subdir('src/cpu/riscv')
+subdir('src/cpu/x86')
+subdir('src/bus/hid')
+subdir('src/bus/pci')
+subdir('src/bus/scsi')
+subdir('src/bus/usb')
+subdir('src/bus/virtio')
+subdir('src/device/char')
+subdir('src/device/display')
+subdir('src/device/fs')
+subdir('src/device/input')
+subdir('src/device/net')
+subdir('src/device/storage')
+subdir('src/fs')
+subdir('src/machine')
+subdir('src/platform/sdl')
+subdir('src/main')
 
-if sdl_dep.found()
-  emu_sources += files('sdl.cpp')
-endif
-
-if fs_net_enabled
-  emu_sources += files(
-    'block_net.cpp',
-    'fs_net.cpp',
-    'fs_utils.cpp',
-    'fs_wget.cpp',
-  )
-  if builtin_crypto
-    emu_sources += files('aes.cpp', 'sha256.cpp')
-  endif
-endif
-
-# riscv_cpu.cpp is compiled once per supported XLEN.
-riscv_cpu_libs = []
-xlens = [32, 64]
-if max_xlen == 128
-  xlens += 128
-endif
-
-foreach xlen : xlens
-  riscv_cpu_libs += static_library('riscv_cpu@0@'.format(xlen),
-    files('riscv_cpu.cpp'),
-    cpp_args: common_args + ['-DMAX_XLEN=@0@'.format(xlen)],
-    dependencies: common_deps,
-  )
-endforeach
+# After src/core and src/fs, which export the sources it shares with temu.
+subdir('tools')
 
 # ----------------------------------------------------------------------------
 # targets
+#
+# link_whole, not link_with: these libraries reference each other both ways --
+# machine/devices.cpp constructs every device, while the host bridges call back
+# into machine -- and a cycle between static archives does not resolve in a
+# single left to right link pass. Pulling every object in makes the order
+# irrelevant, and costs nothing when the executable links all of it anyway.
 
 executable('temu',
-  emu_sources,
-  cpp_args: common_args,
+  link_whole: emu_libs,
   link_with: riscv_cpu_libs,
+  cpp_args: common_args,
   dependencies: common_deps + emu_deps,
   install: true,
 )
-
-if fs_net_enabled
-  executable('build_filelist',
-    files('build_filelist.cpp', 'fs_utils.cpp', 'cutils.cpp'),
-    cpp_args: common_args,
-    dependencies: common_deps + [cc.find_library('m', required: false)],
-    install: true,
-  )
-
-  executable('splitimg',
-    files('splitimg.cpp'),
-    cpp_args: common_args,
-    dependencies: common_deps,
-    install: true,
-  )
-endif
 
 summary({
   'SDL display': sdl_dep.found(),

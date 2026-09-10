@@ -20,6 +20,7 @@ slirp_lib = static_library('slirp',
     'udp.c',
   ),
   c_args: common_c_args,
+  include_directories: inc,
   dependencies: common_deps,
 )
 
