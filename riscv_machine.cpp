@@ -196,10 +196,20 @@ static void htif_handle_cmd(RISCVMachine *s)
 
     device = s->htif_tohost >> 56;
     cmd = (s->htif_tohost >> 48) & 0xff;
-    if (s->htif_tohost == 1) {
-        /* shuthost */
-        printf("\nPower off.\n");
-        exit(0);
+    if (device == 0 && cmd == 0 && (s->htif_tohost & 1)) {
+        /* Power off, using the spike/riscv-tests convention: the guest writes
+           (code << 1) | 1, so a plain 1 is a success exit. The exit status is
+           what makes a guest usable as an automated test: it reports pass/fail
+           without the harness having to grep the console log. */
+        uint64_t code = (s->htif_tohost & 0xffffffffffff) >> 1;
+        if (code == 0) {
+            printf("\nPower off.\n");
+        } else {
+            printf("\nPower off, exit code %" PRIu64 ".\n", code);
+        }
+        /* Only the low 8 bits survive wait(2), and 0 there would turn a failure
+           into a pass, so codes that do not fit are reported as 255. */
+        exit(code < 256 ? (int)code : 255);
     } else if (device == 1 && cmd == 1) {
         uint8_t buf[1];
         buf[0] = s->htif_tohost & 0xff;

@@ -368,6 +368,15 @@ addresses (0x40008000). A small modification was made in the
 display boot messages and to power off the virtual system. The OS
 should use the VirtIO console.
 
+Power off follows the spike/riscv-tests convention: the guest writes
+(code << 1) | 1 to "tohost" with both the device and command fields
+zero, and "code" becomes the exit status of the emulator process. A
+plain 1 is therefore a successful power off, as before. Codes that do
+not fit in the 8 bits a process exit status carries are reported as
+255, so that a failing guest is never mistaken for a passing one. This
+lets a guest act as an automated test: it reports pass or fail through
+the exit status, with no need to grep the console log.
+
 4.4) x86 emulator
 
 A small x86 emulator is included. It is not really an emulator because
