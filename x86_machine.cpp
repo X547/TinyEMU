@@ -40,6 +40,7 @@
 #include "x86_cpu.h"
 #include "machine.h"
 #include "pci.h"
+#include "pci_host_i440fx.h"
 #include "ide.h"
 #include "ps2.h"
 

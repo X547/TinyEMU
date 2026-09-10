@@ -260,6 +260,10 @@ PCIDevice *pci_register_device(PCIBus *b, const char *name, int devfn,
                                uint16_t vendor_id, uint16_t device_id,
                                uint8_t revision, uint16_t class_id);
 
+/* The function at 'devfn' of this bus, or null if there is none. Lets a host
+   bridge walk the devices it owns without reaching into the bus itself. */
+PCIDevice *pci_bus_get_device(PCIBus *b, int devfn);
+
 /* Add a type 1 function at 'devfn' of 'parent' and return the secondary bus
    it owns. Configuration cycles reach that bus once the guest has programmed
    the bridge's bus numbers, and its four INTx lines land on the bridge's own
@@ -314,13 +318,5 @@ int pci_add_ext_capability(PCIDevice *d, uint16_t cap_id, int version,
    device is registered on a bus marked PCI Express, so a device only needs
    this to correct the type it was given. */
 int pci_add_pcie_capability(PCIDevice *d, int port_type);
-
-typedef struct I440FXState I440FXState;
-
-I440FXState *i440fx_init(PCIBus **pbus, int *ppiix3_devfn,
-                         PhysMemoryMap *mem_map, PhysMemoryMap *port_map,
-                         IRQSignal *pic_irqs);
-void i440fx_map_interrupts(I440FXState *s, uint8_t *elcr,
-                           const uint8_t *pci_irqs);
 
 #endif /* PCI_H */

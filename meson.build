@@ -175,6 +175,7 @@ emu_sources = files(
 if x86emu
   emu_sources += files(
     'ide.cpp',
+    'pci_host_i440fx.cpp',
     'pckbd.cpp',
     'ps2.cpp',
     'vga.cpp',
