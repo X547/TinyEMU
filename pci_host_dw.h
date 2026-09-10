@@ -42,6 +42,9 @@
 
 #define PCIE_DW_DEFAULT_MMIO_SIZE 0x10000000 /* 256 MB */
 
+/* Advertised by default, as with the ECAM bridge. */
+#define PCIE_DW_DEFAULT_MMIO64_SIZE 0x100000000ull /* 4 GB */
+
 /* Bus 0 holds the root port and the buses behind it hold everything else, so
    the default leaves room for a few tiers of bridges. */
 #define PCIE_DW_DEFAULT_BUS_COUNT 16

@@ -38,6 +38,11 @@
 #define PCIE_ECAM_DEFAULT_BUS_COUNT 16
 #define PCIE_ECAM_DEFAULT_MMIO_SIZE 0x10000000 /* 256 MB */
 
+/* A window above 4 GB is advertised by default, so that firmware placing a 64
+   bit BAR always has a range of the right kind to take it from. 0 asks for a
+   bridge with no window up there. */
+#define PCIE_ECAM_DEFAULT_MMIO64_SIZE 0x100000000ull /* 4 GB */
+
 
 /* An "pci-host-ecam-generic" bridge: an ECAM configuration window plus a
    memory aperture, both taken from the parent bus's MMIO space so that they

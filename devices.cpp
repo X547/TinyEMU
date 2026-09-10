@@ -304,7 +304,8 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
                           PCIE_ECAM_DEFAULT_BUS_COUNT) ||
             !node_int_opt(node, "mmio_size", &mmio_size_mb,
                           PCIE_ECAM_DEFAULT_MMIO_SIZE >> 20) ||
-            !node_int_opt(node, "mmio64_size", &mmio64_size_mb, 0)) {
+            !node_int_opt(node, "mmio64_size", &mmio64_size_mb,
+                          PCIE_ECAM_DEFAULT_MMIO64_SIZE >> 20)) {
             return nullptr;
         }
         return new PCIHostECAMDevice(node->id != nullptr ? node->id : "pcie",
@@ -317,7 +318,8 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
         const char *compatible;
         if (!node_int_opt(node, "mmio_size", &mmio_size_mb,
                           PCIE_DW_DEFAULT_MMIO_SIZE >> 20) ||
-            !node_int_opt(node, "mmio64_size", &mmio64_size_mb, 0) ||
+            !node_int_opt(node, "mmio64_size", &mmio64_size_mb,
+                          PCIE_DW_DEFAULT_MMIO64_SIZE >> 20) ||
             !node_int_opt(node, "bus_count", &bus_count,
                           PCIE_DW_DEFAULT_BUS_COUNT)) {
             return nullptr;

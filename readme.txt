@@ -141,8 +141,8 @@ Device types:
   pci-host-ecam-generic  ECAM PCIe host bridge; "bus_count" (ECAM window
                          size in MB, default 16), "mmio_size" (aperture size
                          in MB, default 256), "mmio64_size" (size in MB of a
-                         second aperture above 4 GB, default 0 for none), and
-                         a nested PCI bus
+                         second aperture above 4 GB, default 4096; 0 for
+                         none), and a nested PCI bus
   pci-host-designware    Synopsys DesignWare PCIe root complex; "mmio_size",
                          "mmio64_size" and "bus_count" as above (bus_count
                          defaults to 16 and bounds only what the device tree
@@ -260,10 +260,10 @@ emulation are derived from the same routing function.
 
 Base address registers may be 64 bits wide, and the NVMe and xHCI controllers
 declare theirs that way because their specifications do. Such a register is a
-pair, sized and programmed as one, and takes the slot after it. By default the
-guest still places it below 4 GB, because that is the only aperture the device
-tree advertises; asking a host bridge for "mmio64_size" adds a second one
-above 4 GB for those registers to go in.
+pair, sized and programmed as one, and takes the slot after it. A host bridge
+therefore advertises an aperture above 4 GB as well as the 32 bit one, and
+firmware that keeps a free list per aperture kind has somewhere to place one.
+"mmio64_size" sizes it, or 0 leaves the bridge with only the 32 bit aperture.
 
 MMIO addresses and interrupt lines are never written in the configuration
 file. They are allocated when the machine is built, checked against each
