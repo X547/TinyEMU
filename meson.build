@@ -133,6 +133,8 @@ inc = include_directories(
   'src/bus/pci',
   'src/bus/pci/host',
   'src/bus/scsi',
+  'src/bus/sd',
+  'src/bus/sd/host',
   'src/bus/usb',
   'src/bus/usb/host',
   'src/bus/virtio',
@@ -187,6 +189,7 @@ subdir('src/cpu/x86')
 subdir('src/bus/hid')
 subdir('src/bus/pci')
 subdir('src/bus/scsi')
+subdir('src/bus/sd')
 subdir('src/bus/usb')
 subdir('src/bus/virtio')
 subdir('src/device/char')

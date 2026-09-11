@@ -36,6 +36,8 @@
 #include "pci_host_dw.h"
 #include "pci_host_ecam.h"
 #include "scsi.h"
+#include "sd.h"
+#include "sdhci.h"
 #include "usb.h"
 #include "xhci.h"
 
@@ -416,6 +418,44 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
             return nullptr;
         }
         return nvme_namespace_node_create(mutable_node->block_dev, nsid);
+    }
+
+    if (strcmp(type, "sdhci") == 0) {
+        const char *compatible;
+        int clock_mhz;
+        /* On a device tree machine the node has to name a controller some
+           driver binds to, exactly as the DesignWare host bridge does. On
+           PCI the class code does that job and the property is unused. */
+        if (vm_get_str_opt(node->props, "compatible", &compatible) < 0 ||
+            !node_int_opt(node, "clock", &clock_mhz,
+                          SDHCI_DEFAULT_CLOCK_HZ / 1000000)) {
+            return nullptr;
+        }
+        if (compatible == nullptr) {
+            compatible = SDHCI_DEFAULT_COMPATIBLE;
+        }
+        if (clock_mhz < 1 || clock_mhz > 255) {
+            vm_error("sdhci: 'clock' must be between 1 and 255 MHz\n");
+            return nullptr;
+        }
+        return sdhci_node_create(node->id != nullptr ? node->id : "sdhci",
+                                 compatible, (uint32_t)clock_mhz * 1000000);
+    }
+
+    if (strcmp(type, "sd-card") == 0 || strcmp(type, "mmc-card") == 0) {
+        int read_only;
+        if (!node_int_opt(node, "read_only", &read_only, 0)) {
+            return nullptr;
+        }
+        if (mutable_node->block_dev == nullptr) {
+            vm_error("%s: no block back end\n", type);
+            return nullptr;
+        }
+        if (strcmp(type, "sd-card") == 0) {
+            return sd_card_node_create(mutable_node->block_dev,
+                                       read_only != 0);
+        }
+        return mmc_card_node_create(mutable_node->block_dev, read_only != 0);
     }
 
     if (strcmp(type, "xhci") == 0) {

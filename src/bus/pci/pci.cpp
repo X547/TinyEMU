@@ -139,7 +139,8 @@ static PCIDevice *pci_register_device_type(PCIBus *b, const char *name,
                                            int devfn, uint16_t vendor_id,
                                            uint16_t device_id,
                                            uint8_t revision, uint16_t class_id,
-                                           uint8_t header_type, int port_type)
+                                           uint8_t header_type, int port_type,
+                                           int first_cap_offset)
 {
     PCIDevice *d;
     int i;
@@ -162,7 +163,7 @@ static PCIDevice *pci_register_device_type(PCIBus *b, const char *name,
     d->config[0x08] = revision;
     put_le16(d->config + PCI_CLASS_DEVICE, class_id);
     d->config[PCI_HEADER_TYPE] = header_type;
-    d->next_cap_offset = 0x40;
+    d->next_cap_offset = first_cap_offset;
     d->next_ext_cap_offset = PCI_EXT_CAP_START;
     d->secondary_bus = NULL;
     d->pcie_type = -1;
@@ -181,11 +182,12 @@ static PCIDevice *pci_register_device_type(PCIBus *b, const char *name,
 
 PCIDevice *pci_register_device(PCIBus *b, const char *name, int devfn,
                                uint16_t vendor_id, uint16_t device_id,
-                               uint8_t revision, uint16_t class_id)
+                               uint8_t revision, uint16_t class_id,
+                               int first_cap_offset)
 {
     return pci_register_device_type(b, name, devfn, vendor_id, device_id,
                                     revision, class_id, PCI_HEADER_TYPE_NORMAL,
-                                    PCI_EXP_TYPE_ENDPOINT);
+                                    PCI_EXP_TYPE_ENDPOINT, first_cap_offset);
 }
 
 IRQSignal *pci_device_get_irq(PCIDevice *d, unsigned int irq_num)
@@ -609,7 +611,8 @@ PCIBus *pci_bridge_init(PCIBus *parent, int devfn, const char *name,
 
     d = pci_register_device_type(parent, name, devfn, vendor_id, device_id,
                                  0x00, PCI_CLASS_BRIDGE_PCI,
-                                 PCI_HEADER_TYPE_BRIDGE, port_type);
+                                 PCI_HEADER_TYPE_BRIDGE, port_type,
+                                 PCI_FIRST_CAP_OFFSET);
     if (d == NULL)
         return NULL;
 

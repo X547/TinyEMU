@@ -256,9 +256,18 @@ uint32_t pci_bus_config_read(PCIBus *b, uint32_t addr, int size_log2);
 void pci_bus_config_write(PCIBus *b, uint32_t addr, uint32_t data,
                           int size_log2);
 
+/* Where a device's capability list starts. The first byte above the header is
+   the usual place, and is where it goes unless the device asks otherwise. */
+#define PCI_FIRST_CAP_OFFSET 0x40
+
+/* 'first_cap_offset' moves the capability list up, for a device whose binding
+   puts a register of its own in the way: the PCI SD Host Controller
+   specification defines a slot information register at 0x40, which is exactly
+   where the list would otherwise begin. */
 PCIDevice *pci_register_device(PCIBus *b, const char *name, int devfn,
                                uint16_t vendor_id, uint16_t device_id,
-                               uint8_t revision, uint16_t class_id);
+                               uint8_t revision, uint16_t class_id,
+                               int first_cap_offset = PCI_FIRST_CAP_OFFSET);
 
 /* The function at 'devfn' of this bus, or null if there is none. Lets a host
    bridge walk the devices it owns without reaching into the bus itself. */

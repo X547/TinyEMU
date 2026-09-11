@@ -176,6 +176,13 @@ Device types:
                          and a nested NVMe bus
   nvme-ns                NVMe namespace; "file", and "nsid" (default the
                          first free namespace id)
+  sdhci                  SD host controller, on PCI or on the FDT bus;
+                         "clock" (the base clock in MHz, default 50),
+                         "compatible" (which controller the device tree node
+                         claims to be, default "arasan,sdhci-8.9a", and
+                         unused on PCI), and a nested SD bus
+  sd-card                SD memory card; "file", and "read_only"
+  mmc-card               eMMC storage device; "file", and "read_only"
 
 The virtio devices work on either transport: attached to the FDT bus they
 appear as virtio-mmio, and attached to a PCI bus they appear as PCI devices.
@@ -234,6 +241,41 @@ A completion queue interrupt is a level: it is asserted while the queue holds
 entries the host has not taken, and it clears when the host rings that queue's
 head doorbell. A guest whose handler does not drain the queue before returning
 will therefore re-enter it forever, which is what "poll-only" exists for.
+
+The SD stack nests the same way, and like the virtio devices the controller
+works on either transport:
+
+    PCI bus -> sdhci -> SD bus -> sd-card
+    FDT bus -> sdhci -> SD bus -> mmc-card
+
+Attached to a PCI bus the controller is enumerated, and the guest places its
+register window; attached to the FDT bus it takes a register window and an
+interrupt line and describes itself in the device tree, together with the
+fixed clock the drivers for such a part expect to find. Which driver binds to
+that node is decided by "compatible", exactly as it is for the DesignWare
+host bridge; the default names an Arasan controller, which is a plain SDHCI
+part with no platform glue beyond that clock.
+
+A controller has one slot and so carries one card. Which of the three
+protocols the bus carries is the card's business rather than the
+controller's: "sd-card" speaks SD and "mmc-card" speaks MMC, both over the
+same bus and the same host controller, and an SDIO card would be a third
+device on that bus -- the command set, the responses and the card interrupt
+line it needs are modelled, but no SDIO peripheral is.
+
+The controller implements programmed I/O, SDMA and ADMA2 with 32 or 64 bit
+descriptors, Auto CMD12 and Auto CMD23, and offers MSI-X on a PCI bus that
+has a receiver for it. Cards move data one block at a time and may answer
+later, so a block back end that does not complete at once -- the HTTP one --
+stalls the controller rather than the emulator.
+
+Both card types report 512 byte blocks and do not offer partial ones, so
+SET_BLOCKLEN takes 512 and nothing else. Neither claims the erase command
+class, so a guest discards nothing rather than being told a discard happened
+that did not. A card image larger than two gigabytes becomes a high capacity
+card, addressed in blocks; a smaller one is addressed in bytes and holds
+what its capacity fields can express, which for an image whose size is not a
+round number of allocation units is a little less than the file.
 
 The two PCI host bridges differ in more than their register layout. The ECAM
 one is a bare bus: devices sit on bus 0 and interrupt over INTx. The

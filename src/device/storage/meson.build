@@ -1,6 +1,8 @@
 storage_sources = files(
+  'mmc_card.cpp',
   'nvme.cpp',
   'scsi_disk.cpp',
+  'sd_card.cpp',
   'usb_storage.cpp',
   'virtio_block.cpp',
 )
