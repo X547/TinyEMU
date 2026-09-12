@@ -42,7 +42,7 @@
 #include "machine.h"
 #include "pci.h"
 #include "pci_host_i440fx.h"
-#include "ide.h"
+#include "ata_pci.h"
 #include "i8042.h"
 #include "vmmouse.h"
 
@@ -1051,6 +1051,9 @@ public:
     I440FXState *i440fx_state;
     CMOSState *cmos_state;
     SerialState *serial_state;
+    /* The IDE function, built on demand by the first drive that wants
+       it. Null when the configuration declares none. */
+    ATAPCIController *ide_state = nullptr;
 
     /* input */
     VIRTIODevice *keyboard_dev;
@@ -1853,15 +1856,21 @@ static VirtMachine *pc_machine_init(const VirtMachineParams *p)
         if (!de->device || !strcmp(de->device, "virtio")) {
             virtio_block_init(vbus, p->tab_drive[i].node->block_dev);
             i++;
-        } else if (!strcmp(de->device, "ide")) {
-            BlockDevice *tab_bs[2];
-            
-            tab_bs[0] = p->tab_drive[i++].node->block_dev;
-            tab_bs[1] = NULL;
-            if (i < p->drive_count)
-                tab_bs[1] = p->tab_drive[i++].node->block_dev;
-            ide_init(s->port_map, 0x1f0, 0x3f6, &s->pic_irq[14], tab_bs);
-            piix3_ide_init(pci_bus, piix3_devfn + 1);
+        } else {
+            /* The southbridge's IDE function, built the first time a drive
+               asks for it. Every "ide" drive then fills the next free place
+               on its two channels, so a configuration naming four of them
+               gets a master and a slave on each. */
+            if (s->ide_state == NULL) {
+                s->ide_state = ata_pci_init_legacy(pci_bus, piix3_devfn + 1,
+                                                   &s->pic_irq[14],
+                                                   &s->pic_irq[15]);
+                if (s->ide_state == NULL)
+                    exit(1);
+            }
+            if (!s->ide_state->AddDisk(de->node->block_dev, false))
+                exit(1);
+            i++;
         }
     }
     
