@@ -50,6 +50,28 @@ static bool node_int_opt(const VMDeviceNode *node, const char *name, int *pval,
 }
 
 
+/* An "io_size" in KB as a byte count. A PCI to PCI bridge forwards I/O in
+   4 KB units and the window registers hold a power of two, so an aperture
+   that is neither is one no guest could place devices in. 0 asks for a host
+   bridge with no I/O aperture at all, which is what every machine had before
+   there was one. */
+static bool pci_host_io_size(const char *type, int size_kb, uint64_t *out)
+{
+    if (size_kb == 0) {
+        *out = 0;
+        return true;
+    }
+    if (size_kb < 4 || size_kb > 65536 ||
+        (size_kb & (size_kb - 1)) != 0) {
+        vm_error("%s: 'io_size' must be 0 or a power of two between 4 and "
+                 "65536 KB\n", type);
+        return false;
+    }
+    *out = (uint64_t)size_kb << 10;
+    return true;
+}
+
+
 Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
 {
     const char *type = node->type;
@@ -69,29 +91,41 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
     }
 
     if (strcmp(type, "pci-host-ecam-generic") == 0) {
-        int bus_count, mmio_size_mb, mmio64_size_mb;
+        int bus_count, mmio_size_mb, mmio64_size_mb, io_size_kb;
         if (!node_int_opt(node, "bus_count", &bus_count,
                           PCIE_ECAM_DEFAULT_BUS_COUNT) ||
             !node_int_opt(node, "mmio_size", &mmio_size_mb,
                           PCIE_ECAM_DEFAULT_MMIO_SIZE >> 20) ||
             !node_int_opt(node, "mmio64_size", &mmio64_size_mb,
-                          PCIE_ECAM_DEFAULT_MMIO64_SIZE >> 20)) {
+                          PCIE_ECAM_DEFAULT_MMIO64_SIZE >> 20) ||
+            !node_int_opt(node, "io_size", &io_size_kb,
+                          PCIE_ECAM_DEFAULT_IO_SIZE >> 10)) {
+            return nullptr;
+        }
+        uint64_t io_size;
+        if (!pci_host_io_size(type, io_size_kb, &io_size)) {
             return nullptr;
         }
         return new PCIHostECAMDevice(node->id != nullptr ? node->id : "pcie",
                                      bus_count, (uint64_t)mmio_size_mb << 20,
-                                     (uint64_t)mmio64_size_mb << 20);
+                                     (uint64_t)mmio64_size_mb << 20, io_size);
     }
 
     if (strcmp(type, "pci-host-designware") == 0) {
-        int mmio_size_mb, mmio64_size_mb, bus_count;
+        int mmio_size_mb, mmio64_size_mb, io_size_kb, bus_count;
         const char *compatible;
         if (!node_int_opt(node, "mmio_size", &mmio_size_mb,
                           PCIE_DW_DEFAULT_MMIO_SIZE >> 20) ||
             !node_int_opt(node, "mmio64_size", &mmio64_size_mb,
                           PCIE_DW_DEFAULT_MMIO64_SIZE >> 20) ||
+            !node_int_opt(node, "io_size", &io_size_kb,
+                          PCIE_DW_DEFAULT_IO_SIZE >> 10) ||
             !node_int_opt(node, "bus_count", &bus_count,
                           PCIE_DW_DEFAULT_BUS_COUNT)) {
+            return nullptr;
+        }
+        uint64_t io_size;
+        if (!pci_host_io_size(type, io_size_kb, &io_size)) {
             return nullptr;
         }
         /* Which controller this claims to be decides which driver binds to
@@ -105,7 +139,8 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
         }
         return new PCIHostDWDevice(node->id != nullptr ? node->id : "pcie",
                                    compatible, (uint64_t)mmio_size_mb << 20,
-                                   (uint64_t)mmio64_size_mb << 20, bus_count);
+                                   (uint64_t)mmio64_size_mb << 20, io_size,
+                                   bus_count);
     }
 
     if (strcmp(type, "pci-bridge") == 0) {

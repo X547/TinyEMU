@@ -83,6 +83,7 @@ typedef struct PCIDevice PCIDevice;
 #define PCI_SUBORDINATE_BUS	0x1a	/* 8 bits */
 #define PCI_SEC_LATENCY_TIMER	0x1b	/* 8 bits */
 #define PCI_IO_BASE		0x1c	/* 8 bits, 4 KB units */
+#define  PCI_IO_RANGE_TYPE_32	0x01	/* in the low nibble of both */
 #define PCI_IO_LIMIT		0x1d	/* 8 bits */
 #define PCI_SEC_STATUS		0x1e	/* 16 bits */
 #define PCI_MEMORY_BASE		0x20	/* 16 bits, 1 MB units */
@@ -211,6 +212,26 @@ public:
     uint32_t TableRead(uint32_t offset, int size_log2);
     void TableWrite(uint32_t offset, uint32_t val, int size_log2);
     uint32_t PbaRead(uint32_t offset, int size_log2);
+};
+
+/* The CPU side of a host bridge's I/O aperture, on a machine whose processor
+   has no port instructions. Such a machine reaches port space through a
+   memory window instead, so the bridge maps one of these over the window it
+   was given and it forwards what lands there to the port numbers the aperture
+   was assigned. The device tree says the same thing in its "ranges": an I/O
+   range whose parent address is the window and whose child address is the
+   first port. */
+class PCIIOWindow final: public DeviceIO {
+private:
+    PhysMemoryMap *fPortMap = nullptr;
+    uint64_t fPortBase = 0;
+    uint64_t fPortSize = 0;
+
+public:
+    void Init(PhysMemoryMap *port_map, uint64_t port_base, uint64_t port_size);
+
+    uint32_t DeviceRead(uint32_t offset, int size_log2) override;
+    void DeviceWrite(uint32_t offset, uint32_t val, int size_log2) override;
 };
 
 /* A bare PCI bus, with no host bridge attached yet. 'port_map' may be null on

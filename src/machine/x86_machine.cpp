@@ -1280,49 +1280,19 @@ static bool dump_port(int port)
 
 void PCMachine::PortWrite(uint32_t port, uint32_t val, int size_log2)
 {
-    PCMachine *s = this;
-    PhysMemoryRange *pr;
 #ifdef DUMP_IOPORT
     if (dump_port(port))
         printf("write port=0x%x val=0x%x s=%d\n", port, val, 1 << size_log2);
 #endif
-    pr = s->port_map->FindRange(port);
-    if (!pr) {
-        return;
-    }
-    port -= pr->addr;
-    if ((pr->devio_flags >> size_log2) & 1) {
-        pr->io->DeviceWrite(port, (uint32_t)val, size_log2);
-    } else if (size_log2 == 1 && (pr->devio_flags & DEVIO_SIZE8)) {
-        pr->io->DeviceWrite(port, val & 0xff, 0);
-        pr->io->DeviceWrite(port + 1, (val >> 8) & 0xff, 0);
-    }
+    port_map->IoWrite(port, val, size_log2);
 }
 
-uint32_t PCMachine::PortRead(uint32_t port1, int size_log2)
+uint32_t PCMachine::PortRead(uint32_t port, int size_log2)
 {
-    PCMachine *s = this;
-    PhysMemoryRange *pr;
-    uint32_t val, port;
-    
-    port = port1;
-    pr = s->port_map->FindRange(port);
-    if (!pr) {
-        val = -1;
-    } else {
-        port -= pr->addr;
-        if ((pr->devio_flags >> size_log2) & 1) {
-            val = pr->io->DeviceRead(port, size_log2);
-        } else if (size_log2 == 1 && (pr->devio_flags & DEVIO_SIZE8)) {
-            val = pr->io->DeviceRead(port, 0) & 0xff;
-            val |= (pr->io->DeviceRead(port + 1, 0) & 0xff) << 8;
-        } else {
-            val = -1;
-        }
-    }
+    uint32_t val = port_map->IoRead(port, size_log2);
 #ifdef DUMP_IOPORT
-    if (dump_port(port1))
-        printf("read port=0x%x val=0x%x s=%d\n", port1, val, 1 << size_log2);
+    if (dump_port(port))
+        printf("read port=0x%x val=0x%x s=%d\n", port, val, 1 << size_log2);
 #endif
     return val;
 }

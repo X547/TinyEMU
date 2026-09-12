@@ -141,23 +141,36 @@ public:
 };
 
 
-/* The root bus of an FDT machine: owns the host MMIO map and the interrupt
-   controller's input lines, and hands both out through resource records. */
+/* The root bus of an FDT machine: owns the host MMIO map, the PCI I/O port
+   space and the interrupt controller's input lines, and hands them all out
+   through resource records. */
 class SystemBus final: public Bus {
 private:
     PhysMemoryMap *fMemMap;
+    /* The machine's PCI I/O port space. Created on demand, because a machine
+       with no host bridge never addresses one. */
+    PhysMemoryMap *fPortMap = nullptr;
     RangeAllocator fMmioAlloc {"MMIO"};
+    RangeAllocator fIoAlloc {"IO"};
     RangeAllocator fIrqAlloc {"IRQ"};
     IRQSignal fIrqSignals[SYSTEM_BUS_MAX_IRQ] {};
     int fIrqCount;
 
 public:
     SystemBus(PhysMemoryMap *mem_map, IRQTarget *irq_target, int irq_count);
+    ~SystemBus() override;
 
     const char *Type() const override {return "system";}
 
     PhysMemoryMap *MemMap() const {return fMemMap;}
+
+    /* A processor with no port instructions never addresses this map itself:
+       the only way in is the memory window a host bridge maps onto its own
+       slice of the port space. */
+    PhysMemoryMap *PortMap();
+
     RangeAllocator &MmioAlloc() {return fMmioAlloc;}
+    RangeAllocator &IoAlloc() {return fIoAlloc;}
     RangeAllocator &IrqAlloc() {return fIrqAlloc;}
 
     /* Valid for a line returned by an assigned RES_IRQ resource. */

@@ -267,3 +267,41 @@ PhysMemoryRange *PhysMemoryMap::RegisterDevice(uint64_t addr, uint64_t size,
     pr->devio_flags = devio_flags;
     return pr;
 }
+
+
+uint32_t PhysMemoryMap::IoRead(uint64_t addr, int size_log2)
+{
+    PhysMemoryRange *pr = FindRange(addr);
+    if (pr == nullptr || pr->is_ram) {
+        return -1;
+    }
+    uint64_t offset = addr - pr->addr;
+    if ((pr->devio_flags >> size_log2) & 1) {
+        return pr->io->DeviceRead(offset, size_log2);
+    }
+    /* A halfword access to a range that only decodes bytes is split rather
+       than dropped: a device declaring one width still has to answer the
+       other, because the guest picks the width. */
+    if (size_log2 == 1 && (pr->devio_flags & DEVIO_SIZE8)) {
+        uint32_t val = pr->io->DeviceRead(offset, 0) & 0xff;
+        val |= (pr->io->DeviceRead(offset + 1, 0) & 0xff) << 8;
+        return val;
+    }
+    return -1;
+}
+
+
+void PhysMemoryMap::IoWrite(uint64_t addr, uint32_t val, int size_log2)
+{
+    PhysMemoryRange *pr = FindRange(addr);
+    if (pr == nullptr || pr->is_ram) {
+        return;
+    }
+    uint64_t offset = addr - pr->addr;
+    if ((pr->devio_flags >> size_log2) & 1) {
+        pr->io->DeviceWrite(offset, val, size_log2);
+    } else if (size_log2 == 1 && (pr->devio_flags & DEVIO_SIZE8)) {
+        pr->io->DeviceWrite(offset, val & 0xff, 0);
+        pr->io->DeviceWrite(offset + 1, (val >> 8) & 0xff, 0);
+    }
+}

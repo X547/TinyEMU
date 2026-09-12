@@ -33,6 +33,7 @@
 #include "machine.h"
 
 /* PCI address space codes for the high cell of a PCI address triplet. */
+#define PCI_RANGE_IO         0x01000000
 #define PCI_RANGE_MMIO       0x02000000
 #define PCI_RANGE_MMIO_64BIT 0x03000000
 
@@ -106,11 +107,12 @@ static uint32_t size_mask(int size_log2)
 
 PCIHostDWDevice::PCIHostDWDevice(const char *name, const char *compatible,
                                  uint64_t mmio_size, uint64_t mmio64_size,
-                                 int bus_count):
+                                 uint64_t io_size, int bus_count):
     Device(name),
     fCompatible(compatible),
     fMmioSize(mmio_size),
     fMmio64Size(mmio64_size),
+    fIoSize(io_size),
     fBusCount(bus_count)
 {
     /* Bus 0 is the root port and bus 1 is what it forwards to, so there is
@@ -162,6 +164,19 @@ bool PCIHostDWDevice::Prepare()
         }
     }
 
+    /* The I/O aperture is two reservations, exactly as the ECAM bridge makes
+       them: the ports out of the machine's port space, and the memory window
+       they are reached through out of the MMIO space. A driver points an
+       outbound translation region at this window as well, but the region is
+       only stored: the window already lands on the right ports. */
+    if (fIoSize != 0) {
+        fIoRes = AddResource(RES_IO, fIoSize, fIoSize);
+        fIoWindowRes = AddResource(RES_MMIO, fIoSize, fIoSize);
+        if (fIoRes == nullptr || fIoWindowRes == nullptr) {
+            return false;
+        }
+    }
+
     /* The device tree lists the message signalled interrupt first, because
        that is the entry a driver reads to find this controller's own
        receiver. */
@@ -176,7 +191,10 @@ bool PCIHostDWDevice::Prepare()
         }
     }
 
-    fRootBus = pci_bus_init(sys->MemMap(), nullptr);
+    /* As with the ECAM bridge, the port space is out of reach on a bridge
+       configured without an aperture to put it in. */
+    fRootBus = pci_bus_init(sys->MemMap(),
+                            fIoRes != nullptr ? sys->PortMap() : nullptr);
     pci_bus_set_pcie(fRootBus, true);
 
     /* Devices signal through this controller's receiver rather than by
@@ -240,6 +258,14 @@ bool PCIHostDWDevice::Realize()
     sys->MemMap()->RegisterDevice(fConfigRes->base, fConfigRes->size,
                                   &fConfigIo,
                                   DEVIO_SIZE8 | DEVIO_SIZE16 | DEVIO_SIZE32);
+
+    if (fIoRes != nullptr) {
+        fIoWindow.Init(sys->PortMap(), fIoRes->base, fIoRes->size);
+        sys->MemMap()->RegisterDevice(fIoWindowRes->base, fIoWindowRes->size,
+                                      &fIoWindow,
+                                      DEVIO_SIZE8 | DEVIO_SIZE16 |
+                                      DEVIO_SIZE32);
+    }
     return true;
 }
 
@@ -564,9 +590,20 @@ void PCIHostDWDevice::BuildFDT(FDTContext &ctx)
     fdt->PropU32("num-lanes", 1);
     fdt->PropEmpty("dma-coherent");
 
-    /* One non-prefetchable 32 bit memory window, identity mapped, and a 64
-       bit one after it when the configuration asked for one. */
+    /* An I/O window when the configuration asked for one -- the only range
+       here that is not identity mapped, because a port number is not a CPU
+       address -- then one non-prefetchable 32 bit memory window, and a 64 bit
+       one after that when one was asked for. */
     n = 0;
+    if (fIoRes != nullptr) {
+        tab[n++] = PCI_RANGE_IO;
+        tab[n++] = fIoRes->base >> 32;
+        tab[n++] = fIoRes->base;
+        tab[n++] = fIoWindowRes->base >> 32;
+        tab[n++] = fIoWindowRes->base;
+        tab[n++] = fIoRes->size >> 32;
+        tab[n++] = fIoRes->size;
+    }
     tab[n++] = PCI_RANGE_MMIO;       /* child phys.hi */
     tab[n++] = fMmioRes->base >> 32; /* child phys.mid */
     tab[n++] = fMmioRes->base;       /* child phys.lo */

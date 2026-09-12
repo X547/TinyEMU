@@ -42,11 +42,13 @@
 //#pragma mark - PCIHostECAMDevice
 
 PCIHostECAMDevice::PCIHostECAMDevice(const char *name, int bus_count,
-                                     uint64_t mmio_size, uint64_t mmio64_size):
+                                     uint64_t mmio_size, uint64_t mmio64_size,
+                                     uint64_t io_size):
     Device(name),
     fBusCount(bus_count),
     fMmioSize(mmio_size),
-    fMmio64Size(mmio64_size)
+    fMmio64Size(mmio64_size),
+    fIoSize(io_size)
 {
     if (fBusCount < 1) {
         fBusCount = 1;
@@ -96,6 +98,18 @@ bool PCIHostECAMDevice::Prepare()
         }
     }
 
+    /* The I/O aperture is two reservations: the ports themselves, out of the
+       machine's port space, and the memory window they are reached through,
+       out of the same MMIO space everything else comes from. A processor with
+       no port instructions can only get at a port through that window. */
+    if (fIoSize != 0) {
+        fIoRes = AddResource(RES_IO, fIoSize, fIoSize);
+        fIoWindowRes = AddResource(RES_MMIO, fIoSize, fIoSize);
+        if (fIoRes == nullptr || fIoWindowRes == nullptr) {
+            return false;
+        }
+    }
+
     /* One PLIC line per INTx pin. */
     for (int i = 0; i < 4; i++) {
         fIrqRes[i] = AddResource(RES_IRQ, 1);
@@ -104,7 +118,11 @@ bool PCIHostECAMDevice::Prepare()
         }
     }
 
-    fPciBus = pci_bus_init(sys->MemMap(), nullptr);
+    /* Devices may register I/O BARs only on a bridge that has somewhere to
+       put them, so a bridge configured without an aperture keeps the port
+       space it never reserved out of reach. */
+    fPciBus = pci_bus_init(sys->MemMap(),
+                           fIoRes != nullptr ? sys->PortMap() : nullptr);
     pci_bus_set_pcie(fPciBus, true);
     fChildBus = pci_attach_bus_create(this, fPciBus);
     return fChildBus != nullptr;
@@ -126,6 +144,14 @@ bool PCIHostECAMDevice::Realize()
 
     sys->MemMap()->RegisterDevice(fEcamRes->base, fEcamRes->size, &fEcamIo,
                                   DEVIO_SIZE8 | DEVIO_SIZE16 | DEVIO_SIZE32);
+
+    if (fIoRes != nullptr) {
+        fIoWindow.Init(sys->PortMap(), fIoRes->base, fIoRes->size);
+        sys->MemMap()->RegisterDevice(fIoWindowRes->base, fIoWindowRes->size,
+                                      &fIoWindow,
+                                      DEVIO_SIZE8 | DEVIO_SIZE16 |
+                                      DEVIO_SIZE32);
+    }
     return true;
 }
 
@@ -166,11 +192,25 @@ void PCIHostECAMDevice::BuildFDT(FDTContext &ctx)
     tab[1] = fBusCount - 1;
     fdt->PropTabU32("bus-range", tab, 2);
 
-    /* One non-prefetchable 32 bit memory window, identity mapped: the PCI
-       side address equals the CPU side address. A second, 64 bit window
-       follows it when the configuration asked for one; that is where a guest
-       can put a 64 bit BAR that does not have to live below 4 GB. */
+    /* An I/O window first, when the configuration asked for one. This is the
+       only range that is not identity mapped: the child address is the port
+       number and the parent address is the memory window a processor with no
+       port instructions reaches it through.
+
+       One non-prefetchable 32 bit memory window follows, identity mapped: the
+       PCI side address equals the CPU side address. A second, 64 bit window
+       comes after that when the configuration asked for one; that is where a
+       guest can put a 64 bit BAR that does not have to live below 4 GB. */
     n = 0;
+    if (fIoRes != nullptr) {
+        tab[n++] = PCI_RANGE_IO;
+        tab[n++] = fIoRes->base >> 32;
+        tab[n++] = fIoRes->base;
+        tab[n++] = fIoWindowRes->base >> 32;
+        tab[n++] = fIoWindowRes->base;
+        tab[n++] = fIoRes->size >> 32;
+        tab[n++] = fIoRes->size;
+    }
     tab[n++] = PCI_RANGE_MMIO;          /* child phys.hi */
     tab[n++] = fMmioRes->base >> 32;    /* child phys.mid */
     tab[n++] = fMmioRes->base;          /* child phys.lo */

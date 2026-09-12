@@ -401,8 +401,6 @@ static uint8_t pci_config_wmask(const PCIDevice *d, uint32_t addr)
         case PCI_BASE_ADDRESS_0 ... PCI_BASE_ADDRESS_0 + 7:
         /* secondary status, as the primary one above */
         case PCI_SEC_STATUS: case PCI_SEC_STATUS + 1:
-        /* the I/O window is 16 bit, so it has no upper halves */
-        case PCI_IO_BASE_UPPER16 ... PCI_IO_LIMIT_UPPER16 + 1:
         /* expansion rom */
         case PCI_ROM_ADDRESS1 ... PCI_ROM_ADDRESS1 + 3:
             return 0x00;
@@ -531,6 +529,32 @@ static uint32_t pci_data_read(PCIBus *s, uint32_t addr, int size_log2)
                                   size_log2);
 }
 
+void PCIIOWindow::Init(PhysMemoryMap *port_map, uint64_t port_base,
+                       uint64_t port_size)
+{
+    fPortMap = port_map;
+    fPortBase = port_base;
+    fPortSize = port_size;
+}
+
+uint32_t PCIIOWindow::DeviceRead(uint32_t offset, int size_log2)
+{
+    /* The window is the size of the aperture, so nothing should land past it;
+       an access that does reads as one nothing answers, exactly as an
+       unclaimed port inside the aperture does, rather than being folded back
+       into another bridge's ports. */
+    if (fPortMap == NULL || offset >= fPortSize)
+        return -1;
+    return fPortMap->IoRead(fPortBase + offset, size_log2);
+}
+
+void PCIIOWindow::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
+{
+    if (fPortMap == NULL || offset >= fPortSize)
+        return;
+    fPortMap->IoWrite(fPortBase + offset, val, size_log2);
+}
+
 PCIBus *pci_bus_init(PhysMemoryMap *mem_map, PhysMemoryMap *port_map)
 {
     PCIBus *b = new PCIBus();
@@ -617,10 +641,15 @@ PCIBus *pci_bridge_init(PCIBus *parent, int devfn, const char *name,
         return NULL;
 
     /* The prefetchable window carries 64 bit addresses, so that a 64 bit BAR
-       behind this bridge can be placed above 4 GB. The I/O window is 16 bit,
-       which the zero left in the low nibble of PCI_IO_BASE reports. */
+       behind this bridge can be placed above 4 GB. The I/O window carries 32
+       bit ones for the same reason: the port space is larger than one host
+       bridge's aperture, so the ports behind the second bridge in a machine
+       do not fit in 16 bits and a bridge reporting the narrow window would be
+       refused them. */
     d->config[PCI_PREF_MEMORY_BASE] = PCI_PREF_RANGE_TYPE_64;
     d->config[PCI_PREF_MEMORY_LIMIT] = PCI_PREF_RANGE_TYPE_64;
+    d->config[PCI_IO_BASE] = PCI_IO_RANGE_TYPE_32;
+    d->config[PCI_IO_LIMIT] = PCI_IO_RANGE_TYPE_32;
 
     b = pci_bus_init(parent->mem_map, parent->port_map);
     b->parent_bridge = d;

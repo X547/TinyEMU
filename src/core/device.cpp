@@ -192,6 +192,21 @@ SystemBus::SystemBus(PhysMemoryMap *mem_map, IRQTarget *irq_target,
 }
 
 
+SystemBus::~SystemBus()
+{
+    delete fPortMap;
+}
+
+
+PhysMemoryMap *SystemBus::PortMap()
+{
+    if (fPortMap == nullptr) {
+        fPortMap = new PhysMemoryMap();
+    }
+    return fPortMap;
+}
+
+
 IRQSignal *SystemBus::IrqSignalFor(uint64_t line)
 {
     if (line == 0 || line >= (uint64_t)fIrqCount) {
@@ -208,6 +223,11 @@ bool SystemBus::AssignResources(Device *dev)
         switch (res->type) {
         case RES_MMIO:
             if (!fMmioAlloc.Assign(res, dev->Name())) {
+                return false;
+            }
+            break;
+        case RES_IO:
+            if (!fIoAlloc.Assign(res, dev->Name())) {
                 return false;
             }
             break;

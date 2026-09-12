@@ -171,6 +171,16 @@ public:
     PhysMemoryRange *RegisterDevice(uint64_t addr, uint64_t size, DeviceIO *io,
                                     int devio_flags);
 
+    /* Perform one access against whichever device range covers 'addr'. A
+       range that does not take the width is served as two byte accesses when
+       it takes those, and otherwise nothing answers; a read nobody answers
+       gives back all ones, which is what an undriven bus reads as. RAM is not
+       consulted -- that is what GetRamPtr() is for. This is the whole of how
+       a port space is addressed, so the map behind one is reached only
+       through here. */
+    uint32_t IoRead(uint64_t addr, int size_log2);
+    void IoWrite(uint64_t addr, uint32_t val, int size_log2);
+
     virtual PhysMemoryRange *RegisterRam(uint64_t addr, uint64_t size,
                                          int devram_flags);
     virtual void FreeRam(PhysMemoryRange *pr);

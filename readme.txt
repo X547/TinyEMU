@@ -142,13 +142,14 @@ Device types:
                          size in MB, default 16), "mmio_size" (aperture size
                          in MB, default 256), "mmio64_size" (size in MB of a
                          second aperture above 4 GB, default 4096; 0 for
-                         none), and a nested PCI bus
+                         none), "io_size" (I/O aperture size in KB, default
+                         64; 0 for none), and a nested PCI bus
   pci-host-designware    Synopsys DesignWare PCIe root complex; "mmio_size",
-                         "mmio64_size" and "bus_count" as above (bus_count
-                         defaults to 16 and bounds only what the device tree
-                         advertises), "compatible" (which controller it
-                         claims to be, default "sifive,fu740-pcie"), and a
-                         nested PCI bus
+                         "mmio64_size", "io_size" and "bus_count" as above
+                         (bus_count defaults to 16 and bounds only what the
+                         device tree advertises), "compatible" (which
+                         controller it claims to be, default
+                         "sifive,fu740-pcie"), and a nested PCI bus
   pci-bridge             PCI Express switch; the devices nested in it sit
                          behind it rather than on the bus above. Nest one
                          inside another for a deeper hierarchy
@@ -390,6 +391,18 @@ pair, sized and programmed as one, and takes the slot after it. A host bridge
 therefore advertises an aperture above 4 GB as well as the 32 bit one, and
 firmware that keeps a free list per aperture kind has somewhere to place one.
 "mmio64_size" sizes it, or 0 leaves the bridge with only the 32 bit aperture.
+
+A host bridge also advertises an I/O aperture, so that a device whose base
+address register asks for port space has somewhere to be placed. A RISC-V
+processor has no port instructions, so the ports are reached the way this
+machine reaches everything else: the bridge maps a memory window over its
+aperture and says so in the device tree, as an "I/O" range whose parent
+address is that window and whose child address is the first port. The port
+space is one space for the whole machine, allocated like the MMIO space, so
+the second host bridge in a machine gets a slice of its own rather than
+colliding with the first. "io_size" sizes the aperture in KB, must be a power
+of two of at least 4 (the granularity a PCI to PCI bridge forwards I/O in),
+and 0 leaves the bridge with no I/O aperture and its port space out of reach.
 
 MMIO addresses and interrupt lines are never written in the configuration
 file. They are allocated when the machine is built, checked against each

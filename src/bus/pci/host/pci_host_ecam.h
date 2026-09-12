@@ -38,6 +38,12 @@
 #define PCIE_ECAM_DEFAULT_BUS_COUNT 16
 #define PCIE_ECAM_DEFAULT_MMIO_SIZE 0x10000000 /* 256 MB */
 
+/* The I/O aperture. A PCI to PCI bridge forwards I/O in 4 KB units and names
+   the window in 16 bits, so 64 KB is both the conventional size and as much
+   as a guest can put behind one bridge without the optional upper registers.
+   0 asks for a bridge with no I/O aperture at all. */
+#define PCIE_ECAM_DEFAULT_IO_SIZE 0x10000 /* 64 KB */
+
 /* A window above 4 GB is advertised by default, so that firmware placing a 64
    bit BAR always has a range of the right kind to take it from. 0 asks for a
    bridge with no window up there. */
@@ -56,17 +62,22 @@ private:
     Resource *fEcamRes = nullptr;
     Resource *fMmioRes = nullptr;
     Resource *fMmio64Res = nullptr;
+    /* The ports the aperture covers, and the memory window they are reached
+       through. Both are null when no I/O aperture was asked for. */
+    Resource *fIoRes = nullptr;
+    Resource *fIoWindowRes = nullptr;
     Resource *fIrqRes[4] {};
     int fBusCount;
     uint64_t fMmioSize;
     uint64_t fMmio64Size;
+    uint64_t fIoSize;
 
     uint32_t EcamRead(uint32_t offset, int size_log2);
     void EcamWrite(uint32_t offset, uint32_t val, int size_log2);
 
 public:
     PCIHostECAMDevice(const char *name, int bus_count, uint64_t mmio_size,
-                      uint64_t mmio64_size);
+                      uint64_t mmio64_size, uint64_t io_size);
     ~PCIHostECAMDevice() override;
 
     bool Prepare() override;
@@ -76,4 +87,5 @@ public:
 
     DeviceIOAdapter<PCIHostECAMDevice, &PCIHostECAMDevice::EcamRead,
                     &PCIHostECAMDevice::EcamWrite> fEcamIo {*this};
+    PCIIOWindow fIoWindow;
 };

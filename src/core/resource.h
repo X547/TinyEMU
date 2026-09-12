@@ -26,15 +26,17 @@
 #include <stdint.h>
 
 /* A PCI host bridge is the greediest device: the Designware bridge takes a DBI
-   window, a configuration window, a memory aperture, one line per INTx pin and
-   one more for its MSI receiver, with a little room left over. */
-#define RESOURCE_MAX_PER_DEVICE 12
+   window, a configuration window, a memory aperture, a 64 bit one, an I/O
+   aperture and the window it is reached through, one line per INTx pin and one
+   more for its MSI receiver, with a little room left over. */
+#define RESOURCE_MAX_PER_DEVICE 14
 #define ALLOCATOR_MAX_ENTRIES 128
 
 
 typedef enum {
     RES_NONE,
     RES_MMIO,      /* host physical address space */
+    RES_IO,        /* PCI I/O port space */
     RES_IRQ,       /* interrupt controller input line */
     RES_MDIO_ADDR, /* address on an MDIO bus */
 } ResourceTypeEnum;

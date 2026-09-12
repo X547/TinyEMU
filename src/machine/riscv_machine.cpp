@@ -137,6 +137,18 @@ public:
 #define HIGH_DEVICE_WINDOW_BASE 0x1000000000ull
 #define HIGH_DEVICE_WINDOW_SIZE 0x1000000000ull
 
+/* The machine's PCI I/O port space, which every host bridge's I/O aperture is
+   a slice of. This processor has no port instructions, so nothing addresses
+   it directly: a bridge reaches its own slice through a memory window and
+   says so in its device tree "ranges".
+
+   It starts at port 0, so a machine with one host bridge -- which is what
+   nearly every configuration is -- gets the 0 to 0xffff a guest expects to
+   find. It runs well past 64 KB only so that a second bridge has somewhere
+   to put its aperture rather than colliding with the first. */
+#define PCI_IO_WINDOW_BASE 0
+#define PCI_IO_WINDOW_SIZE 0x1000000 /* 16 MB */
+
 /* PLIC input lines; line 0 does not exist. */
 #define PLIC_NUM_SOURCES 32
 
@@ -749,6 +761,7 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
     s->bus->MmioAlloc().SetWindow(DEVICE_WINDOW_BASE, DEVICE_WINDOW_SIZE);
     s->bus->MmioAlloc().SetHighWindow(HIGH_DEVICE_WINDOW_BASE,
                                       HIGH_DEVICE_WINDOW_SIZE);
+    s->bus->IoAlloc().SetWindow(PCI_IO_WINDOW_BASE, PCI_IO_WINDOW_SIZE);
     if (!riscv_claim_fixed_ranges(s)) {
         return NULL;
     }
