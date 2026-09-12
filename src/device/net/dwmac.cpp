@@ -958,10 +958,7 @@ void DwmacDevice::BuildFDT(FDTContext &ctx)
     fdt->PropStrList("compatible", fCompatible, "snps,dwmac", nullptr);
     fdt->PropU64Range("reg", fMmioRes->base, fMmioRes->size);
 
-    uint32_t tab[2];
-    tab[0] = ctx.plic_phandle;
-    tab[1] = fIrqRes->base;
-    fdt->PropTabU32("interrupts-extended", tab, 2);
+    fdt_prop_plic_irq(ctx, fIrqRes->base);
     /* The line is looked up by name, not by index. */
     fdt->PropStr("interrupt-names", "macirq");
 

@@ -1531,8 +1531,6 @@ bool SDHCIDevice::Realize()
 
 void SDHCIDevice::BuildFDT(FDTContext &ctx)
 {
-    uint32_t tab[2];
-
     if (fMmioRes == nullptr) {
         /* On PCI the guest finds the controller by enumerating configuration
            space, so it must not also appear as a node. */
@@ -1554,13 +1552,10 @@ void SDHCIDevice::BuildFDT(FDTContext &ctx)
     ctx.fdt->BeginNodeNum("mmc", fMmioRes->base);
     ctx.fdt->PropStr("compatible", fCompatible);
     ctx.fdt->PropU64Range("reg", fMmioRes->base, fMmioRes->size);
-    tab[0] = ctx.plic_phandle;
-    tab[1] = (uint32_t)fIrqRes->base;
-    ctx.fdt->PropTabU32("interrupts-extended", tab, 2);
+    fdt_prop_plic_irq(ctx, fIrqRes->base);
 
     /* Both the register clock and the card clock are that one fixed clock. */
-    tab[0] = clock_phandle;
-    tab[1] = clock_phandle;
+    uint32_t tab[2] = {clock_phandle, clock_phandle};
     ctx.fdt->PropTabU32("clocks", tab, 2);
     ctx.fdt->PropStrList("clock-names", "clk_xin", "clk_ahb", NULL);
     ctx.fdt->PropU32("max-frequency", fClockHz);

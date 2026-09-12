@@ -257,15 +257,7 @@ VirtMachine *virt_machine_init(VirtMachineParams *p);
 void sdl_refresh(VirtMachine *m);
 void sdl_init(int width, int height);
 
-/* simplefb.c */
-class SimpleFBState;
-FBDevice *simplefb_init(PhysMemoryMap *map, uint64_t phys_addr,
-                        int width, int height);
-void simplefb_refresh(FBDevice *fb_dev, SimpleFBDraw *draw,
-                      PhysMemoryRange *mem_range, int fb_page_count);
-
 /* vga.c */
-class VGAState;
 FBDevice *pci_vga_init(PCIBus *bus, int width, int height,
                        const uint8_t *vga_rom_buf, int vga_rom_size);
                       

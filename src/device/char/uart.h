@@ -3,7 +3,14 @@
 #include <stddef.h>
 
 #include "cutils.h"
+#include "device.h"
 #include "iomem.h"
+
+struct DeviceContext;
+
+/* The window the device tree node publishes. Only the first eight bytes
+   decode, but a 16550 is conventionally given a page of its own. */
+#define UART_REG_SIZE 0x100
 
 #define UART_LCR_DLAB	0x80	/* Divisor latch access bit */
 
@@ -78,3 +85,6 @@ public:
 
     DeviceIOAdapter<SerialState, &SerialState::Read, &SerialState::Write> fIo {*this};
 };
+
+
+Device *uart_node_create(DeviceContext *ctx, SerialOutput *output);

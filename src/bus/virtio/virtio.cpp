@@ -29,6 +29,8 @@
 #include <stdarg.h>
 
 #include "cutils.h"
+#include "devices.h"
+#include "fdt.h"
 #include "list.h"
 #include "virtio.h"
 #include "virtio_priv.h"
@@ -1002,4 +1004,201 @@ void virtio_set_debug(VIRTIODevice *s, int debug)
 void virtio_config_change_notify(VIRTIODevice *s)
 {
     virtio_raise_irq(s, VIRTIO_INT_CONFIG, s->config_msix_vector);
+}
+
+
+//#pragma mark - VirtioDevice
+
+/* A virtio input device as a machine input target. */
+class VirtioInputTarget final: public InputEventTarget {
+private:
+    VIRTIODevice *fDev;
+    bool fAbsolute;
+
+public:
+    VirtioInputTarget(VIRTIODevice *dev, bool absolute):
+        fDev(dev), fAbsolute(absolute) {}
+
+    void SendKeyEvent(bool is_down, uint16_t key_code) override
+        {virtio_input_send_key_event(fDev, is_down, key_code);}
+
+    void SendMouseEvent(int dx, int dy, int dz,
+                        unsigned int buttons) override
+        {virtio_input_send_mouse_event(fDev, dx, dy, dz, buttons);}
+
+    bool MouseIsAbsolute() override {return fAbsolute;}
+};
+
+
+typedef enum {
+    VIRTIO_KIND_BLOCK,
+    VIRTIO_KIND_NET,
+    VIRTIO_KIND_CONSOLE,
+    VIRTIO_KIND_9P,
+    VIRTIO_KIND_INPUT,
+} VirtioKindEnum;
+
+
+/* One wrapper for every virtio device, on either transport. Which resources
+   it needs is decided by the bus it was attached to: on MMIO it takes a
+   register page and an interrupt line, on PCI it takes neither because the
+   guest places the BARs and the bridge routes INTx. */
+class VirtioDevice final: public Device {
+private:
+    VirtioKindEnum fKind;
+    DeviceContext *fCtx;
+    VMDeviceNode *fNode;
+    VirtioInputTypeEnum fInputType = VIRTIO_INPUT_TYPE_KEYBOARD;
+    const char *fTag = nullptr;
+    Resource *fMmio = nullptr;
+    Resource *fIrq = nullptr;
+    VIRTIODevice *fDev = nullptr;
+    VirtioInputTarget *fInputTarget = nullptr;
+
+public:
+    VirtioDevice(const char *name, VirtioKindEnum kind, DeviceContext *ctx,
+                 VMDeviceNode *node):
+        Device(name), fKind(kind), fCtx(ctx), fNode(node) {}
+
+    ~VirtioDevice() override {delete fInputTarget;}
+
+    void SetInputType(VirtioInputTypeEnum type) {fInputType = type;}
+    void SetTag(const char *tag) {fTag = tag;}
+
+    bool Prepare() override
+    {
+        if (ParentBus()->AsPCIBus() != nullptr) {
+            return true;
+        }
+        fMmio = AddResource(RES_MMIO, VIRTIO_PAGE_SIZE, VIRTIO_PAGE_SIZE);
+        fIrq = AddResource(RES_IRQ, 1);
+        return fMmio != nullptr && fIrq != nullptr;
+    }
+
+    bool Realize() override
+    {
+        VIRTIOBusDef vbus = {};
+        PCIBus *pci_bus = ParentBus()->AsPCIBus();
+
+        if (pci_bus != nullptr) {
+            vbus.pci_bus = pci_bus;
+        } else {
+            SystemBus *sys = static_cast<SystemBus *>(ParentBus());
+            vbus.mem_map = sys->MemMap();
+            vbus.addr = fMmio->base;
+            vbus.irq = sys->IrqSignalFor(fIrq->base);
+            if (vbus.irq == nullptr) {
+                vm_error("%s: bad interrupt line %d\n", Name(),
+                         (int)fIrq->base);
+                return false;
+            }
+        }
+
+        switch (fKind) {
+        case VIRTIO_KIND_BLOCK:
+            if (fNode->block_dev == nullptr) {
+                vm_error("%s: no block back end\n", Name());
+                return false;
+            }
+            fDev = virtio_block_init(&vbus, fNode->block_dev);
+            break;
+        case VIRTIO_KIND_NET:
+            if (fNode->net == nullptr) {
+                vm_error("%s: no network back end\n", Name());
+                return false;
+            }
+            /* The emulator polls a single back end from its main loop, so a
+               second network device would simply never receive anything. */
+            if (fCtx->net != nullptr) {
+                vm_error("%s: only one network device is supported\n", Name());
+                return false;
+            }
+            fDev = virtio_net_init(&vbus, fNode->net);
+            fCtx->net = fNode->net;
+            break;
+        case VIRTIO_KIND_CONSOLE:
+            if (fCtx->console == nullptr) {
+                vm_error("%s: no console back end\n", Name());
+                return false;
+            }
+            fDev = virtio_console_init(&vbus, fCtx->console);
+            fCtx->console_dev = fDev;
+            break;
+        case VIRTIO_KIND_9P:
+            if (fNode->fs_dev == nullptr) {
+                vm_error("%s: no filesystem back end\n", Name());
+                return false;
+            }
+            fDev = virtio_9p_init(&vbus, fNode->fs_dev, fTag);
+            break;
+        case VIRTIO_KIND_INPUT:
+            fDev = virtio_input_init(&vbus, fInputType);
+            if (fDev == nullptr) {
+                break;
+            }
+            fInputTarget = new VirtioInputTarget(
+                fDev, fInputType == VIRTIO_INPUT_TYPE_TABLET);
+            if (fInputType == VIRTIO_INPUT_TYPE_KEYBOARD) {
+                fCtx->keyboard = fInputTarget;
+            } else {
+                fCtx->mouse = fInputTarget;
+            }
+            break;
+        }
+        return fDev != nullptr;
+    }
+
+    void BuildFDT(FDTContext &ctx) override
+    {
+        /* On PCI the guest finds the device by enumerating configuration
+           space, so it must not also appear as a node. */
+        if (fMmio == nullptr) {
+            return;
+        }
+        ctx.fdt->BeginNodeNum("virtio", fMmio->base);
+        ctx.fdt->PropStr("compatible", "virtio,mmio");
+        ctx.fdt->PropU64Range("reg", fMmio->base, fMmio->size);
+        fdt_prop_plic_irq(ctx, fIrq->base);
+        ctx.fdt->EndNode();
+    }
+};
+
+
+//#pragma mark - factory
+
+Device *virtio_block_node_create(DeviceContext *ctx, VMDeviceNode *node)
+{
+    return new VirtioDevice("virtio-block", VIRTIO_KIND_BLOCK, ctx, node);
+}
+
+
+Device *virtio_net_node_create(DeviceContext *ctx, VMDeviceNode *node)
+{
+    return new VirtioDevice("virtio-net", VIRTIO_KIND_NET, ctx, node);
+}
+
+
+Device *virtio_console_node_create(DeviceContext *ctx, VMDeviceNode *node)
+{
+    return new VirtioDevice("virtio-console", VIRTIO_KIND_CONSOLE, ctx, node);
+}
+
+
+Device *virtio_9p_node_create(DeviceContext *ctx, VMDeviceNode *node,
+                              const char *mount_tag)
+{
+    VirtioDevice *dev = new VirtioDevice("virtio-9p", VIRTIO_KIND_9P, ctx,
+                                         node);
+    dev->SetTag(mount_tag);
+    return dev;
+}
+
+
+Device *virtio_input_node_create(DeviceContext *ctx, VMDeviceNode *node,
+                                 VirtioInputTypeEnum type)
+{
+    VirtioDevice *dev = new VirtioDevice("virtio-input", VIRTIO_KIND_INPUT,
+                                         ctx, node);
+    dev->SetInputType(type);
+    return dev;
 }

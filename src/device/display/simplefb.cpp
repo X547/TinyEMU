@@ -21,6 +21,8 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#include "simplefb.h"
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -29,12 +31,18 @@
 #include <assert.h>
 
 #include "cutils.h"
+#include "devices.h"
+#include "fdt.h"
 #include "iomem.h"
 #include "virtio.h"
 #include "machine.h"
 
 //#define DEBUG_VBE
 
+/* The frame buffer is mapped as RAM with dirty tracking, so its size is
+   rounded up to something the page granularity divides. The device wrapper
+   below reserves its window the same way, so that the reservation and the
+   mapping can never disagree. */
 #define FB_ALLOC_ALIGN 65536
 
 class SimpleFBState final: public FBDevice {
@@ -114,7 +122,61 @@ FBDevice *simplefb_init(PhysMemoryMap *map, uint64_t phys_addr,
 
     s->mem_range = map->RegisterRam(phys_addr, fb_dev->fb_size,
                                     DEVRAM_FLAG_DIRTY_BITS);
-    
+
     fb_dev->fb_data = s->mem_range->phys_mem;
     return s;
+}
+
+
+//#pragma mark - SimpleFBDevice
+
+class SimpleFBDevice final: public Device {
+private:
+    DeviceContext *fCtx;
+    int fWidth;
+    int fHeight;
+    Resource *fMmio = nullptr;
+    FBDevice *fFb = nullptr;
+
+public:
+    SimpleFBDevice(DeviceContext *ctx, int width, int height):
+        Device("framebuffer"), fCtx(ctx), fWidth(width), fHeight(height) {}
+
+    bool Prepare() override
+    {
+        /* simplefb_init() rounds the allocation the same way; computing it
+           here keeps the reservation and the mapping identical. */
+        uint64_t size = (uint64_t)fHeight * fWidth * 4;
+        size = (size + FB_ALLOC_ALIGN - 1) & ~(uint64_t)(FB_ALLOC_ALIGN - 1);
+        fMmio = AddResource(RES_MMIO, size, FB_ALLOC_ALIGN);
+        return fMmio != nullptr;
+    }
+
+    bool Realize() override
+    {
+        SystemBus *sys = static_cast<SystemBus *>(ParentBus());
+        fFb = simplefb_init(sys->MemMap(), fMmio->base, fWidth, fHeight);
+        fCtx->fb_dev = fFb;
+        return fFb != nullptr;
+    }
+
+    void BuildFDT(FDTContext &ctx) override
+    {
+        ctx.fdt->BeginNodeNum("framebuffer", fMmio->base);
+        ctx.fdt->PropStr("compatible", "simple-framebuffer");
+        ctx.fdt->PropU64Range("reg", fMmio->base, fFb->fb_size);
+        ctx.fdt->PropU32("width", fFb->width);
+        ctx.fdt->PropU32("height", fFb->height);
+        ctx.fdt->PropU32("stride", fFb->stride);
+        ctx.fdt->PropStr("format", "a8r8g8b8");
+        ctx.fdt->EndNode();
+    }
+};
+
+
+//#pragma mark - factory
+
+Device *simplefb_node_create(DeviceContext *ctx, int width, int height)
+{
+    return new SimpleFBDevice(ctx, width, height);
 }

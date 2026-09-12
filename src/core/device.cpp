@@ -26,7 +26,19 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "fdt.h"
 #include "machine.h"
+
+
+//#pragma mark - FDT helpers
+
+void fdt_prop_plic_irq(FDTContext &ctx, uint64_t line)
+{
+    uint32_t tab[2];
+    tab[0] = ctx.plic_phandle;
+    tab[1] = line;
+    ctx.fdt->PropTabU32("interrupts-extended", tab, 2);
+}
 
 
 //#pragma mark - Device

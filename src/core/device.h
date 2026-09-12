@@ -51,6 +51,12 @@ struct FDTContext {
 };
 
 
+/* Emit the "interrupts-extended" property naming the PLIC line a resource was
+   assigned. Kept in one place so that every device describes the line it
+   actually got. */
+void fdt_prop_plic_irq(FDTContext &ctx, uint64_t line);
+
+
 class Device {
 private:
     char *fName = nullptr;

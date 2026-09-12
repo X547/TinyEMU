@@ -23,14 +23,10 @@
  */
 #include "devices.h"
 
-#include <stdlib.h>
-#include <stdio.h>
 #include <string.h>
-#include <inttypes.h>
 
 #include "cutils.h"
 #include "dwmac.h"
-#include "fdt.h"
 #include "hid.h"
 #include "mdio.h"
 #include "nvme.h"
@@ -40,275 +36,9 @@
 #include "scsi.h"
 #include "sd.h"
 #include "sdhci.h"
+#include "simplefb.h"
 #include "usb.h"
 #include "xhci.h"
-
-#define UART_REG_SIZE 0x100
-#define FB_ALLOC_ALIGN 65536
-
-
-/* Emit the "interrupts-extended" property naming the PLIC line a resource was
-   assigned. Kept in one place so that every device describes the line it
-   actually got. */
-static void fdt_prop_plic_irq(FDTContext &ctx, uint64_t line)
-{
-    uint32_t tab[2];
-    tab[0] = ctx.plic_phandle;
-    tab[1] = line;
-    ctx.fdt->PropTabU32("interrupts-extended", tab, 2);
-}
-
-
-//#pragma mark - UartDevice
-
-class UartDevice final: public Device {
-private:
-    DeviceContext *fCtx;
-    SerialOutput *fOutput;
-    SerialState *fSerial = nullptr;
-    Resource *fMmio = nullptr;
-    Resource *fIrq = nullptr;
-
-public:
-    UartDevice(DeviceContext *ctx, SerialOutput *output):
-        Device("serial"), fCtx(ctx), fOutput(output) {}
-
-    ~UartDevice() override {delete fSerial;}
-
-    bool Prepare() override
-    {
-        fMmio = AddResource(RES_MMIO, UART_REG_SIZE, 0x1000);
-        fIrq = AddResource(RES_IRQ, 1);
-        return fMmio != nullptr && fIrq != nullptr;
-    }
-
-    bool Realize() override
-    {
-        SystemBus *sys = static_cast<SystemBus *>(ParentBus());
-        fSerial = new SerialState(sys->MemMap(), fMmio->base,
-                                  sys->IrqSignalFor(fIrq->base), fOutput);
-        fCtx->serial_console = fSerial;
-        return true;
-    }
-
-    void BuildFDT(FDTContext &ctx) override
-    {
-        ctx.fdt->BeginNodeNum("serial", fMmio->base);
-        ctx.fdt->PropStr("compatible", "ns16550a");
-        ctx.fdt->PropU64Range("reg", fMmio->base, fMmio->size);
-        ctx.fdt->PropU32("clock-frequency", 3686400);
-        fdt_prop_plic_irq(ctx, fIrq->base);
-        ctx.fdt->EndNode();
-
-        /* Claim /chosen's stdout-path from the address that was actually
-           assigned, so the path can never name a node that is not there. */
-        snprintf(ctx.stdout_path, sizeof(ctx.stdout_path),
-                 "/soc/serial@%" PRIx64, fMmio->base);
-    }
-};
-
-
-//#pragma mark - SimpleFBDevice
-
-class SimpleFBDevice final: public Device {
-private:
-    DeviceContext *fCtx;
-    int fWidth;
-    int fHeight;
-    Resource *fMmio = nullptr;
-    FBDevice *fFb = nullptr;
-
-public:
-    SimpleFBDevice(DeviceContext *ctx, int width, int height):
-        Device("framebuffer"), fCtx(ctx), fWidth(width), fHeight(height) {}
-
-    bool Prepare() override
-    {
-        /* simplefb_init() rounds the allocation the same way; computing it
-           here keeps the reservation and the mapping identical. */
-        uint64_t size = (uint64_t)fHeight * fWidth * 4;
-        size = (size + FB_ALLOC_ALIGN - 1) & ~(uint64_t)(FB_ALLOC_ALIGN - 1);
-        fMmio = AddResource(RES_MMIO, size, FB_ALLOC_ALIGN);
-        return fMmio != nullptr;
-    }
-
-    bool Realize() override
-    {
-        SystemBus *sys = static_cast<SystemBus *>(ParentBus());
-        fFb = simplefb_init(sys->MemMap(), fMmio->base, fWidth, fHeight);
-        fCtx->fb_dev = fFb;
-        return fFb != nullptr;
-    }
-
-    void BuildFDT(FDTContext &ctx) override
-    {
-        ctx.fdt->BeginNodeNum("framebuffer", fMmio->base);
-        ctx.fdt->PropStr("compatible", "simple-framebuffer");
-        ctx.fdt->PropU64Range("reg", fMmio->base, fFb->fb_size);
-        ctx.fdt->PropU32("width", fFb->width);
-        ctx.fdt->PropU32("height", fFb->height);
-        ctx.fdt->PropU32("stride", fFb->stride);
-        ctx.fdt->PropStr("format", "a8r8g8b8");
-        ctx.fdt->EndNode();
-    }
-};
-
-
-//#pragma mark - VirtioDevice
-
-/* A virtio input device as a machine input target. */
-class VirtioInputTarget final: public InputEventTarget {
-private:
-    VIRTIODevice *fDev;
-    bool fAbsolute;
-
-public:
-    VirtioInputTarget(VIRTIODevice *dev, bool absolute):
-        fDev(dev), fAbsolute(absolute) {}
-
-    void SendKeyEvent(bool is_down, uint16_t key_code) override
-        {virtio_input_send_key_event(fDev, is_down, key_code);}
-
-    void SendMouseEvent(int dx, int dy, int dz,
-                        unsigned int buttons) override
-        {virtio_input_send_mouse_event(fDev, dx, dy, dz, buttons);}
-
-    bool MouseIsAbsolute() override {return fAbsolute;}
-};
-
-
-typedef enum {
-    VIRTIO_KIND_BLOCK,
-    VIRTIO_KIND_NET,
-    VIRTIO_KIND_CONSOLE,
-    VIRTIO_KIND_9P,
-    VIRTIO_KIND_INPUT,
-} VirtioKindEnum;
-
-
-/* One wrapper for every virtio device, on either transport. Which resources
-   it needs is decided by the bus it was attached to: on MMIO it takes a
-   register page and an interrupt line, on PCI it takes neither because the
-   guest places the BARs and the bridge routes INTx. */
-class VirtioDevice final: public Device {
-private:
-    VirtioKindEnum fKind;
-    DeviceContext *fCtx;
-    VMDeviceNode *fNode;
-    VirtioInputTypeEnum fInputType = VIRTIO_INPUT_TYPE_KEYBOARD;
-    const char *fTag = nullptr;
-    Resource *fMmio = nullptr;
-    Resource *fIrq = nullptr;
-    VIRTIODevice *fDev = nullptr;
-    VirtioInputTarget *fInputTarget = nullptr;
-
-public:
-    VirtioDevice(const char *name, VirtioKindEnum kind, DeviceContext *ctx,
-                 VMDeviceNode *node):
-        Device(name), fKind(kind), fCtx(ctx), fNode(node) {}
-
-    ~VirtioDevice() override {delete fInputTarget;}
-
-    void SetInputType(VirtioInputTypeEnum type) {fInputType = type;}
-    void SetTag(const char *tag) {fTag = tag;}
-
-    bool Prepare() override
-    {
-        if (ParentBus()->AsPCIBus() != nullptr) {
-            return true;
-        }
-        fMmio = AddResource(RES_MMIO, VIRTIO_PAGE_SIZE, VIRTIO_PAGE_SIZE);
-        fIrq = AddResource(RES_IRQ, 1);
-        return fMmio != nullptr && fIrq != nullptr;
-    }
-
-    bool Realize() override
-    {
-        VIRTIOBusDef vbus = {};
-        PCIBus *pci_bus = ParentBus()->AsPCIBus();
-
-        if (pci_bus != nullptr) {
-            vbus.pci_bus = pci_bus;
-        } else {
-            SystemBus *sys = static_cast<SystemBus *>(ParentBus());
-            vbus.mem_map = sys->MemMap();
-            vbus.addr = fMmio->base;
-            vbus.irq = sys->IrqSignalFor(fIrq->base);
-            if (vbus.irq == nullptr) {
-                vm_error("%s: bad interrupt line %d\n", Name(),
-                         (int)fIrq->base);
-                return false;
-            }
-        }
-
-        switch (fKind) {
-        case VIRTIO_KIND_BLOCK:
-            if (fNode->block_dev == nullptr) {
-                vm_error("%s: no block back end\n", Name());
-                return false;
-            }
-            fDev = virtio_block_init(&vbus, fNode->block_dev);
-            break;
-        case VIRTIO_KIND_NET:
-            if (fNode->net == nullptr) {
-                vm_error("%s: no network back end\n", Name());
-                return false;
-            }
-            /* The emulator polls a single back end from its main loop, so a
-               second network device would simply never receive anything. */
-            if (fCtx->net != nullptr) {
-                vm_error("%s: only one network device is supported\n", Name());
-                return false;
-            }
-            fDev = virtio_net_init(&vbus, fNode->net);
-            fCtx->net = fNode->net;
-            break;
-        case VIRTIO_KIND_CONSOLE:
-            if (fCtx->console == nullptr) {
-                vm_error("%s: no console back end\n", Name());
-                return false;
-            }
-            fDev = virtio_console_init(&vbus, fCtx->console);
-            fCtx->console_dev = fDev;
-            break;
-        case VIRTIO_KIND_9P:
-            if (fNode->fs_dev == nullptr) {
-                vm_error("%s: no filesystem back end\n", Name());
-                return false;
-            }
-            fDev = virtio_9p_init(&vbus, fNode->fs_dev, fTag);
-            break;
-        case VIRTIO_KIND_INPUT:
-            fDev = virtio_input_init(&vbus, fInputType);
-            if (fDev == nullptr) {
-                break;
-            }
-            fInputTarget = new VirtioInputTarget(
-                fDev, fInputType == VIRTIO_INPUT_TYPE_TABLET);
-            if (fInputType == VIRTIO_INPUT_TYPE_KEYBOARD) {
-                fCtx->keyboard = fInputTarget;
-            } else {
-                fCtx->mouse = fInputTarget;
-            }
-            break;
-        }
-        return fDev != nullptr;
-    }
-
-    void BuildFDT(FDTContext &ctx) override
-    {
-        /* On PCI the guest finds the device by enumerating configuration
-           space, so it must not also appear as a node. */
-        if (fMmio == nullptr) {
-            return;
-        }
-        ctx.fdt->BeginNodeNum("virtio", fMmio->base);
-        ctx.fdt->PropStr("compatible", "virtio,mmio");
-        ctx.fdt->PropU64Range("reg", fMmio->base, fMmio->size);
-        fdt_prop_plic_irq(ctx, fIrq->base);
-        ctx.fdt->EndNode();
-    }
-};
 
 
 //#pragma mark - factory
@@ -326,7 +56,7 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
     VMDeviceNode *mutable_node = const_cast<VMDeviceNode *>(node);
 
     if (strcmp(type, "ns16550a") == 0) {
-        return new UartDevice(ctx, ctx->serial_output);
+        return uart_node_create(ctx, ctx->serial_output);
     }
 
     if (strcmp(type, "simplefb") == 0) {
@@ -335,7 +65,7 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
             vm_get_int(node->props, "height", &height) < 0) {
             return nullptr;
         }
-        return new SimpleFBDevice(ctx, width, height);
+        return simplefb_node_create(ctx, width, height);
     }
 
     if (strcmp(type, "pci-host-ecam-generic") == 0) {
@@ -595,18 +325,15 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
     }
 
     if (strcmp(type, "virtio-block") == 0) {
-        return new VirtioDevice("virtio-block", VIRTIO_KIND_BLOCK, ctx,
-                                mutable_node);
+        return virtio_block_node_create(ctx, mutable_node);
     }
 
     if (strcmp(type, "virtio-net") == 0) {
-        return new VirtioDevice("virtio-net", VIRTIO_KIND_NET, ctx,
-                                mutable_node);
+        return virtio_net_node_create(ctx, mutable_node);
     }
 
     if (strcmp(type, "virtio-console") == 0) {
-        return new VirtioDevice("virtio-console", VIRTIO_KIND_CONSOLE, ctx,
-                                mutable_node);
+        return virtio_console_node_create(ctx, mutable_node);
     }
 
     if (strcmp(type, "virtio-9p") == 0) {
@@ -614,10 +341,7 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
         if (vm_get_str(node->props, "tag", &tag) < 0) {
             return nullptr;
         }
-        VirtioDevice *dev = new VirtioDevice("virtio-9p", VIRTIO_KIND_9P, ctx,
-                                             mutable_node);
-        dev->SetTag(tag);
-        return dev;
+        return virtio_9p_node_create(ctx, mutable_node, tag);
     }
 
     if (strcmp(type, "virtio-input") == 0) {
@@ -636,11 +360,7 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
             vm_error("virtio-input: unsupported kind '%s'\n", kind);
             return nullptr;
         }
-        VirtioDevice *dev = new VirtioDevice("virtio-input",
-                                             VIRTIO_KIND_INPUT, ctx,
-                                             mutable_node);
-        dev->SetInputType(input_type);
-        return dev;
+        return virtio_input_node_create(ctx, mutable_node, input_type);
     }
 
     vm_error("unsupported device type: %s\n", type);

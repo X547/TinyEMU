@@ -152,4 +152,21 @@ VIRTIODevice *virtio_input_init(VIRTIOBusDef *bus, VirtioInputTypeEnum type);
 VIRTIODevice *virtio_9p_init(VIRTIOBusDef *bus, FSDevice *fs,
                              const char *mount_tag);
 
+/* device tree nodes */
+
+class Device;
+struct DeviceContext;
+struct VMDeviceNode;
+
+/* One wrapper serves every virtio device on either transport: which resources
+   it takes is decided by the bus it is attached to, so the same node works on
+   an MMIO machine and behind a PCI bridge. */
+Device *virtio_block_node_create(DeviceContext *ctx, VMDeviceNode *node);
+Device *virtio_net_node_create(DeviceContext *ctx, VMDeviceNode *node);
+Device *virtio_console_node_create(DeviceContext *ctx, VMDeviceNode *node);
+Device *virtio_9p_node_create(DeviceContext *ctx, VMDeviceNode *node,
+                              const char *mount_tag);
+Device *virtio_input_node_create(DeviceContext *ctx, VMDeviceNode *node,
+                                 VirtioInputTypeEnum type);
+
 #endif /* VIRTIO_H */

@@ -35,6 +35,7 @@
 
 #include "cutils.h"
 #include "iomem.h"
+#include "simplefb.h"
 #include "virtio.h"
 #include "uart.h"
 #include "x86_cpu.h"

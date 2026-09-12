@@ -30,6 +30,7 @@
 
 #include "cutils.h"
 #include "iomem.h"
+#include "simplefb.h"
 #include "virtio.h"
 #include "machine.h"
 
