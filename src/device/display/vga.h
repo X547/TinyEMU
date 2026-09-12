@@ -1,7 +1,7 @@
 /*
- * i440FX PCI host bridge
+ * Standard VGA
  *
- * Copyright (c) 2017 Fabrice Bellard
+ * Copyright (c) 2016-2018 Fabrice Bellard
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -24,21 +24,11 @@
 #pragma once
 
 #include "device.h"
-#include "pci.h"
 
-typedef struct I440FXState I440FXState;
+struct DeviceContext;
 
-/* The "pci-host-i440fx" configuration node: the host bridge of a PC. It
-   decodes the CF8/CFC configuration ports, carries the i440FX function and
-   the PIIX3 ISA bridge whose PIRQ registers route the four INTx lines onto
-   the PIC, and provides the PCI bus the machine's devices hang from. */
-Device *i440fx_node_create(const char *name);
-
-/* The bridge a realized node built, or null for any other device. The
-   machine's no-BIOS path needs it: with no firmware to program the PIRQ
-   registers it has to route the INTx lines itself. */
-I440FXState *i440fx_node_state(Device *dev);
-
-/* In case no BIOS is used, map the interrupts. */
-void i440fx_map_interrupts(I440FXState *s, uint8_t *elcr,
-                           const uint8_t *pci_irqs);
+/* The "vga" configuration node: the 1234:1111 standard VGA, on a PCI bus. It
+   also decodes the legacy VGA and VBE ports, which is what lets a video BIOS
+   and a guest that has not yet loaded a driver use it. The ROM it answers
+   with is the machine's vga_bios file. */
+Device *vga_node_create(DeviceContext *ctx, int width, int height);

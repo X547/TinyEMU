@@ -780,7 +780,8 @@ static void open_device_backend(VMDeviceNode *node, void *opaque)
 {
     BackendOpenState *st = static_cast<BackendOpenState *>(opaque);
 
-    if (!strcmp(node->type, "virtio-block") || !strcmp(node->type, "ide") ||
+    if (!strcmp(node->type, "virtio-block") ||
+        !strcmp(node->type, "ata-disk") ||
         !strcmp(node->type, "scsi-disk") || !strcmp(node->type, "nvme-ns") ||
         !strcmp(node->type, "sd-card") || !strcmp(node->type, "mmc-card")) {
         open_block_backend(node, st);

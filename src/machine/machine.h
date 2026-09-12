@@ -71,6 +71,18 @@ public:
 };
 
 
+/* Implemented by a device that answers the VMware backdoor port. The call
+   carries the processor's registers rather than the port's data, which is how
+   the protocol passes its arguments, so the machine performs the access and
+   the device only interprets it. */
+class VMPortTarget {
+public:
+    virtual ~VMPortTarget() = default;
+
+    virtual void VMPortCommand(uint32_t *regs) = 0;
+};
+
+
 class FBDevice {
 public:
     /* the following is set by the device */
@@ -84,10 +96,6 @@ public:
 
     virtual void Refresh(SimpleFBDraw *draw) = 0;
 };
-
-#define MAX_DRIVE_DEVICE 4
-#define MAX_FS_DEVICE 4
-#define MAX_ETH_DEVICE 1
 
 #define VM_CONFIG_VERSION 2
 
@@ -107,29 +115,6 @@ typedef struct {
 } VMFileEntry;
 
 typedef struct VMDeviceNode VMDeviceNode;
-
-/* Flattened views of the device tree, for machines whose topology is fixed
-   and which therefore do not walk the tree themselves. The strings are
-   borrowed from the tree or from the parsed configuration, and the back end
-   lives on the node so that there is only ever one copy of it. */
-typedef struct {
-    const char *device;
-    const char *filename;
-    VMDeviceNode *node;
-} VMDriveEntry;
-
-typedef struct {
-    const char *tag; /* 9p mount tag */
-    const char *filename;
-    VMDeviceNode *node;
-} VMFSEntry;
-
-typedef struct {
-    const char *driver;
-    const char *ifname;
-    VMDeviceNode *node;
-} VMEthEntry;
-
 typedef struct VirtMachineClass VirtMachineClass;
 
 /* One node of the configuration's device tree. A node that declares child
@@ -167,25 +152,21 @@ typedef struct {
     uint64_t ram_size;
     bool rtc_real_time;
     bool rtc_local_time;
-    char *display_device; /* NULL means no display */
+    /* Whether the configuration declares a display, and how big. The window
+       is opened before the machine exists, so this much is read out of the
+       tree ahead of time; everything else about the device comes from the
+       tree itself. NULL means no display. */
+    char *display_device;
     int width, height; /* graphic width & height */
     CharacterDevice *console;
-    VMDriveEntry tab_drive[MAX_DRIVE_DEVICE];
-    int drive_count;
-    VMFSEntry tab_fs[MAX_FS_DEVICE];
-    int fs_count;
-    VMEthEntry tab_eth[MAX_ETH_DEVICE];
-    int eth_count;
 
     char *cmdline; /* bios or kernel command line */
     bool accel_enable; /* enable acceleration (KVM) */
-    char *input_device; /* NULL means no input */
 
-    /* The device tree the configuration declares. Machines that describe
-       themselves to the guest (RISC-V/FDT) build directly from this; the PC
-       machine, whose topology is fixed, uses the flattened tab_* views
-       above. */
+    /* The device tree the configuration declares, and the type its root bus
+       was given. Every machine builds from these. */
     VMDeviceNode *root_devices;
+    char *root_bus_type;
     /* the parsed configuration, kept alive because the nodes point into it */
     JSONValue cfg_json;
 
@@ -257,10 +238,6 @@ VirtMachine *virt_machine_init(VirtMachineParams *p);
 void sdl_refresh(VirtMachine *m);
 void sdl_init(int width, int height);
 
-/* vga.c */
-FBDevice *pci_vga_init(PCIBus *bus, int width, int height,
-                       const uint8_t *vga_rom_buf, int vga_rom_size);
-                      
 /* block_net.c */
 BlockDevice *block_device_init_http(const char *url, int max_cache_size_kb,
                                     StartCallback *start);

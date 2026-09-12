@@ -23,8 +23,22 @@
  */
 #pragma once
 
+#include "device.h"
 #include "iomem.h"
 #include "ps2.h"
+
+struct DeviceContext;
+
+/* Where a PC's controller answers: the data port, the command and status port
+   four above it, and the two lines the two devices interrupt on. */
+#define I8042_IO_BASE 0x60
+#define I8042_IRQ_KBD 1
+#define I8042_IRQ_AUX 12
+
+/* The VMware backdoor. A guest driver that speaks the protocol reads absolute
+   pointer positions from this port instead of decoding the relative packets
+   the PS/2 pointer sends. */
+#define I8042_VMPORT 0x5658
 
 /* The two ports the PC's controller has: the keyboard one, and the auxiliary
    one a pointer hangs off. */
@@ -108,3 +122,9 @@ public:
 I8042Controller *i8042_init(PS2Keyboard **pkbd, PS2Mouse **pmouse,
                             PhysMemoryMap *port_map, IRQSignal *kbd_irq,
                             IRQSignal *aux_irq, uint32_t io_base);
+
+
+/* The "ps2" configuration node: the controller, the keyboard and the pointer
+   a PC has, on the addresses a PC has always had them on. 'vmmouse' adds the
+   backdoor port the pointer's absolute protocol is read through. */
+Device *i8042_node_create(DeviceContext *ctx, bool vmmouse);

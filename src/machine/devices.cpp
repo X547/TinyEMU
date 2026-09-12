@@ -25,6 +25,8 @@
 
 #include <string.h>
 
+#include "ata.h"
+#include "ata_pci.h"
 #include "cutils.h"
 #include "dwmac.h"
 #include "hid.h"
@@ -39,6 +41,14 @@
 #include "simplefb.h"
 #include "usb.h"
 #include "xhci.h"
+
+/* The PC's own parts. They are built only with the x86 machine, because none
+   of them models anything a device tree machine has. */
+#ifdef CONFIG_X86EMU
+#include "i8042.h"
+#include "pci_host_i440fx.h"
+#include "vga.h"
+#endif
 
 
 //#pragma mark - factory
@@ -78,16 +88,61 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
     VMDeviceNode *mutable_node = const_cast<VMDeviceNode *>(node);
 
     if (strcmp(type, "ns16550a") == 0) {
-        return uart_node_create(ctx, ctx->serial_output);
+        int port, irq;
+        if (!node_int_opt(node, "reg", &port, -1) ||
+            !node_int_opt(node, "irq", &irq, -1)) {
+            return nullptr;
+        }
+        return uart_node_create(ctx, ctx->serial_output, port, irq);
     }
 
-    if (strcmp(type, "simplefb") == 0) {
+    if (strcmp(type, "simplefb") == 0 || strcmp(type, "vga") == 0) {
         int width, height;
         if (vm_get_int(node->props, "width", &width) < 0 ||
             vm_get_int(node->props, "height", &height) < 0) {
             return nullptr;
         }
+#ifdef CONFIG_X86EMU
+        if (strcmp(type, "vga") == 0) {
+            return vga_node_create(ctx, width, height);
+        }
+#endif
         return simplefb_node_create(ctx, width, height);
+    }
+
+#ifdef CONFIG_X86EMU
+    if (strcmp(type, "ps2") == 0) {
+        int vmmouse;
+        if (!node_int_opt(node, "vmmouse", &vmmouse, 1)) {
+            return nullptr;
+        }
+        return i8042_node_create(ctx, vmmouse != 0);
+    }
+
+    if (strcmp(type, "pci-host-i440fx") == 0) {
+        return i440fx_node_create(node->id != nullptr ? node->id : "i440fx");
+    }
+#endif
+
+    if (strcmp(type, "pci-ide") == 0) {
+        if (node->children == nullptr) {
+            vm_error("pci-ide: needs a nested ATA bus with at least one "
+                     "drive on it\n");
+            return nullptr;
+        }
+        return ata_pci_node_create(node->id != nullptr ? node->id : "ide");
+    }
+
+    if (strcmp(type, "ata-disk") == 0) {
+        int read_only;
+        if (!node_int_opt(node, "read_only", &read_only, 0)) {
+            return nullptr;
+        }
+        if (mutable_node->block_dev == nullptr) {
+            vm_error("ata-disk: no block back end\n");
+            return nullptr;
+        }
+        return ata_disk_node_create(mutable_node->block_dev, read_only != 0);
     }
 
     if (strcmp(type, "pci-host-ecam-generic") == 0) {
@@ -396,6 +451,13 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
             return nullptr;
         }
         return virtio_input_node_create(ctx, mutable_node, input_type);
+    }
+
+    if (strcmp(type, "ide") == 0) {
+        vm_error("'ide' is now a 'pci-ide' controller carrying an 'ata-disk' "
+                 "on the ATA bus it provides, declared inside the PCI bus of "
+                 "a host bridge\n");
+        return nullptr;
     }
 
     vm_error("unsupported device type: %s\n", type);

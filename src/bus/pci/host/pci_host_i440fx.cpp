@@ -29,6 +29,8 @@
 #include <assert.h>
 
 #include "cutils.h"
+#include "machine.h"
+#include "pci_bridge.h"
 
 /* PIRQA..PIRQD routing registers of the PIIX3, one byte each. Bit 7 disables
    the line; the low bits name the PIC input it lands on. */
@@ -130,47 +132,107 @@ void I440FXState::SetIRQ(int irq_num, int irq_level)
     }
 }
 
-I440FXState *i440fx_init(PCIBus **pbus, int *ppiix3_devfn,
-                         PhysMemoryMap *mem_map, PhysMemoryMap *port_map,
-                         IRQSignal *pic_irqs)
-{
-    I440FXState *s;
-    PCIBus *b;
-    PCIDevice *d;
-    int i;
+//#pragma mark - the configuration node
 
-    s = new I440FXState();
+/* The bus is built in Prepare() rather than Realize(), because the devices
+   nested inside the node are added to it before any of them is realized. */
+class I440FXDevice final: public Device {
+private:
+    I440FXState *fState = nullptr;
+    PCIBus *fPciBus = nullptr;
+    Bus *fChildBus = nullptr;
+    Resource *fAddrRes = nullptr;
+    Resource *fDataRes = nullptr;
 
-    b = pci_bus_init(mem_map, port_map);
+public:
+    I440FXDevice(const char *name): Device(name) {}
 
-    s->pic_irqs = pic_irqs;
-    /* The four INTx lines land on the bridge itself rather than on a PIC
-       input directly: SetIRQ() above puts them through the PIIX3 PIRQ
-       routing registers first. */
-    for(i = 0; i < 4; i++) {
-        IRQSignal sig;
-        sig.Init(s, i);
-        pci_bus_set_irq(b, i, &sig);
+    ~I440FXDevice() override
+    {
+        delete fChildBus;
+        delete fState;
     }
 
-    port_map->RegisterDevice(0xcf8, 1, &s->fAddrIo, DEVIO_SIZE32);
-    port_map->RegisterDevice(0xcfc, 4, &s->fDataIo,
-                             DEVIO_SIZE8 | DEVIO_SIZE16 | DEVIO_SIZE32);
-    d = pci_register_device(b, "i440FX", 0, 0x8086, 0x1237, 0x02, 0x0600);
-    pci_device_set_config16(d, PCI_SUBSYSTEM_VENDOR_ID, 0x1af4); /* Red Hat, Inc. */
-    pci_device_set_config16(d, PCI_SUBSYSTEM_ID, 0x1100); /* QEMU virtual machine */
+    I440FXState *State() const {return fState;}
 
-    s->pci_dev = d;
-    s->pci_bus = b;
+    bool Prepare() override
+    {
+        SystemBus *sys = dynamic_cast<SystemBus *>(ParentBus());
+        if (sys == nullptr || !sys->IsPortBased()) {
+            vm_error("%s: must be attached to a PC system bus\n", Name());
+            return false;
+        }
 
-    s->piix3_dev = pci_register_device(b, "PIIX3", 8, 0x8086, 0x7000,
-                                       0x00, 0x0601);
-    pci_device_set_config8(s->piix3_dev, PCI_HEADER_TYPE,
-                           PCI_HEADER_TYPE_NORMAL | PCI_HEADER_TYPE_MULTI);
+        /* The configuration ports, where the PCI BIOS specification put
+           them. */
+        fAddrRes = AddFixedResource(RES_IO, 0xcf8, 4);
+        fDataRes = AddFixedResource(RES_IO, 0xcfc, 4);
+        if (fAddrRes == nullptr || fDataRes == nullptr) {
+            return false;
+        }
 
-    *pbus = b;
-    *ppiix3_devfn = pci_device_get_devfn(s->piix3_dev);
-    return s;
+        fState = new I440FXState();
+        fPciBus = pci_bus_init(sys->MemMap(), sys->PortMap());
+        fState->pci_bus = fPciBus;
+        /* The lines are the machine's, which on a PC are wired before any
+           device exists, so the array is contiguous from line 0. */
+        fState->pic_irqs = sys->IrqSignalFor(0);
+
+        /* The four INTx lines land on the bridge itself rather than on a PIC
+           input directly: SetIRQ() puts them through the PIIX3 PIRQ routing
+           registers first. */
+        for (int i = 0; i < 4; i++) {
+            IRQSignal sig;
+            sig.Init(fState, i);
+            pci_bus_set_irq(fPciBus, i, &sig);
+        }
+
+        fState->pci_dev = pci_register_device(fPciBus, "i440FX", 0, 0x8086,
+                                              0x1237, 0x02, 0x0600);
+        /* Red Hat, Inc. / QEMU virtual machine, which is the pair guests
+           recognise. */
+        pci_device_set_config16(fState->pci_dev, PCI_SUBSYSTEM_VENDOR_ID,
+                                0x1af4);
+        pci_device_set_config16(fState->pci_dev, PCI_SUBSYSTEM_ID, 0x1100);
+
+        fState->piix3_dev = pci_register_device(fPciBus, "PIIX3", 8, 0x8086,
+                                                0x7000, 0x00, 0x0601);
+        pci_device_set_config8(fState->piix3_dev, PCI_HEADER_TYPE,
+                               PCI_HEADER_TYPE_NORMAL |
+                               PCI_HEADER_TYPE_MULTI);
+
+        fChildBus = pci_attach_bus_create(this, fPciBus);
+        return fChildBus != nullptr;
+    }
+
+    bool Realize() override
+    {
+        SystemBus *sys = static_cast<SystemBus *>(ParentBus());
+
+        sys->PortMap()->RegisterDevice(fAddrRes->base, 1, &fState->fAddrIo,
+                                       DEVIO_SIZE32);
+        sys->PortMap()->RegisterDevice(fDataRes->base, fDataRes->size,
+                                       &fState->fDataIo,
+                                       DEVIO_SIZE8 | DEVIO_SIZE16 |
+                                       DEVIO_SIZE32);
+        return true;
+    }
+
+    Bus *ChildBus() override {return fChildBus;}
+};
+
+
+Device *i440fx_node_create(const char *name)
+{
+    return new I440FXDevice(name);
+}
+
+
+I440FXState *i440fx_node_state(Device *dev)
+{
+    I440FXDevice *node = dynamic_cast<I440FXDevice *>(dev);
+
+    return node != nullptr ? node->State() : nullptr;
 }
 
 /* in case no BIOS is used, map the interrupts. */

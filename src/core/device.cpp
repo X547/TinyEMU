@@ -131,6 +131,17 @@ bool Bus::AddDevice(Device *dev)
 }
 
 
+Bus *Bus::Root()
+{
+    Bus *bus = this;
+
+    while (bus->Owner() != nullptr && bus->Owner()->ParentBus() != nullptr) {
+        bus = bus->Owner()->ParentBus();
+    }
+    return bus;
+}
+
+
 bool Bus::AllocateAll()
 {
     for (int i = 0; i < fDeviceCount; i++) {
@@ -192,9 +203,27 @@ SystemBus::SystemBus(PhysMemoryMap *mem_map, IRQTarget *irq_target,
 }
 
 
+SystemBus::SystemBus(PhysMemoryMap *mem_map, PhysMemoryMap *port_map,
+                     IRQSignal *irqs, int irq_count):
+    Bus(nullptr),
+    fMemMap(mem_map),
+    fPortMap(port_map),
+    fOwnsPortMap(false),
+    fPortBased(true),
+    fIrqTable(irqs),
+    fIrqCount(irq_count)
+{
+    /* Every line is a real one here, line 0 included: on a PC that is the
+       timer. Which of them are spoken for is the machine's to claim. */
+    fIrqAlloc.SetWindow(0, fIrqCount);
+}
+
+
 SystemBus::~SystemBus()
 {
-    delete fPortMap;
+    if (fOwnsPortMap) {
+        delete fPortMap;
+    }
 }
 
 
@@ -209,35 +238,32 @@ PhysMemoryMap *SystemBus::PortMap()
 
 IRQSignal *SystemBus::IrqSignalFor(uint64_t line)
 {
-    if (line == 0 || line >= (uint64_t)fIrqCount) {
+    if (line >= (uint64_t)fIrqCount) {
         return nullptr;
     }
-    return &fIrqSignals[line];
+    if (line == 0 && !fPortBased) {
+        return nullptr;
+    }
+    return &fIrqTable[line];
+}
+
+
+bool SystemBus::AssignOne(Resource *res, const char *owner)
+{
+    switch (res->type) {
+    case RES_MMIO: return fMmioAlloc.Assign(res, owner);
+    case RES_IO:   return fIoAlloc.Assign(res, owner);
+    case RES_IRQ:  return fIrqAlloc.Assign(res, owner);
+    default:       return true;
+    }
 }
 
 
 bool SystemBus::AssignResources(Device *dev)
 {
     for (int i = 0; i < dev->ResourceCount(); i++) {
-        Resource *res = dev->ResourceAt(i);
-        switch (res->type) {
-        case RES_MMIO:
-            if (!fMmioAlloc.Assign(res, dev->Name())) {
-                return false;
-            }
-            break;
-        case RES_IO:
-            if (!fIoAlloc.Assign(res, dev->Name())) {
-                return false;
-            }
-            break;
-        case RES_IRQ:
-            if (!fIrqAlloc.Assign(res, dev->Name())) {
-                return false;
-            }
-            break;
-        default:
-            break;
+        if (!AssignOne(dev->ResourceAt(i), dev->Name())) {
+            return false;
         }
     }
     return true;

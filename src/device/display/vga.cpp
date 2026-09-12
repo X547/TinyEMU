@@ -29,8 +29,10 @@
 #include <assert.h>
 
 #include "cutils.h"
+#include "devices.h"
 #include "iomem.h"
 #include "simplefb.h"
+#include "vga.h"
 #include "virtio.h"
 #include "machine.h"
 
@@ -748,8 +750,8 @@ void VGAState::SetBar(int bar_num, uint64_t addr, bool enabled)
         s->rom_range->SetAddr(addr, enabled);
 }
 
-FBDevice *pci_vga_init(PCIBus *bus, int width, int height,
-                       const uint8_t *vga_rom_buf, int vga_rom_size)
+static FBDevice *pci_vga_init(PCIBus *bus, int width, int height,
+                              const uint8_t *vga_rom_buf, int vga_rom_size)
 {
     VGAState *s;
     PCIDevice *d;
@@ -816,4 +818,72 @@ FBDevice *pci_vga_init(PCIBus *bus, int width, int height,
     s->vbe_regs[VBE_DISPI_INDEX_VIDEO_MEMORY_64K] = fb_dev->fb_size >> 16;
 
     return s;
+}
+
+
+//#pragma mark - the configuration node
+
+/* The ports a VGA has decoded since the adapter was an ISA card, alongside
+   whatever base address registers the guest gives it. They are reserved out
+   of the machine's port space so that a second display cannot quietly land on
+   top of the first. */
+static const struct {
+    uint32_t base;
+    uint32_t size;
+} kVgaPorts[] = {
+    {0x1ce, 2},  /* VBE index and data */
+    {0x3b4, 2},  /* monochrome CRT controller */
+    {0x3ba, 1},  /* monochrome feature control and input status */
+    {0x3c0, 16}, /* attribute, sequencer, DAC and graphics controllers */
+    {0x3d4, 2},  /* colour CRT controller */
+    {0x3da, 1},  /* colour feature control and input status */
+};
+
+#define VGA_PORT_COUNT (int)(sizeof(kVgaPorts) / sizeof(kVgaPorts[0]))
+
+
+class VGADevice final: public Device {
+private:
+    DeviceContext *fCtx;
+    int fWidth;
+    int fHeight;
+    FBDevice *fFb = nullptr;
+
+public:
+    VGADevice(DeviceContext *ctx, int width, int height):
+        Device("vga"), fCtx(ctx), fWidth(width), fHeight(height) {}
+
+    bool Prepare() override
+    {
+        if (ParentBus()->AsPCIBus() == nullptr) {
+            vm_error("%s: must be attached to a PCI bus\n", Name());
+            return false;
+        }
+        for (int i = 0; i < VGA_PORT_COUNT; i++) {
+            if (AddFixedResource(RES_IO, kVgaPorts[i].base,
+                                 kVgaPorts[i].size) == nullptr) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool Realize() override
+    {
+        const VMFileEntry &rom = fCtx->params->files[VM_FILE_VGA_BIOS];
+
+        fFb = pci_vga_init(ParentBus()->AsPCIBus(), fWidth, fHeight, rom.buf,
+                           rom.len);
+        if (fFb == nullptr) {
+            return false;
+        }
+        fCtx->fb_dev = fFb;
+        return true;
+    }
+};
+
+
+Device *vga_node_create(DeviceContext *ctx, int width, int height)
+{
+    return new VGADevice(ctx, width, height);
 }

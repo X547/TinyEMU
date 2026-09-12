@@ -12,6 +12,16 @@ struct DeviceContext;
    decode, but a 16550 is conventionally given a page of its own. */
 #define UART_REG_SIZE 0x100
 
+/* The eight registers themselves, which is the whole of what a port based
+   machine decodes. */
+#define UART_PORT_SIZE 8
+
+/* Where COM1 has been since the PC/AT. The other three are at 0x2f8, 0x3e8
+   and 0x2e8, on lines 3, 4 and 3; a configuration naming one of those says so
+   itself. */
+#define UART_PC_COM1_PORT 0x3f8
+#define UART_PC_COM1_IRQ  4
+
 #define UART_LCR_DLAB	0x80	/* Divisor latch access bit */
 
 #define UART_IER_MSI	0x08	/* Enable Modem status interrupt */
@@ -87,4 +97,8 @@ public:
 };
 
 
-Device *uart_node_create(DeviceContext *ctx, SerialOutput *output);
+/* The "ns16550a" configuration node. On a machine whose devices are addressed
+   by port number the registers go at 'port' on line 'irq'; on one that maps
+   them into memory both are allocated and -1 is what to pass. */
+Device *uart_node_create(DeviceContext *ctx, SerialOutput *output, int port,
+                         int irq);

@@ -158,37 +158,74 @@ class UartDevice final: public Device {
 private:
     DeviceContext *fCtx;
     SerialOutput *fOutput;
+    /* The port and line the configuration asked for, or -1 for whatever the
+       machine hands out. */
+    int fPort;
+    int fIrqLine;
     SerialState *fSerial = nullptr;
-    Resource *fMmio = nullptr;
+    Resource *fRegs = nullptr;
     Resource *fIrq = nullptr;
 
 public:
-    UartDevice(DeviceContext *ctx, SerialOutput *output):
-        Device("serial"), fCtx(ctx), fOutput(output) {}
+    UartDevice(DeviceContext *ctx, SerialOutput *output, int port, int irq):
+        Device("serial"), fCtx(ctx), fOutput(output), fPort(port),
+        fIrqLine(irq) {}
 
     ~UartDevice() override {delete fSerial;}
 
     bool Prepare() override
     {
-        fMmio = AddResource(RES_MMIO, UART_REG_SIZE, 0x1000);
-        fIrq = AddResource(RES_IRQ, 1);
-        return fMmio != nullptr && fIrq != nullptr;
+        SystemBus *sys = dynamic_cast<SystemBus *>(ParentBus());
+        if (sys == nullptr) {
+            vm_error("%s: must be attached to a system bus\n", Name());
+            return false;
+        }
+
+        if (sys->RegisterSpace() == RES_IO) {
+            /* A port based machine puts its serial ports where its firmware
+               and its guests have always looked for them. */
+            fRegs = AddFixedResource(RES_IO,
+                                     fPort >= 0 ? fPort : UART_PC_COM1_PORT,
+                                     UART_PORT_SIZE);
+            fIrq = AddFixedResource(RES_IRQ,
+                                    fIrqLine >= 0 ? fIrqLine
+                                                  : UART_PC_COM1_IRQ, 1);
+        } else {
+            if (fPort >= 0 || fIrqLine >= 0) {
+                vm_error("%s: 'reg' and 'irq' are for a machine that "
+                         "addresses its devices by port number; here both "
+                         "are allocated\n", Name());
+                return false;
+            }
+            fRegs = AddResource(RES_MMIO, UART_REG_SIZE, 0x1000);
+            fIrq = AddResource(RES_IRQ, 1);
+        }
+        return fRegs != nullptr && fIrq != nullptr;
     }
 
     bool Realize() override
     {
         SystemBus *sys = static_cast<SystemBus *>(ParentBus());
-        fSerial = new SerialState(sys->MemMap(), fMmio->base,
-                                  sys->IrqSignalFor(fIrq->base), fOutput);
+        IRQSignal *irq = sys->IrqSignalFor(fIrq->base);
+
+        if (irq == nullptr) {
+            vm_error("%s: bad interrupt line %d\n", Name(), (int)fIrq->base);
+            return false;
+        }
+        fSerial = new SerialState(sys->RegisterMap(), fRegs->base, irq,
+                                  fOutput);
         fCtx->serial_console = fSerial;
         return true;
     }
 
     void BuildFDT(FDTContext &ctx) override
     {
-        ctx.fdt->BeginNodeNum("serial", fMmio->base);
+        if (fRegs->type != RES_MMIO) {
+            return;
+        }
+        ctx.fdt->BeginNodeNum("serial", fRegs->base);
         ctx.fdt->PropStr("compatible", "ns16550a");
-        ctx.fdt->PropU64Range("reg", fMmio->base, fMmio->size);
+        ctx.fdt->PropU64Range("reg", fRegs->base, fRegs->size);
         ctx.fdt->PropU32("clock-frequency", 3686400);
         fdt_prop_plic_irq(ctx, fIrq->base);
         ctx.fdt->EndNode();
@@ -196,14 +233,15 @@ public:
         /* Claim /chosen's stdout-path from the address that was actually
            assigned, so the path can never name a node that is not there. */
         snprintf(ctx.stdout_path, sizeof(ctx.stdout_path),
-                 "/soc/serial@%" PRIx64, fMmio->base);
+                 "/soc/serial@%" PRIx64, fRegs->base);
     }
 };
 
 
 //#pragma mark - factory
 
-Device *uart_node_create(DeviceContext *ctx, SerialOutput *output)
+Device *uart_node_create(DeviceContext *ctx, SerialOutput *output, int port,
+                         int irq)
 {
-    return new UartDevice(ctx, output);
+    return new UartDevice(ctx, output, port, irq);
 }

@@ -35,6 +35,7 @@
 
 #include "cutils.h"
 #include "iomem.h"
+#include "devices.h"
 #include "simplefb.h"
 #include "virtio.h"
 #include "uart.h"
@@ -42,9 +43,6 @@
 #include "machine.h"
 #include "pci.h"
 #include "pci_host_i440fx.h"
-#include "ata_pci.h"
-#include "i8042.h"
-#include "vmmouse.h"
 
 #if defined(__linux__) && (defined(__i386__) || defined(__x86_64__))
 #define USE_KVM
@@ -1048,20 +1046,16 @@ public:
     PIC2State *pic_state;
     IRQSignal pic_irq[16];
     PITState *pit_state;
-    I440FXState *i440fx_state;
     CMOSState *cmos_state;
-    SerialState *serial_state;
-    /* The IDE function, built on demand by the first drive that wants
-       it. Null when the configuration declares none. */
-    ATAPCIController *ide_state = nullptr;
 
-    /* input */
-    VIRTIODevice *keyboard_dev;
-    VIRTIODevice *mouse_dev;
-    I8042Controller *kbd_state;
-    PS2Mouse *ps2_mouse;
-    VMMouseState *vm_mouse;
-    PS2Keyboard *ps2_kbd;
+    /* The configuration's devices, and what realizing them produced. */
+    SystemBus *bus = nullptr;
+    I440FXState *i440fx_state = nullptr;
+    InputEventTarget *keyboard = nullptr;
+    InputEventTarget *mouse = nullptr;
+    /* The device answering the VMware backdoor port, and where it is. */
+    VMPortTarget *vmport = nullptr;
+    uint64_t fb_base = 0;
 
 #ifdef USE_KVM
     bool kvm_enabled;
@@ -1192,9 +1186,9 @@ uint32_t PCMachine::VmPortRead(uint32_t addr, int size_log2)
         regs[REG_EDI] = r.rdi;
 
         if (regs[REG_EAX] == VMPORT_MAGIC) {
-            
-            vmmouse_handler(s->vm_mouse, regs);
-            
+
+            s->vmport->VMPortCommand(regs);
+
             /* Note: in 64 bits the high parts are reset to zero
                in all cases. */
             r.rax = regs[REG_EAX];
@@ -1216,7 +1210,7 @@ uint32_t PCMachine::VmPortRead(uint32_t addr, int size_log2)
         regs[REG_EDI] = x86_cpu_get_reg(s->cpu_state, 7);
 
         if (regs[REG_EAX] == VMPORT_MAGIC) {
-            vmmouse_handler(s->vm_mouse, regs);
+            s->vmport->VMPortCommand(regs);
 
             x86_cpu_set_reg(s->cpu_state, 0, regs[REG_EAX]);
             x86_cpu_set_reg(s->cpu_state, 3, regs[REG_EBX]);
@@ -1262,7 +1256,17 @@ int64_t PCMachine::Ticks()
         ((uint64_t)ts.tv_nsec * PIT_FREQ / 1000000000);
 }
 
+/* The two PICs give sixteen lines, and the port space is what a 16 bit port
+   number can name. */
+#define PC_IRQ_COUNT 16
+#define PC_IO_SPACE_SIZE 0x10000
+
+/* Where a device that wants host address space rather than ports is placed.
+   A PC has almost nothing of the kind -- the framebuffer of a machine booting
+   a kernel without firmware is the one thing -- so the window is the hole
+   below the BIOS and nothing else is expected to compete for it. */
 #define FRAMEBUFFER_BASE_ADDR 0xf0400000
+#define PC_DEVICE_WINDOW_SIZE 0x08000000 /* 128 MB */
 
 static uint8_t *get_ram_ptr(PCMachine *s, uint64_t paddr)
 {
@@ -1736,15 +1740,41 @@ void PCMachine::FlushTlbWriteRange(uint8_t *ram_addr, size_t ram_size)
     x86_cpu_flush_tlb_write_range_ram(cpu_state, ram_addr, ram_size);
 }
 
+/* The addresses and lines the chipset above holds. They are reserved so that
+   a device the configuration declares cannot be placed on top of one of
+   them. */
+static bool pc_claim_fixed_ranges(PCMachine *s)
+{
+    RangeAllocator &io = s->bus->IoAlloc();
+    RangeAllocator &irq = s->bus->IrqAlloc();
+
+    return io.Claim(0x20, 2, "pic") && io.Claim(0xa0, 2, "pic") &&
+        io.Claim(0x4d0, 2, "elcr") &&
+        io.Claim(0x40, 4, "pit") && io.Claim(0x61, 1, "pit") &&
+        io.Claim(0x70, 2, "cmos") &&
+        io.Claim(0x80, 2, "port80") && io.Claim(0x92, 2, "port92") &&
+#ifdef DEBUG_BIOS
+        io.Claim(0x402, 2, "bios debug") &&
+#endif
+        irq.Claim(0, 1, "pit") && irq.Claim(2, 1, "cascade") &&
+        irq.Claim(8, 1, "rtc") && irq.Claim(13, 1, "fpu");
+}
+
+
 static VirtMachine *pc_machine_init(const VirtMachineParams *p)
 {
     PCMachine *s;
-    int i, piix3_devfn;
-    PCIBus *pci_bus;
-    VIRTIOBusDef vbus_s, *vbus = &vbus_s;
-    
+    DeviceContext ctx;
+
     if (strcmp(p->machine_name, "pc") != 0) {
         vm_error("unsupported machine: %s\n", p->machine_name);
+        return NULL;
+    }
+    /* The nesting in the file is the nesting of the buses, so the root one
+       has to be the kind this machine provides. */
+    if (p->root_bus_type != NULL && strcmp(p->root_bus_type, "pc") != 0) {
+        vm_error("pc: the root bus must be a 'pc' bus, not '%s'\n",
+                 p->root_bus_type);
         return NULL;
     }
 
@@ -1832,94 +1862,53 @@ static VirtMachine *pc_machine_init(const VirtMachineParams *p)
         s->cmos_state->cmos_data[0x14] = 0x06; /* mouse + FPU present */
     }
     
-    s->i440fx_state = i440fx_init(&pci_bus, &piix3_devfn, s->mem_map,
-                                  s->port_map, s->pic_irq);
-    
     s->console = p->console;
-    /* serial console */
-    if (0) {
-    s->serial_state = new SerialState(s->port_map, 0x3f8, &s->pic_irq[4], s);
-    }
-    
-    memset(vbus, 0, sizeof(*vbus));
-    vbus->pci_bus = pci_bus;
 
-    if (p->console) {
-        /* virtio console */
-        s->console_dev = virtio_console_init(vbus, p->console);
+    /* The devices the configuration declares. Everything above this point is
+       what a PC has before any of them exists: RAM, the interrupt
+       controllers, the timer and the clock. */
+    s->bus = new SystemBus(s->mem_map, s->port_map, s->pic_irq,
+                           PC_IRQ_COUNT);
+    s->bus->IoAlloc().SetWindow(0, PC_IO_SPACE_SIZE);
+    s->bus->MmioAlloc().SetWindow(FRAMEBUFFER_BASE_ADDR,
+                                  PC_DEVICE_WINDOW_SIZE);
+    if (!pc_claim_fixed_ranges(s)) {
+        return NULL;
     }
-    
-    /* block devices */
-    for(i = 0; i < p->drive_count;) {
-        const VMDriveEntry *de = &p->tab_drive[i];
 
-        if (!de->device || !strcmp(de->device, "virtio")) {
-            virtio_block_init(vbus, p->tab_drive[i].node->block_dev);
-            i++;
-        } else {
-            /* The southbridge's IDE function, built the first time a drive
-               asks for it. Every "ide" drive then fills the next free place
-               on its two channels, so a configuration naming four of them
-               gets a master and a slave on each. */
-            if (s->ide_state == NULL) {
-                s->ide_state = ata_pci_init_legacy(pci_bus, piix3_devfn + 1,
-                                                   &s->pic_irq[14],
-                                                   &s->pic_irq[15]);
-                if (s->ide_state == NULL)
-                    exit(1);
-            }
-            if (!s->ide_state->AddDisk(de->node->block_dev, false))
-                exit(1);
-            i++;
+    ctx.params = p;
+    ctx.console = p->console;
+    ctx.serial_output = s;
+
+    if (!device_build_tree(s->bus, p->root_devices, &ctx) ||
+        !s->bus->AllocateAll() || !s->bus->RealizeAll()) {
+        return NULL;
+    }
+
+    s->console_dev = ctx.console_dev;
+    s->keyboard = ctx.keyboard;
+    s->mouse = ctx.mouse;
+    s->fb_dev = ctx.fb_dev;
+    s->fb_base = ctx.fb_base;
+    s->serial_console = ctx.serial_console;
+    s->net = ctx.net;
+
+    /* The VMware backdoor is read through the processor's registers, so the
+       machine owns the port and the device only interprets the call. */
+    s->vmport = ctx.vmport;
+    if (s->vmport != NULL) {
+        s->port_map->RegisterDevice(ctx.vmport_base, 1, &s->fVmPortIo,
+                                    DEVIO_SIZE32);
+    }
+
+    /* With no firmware to program the PIRQ registers, copy_kernel() routes
+       the INTx lines itself, which needs the bridge the tree built. */
+    for (int i = 0; i < s->bus->DeviceCount(); i++) {
+        I440FXState *fx = i440fx_node_state(s->bus->DeviceAt(i));
+        if (fx != NULL) {
+            s->i440fx_state = fx;
+            break;
         }
-    }
-    
-    /* virtio filesystem */
-    for(i = 0; i < p->fs_count; i++) {
-        virtio_9p_init(vbus, p->tab_fs[i].node->fs_dev,
-                       p->tab_fs[i].tag);
-    }
-
-    if (p->display_device) {
-        if (!strcmp(p->display_device, "vga")) {
-            int bios_size;
-            uint8_t *bios_buf;
-            bios_size = p->files[VM_FILE_VGA_BIOS].len;
-            bios_buf = p->files[VM_FILE_VGA_BIOS].buf;
-            s->fb_dev = pci_vga_init(pci_bus, p->width, p->height,
-                                     bios_buf, bios_size);
-        } else if (!strcmp(p->display_device, "simplefb")) {
-            s->fb_dev = simplefb_init(s->mem_map, FRAMEBUFFER_BASE_ADDR,
-                                      p->width, p->height);
-        } else {
-            vm_error("unsupported display device: %s\n", p->display_device);
-            exit(1);
-        }
-    }
-
-    if (p->input_device) {
-        if (!strcmp(p->input_device, "virtio")) {
-            s->keyboard_dev = virtio_input_init(vbus, VIRTIO_INPUT_TYPE_KEYBOARD);
-            
-            s->mouse_dev = virtio_input_init(vbus, VIRTIO_INPUT_TYPE_TABLET);
-        } else if (!strcmp(p->input_device, "ps2")) {
-            s->kbd_state = i8042_init(&s->ps2_kbd, &s->ps2_mouse,
-                                      s->port_map,
-                                      &s->pic_irq[1], &s->pic_irq[12], 0x60);
-            /* vmmouse */
-            s->port_map->RegisterDevice(0x5658, 1, &s->fVmPortIo,
-                                        DEVIO_SIZE32);
-            s->vm_mouse = vmmouse_init(s->ps2_mouse);
-        } else {
-            vm_error("unsupported input device: %s\n", p->input_device);
-            exit(1);
-        }
-    }
-    
-    /* virtio net device */
-    for(i = 0; i < p->eth_count; i++) {
-        virtio_net_init(vbus, p->tab_eth[i].node->net);
-        s->net = p->tab_eth[i].node->net;
     }
 
     if (p->files[VM_FILE_KERNEL].buf) {
@@ -1938,40 +1927,27 @@ PCMachine::~PCMachine()
     if (s->cpu_state) {
         x86_cpu_end(s->cpu_state);
     }
-    delete s->serial_state;
+    delete s->bus;
     delete s->mem_map;
     delete s->port_map;
 }
 
 void PCMachine::SendKeyEvent(bool is_down, uint16_t key_code)
 {
-    PCMachine *s = this;
-    if (s->keyboard_dev) {
-        virtio_input_send_key_event(s->keyboard_dev, is_down, key_code);
-    } else if (s->ps2_kbd) {
-        s->ps2_kbd->PutKeycode(is_down, key_code);
+    if (keyboard != nullptr) {
+        keyboard->SendKeyEvent(is_down, key_code);
     }
 }
 
 bool PCMachine::MouseIsAbsolute()
 {
-    PCMachine *s = this;
-    if (s->mouse_dev) {
-        return true;
-    } else if (s->vm_mouse) {
-        return vmmouse_is_absolute(s->vm_mouse);
-    } else {
-        return false;
-    }
+    return mouse != nullptr && mouse->MouseIsAbsolute();
 }
 
 void PCMachine::SendMouseEvent(int dx, int dy, int dz, unsigned int buttons)
 {
-    PCMachine *s = this;
-    if (s->mouse_dev) {
-        virtio_input_send_mouse_event(s->mouse_dev, dx, dy, dz, buttons);
-    } else if (s->vm_mouse) {
-        vmmouse_send_mouse_event(s->vm_mouse, dx, dy, dz, buttons);
+    if (mouse != nullptr) {
+        mouse->SendMouseEvent(dx, dy, dz, buttons);
     }
 }
 
@@ -2192,7 +2168,7 @@ static void copy_kernel(PCMachine *s, const uint8_t *buf, int buf_len,
         params->lfb_height = fb_dev->height;
         params->lfb_linelength = fb_dev->stride;
         params->lfb_size = fb_dev->fb_size;
-        params->lfb_base = FRAMEBUFFER_BASE_ADDR;
+        params->lfb_base = s->fb_base;
     }
     
     params->gdt_table[2] = 0x00cf9b000000ffffLL; /* CS */

@@ -117,21 +117,17 @@ bool ATAPCIController::RegisterPCI(PCIBus *pci_bus, int devfn)
     if (fLegacy) {
         /* Compatibility mode: the channels are where they have always been,
            and the base address registers for them read as zero. */
-        static const uint32_t cmd_base[ATA_PCI_CHANNELS] = {
-            ATA_LEGACY_CMD0, ATA_LEGACY_CMD1,
-        };
-        static const uint32_t ctrl_base[ATA_PCI_CHANNELS] = {
-            ATA_LEGACY_CTRL0, ATA_LEGACY_CTRL1,
-        };
         for (int i = 0; i < ATA_PCI_CHANNELS; i++) {
-            fPortMap->RegisterDevice(cmd_base[i], ATA_PCI_CMD_SIZE,
+            fPortMap->RegisterDevice(fLegacyCmdRes[i]->base,
+                                     fLegacyCmdRes[i]->size,
                                      &fChannels[i].cmd_io,
                                      DEVIO_SIZE8 | DEVIO_SIZE16 |
                                      DEVIO_SIZE32);
             /* Only the one register of the control block is decoded, which
                is all a compatibility mode controller answers. */
-            fPortMap->RegisterDevice(ctrl_base[i], 1, &fChannels[i].ctrl_io,
-                                     DEVIO_SIZE8);
+            fPortMap->RegisterDevice(fLegacyCtrlRes[i]->base,
+                                     fLegacyCtrlRes[i]->size,
+                                     &fChannels[i].ctrl_io, DEVIO_SIZE8);
         }
     } else {
         for (int i = 0; i < ATA_PCI_CHANNELS; i++) {
@@ -187,6 +183,36 @@ bool ATAPCIController::Prepare()
         vm_error("%s: must be attached to a PCI bus\n", Name());
         return false;
     }
+
+    /* A machine that addresses its devices by port number is a PC, whose
+       firmware and guests expect this function on the addresses the AT put
+       it on. Anywhere else there is nothing legacy to be compatible with, so
+       the base address registers place everything. */
+    SystemBus *sys = dynamic_cast<SystemBus *>(ParentBus()->Root());
+    fLegacy = sys != nullptr && sys->IsPortBased();
+
+    if (fLegacy) {
+        static const uint32_t cmd_base[ATA_PCI_CHANNELS] = {
+            ATA_LEGACY_CMD0, ATA_LEGACY_CMD1,
+        };
+        static const uint32_t ctrl_base[ATA_PCI_CHANNELS] = {
+            ATA_LEGACY_CTRL0, ATA_LEGACY_CTRL1,
+        };
+        static const uint32_t irq_line[ATA_PCI_CHANNELS] = {
+            ATA_LEGACY_IRQ0, ATA_LEGACY_IRQ1,
+        };
+        for (int i = 0; i < ATA_PCI_CHANNELS; i++) {
+            fLegacyCmdRes[i] = AddFixedResource(RES_IO, cmd_base[i],
+                                                ATA_PCI_CMD_SIZE);
+            fLegacyCtrlRes[i] = AddFixedResource(RES_IO, ctrl_base[i], 1);
+            fLegacyIrqRes[i] = AddFixedResource(RES_IRQ, irq_line[i], 1);
+            if (fLegacyCmdRes[i] == nullptr || fLegacyCtrlRes[i] == nullptr ||
+                fLegacyIrqRes[i] == nullptr) {
+                return false;
+            }
+        }
+    }
+
     fChildBus = new ATABus(this, this);
     return true;
 }
@@ -196,33 +222,23 @@ bool ATAPCIController::Realize()
 {
     PCIBus *pci_bus = ParentBus()->AsPCIBus();
 
-    fLegacy = false;
     if (!RegisterPCI(pci_bus, -1)) {
         return false;
     }
-    fPciIrq = pci_device_get_irq(fPciDev, 0);
+    if (fLegacy) {
+        SystemBus *sys = static_cast<SystemBus *>(ParentBus()->Root());
+        for (int i = 0; i < ATA_PCI_CHANNELS; i++) {
+            fLegacyIrq[i] = sys->IrqSignalFor(fLegacyIrqRes[i]->base);
+            if (fLegacyIrq[i] == nullptr) {
+                vm_error("%s: bad interrupt line %d\n", Name(),
+                         (int)fLegacyIrqRes[i]->base);
+                return false;
+            }
+        }
+    } else {
+        fPciIrq = pci_device_get_irq(fPciDev, 0);
+    }
     return true;
-}
-
-
-//#pragma mark - the fixed topology path
-
-bool ATAPCIController::InitLegacy(PCIBus *pci_bus, int devfn, IRQSignal *irq0,
-                                  IRQSignal *irq1)
-{
-    fChildBus = new ATABus(nullptr, this);
-
-    fLegacy = true;
-    fLegacyIrq[0] = irq0;
-    fLegacyIrq[1] = irq1;
-    return RegisterPCI(pci_bus, devfn);
-}
-
-
-bool ATAPCIController::AddDisk(BlockDevice *bs, bool read_only)
-{
-    Device *node = ata_disk_node_create(bs, read_only);
-    return fChildBus->AddDevice(node) && node->Realize();
 }
 
 
@@ -493,19 +509,6 @@ void ATAPCIController::WindowWrite(int channel, ATAPCIWindow::KindEnum kind,
 
 
 //#pragma mark - factory
-
-ATAPCIController *ata_pci_init_legacy(PCIBus *pci_bus, int devfn,
-                                      IRQSignal *irq0, IRQSignal *irq1)
-{
-    ATAPCIController *c = new ATAPCIController("ide");
-
-    if (!c->InitLegacy(pci_bus, devfn, irq0, irq1)) {
-        delete c;
-        return nullptr;
-    }
-    return c;
-}
-
 
 Device *ata_pci_node_create(const char *name)
 {

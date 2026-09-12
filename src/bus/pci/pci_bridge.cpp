@@ -33,13 +33,33 @@
 bool PCIBusWrapper::AssignResources(Device *dev)
 {
     /* A PCI device's BARs are placed by the guest, so nothing here consumes
-       host address space. Anything a device does declare is a modelling
-       mistake worth reporting rather than silently dropping. */
+       host address space.
+
+       Ports and interrupt lines are another matter: a function in
+       compatibility mode decodes fixed addresses and drives fixed lines,
+       which the IDE function of a southbridge is the standing example of.
+       Those come out of the machine's spaces like any other fixed mapping,
+       so that two of them collide loudly rather than silently. */
+    SystemBus *sys = dynamic_cast<SystemBus *>(Root());
+
     for (int i = 0; i < dev->ResourceCount(); i++) {
         Resource *res = dev->ResourceAt(i);
-        if (res->type != RES_NONE) {
-            vm_error("pci bus: device '%s' declared a resource, but PCI "
-                     "resources are assigned by the guest\n", dev->Name());
+        if (res->type == RES_NONE) {
+            continue;
+        }
+        if (res->type == RES_MMIO) {
+            vm_error("pci bus: device '%s' declared a memory resource, but a "
+                     "PCI device's memory windows are assigned by the "
+                     "guest\n", dev->Name());
+            return false;
+        }
+        if (sys == nullptr) {
+            vm_error("pci bus: device '%s' declared a resource, but this bus "
+                     "hangs from no system bus to take it from\n",
+                     dev->Name());
+            return false;
+        }
+        if (!sys->AssignOne(res, dev->Name())) {
             return false;
         }
     }

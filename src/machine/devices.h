@@ -44,8 +44,15 @@ struct DeviceContext {
     InputEventTarget *keyboard = nullptr;
     InputEventTarget *mouse = nullptr;
     FBDevice *fb_dev = nullptr;
+    /* Where the framebuffer was placed, for a machine that has to tell its
+       guest in something other than a device tree. */
+    uint64_t fb_base = 0;
     SerialState *serial_console = nullptr;
     EthernetDevice *net = nullptr;
+    /* The VMware backdoor, when a device answers it. The machine installs the
+       port, because reading it means reading the processor's registers. */
+    VMPortTarget *vmport = nullptr;
+    uint64_t vmport_base = 0;
 };
 
 

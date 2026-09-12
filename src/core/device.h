@@ -134,6 +134,12 @@ public:
        anywhere else. */
     virtual MDIOBus *AsMDIOBus() {return nullptr;}
 
+    /* The bus at the top of the tree, which is the machine's SystemBus. A
+       device that needs the machine's port space or interrupt lines while
+       sitting on a bus that has neither -- a PCI function in compatibility
+       mode -- reaches them from here. */
+    Bus *Root();
+
     /* Depth-first passes over the whole subtree. */
     bool AllocateAll();
     bool RealizeAll();
@@ -141,33 +147,52 @@ public:
 };
 
 
-/* The root bus of an FDT machine: owns the host MMIO map, the PCI I/O port
-   space and the interrupt controller's input lines, and hands them all out
-   through resource records. */
+/* The root bus of a machine: owns the host MMIO map, the port space and the
+   interrupt controller's input lines, and hands them all out through resource
+   records.
+
+   Which of the two spaces a plain device's registers land in is the one thing
+   that differs between machines. An FDT machine maps everything into host
+   physical addresses and reaches port space only through a host bridge's
+   aperture; a PC decodes its devices by port number and has had the same
+   fixed addresses since the AT. RegisterSpace() is how a device that exists
+   on both -- a 16550, say -- asks which it is on. */
 class SystemBus final: public Bus {
 private:
     PhysMemoryMap *fMemMap;
-    /* The machine's PCI I/O port space. Created on demand, because a machine
-       with no host bridge never addresses one. */
+    /* The machine's port space. Created on demand, because a machine with no
+       host bridge and no port instructions never addresses one. */
     PhysMemoryMap *fPortMap = nullptr;
+    bool fOwnsPortMap = true;
+    bool fPortBased = false;
     RangeAllocator fMmioAlloc {"MMIO"};
     RangeAllocator fIoAlloc {"IO"};
     RangeAllocator fIrqAlloc {"IRQ"};
     IRQSignal fIrqSignals[SYSTEM_BUS_MAX_IRQ] {};
+    /* fIrqSignals, or the machine's own array when it wired the lines
+       itself. */
+    IRQSignal *fIrqTable = fIrqSignals;
     int fIrqCount;
 
 public:
     SystemBus(PhysMemoryMap *mem_map, IRQTarget *irq_target, int irq_count);
+    /* A machine whose port space and interrupt lines exist before any device
+       does, because its chipset is fixed: a PC. */
+    SystemBus(PhysMemoryMap *mem_map, PhysMemoryMap *port_map,
+              IRQSignal *irqs, int irq_count);
     ~SystemBus() override;
 
     const char *Type() const override {return "system";}
 
     PhysMemoryMap *MemMap() const {return fMemMap;}
-
-    /* A processor with no port instructions never addresses this map itself:
-       the only way in is the memory window a host bridge maps onto its own
-       slice of the port space. */
     PhysMemoryMap *PortMap();
+
+    /* Where a device that names no space of its own puts its registers. */
+    bool IsPortBased() const {return fPortBased;}
+    ResourceTypeEnum RegisterSpace() const
+        {return fPortBased ? RES_IO : RES_MMIO;}
+    PhysMemoryMap *RegisterMap()
+        {return fPortBased ? PortMap() : fMemMap;}
 
     RangeAllocator &MmioAlloc() {return fMmioAlloc;}
     RangeAllocator &IoAlloc() {return fIoAlloc;}
@@ -175,6 +200,10 @@ public:
 
     /* Valid for a line returned by an assigned RES_IRQ resource. */
     IRQSignal *IrqSignalFor(uint64_t line);
+
+    /* Assign one record out of whichever space its type names. Buses further
+       down pass up the records they cannot serve themselves. */
+    bool AssignOne(Resource *res, const char *owner);
 
     bool AssignResources(Device *dev) override;
 };

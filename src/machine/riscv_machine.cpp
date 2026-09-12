@@ -766,6 +766,15 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
         return NULL;
     }
 
+    /* The nesting in the file is the nesting of the buses, so the root one
+       has to be the kind this machine provides. */
+    if (p->root_bus_type != nullptr &&
+        strcmp(p->root_bus_type, "fdt") != 0) {
+        vm_error("%s: the root bus must be an 'fdt' bus, not '%s'\n",
+                 p->machine_name, p->root_bus_type);
+        return NULL;
+    }
+
     ctx.params = p;
     ctx.console = p->console;
     ctx.serial_output = s;

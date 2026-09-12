@@ -34,8 +34,10 @@
    ones every PC has had since the AT. */
 #define ATA_LEGACY_CMD0  0x1f0
 #define ATA_LEGACY_CTRL0 0x3f6
+#define ATA_LEGACY_IRQ0  14
 #define ATA_LEGACY_CMD1  0x170
 #define ATA_LEGACY_CTRL1 0x376
+#define ATA_LEGACY_IRQ1  15
 
 /* Base address register windows. The command block is the eight task file
    registers; the control block is four ports with the device control
@@ -108,14 +110,15 @@ public:
 /* A PCI IDE controller: two ATA channels and the bus master that moves their
    data.
 
-   It attaches two ways. On a PC it is the southbridge's IDE function, in
-   compatibility mode: the channels answer the fixed AT addresses and drive
-   the fixed interrupt lines, and only the bus master block is placed by a
-   base address register. Anywhere else -- a device tree machine reaching PCI
-   through a host bridge with an I/O aperture, for one -- it runs in native
-   mode, where all five windows are base address registers and the interrupt
-   goes out over INTx. Nothing below the registers differs between the
-   two. */
+   It runs in one of two modes, chosen from the machine it lands in. On a
+   machine that addresses its devices by port number -- a PC -- it is the
+   southbridge's IDE function in compatibility mode: the channels answer the
+   fixed AT addresses and drive the fixed interrupt lines, and only the bus
+   master block is placed by a base address register. Anywhere else -- a
+   device tree machine reaching PCI through a host bridge with an I/O
+   aperture, for one -- it runs in native mode, where all five windows are
+   base address registers and the interrupt goes out over INTx. Nothing below
+   the registers differs between the two. */
 class ATAPCIController final: public Device, public ATAChannelTarget,
                               public ATABusTarget, public PCIBarTarget {
 private:
@@ -142,9 +145,12 @@ private:
     PCIDevice *fPciDev = nullptr;
     PhysMemoryMap *fPortMap = nullptr;
 
-    /* Compatibility mode: the fixed lines, and no base address registers
-       for the channels. Null in native mode. */
+    /* Compatibility mode: the fixed ports and lines, and no base address
+       registers for the channels. Unused in native mode. */
     bool fLegacy = false;
+    Resource *fLegacyCmdRes[ATA_PCI_CHANNELS] {};
+    Resource *fLegacyCtrlRes[ATA_PCI_CHANNELS] {};
+    Resource *fLegacyIrqRes[ATA_PCI_CHANNELS] {};
     IRQSignal *fLegacyIrq[ATA_PCI_CHANNELS] {};
     IRQSignal *fPciIrq = nullptr;
 
@@ -161,16 +167,9 @@ public:
     ATAPCIController(const char *name);
     ~ATAPCIController() override;
 
-    /* Device, for a controller declared in a configuration. */
     bool Prepare() override;
     bool Realize() override;
     Bus *ChildBus() override {return fChildBus;}
-
-    /* The other way in: a machine with a fixed topology builds the
-       controller itself, in compatibility mode, and hands it the drives. */
-    bool InitLegacy(PCIBus *pci_bus, int devfn, IRQSignal *irq0,
-                    IRQSignal *irq1);
-    bool AddDisk(BlockDevice *bs, bool read_only);
 
     /* ATAChannelTarget */
     void ATASetIrq(int channel, bool level) override;
@@ -190,13 +189,7 @@ public:
 };
 
 
-/* Build the controller a PC has: the southbridge IDE function, in
-   compatibility mode, on the fixed lines. */
-ATAPCIController *ata_pci_init_legacy(PCIBus *pci_bus, int devfn,
-                                      IRQSignal *irq0, IRQSignal *irq1);
-
-/* The "pci-ide" configuration node, for a machine that declares its PCI
-   devices. The drives nested inside fill the channels in the order they
-   appear: the first two are the master and slave of the first channel, the
-   next two of the second. */
+/* The "pci-ide" configuration node. The drives nested inside fill the
+   channels in the order they appear: the first two are the master and slave
+   of the first channel, the next two of the second. */
 Device *ata_pci_node_create(const char *name);

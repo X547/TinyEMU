@@ -26,7 +26,9 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+#include "devices.h"
 #include "machine.h"
+#include "vmmouse.h"
 
 /* debug PC keyboard */
 //#define DEBUG_KBD
@@ -437,4 +439,123 @@ I8042Controller *i8042_init(PS2Keyboard **pkbd, PS2Mouse **pmouse,
     *pkbd = kbd;
     *pmouse = mouse;
     return s;
+}
+
+
+//#pragma mark - the configuration node
+
+/* Routes the window's input events to whichever of the two protocols the
+   guest is driving: key events always reach the keyboard, and pointer events
+   go through the backdoor, which passes them on to the PS/2 pointer for as
+   long as no driver has turned the absolute protocol on. */
+class I8042Input final: public InputEventTarget, public VMPortTarget {
+public:
+    PS2Keyboard *kbd = nullptr;
+    PS2Mouse *mouse = nullptr;
+    VMMouseState *vmmouse = nullptr;
+
+    void SendKeyEvent(bool is_down, uint16_t key_code) override
+    {
+        kbd->PutKeycode(is_down, key_code);
+    }
+
+    void SendMouseEvent(int dx, int dy, int dz,
+                        unsigned int buttons) override
+    {
+        if (vmmouse != nullptr) {
+            vmmouse_send_mouse_event(vmmouse, dx, dy, dz, buttons);
+        } else {
+            mouse->MouseEvent(dx, dy, dz, buttons);
+        }
+    }
+
+    bool MouseIsAbsolute() override
+    {
+        return vmmouse != nullptr && vmmouse_is_absolute(vmmouse);
+    }
+
+    void VMPortCommand(uint32_t *regs) override
+    {
+        vmmouse_handler(vmmouse, regs);
+    }
+};
+
+
+class I8042Device final: public Device {
+private:
+    DeviceContext *fCtx;
+    bool fVmmouse;
+    I8042Controller *fController = nullptr;
+    I8042Input fInput;
+    Resource *fDataRes = nullptr;
+    Resource *fCmdRes = nullptr;
+    Resource *fVmportRes = nullptr;
+    Resource *fKbdIrqRes = nullptr;
+    Resource *fAuxIrqRes = nullptr;
+
+public:
+    I8042Device(DeviceContext *ctx, bool vmmouse):
+        Device("i8042"), fCtx(ctx), fVmmouse(vmmouse) {}
+
+    ~I8042Device() override
+    {
+        delete fController;
+    }
+
+    bool Prepare() override
+    {
+        SystemBus *sys = dynamic_cast<SystemBus *>(ParentBus());
+        if (sys == nullptr || !sys->IsPortBased()) {
+            vm_error("%s: must be attached to a PC system bus\n", Name());
+            return false;
+        }
+
+        fDataRes = AddFixedResource(RES_IO, I8042_IO_BASE, 1);
+        fCmdRes = AddFixedResource(RES_IO, I8042_IO_BASE + 4, 1);
+        fKbdIrqRes = AddFixedResource(RES_IRQ, I8042_IRQ_KBD, 1);
+        fAuxIrqRes = AddFixedResource(RES_IRQ, I8042_IRQ_AUX, 1);
+        if (fDataRes == nullptr || fCmdRes == nullptr ||
+            fKbdIrqRes == nullptr || fAuxIrqRes == nullptr) {
+            return false;
+        }
+        if (fVmmouse) {
+            fVmportRes = AddFixedResource(RES_IO, I8042_VMPORT, 1);
+            if (fVmportRes == nullptr) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool Realize() override
+    {
+        SystemBus *sys = static_cast<SystemBus *>(ParentBus());
+        PS2Keyboard *kbd;
+        PS2Mouse *mouse;
+
+        fController = i8042_init(&kbd, &mouse, sys->PortMap(),
+                                 sys->IrqSignalFor(fKbdIrqRes->base),
+                                 sys->IrqSignalFor(fAuxIrqRes->base),
+                                 fDataRes->base);
+        if (fController == nullptr) {
+            return false;
+        }
+
+        fInput.kbd = kbd;
+        fInput.mouse = mouse;
+        if (fVmmouse) {
+            fInput.vmmouse = vmmouse_init(mouse);
+            fCtx->vmport = &fInput;
+            fCtx->vmport_base = fVmportRes->base;
+        }
+        fCtx->keyboard = &fInput;
+        fCtx->mouse = &fInput;
+        return true;
+    }
+};
+
+
+Device *i8042_node_create(DeviceContext *ctx, bool vmmouse)
+{
+    return new I8042Device(ctx, vmmouse);
 }

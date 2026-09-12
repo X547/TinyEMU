@@ -122,21 +122,37 @@ Press C-a x to exit the emulator, C-a h to get some help.
 
 The configuration file is JSON with relaxed syntax (unquoted keys, trailing
 commas and /* */ comments are accepted). Format version 2 declares devices
-inside the bus they attach to; see sample-riscv64.cfg for a commented
-example.
+inside the bus they attach to; see sample-riscv64.cfg and sample-pc.cfg for
+commented examples.
 
 The root bus of an FDT machine is declared as:
 
 bus: { type: "fdt", devices: [ ... ] }
+
+and that of the PC machine as:
+
+bus: { type: "pc", devices: [ ... ] }
 
 Each entry of "devices" is an object with a "type" and whatever properties
 that type needs. A device that provides a bus of its own carries a nested
 "bus" object, so buses can be nested arbitrarily, for example
 FDT bus -> pci-host-ecam-generic -> PCI bus -> virtio device.
 
+The difference between the two root buses is where a device's registers are
+decoded. An FDT machine maps them into physical address space and allocates
+the addresses and interrupt lines, then describes what it assigned in the
+device tree. A PC decodes them by port number, and its devices sit at the
+addresses a PC has had since the AT, so nothing places them; the machine only
+checks that two devices have not been declared on top of each other. The PC
+has no device tree, so nothing it carries is described to the guest: its
+firmware and its guests know where to look.
+
 Device types:
 
-  ns16550a               serial port; also supplies /chosen/stdout-path
+  ns16550a               serial port; on an FDT machine it also supplies
+                         /chosen/stdout-path, and on a PC it is COM1 at 0x3f8
+                         on line 4 unless "reg" (the port) and "irq" say
+                         otherwise
   simplefb               "width", "height"
   pci-host-ecam-generic  ECAM PCIe host bridge; "bus_count" (ECAM window
                          size in MB, default 16), "mmio_size" (aperture size
@@ -153,6 +169,24 @@ Device types:
   pci-bridge             PCI Express switch; the devices nested in it sit
                          behind it rather than on the bus above. Nest one
                          inside another for a deeper hierarchy
+  pci-host-i440fx        the host bridge of the PC machine: the CF8/CFC
+                         configuration ports, the i440FX function and the
+                         PIIX3 ISA bridge that routes the four INTx lines
+                         onto the PIC, and a nested PCI bus
+  vga                    the standard VGA on a PCI bus, which is also what
+                         decodes the legacy VGA and VBE ports; "width",
+                         "height", and the machine's vga_bios as its ROM
+  ps2                    the PC's i8042 with a keyboard and a pointer on its
+                         two ports; "vmmouse" (default 1) adds the VMware
+                         backdoor port the absolute pointer protocol is read
+                         through
+  pci-ide                PCI IDE controller with bus master DMA, and a nested
+                         ATA bus. On the PC it runs in compatibility mode --
+                         0x1f0 and 0x170 on lines 14 and 15, with only the bus
+                         master block placed by a base address register --
+                         and elsewhere in native mode, where every window is a
+                         base address register and the interrupt is INTx
+  ata-disk               ATA disk; "file", and "read_only"
   virtio-block           "file"
   virtio-9p              "file", "tag"
   virtio-net             "driver" ("user" or "tap"), "ifname" for tap
@@ -198,6 +232,19 @@ Device types:
 
 The virtio devices work on either transport: attached to the FDT bus they
 appear as virtio-mmio, and attached to a PCI bus they appear as PCI devices.
+On the PC that means inside the host bridge, because a PC has no way to reach
+a device that is neither on PCI nor at a fixed port:
+
+    pc bus -> pci-host-i440fx -> PCI bus -> virtio-block
+
+The disk of a PC nests one tier further, because the controller and the drive
+are separate parts:
+
+    pc bus -> pci-host-i440fx -> PCI bus -> pci-ide -> ATA bus -> ata-disk
+
+Only "ps2" and "ns16550a" go straight on the pc bus; everything else a PC
+carries is a PCI device and belongs inside the bridge. sample-pc.cfg is a
+commented example of a whole PC, as sample-riscv64.cfg is of an FDT machine.
 
 The USB stack nests the same way everything else does, and the whole path from
 the PCI bus down to the image file is spelled out in the file:
@@ -505,6 +552,14 @@ the RISCV emulator and is able to run many operating systems.
 
 The x86 emulator accepts a Linux kernel image (bzImage). No BIOS image
 is necessary.
+
+The PC is built from the configuration's device tree, as every machine is.
+What it has before any device is declared is the part a PC cannot be without:
+RAM, the two interrupt controllers, the timer and the clock. Everything else
+-- the host bridge, the display, the keyboard controller, the disks -- is
+declared, and where a device may sit is decided by the hierarchy: a PCI device
+only works inside a "pci-host-i440fx", and only "ps2" and "ns16550a" go
+straight on the pc bus.
 
 The x86 emulator comes from my JS/Linux project (2011) which was one
 of the first emulator running Linux fully implemented in

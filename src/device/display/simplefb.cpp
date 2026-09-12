@@ -157,6 +157,7 @@ public:
         SystemBus *sys = static_cast<SystemBus *>(ParentBus());
         fFb = simplefb_init(sys->MemMap(), fMmio->base, fWidth, fHeight);
         fCtx->fb_dev = fFb;
+        fCtx->fb_base = fMmio->base;
         return fFb != nullptr;
     }
 

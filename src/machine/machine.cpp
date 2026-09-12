@@ -327,61 +327,21 @@ static int parse_bus(JSONValue bus_obj, VMDeviceNode *owner,
     return 0;
 }
 
-/* Build the flat tab_* views the PC machine consumes. Only the description is
-   copied here; the back ends stay on the nodes so that opening a drive fills
-   in exactly one place. */
+/* The display window is opened before the machine is built, so its size has
+   to be known ahead of the device that provides it. Nothing else is taken out
+   of the tree here: every device is instantiated from the tree itself. */
 static void flatten_visit(VMDeviceNode *node, void *opaque)
 {
     VirtMachineParams *p = static_cast<VirtMachineParams *>(opaque);
-    const char *str;
 
-    if (!strcmp(node->type, "virtio-block") || !strcmp(node->type, "ide")) {
-        if (p->drive_count >= MAX_DRIVE_DEVICE) {
-            vm_error("Too many drives\n");
-            return;
-        }
-        VMDriveEntry *e = &p->tab_drive[p->drive_count++];
-        e->device = !strcmp(node->type, "ide") ? "ide" : "virtio";
-        e->filename = node->filename;
-        e->node = node;
-    } else if (!strcmp(node->type, "virtio-9p")) {
-        if (p->fs_count >= MAX_FS_DEVICE) {
-            vm_error("Too many filesystems\n");
-            return;
-        }
-        VMFSEntry *e = &p->tab_fs[p->fs_count++];
-        if (vm_get_str_opt(node->props, "tag", &str) < 0)
-            str = NULL;
-        e->tag = str;
-        e->filename = node->filename;
-        e->node = node;
-    } else if (!strcmp(node->type, "virtio-net") ||
-               !strcmp(node->type, "dwmac")) {
-        if (p->eth_count >= MAX_ETH_DEVICE) {
-            vm_error("Too many ethernet interfaces\n");
-            return;
-        }
-        VMEthEntry *e = &p->tab_eth[p->eth_count++];
-        if (vm_get_str_opt(node->props, "driver", &str) < 0)
-            str = NULL;
-        e->driver = str;
-        if (vm_get_str_opt(node->props, "ifname", &str) < 0)
-            str = NULL;
-        e->ifname = str;
-        e->node = node;
-    } else if (!strcmp(node->type, "simplefb") ||
-               !strcmp(node->type, "vga")) {
-        free(p->display_device);
-        p->display_device = strdup(node->type);
-        vm_get_int_opt(node->props, "width", &p->width, 800);
-        vm_get_int_opt(node->props, "height", &p->height, 600);
-    } else if (!strcmp(node->type, "virtio-input")) {
-        if (p->input_device == NULL)
-            p->input_device = strdup("virtio");
-    } else if (!strcmp(node->type, "ps2")) {
-        free(p->input_device);
-        p->input_device = strdup("ps2");
-    }
+    if (strcmp(node->type, "simplefb") != 0 &&
+        strcmp(node->type, "vga") != 0)
+        return;
+
+    free(p->display_device);
+    p->display_device = strdup(node->type);
+    vm_get_int_opt(node->props, "width", &p->width, 800);
+    vm_get_int_opt(node->props, "height", &p->height, 600);
 }
 
 static int flatten_device_tree(VirtMachineParams *p)
@@ -467,6 +427,9 @@ static int virt_machine_parse_config(VirtMachineParams *p,
         vm_error("expecting a 'bus' property describing the root bus\n");
         goto tag_fail;
     }
+    if (vm_get_str(obj, "type", &str) < 0)
+        goto tag_fail;
+    p->root_bus_type = strdup(str);
     if (parse_bus(obj, NULL, &p->root_devices) < 0)
         goto tag_fail;
     if (flatten_device_tree(p) < 0)
@@ -751,13 +714,12 @@ void virt_machine_free_config(VirtMachineParams *p)
         free(p->files[i].filename);
         free(p->files[i].buf);
     }
-    /* The tab_* entries only borrow their strings from the device tree and
-       from the parsed configuration, so both are released here instead. */
     free_device_list(p->root_devices);
     p->root_devices = NULL;
+    free(p->root_bus_type);
+    p->root_bus_type = NULL;
     json_free(p->cfg_json);
     p->cfg_json = json_undefined_new();
-    free(p->input_device);
     free(p->display_device);
     free(p->cfg_filename);
 }
