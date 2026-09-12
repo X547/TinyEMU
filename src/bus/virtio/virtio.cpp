@@ -241,31 +241,31 @@ void virtio_init(VIRTIODevice *s, VIRTIOBusDef *bus,
         
         switch(device_id) {
         case 1:
-            pci_device_id = 0x1000; /* net */
-            class_id = 0x0200;
+            class_id = 0x0200; /* net */
             break;
         case 2:
-            pci_device_id = 0x1001; /* block */
-            class_id = 0x0100; /* XXX: check it */
+            class_id = 0x0100; /* block. XXX: check it */
             break;
         case 3:
-            pci_device_id = 0x1003; /* console */
-            class_id = 0x0780;
+            class_id = 0x0780; /* console */
             break;
         case 9:
-            pci_device_id = 0x1040 + device_id; /* use new device ID */
             class_id = 0x2;
             break;
         case 18:
-            pci_device_id = 0x1040 + device_id; /* use new device ID */
             class_id = 0x0980;
             break;
         default:
             abort();
         }
+        /* Only the virtio 1.0 layout is implemented, so the identifier and
+           revision have to be non-transitional ones: a guest picks the layout
+           from them, and a transitional device promises a port window that is
+           not here. */
+        pci_device_id = 0x1040 + device_id;
         snprintf(name, sizeof(name), "virtio_%04x", pci_device_id);
         s->pci_dev = pci_register_device(bus->pci_bus, name, -1,
-                                         0x1af4, pci_device_id, 0x00,
+                                         0x1af4, pci_device_id, 0x01,
                                          class_id);
         pci_device_set_config16(s->pci_dev, 0x2c, 0x1af4);
         pci_device_set_config16(s->pci_dev, 0x2e, device_id);
