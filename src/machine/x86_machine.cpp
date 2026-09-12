@@ -385,14 +385,17 @@ static void pic_set_irq1(PICState *s, int irq, int level)
     }
 }
     
+/* The rotated offset of the highest priority input set in 'mask', or 8 if
+   none is. Offset 0 is the highest priority one, as on the part: input 0 wins
+   over input 7, and the rotation registers move which input offset 0 names. */
 static int pic_get_priority(PICState *s, int mask)
 {
     int priority;
     if (mask == 0)
-        return -1;
-    priority = 7;
+        return 8;
+    priority = 0;
     while ((mask & (1 << ((priority + s->priority_add) & 7))) == 0)
-        priority--;
+        priority++;
     return priority;
 }
 
@@ -403,13 +406,13 @@ static int pic_get_irq(PICState *s)
 
     mask = s->irr & ~s->imr;
     priority = pic_get_priority(s, mask);
-    if (priority < 0)
+    if (priority == 8)
         return -1;
     /* compute current priority */
     cur_priority = pic_get_priority(s, s->isr);
-    if (priority > cur_priority) {
+    if (priority < cur_priority) {
         /* higher priority found: an irq should be generated */
-        return priority;
+        return (priority + s->priority_add) & 7;
     } else {
         return -1;
     }
@@ -462,7 +465,7 @@ void PICState::Write(uint32_t offset, uint32_t val, int size_log2)
             case 0x20: /* end of interrupt */
             case 0xa0:
                 priority = pic_get_priority(s, s->isr);
-                if (priority >= 0) {
+                if (priority < 8) {
                     s->isr &= ~(1 << ((priority + s->priority_add) & 7));
                 }
                 if (val == 0xa0)
