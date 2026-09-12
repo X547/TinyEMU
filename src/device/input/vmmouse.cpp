@@ -29,7 +29,7 @@
 
 #include "cutils.h"
 #include "iomem.h"
-#include "ps2.h"
+#include "vmmouse.h"
 
 #define VMPORT_MAGIC   0x564D5868
 
@@ -43,7 +43,7 @@
 #define FIFO_SIZE (4 * 16)
 
 struct VMMouseState {
-    PS2MouseState *ps2_mouse;
+    PS2Mouse *ps2_mouse;
     int fifo_count, fifo_rindex, fifo_windex;
     bool enabled;
     bool absolute;
@@ -82,7 +82,7 @@ void vmmouse_send_mouse_event(VMMouseState *s, int x, int y, int dz,
     int state;
 
     if (!s->enabled) {
-        ps2_mouse_event(s->ps2_mouse, x, y, dz, buttons);
+        s->ps2_mouse->MouseEvent(x, y, dz, buttons);
         return;
     }
 
@@ -108,7 +108,7 @@ void vmmouse_send_mouse_event(VMMouseState *s, int x, int y, int dz,
     put_queue(s, -dz);
 
     /* send PS/2 mouse event */
-    ps2_mouse_event(s->ps2_mouse, 1, 0, 0, 0);
+    s->ps2_mouse->MouseEvent(1, 0, 0, 0);
 }
 
 void vmmouse_handler(VMMouseState *s, uint32_t *regs)
@@ -153,7 +153,7 @@ bool vmmouse_is_absolute(VMMouseState *s)
     return s->absolute;
 }
 
-VMMouseState *vmmouse_init(PS2MouseState *ps2_mouse)
+VMMouseState *vmmouse_init(PS2Mouse *ps2_mouse)
 {
     VMMouseState *s;
     s = static_cast<VMMouseState *>(mallocz(sizeof(*s)));

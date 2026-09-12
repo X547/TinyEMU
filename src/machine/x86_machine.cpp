@@ -43,7 +43,8 @@
 #include "pci.h"
 #include "pci_host_i440fx.h"
 #include "ide.h"
-#include "ps2.h"
+#include "i8042.h"
+#include "vmmouse.h"
 
 #if defined(__linux__) && (defined(__i386__) || defined(__x86_64__))
 #define USE_KVM
@@ -1054,10 +1055,10 @@ public:
     /* input */
     VIRTIODevice *keyboard_dev;
     VIRTIODevice *mouse_dev;
-    KBDState *kbd_state;
-    PS2MouseState *ps2_mouse;
+    I8042Controller *kbd_state;
+    PS2Mouse *ps2_mouse;
     VMMouseState *vm_mouse;
-    PS2KbdState *ps2_kbd;
+    PS2Keyboard *ps2_kbd;
 
 #ifdef USE_KVM
     bool kvm_enabled;
@@ -1939,7 +1940,7 @@ void PCMachine::SendKeyEvent(bool is_down, uint16_t key_code)
     if (s->keyboard_dev) {
         virtio_input_send_key_event(s->keyboard_dev, is_down, key_code);
     } else if (s->ps2_kbd) {
-        ps2_put_keycode(s->ps2_kbd, is_down, key_code);
+        s->ps2_kbd->PutKeycode(is_down, key_code);
     }
 }
 
