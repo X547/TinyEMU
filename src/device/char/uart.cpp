@@ -227,7 +227,7 @@ public:
         ctx.fdt->PropStr("compatible", "ns16550a");
         ctx.fdt->PropU64Range("reg", fRegs->base, fRegs->size);
         ctx.fdt->PropU32("clock-frequency", 3686400);
-        fdt_prop_plic_irq(ctx, fIrq->base);
+        fdt_prop_irq(ctx, fIrq->base);
         ctx.fdt->EndNode();
 
         /* Claim /chosen's stdout-path from the address that was actually

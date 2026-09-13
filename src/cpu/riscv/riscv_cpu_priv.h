@@ -176,6 +176,19 @@ typedef struct {
     uintptr_t mem_addend;
 } TLBEntry;
 
+#define IMSIC_WORDS ((RISCV_IMSIC_NUM_IDS + 64) / 64)
+
+/* An IMSIC interrupt file. Bit n of the arrays is identity n. */
+typedef struct {
+    uint32_t eidelivery;
+    uint32_t eithreshold;
+    uint64_t eip[IMSIC_WORDS];
+    uint64_t eie[IMSIC_WORDS];
+} ImsicFile;
+
+#define IMSIC_FILE_M 0
+#define IMSIC_FILE_S 1
+
 struct RISCVCPUState: public RISCVCPU {
     target_ulong pc;
     target_ulong reg[32];
@@ -236,6 +249,12 @@ struct RISCVCPUState: public RISCVCPU {
     uint64_t senvcfg;
     uint64_t stimecmp;
 
+    /* Advanced Interrupt Architecture */
+    RISCVInterruptArch intr_arch;
+    target_ulong miselect;
+    target_ulong siselect;
+    ImsicFile imsic[2]; /* IMSIC_FILE_M, IMSIC_FILE_S */
+
     target_ulong load_res; /* for atomic LR/SC */
 
     PhysMemoryMap *mem_map;
@@ -254,6 +273,8 @@ struct RISCVCPUState: public RISCVCPU {
     uint32_t Misa() override;
     void FlushTlbWriteRangeRam(uint8_t *ram_ptr, size_t ram_size) override;
     void SetRtcTimeSource(RtcTimeSource *source) override;
+    void SetInterruptArch(RISCVInterruptArch arch) override;
+    void ImsicSetPending(bool supervisor, uint32_t id) override;
 };
 
 #define target_read_slow glue(glue(riscv, MAX_XLEN), _read_slow)

@@ -32,12 +32,23 @@
 
 //#pragma mark - FDT helpers
 
-void fdt_prop_plic_irq(FDTContext &ctx, uint64_t line)
+/* the lines are level triggered, active high */
+#define FDT_IRQ_TYPE_LEVEL_HIGH 4
+
+int fdt_irq_spec(const FDTContext &ctx, uint32_t *tab, uint64_t line)
 {
-    uint32_t tab[2];
-    tab[0] = ctx.plic_phandle;
-    tab[1] = line;
-    ctx.fdt->PropTabU32("interrupts-extended", tab, 2);
+    tab[0] = line;
+    if (ctx.irq_cells > 1)
+        tab[1] = FDT_IRQ_TYPE_LEVEL_HIGH;
+    return ctx.irq_cells;
+}
+
+void fdt_prop_irq(FDTContext &ctx, uint64_t line)
+{
+    uint32_t tab[1 + FDT_IRQ_SPEC_MAX];
+    tab[0] = ctx.irq_phandle;
+    int n = 1 + fdt_irq_spec(ctx, tab + 1, line);
+    ctx.fdt->PropTabU32("interrupts-extended", tab, n);
 }
 
 

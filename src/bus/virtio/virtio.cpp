@@ -1158,7 +1158,7 @@ public:
         ctx.fdt->BeginNodeNum("virtio", fMmio->base);
         ctx.fdt->PropStr("compatible", "virtio,mmio");
         ctx.fdt->PropU64Range("reg", fMmio->base, fMmio->size);
-        fdt_prop_plic_irq(ctx, fIrq->base);
+        fdt_prop_irq(ctx, fIrq->base);
         ctx.fdt->EndNode();
     }
 };

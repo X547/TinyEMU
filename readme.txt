@@ -132,6 +132,20 @@ machine and a supervisor mode PLIC context. The harts take turns on one host
 thread, so more of them do not make the guest faster. The PC machine has one
 processor.
 
+"interrupt_controller" chooses a RISC-V machine's external interrupt
+controller:
+
+  plic         a PLIC (the default)
+  aplic        an APLIC delivering directly to the harts, with a machine level
+               domain and a supervisor level domain it delegates every source
+               to; the harts implement the Smaia and Ssaia CSRs
+  aplic-imsic  the same APLIC delivering by MSIs to an IMSIC at each hart,
+               which also takes the MSI-X messages of the devices behind a
+               pci-host-ecam-generic bridge
+
+Every machine keeps its CLINT for the timers. The PC machine takes no
+"interrupt_controller".
+
 The root bus of an FDT machine is declared as:
 
 bus: { type: "fdt", devices: [ ... ] }

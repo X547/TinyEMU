@@ -44,19 +44,25 @@
 #include "device.h"
 #include "devices.h"
 #include "fdt.h"
+#include "pci.h"
+#include "plic.h"
+#include "aplic.h"
 
 /* RISCV machine */
 
 #define RISCV_MAX_HARTS 64
 
-/* PLIC input lines; line 0 does not exist. */
-#define PLIC_NUM_SOURCES 32
-/* one machine mode and one supervisor mode context per hart */
-#define PLIC_MAX_CONTEXTS (2 * RISCV_MAX_HARTS)
+/* the external interrupt controllers a configuration can choose */
+enum RISCVIntcType {
+    RISCV_INTC_PLIC,
+    RISCV_INTC_APLIC,
+    RISCV_INTC_APLIC_IMSIC,
+};
 
 class RISCVMachine final:
     public VirtMachine,
-    public IRQTarget,
+    public HartIrqTarget,
+    public PCIMsiTarget,
     public TlbFlushTarget,
     public RtcTimeSource,
     public SerialOutput {
@@ -66,17 +72,17 @@ public:
     int max_xlen = 0;
     int hart_count = 0;
     RISCVCPU *cpus[RISCV_MAX_HARTS] {};
+    RISCVIntcType intc_type = RISCV_INTC_PLIC;
     uint64_t ram_size = 0;
     /* RTC */
     bool rtc_real_time = false;
     uint64_t rtc_start_time = 0;
     uint64_t timecmp[RISCV_MAX_HARTS] {};
-    /* PLIC. Bit n of each mask is source n. */
-    uint32_t plic_level = 0; /* input line levels */
-    uint32_t plic_served_irq = 0; /* claimed and not yet completed */
-    uint8_t plic_priority[PLIC_NUM_SOURCES] {};
-    uint32_t plic_enable[PLIC_MAX_CONTEXTS] {};
-    uint8_t plic_threshold[PLIC_MAX_CONTEXTS] {};
+    /* the one selected by intc_type */
+    PLIC *plic = nullptr;
+    APLIC *aplic = nullptr;
+    /* bits of the hart number in an IMSIC page address */
+    int imsic_hart_bits = 0;
     /* HTIF */
     uint64_t htif_tohost = 0, htif_fromhost = 0;
 
@@ -92,18 +98,24 @@ public:
     void HtifWrite(uint32_t offset, uint32_t val, int size_log2);
     uint32_t ClintRead(uint32_t offset, int size_log2);
     void ClintWrite(uint32_t offset, uint32_t val, int size_log2);
-    uint32_t PlicRead(uint32_t offset, int size_log2);
-    void PlicWrite(uint32_t offset, uint32_t val, int size_log2);
+    uint32_t ImsicRead(uint32_t offset, int size_log2);
+    void ImsicWriteM(uint32_t offset, uint32_t val, int size_log2);
+    void ImsicWriteS(uint32_t offset, uint32_t val, int size_log2);
 
     DeviceIOAdapter<RISCVMachine, &RISCVMachine::HtifRead,
                     &RISCVMachine::HtifWrite> fHtifIo {*this};
     DeviceIOAdapter<RISCVMachine, &RISCVMachine::ClintRead,
                     &RISCVMachine::ClintWrite> fClintIo {*this};
-    DeviceIOAdapter<RISCVMachine, &RISCVMachine::PlicRead,
-                    &RISCVMachine::PlicWrite> fPlicIo {*this};
+    DeviceIOAdapter<RISCVMachine, &RISCVMachine::ImsicRead,
+                    &RISCVMachine::ImsicWriteM> fImsicIoM {*this};
+    DeviceIOAdapter<RISCVMachine, &RISCVMachine::ImsicRead,
+                    &RISCVMachine::ImsicWriteS> fImsicIoS {*this};
 
-    /* IRQTarget */
-    void SetIRQ(int irq_num, int level) override;
+    /* HartIrqTarget */
+    void SetExternalIrq(int hart, bool supervisor, int level) override;
+
+    /* PCIMsiTarget */
+    void SendMsi(uint64_t addr, uint32_t data) override;
 
     /* TlbFlushTarget */
     void FlushTlbWriteRange(uint8_t *ram_addr, size_t ram_size) override;
@@ -133,7 +145,18 @@ public:
 #define HTIF_BASE_ADDR 0x40008000
 #define HTIF_SIZE      0x00001000
 #define PLIC_BASE_ADDR 0x40100000
-#define PLIC_SIZE      0x00400000
+#define APLIC_M_BASE_ADDR 0x0c000000
+#define APLIC_S_BASE_ADDR 0x0d000000
+/* One page per hart from each base, in blocks aligned to their size as the
+   AIA specification asks. */
+#define IMSIC_M_BASE_ADDR 0x08000000
+#define IMSIC_S_BASE_ADDR 0x09000000
+#define IMSIC_PAGE_SIZE   0x1000
+#define IMSIC_SETEIPNUM_LE 0x000
+
+/* Wired interrupt lines, whichever controller takes them; line 0 does not
+   exist. */
+#define RISCV_IRQ_LINES PLIC_NUM_SOURCES
 
 /* Everything the configuration adds is placed in here. It is the one hole in
    the architectural layout large enough for an ECAM window and a PCI aperture
@@ -347,145 +370,52 @@ void RISCVMachine::ClintWrite(uint32_t offset, uint32_t val, int size_log2)
     }
 }
 
-/* PLIC register layout. Context 2n takes machine mode external interrupts
-   for hart n and context 2n + 1 supervisor mode ones, in the order the
-   device tree lists them. */
-#define PLIC_PENDING_BASE  0x001000
-#define PLIC_ENABLE_BASE   0x002000
-#define PLIC_ENABLE_SIZE   0x80
-#define PLIC_CONTEXT_BASE  0x200000
-#define PLIC_CONTEXT_SIZE  0x1000
-#define PLIC_MAX_PRIORITY  7
-
-/* The sources are level triggered: a line that is still high once its
-   interrupt has been completed is pending again. */
-static uint32_t plic_pending(RISCVMachine *s)
+/* The memory regions of the IMSIC interrupt files. The interrupt files
+   themselves are part of the harts; a page only takes the MSI writes. */
+uint32_t RISCVMachine::ImsicRead(uint32_t offset, int size_log2)
 {
-    return s->plic_level & ~s->plic_served_irq;
+    (void)offset;
+    (void)size_log2;
+    return 0;
 }
 
-/* The source a claim on 'ctx' would return, or 0. */
-static uint32_t plic_best_irq(RISCVMachine *s, int ctx)
+void RISCVMachine::ImsicWriteM(uint32_t offset, uint32_t val, int size_log2)
 {
-    uint32_t mask = plic_pending(s) & s->plic_enable[ctx];
-    uint32_t best = 0, best_priority = s->plic_threshold[ctx];
+    uint32_t hart = offset / IMSIC_PAGE_SIZE;
 
-    while (mask != 0) {
-        uint32_t irq = ctz32(mask);
-        mask &= mask - 1;
-        /* ties go to the lowest source number */
-        if (s->plic_priority[irq] > best_priority) {
-            best = irq;
-            best_priority = s->plic_priority[irq];
-        }
-    }
-    return best;
+    if (offset % IMSIC_PAGE_SIZE == IMSIC_SETEIPNUM_LE &&
+        hart < (uint32_t)hart_count)
+        cpus[hart]->ImsicSetPending(false, val);
 }
 
-static void plic_update_mip(RISCVMachine *s)
+void RISCVMachine::ImsicWriteS(uint32_t offset, uint32_t val, int size_log2)
 {
-    for (int hart = 0; hart < s->hart_count; hart++) {
-        RISCVCPU *cpu = s->cpus[hart];
-        if (plic_best_irq(s, 2 * hart) != 0) {
-            cpu->SetMip(MIP_MEIP);
-        } else {
-            cpu->ResetMip(MIP_MEIP);
-        }
-        if (plic_best_irq(s, 2 * hart + 1) != 0) {
-            cpu->SetMip(MIP_SEIP);
-        } else {
-            cpu->ResetMip(MIP_SEIP);
-        }
-    }
+    uint32_t hart = offset / IMSIC_PAGE_SIZE;
+
+    if (offset % IMSIC_PAGE_SIZE == IMSIC_SETEIPNUM_LE &&
+        hart < (uint32_t)hart_count)
+        cpus[hart]->ImsicSetPending(true, val);
 }
 
-uint32_t RISCVMachine::PlicRead(uint32_t offset, int size_log2)
+/* PCI MSIs are written straight to the IMSIC pages. */
+void RISCVMachine::SendMsi(uint64_t addr, uint32_t data)
 {
-    RISCVMachine *s = this;
-    uint32_t val = 0;
-    uint32_t context_count = 2 * s->hart_count;
-
-    assert(size_log2 == 2);
-    if (offset < PLIC_PENDING_BASE) {
-        uint32_t irq = offset / 4;
-        if (irq < PLIC_NUM_SOURCES)
-            val = s->plic_priority[irq];
-    } else if (offset < PLIC_ENABLE_BASE) {
-        if (offset == PLIC_PENDING_BASE)
-            val = plic_pending(s);
-    } else if (offset < PLIC_CONTEXT_BASE) {
-        uint32_t ctx = (offset - PLIC_ENABLE_BASE) / PLIC_ENABLE_SIZE;
-        uint32_t reg = (offset - PLIC_ENABLE_BASE) % PLIC_ENABLE_SIZE;
-        if (ctx < context_count && reg == 0)
-            val = s->plic_enable[ctx];
-    } else {
-        uint32_t ctx = (offset - PLIC_CONTEXT_BASE) / PLIC_CONTEXT_SIZE;
-        uint32_t reg = (offset - PLIC_CONTEXT_BASE) % PLIC_CONTEXT_SIZE;
-        if (ctx >= context_count)
-            return 0;
-        if (reg == 0) {
-            val = s->plic_threshold[ctx];
-        } else if (reg == 4) {
-            /* claim */
-            val = plic_best_irq(s, ctx);
-            if (val != 0) {
-                s->plic_served_irq |= 1u << val;
-                plic_update_mip(s);
-            }
-        }
-    }
-    return val;
+    mem_map->IoWrite(addr, data, 2);
 }
 
-void RISCVMachine::PlicWrite(uint32_t offset, uint32_t val, int size_log2)
+static uint64_t imsic_region_size(RISCVMachine *m)
 {
-    RISCVMachine *s = this;
-    uint32_t context_count = 2 * s->hart_count;
-
-    assert(size_log2 == 2);
-    if (offset < PLIC_PENDING_BASE) {
-        uint32_t irq = offset / 4;
-        if (irq == 0 || irq >= PLIC_NUM_SOURCES)
-            return;
-        s->plic_priority[irq] = val & PLIC_MAX_PRIORITY;
-    } else if (offset < PLIC_ENABLE_BASE) {
-        /* the pending bits are read-only */
-        return;
-    } else if (offset < PLIC_CONTEXT_BASE) {
-        uint32_t ctx = (offset - PLIC_ENABLE_BASE) / PLIC_ENABLE_SIZE;
-        uint32_t reg = (offset - PLIC_ENABLE_BASE) % PLIC_ENABLE_SIZE;
-        if (ctx >= context_count || reg != 0)
-            return;
-        s->plic_enable[ctx] = val & ~1u; /* source 0 does not exist */
-    } else {
-        uint32_t ctx = (offset - PLIC_CONTEXT_BASE) / PLIC_CONTEXT_SIZE;
-        uint32_t reg = (offset - PLIC_CONTEXT_BASE) % PLIC_CONTEXT_SIZE;
-        if (ctx >= context_count)
-            return;
-        if (reg == 0) {
-            s->plic_threshold[ctx] = val & PLIC_MAX_PRIORITY;
-        } else if (reg == 4) {
-            /* complete; like QEMU, whether the source is still enabled for
-               this context does not matter */
-            if (val == 0 || val >= PLIC_NUM_SOURCES)
-                return;
-            s->plic_served_irq &= ~(1u << val);
-        } else {
-            return;
-        }
-    }
-    plic_update_mip(s);
+    return (uint64_t)IMSIC_PAGE_SIZE << m->imsic_hart_bits;
 }
 
-void RISCVMachine::SetIRQ(int irq_num, int level)
+void RISCVMachine::SetExternalIrq(int hart, bool supervisor, int level)
 {
-    uint32_t mask = 1u << irq_num;
+    uint32_t mask = supervisor ? MIP_SEIP : MIP_MEIP;
     if (level) {
-        plic_level |= mask;
+        cpus[hart]->SetMip(mask);
     } else {
-        plic_level &= ~mask;
+        cpus[hart]->ResetMip(mask);
     }
-    plic_update_mip(this);
 }
 
 static uint8_t *get_ram_ptr(RISCVMachine *s, uint64_t paddr, bool is_rw)
@@ -494,6 +424,35 @@ static uint8_t *get_ram_ptr(RISCVMachine *s, uint64_t paddr, bool is_rw)
 }
 
 /* FDT machine description */
+
+/* The interrupt files of one privilege level; returns the node's phandle.
+   The hart index width is left for the guest to derive from the number of
+   harts listed, which gives the layout the pages are placed in. */
+static uint32_t riscv_build_imsic_fdt(RISCVMachine *m, FDTBuilder &fdt,
+                                      uint64_t base,
+                                      const uint32_t *intc_phandle,
+                                      bool supervisor)
+{
+    uint32_t tab[2 * RISCV_MAX_HARTS];
+    uint32_t phandle = fdt.AllocPhandle();
+
+    fdt.BeginNodeNum("interrupt-controller", base);
+    fdt.PropStr("compatible", "riscv,imsics");
+    fdt.PropU64Range("reg", base, imsic_region_size(m));
+    for (int hart = 0; hart < m->hart_count; hart++) {
+        tab[2 * hart] = intc_phandle[hart];
+        tab[2 * hart + 1] = supervisor ? 9 : 11; /* S or M ext irq */
+    }
+    fdt.PropTabU32("interrupts-extended", tab, 2 * m->hart_count);
+    fdt.PropEmpty("interrupt-controller");
+    fdt.PropU32("#interrupt-cells", 0);
+    fdt.PropEmpty("msi-controller");
+    fdt.PropU32("#msi-cells", 0);
+    fdt.PropU32("riscv,num-ids", RISCV_IMSIC_NUM_IDS);
+    fdt.PropU32("phandle", phandle);
+    fdt.EndNode();
+    return phandle;
+}
 
 static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
                            uint64_t firmware_size,
@@ -528,9 +487,18 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
 
     /* Extensions implemented outside of misa, which only has room for the
        single letter ones. */
-    static const char *const multi_letter_ext[] = {
-        "zicsr", "zifencei", "zicntr", "sstc", "svadu", "svinval",
-    };
+    const char *multi_letter_ext[16];
+    int ext_count = 0;
+    multi_letter_ext[ext_count++] = "zicsr";
+    multi_letter_ext[ext_count++] = "zifencei";
+    multi_letter_ext[ext_count++] = "zicntr";
+    if (m->intc_type != RISCV_INTC_PLIC) {
+        multi_letter_ext[ext_count++] = "smaia";
+        multi_letter_ext[ext_count++] = "ssaia";
+    }
+    multi_letter_ext[ext_count++] = "sstc";
+    multi_letter_ext[ext_count++] = "svadu";
+    multi_letter_ext[ext_count++] = "svinval";
 
     q = isa_string;
     q += snprintf(isa_string, sizeof(isa_string), "rv%d", max_xlen);
@@ -556,8 +524,10 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
     }
     /* Multi-letter extensions follow the single letter ones, each introduced
        by an underscore. */
-    for (const char *ext: multi_letter_ext)
-        q += snprintf(q, sizeof(isa_string) - (q - isa_string), "_%s", ext);
+    for (i = 0; i < ext_count; i++) {
+        q += snprintf(q, sizeof(isa_string) - (q - isa_string), "_%s",
+                      multi_letter_ext[i]);
+    }
 
     {
         /* A packed list of NUL terminated strings. The privilege modes 'S'
@@ -571,9 +541,9 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
                 *p++ = '\0';
             }
         }
-        for (const char *ext: multi_letter_ext) {
-            size_t len = strlen(ext) + 1;
-            memcpy(p, ext, len);
+        for (i = 0; i < ext_count; i++) {
+            size_t len = strlen(multi_letter_ext[i]) + 1;
+            memcpy(p, multi_letter_ext[i], len);
             p += len;
         }
         ext_end = p;
@@ -650,29 +620,23 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
 
     fdt.EndNode(); /* clint */
 
-    fdt.BeginNodeNum("plic", PLIC_BASE_ADDR);
-    fdt.PropU32("#interrupt-cells", 1);
-    /* Needed so that an "interrupt-map" naming this controller as the parent
-       has an unambiguous parent specifier length. */
-    fdt.PropU32("#address-cells", 0);
-    fdt.PropEmpty("interrupt-controller");
-    fdt.PropStr("compatible", "riscv,plic0");
-    fdt.PropU32("riscv,ndev", PLIC_NUM_SOURCES - 1);
-    fdt.PropU64Range("reg", PLIC_BASE_ADDR, PLIC_SIZE);
+    if (m->intc_type == RISCV_INTC_PLIC) {
+        ctx.irq_phandle = m->plic->BuildFDT(fdt, PLIC_BASE_ADDR, intc_phandle);
+    } else {
+        uint32_t imsic_m_phandle = 0, imsic_s_phandle = 0;
 
-    /* the context numbering PlicRead() and PlicWrite() decode */
-    for (int hart = 0; hart < m->hart_count; hart++) {
-        tab[4 * hart] = intc_phandle[hart];
-        tab[4 * hart + 1] = 11; /* M ext irq */
-        tab[4 * hart + 2] = intc_phandle[hart];
-        tab[4 * hart + 3] = 9; /* S ext irq */
+        if (m->intc_type == RISCV_INTC_APLIC_IMSIC) {
+            imsic_m_phandle = riscv_build_imsic_fdt(m, fdt, IMSIC_M_BASE_ADDR,
+                                                    intc_phandle, false);
+            imsic_s_phandle = riscv_build_imsic_fdt(m, fdt, IMSIC_S_BASE_ADDR,
+                                                    intc_phandle, true);
+            ctx.msi_phandle = imsic_s_phandle;
+        }
+        ctx.irq_phandle = m->aplic->BuildFDT(fdt, APLIC_M_BASE_ADDR,
+                                             APLIC_S_BASE_ADDR, intc_phandle,
+                                             imsic_m_phandle, imsic_s_phandle);
+        ctx.irq_cells = 2;
     }
-    fdt.PropTabU32("interrupts-extended", tab, 4 * m->hart_count);
-
-    ctx.plic_phandle = fdt.AllocPhandle();
-    fdt.PropU32("phandle", ctx.plic_phandle);
-
-    fdt.EndNode(); /* plic */
 
     /* Every configured device describes itself from the resources it was
        actually given, so the tree cannot drift from the mapping. */
@@ -798,17 +762,31 @@ static bool riscv_claim_fixed_ranges(RISCVMachine *s)
 {
     RangeAllocator &mmio = s->bus->MmioAlloc();
 
-    return mmio.Claim(0, LOW_RAM_SIZE, "low ram") &&
-        mmio.Claim(CLINT_BASE_ADDR, CLINT_SIZE, "clint") &&
-        mmio.Claim(HTIF_BASE_ADDR, HTIF_SIZE, "htif") &&
-        mmio.Claim(PLIC_BASE_ADDR, PLIC_SIZE, "plic") &&
-        mmio.Claim(RAM_BASE_ADDR, s->ram_size, "ram");
+    if (!mmio.Claim(0, LOW_RAM_SIZE, "low ram") ||
+        !mmio.Claim(CLINT_BASE_ADDR, CLINT_SIZE, "clint") ||
+        !mmio.Claim(HTIF_BASE_ADDR, HTIF_SIZE, "htif") ||
+        !mmio.Claim(RAM_BASE_ADDR, s->ram_size, "ram")) {
+        return false;
+    }
+    if (s->intc_type == RISCV_INTC_PLIC) {
+        return mmio.Claim(PLIC_BASE_ADDR, PLIC_SIZE, "plic");
+    }
+    if (!mmio.Claim(APLIC_M_BASE_ADDR, APLIC_SIZE, "aplic-m") ||
+        !mmio.Claim(APLIC_S_BASE_ADDR, APLIC_SIZE, "aplic-s")) {
+        return false;
+    }
+    if (s->intc_type == RISCV_INTC_APLIC_IMSIC) {
+        return mmio.Claim(IMSIC_M_BASE_ADDR, imsic_region_size(s), "imsic-m") &&
+            mmio.Claim(IMSIC_S_BASE_ADDR, imsic_region_size(s), "imsic-s");
+    }
+    return true;
 }
 
 static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
 {
     RISCVMachine *s;
     int max_xlen, ram_flags;
+    RISCVIntcType intc_type;
     DeviceContext ctx;
 
     if (!strcmp(p->machine_name, "riscv32")) {
@@ -827,8 +805,22 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
                  RISCV_MAX_HARTS);
         return NULL;
     }
+    if (p->interrupt_controller == nullptr ||
+        strcmp(p->interrupt_controller, "plic") == 0) {
+        intc_type = RISCV_INTC_PLIC;
+    } else if (strcmp(p->interrupt_controller, "aplic") == 0) {
+        intc_type = RISCV_INTC_APLIC;
+    } else if (strcmp(p->interrupt_controller, "aplic-imsic") == 0) {
+        intc_type = RISCV_INTC_APLIC_IMSIC;
+    } else {
+        vm_error("%s: interrupt_controller must be \"plic\", \"aplic\" or "
+                 "\"aplic-imsic\", not \"%s\"\n", p->machine_name,
+                 p->interrupt_controller);
+        return NULL;
+    }
 
     s = new RISCVMachine();
+    s->intc_type = intc_type;
     s->vmc = p->vmc;
     s->ram_size = p->ram_size;
     s->max_xlen = max_xlen;
@@ -859,12 +851,50 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
 
     s->mem_map->RegisterDevice(CLINT_BASE_ADDR, CLINT_SIZE, &s->fClintIo,
                                DEVIO_SIZE32);
-    s->mem_map->RegisterDevice(PLIC_BASE_ADDR, PLIC_SIZE, &s->fPlicIo,
-                               DEVIO_SIZE32);
     s->mem_map->RegisterDevice(HTIF_BASE_ADDR, 16, &s->fHtifIo, DEVIO_SIZE32);
     s->console = p->console;
 
-    s->bus = new SystemBus(s->mem_map, s, PLIC_NUM_SOURCES);
+    IRQTarget *irq_target;
+    if (intc_type == RISCV_INTC_PLIC) {
+        s->plic = new PLIC(s, s->hart_count);
+        s->mem_map->RegisterDevice(PLIC_BASE_ADDR, PLIC_SIZE, s->plic,
+                                   DEVIO_SIZE32);
+        irq_target = s->plic;
+    } else {
+        AplicMsiLayout msi;
+        RISCVInterruptArch arch = RISCV_INTR_AIA;
+
+        if (intc_type == RISCV_INTC_APLIC_IMSIC) {
+            while ((1 << s->imsic_hart_bits) < s->hart_count)
+                s->imsic_hart_bits++;
+            s->mem_map->RegisterDevice(IMSIC_M_BASE_ADDR,
+                                       imsic_region_size(s), &s->fImsicIoM,
+                                       DEVIO_SIZE32);
+            s->mem_map->RegisterDevice(IMSIC_S_BASE_ADDR,
+                                       imsic_region_size(s), &s->fImsicIoS,
+                                       DEVIO_SIZE32);
+            msi.m_base = IMSIC_M_BASE_ADDR;
+            msi.s_base = IMSIC_S_BASE_ADDR;
+            msi.hart_index_bits = s->imsic_hart_bits;
+            arch = RISCV_INTR_AIA_IMSIC;
+        }
+        s->aplic = new APLIC(s->mem_map, s, s->hart_count,
+                             RISCV_IRQ_LINES - 1,
+                             intc_type == RISCV_INTC_APLIC_IMSIC ?
+                             &msi : nullptr);
+        s->mem_map->RegisterDevice(APLIC_M_BASE_ADDR, APLIC_SIZE,
+                                   s->aplic->DomainIO(false), DEVIO_SIZE32);
+        s->mem_map->RegisterDevice(APLIC_S_BASE_ADDR, APLIC_SIZE,
+                                   s->aplic->DomainIO(true), DEVIO_SIZE32);
+        irq_target = s->aplic;
+        for (int hart = 0; hart < s->hart_count; hart++)
+            s->cpus[hart]->SetInterruptArch(arch);
+    }
+
+    s->bus = new SystemBus(s->mem_map, irq_target, RISCV_IRQ_LINES);
+    if (intc_type == RISCV_INTC_APLIC_IMSIC) {
+        s->bus->SetMsiTarget(s);
+    }
     s->bus->MmioAlloc().SetWindow(DEVICE_WINDOW_BASE, DEVICE_WINDOW_SIZE);
     s->bus->MmioAlloc().SetHighWindow(HIGH_DEVICE_WINDOW_BASE,
                                       HIGH_DEVICE_WINDOW_SIZE);
@@ -921,6 +951,8 @@ RISCVMachine::~RISCVMachine()
     for (int hart = 0; hart < hart_count; hart++)
         delete cpus[hart];
     delete bus;
+    delete plic;
+    delete aplic;
     delete mem_map;
 }
 

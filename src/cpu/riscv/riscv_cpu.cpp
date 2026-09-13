@@ -852,6 +852,164 @@ static uint64_t csr64_written(RISCVCPUState *s, uint64_t old_val,
     return (old_val & ~(uint64_t)0xffffffff) | (uint32_t)val;
 }
 
+/* the order the privileged spec requires simultaneous interrupts to be taken
+   in: MEI, MSI, MTI, SEI, SSI, STI */
+static const uint8_t irq_priority[] = { 11, 3, 7, 9, 1, 5 };
+
+/* mtopi or stopi: the top pending and enabled interrupt that traps to the
+   given level. The iprio arrays are read-only zero, so IPRIO is always 1. */
+static target_ulong top_interrupt(RISCVCPUState *s, bool supervisor)
+{
+    uint32_t pending = s->mip & s->mie;
+    int irq;
+    size_t i;
+
+    pending &= supervisor ? s->mideleg : ~s->mideleg;
+    if (pending == 0)
+        return 0;
+    irq = ctz32(pending);
+    for(i = 0; i < countof(irq_priority); i++) {
+        if ((pending >> irq_priority[i]) & 1) {
+            irq = irq_priority[i];
+            break;
+        }
+    }
+    return ((target_ulong)irq << 16) | 1;
+}
+
+/* The lowest pending and enabled identity under the threshold, or 0. */
+static uint32_t imsic_top(const ImsicFile *f)
+{
+    for (int w = 0; w < IMSIC_WORDS; w++) {
+        uint64_t mask = f->eip[w] & f->eie[w];
+        if (mask != 0) {
+            uint32_t id = w * 64 + __builtin_ctzll(mask);
+            if (f->eithreshold != 0 && id >= f->eithreshold)
+                return 0;
+            return id;
+        }
+    }
+    return 0;
+}
+
+/* An interrupt file drives MEIP or SEIP by itself. */
+static void imsic_update(RISCVCPUState *s, int file)
+{
+    uint32_t bit = file == IMSIC_FILE_M ? MIP_MEIP : MIP_SEIP;
+
+    if (s->imsic[file].eidelivery == 1 && imsic_top(&s->imsic[file]) != 0)
+        set_mip(s, bit);
+    else
+        s->mip &= ~bit;
+}
+
+/* mtopei or stopei */
+static target_ulong imsic_topei(RISCVCPUState *s, int file)
+{
+    uint32_t id = imsic_top(&s->imsic[file]);
+    return ((target_ulong)id << 16) | id;
+}
+
+/* A write to mtopei or stopei claims what it reads. */
+static void imsic_claim(RISCVCPUState *s, int file)
+{
+    uint32_t id = imsic_top(&s->imsic[file]);
+
+    if (id != 0) {
+        s->imsic[file].eip[id / 64] &= ~((uint64_t)1 << (id % 64));
+        imsic_update(s, file);
+    }
+}
+
+/* The eip or eie register an *iselect value in 0x80-0xff names: a 32 bit half
+   of a 64 bit word for RV32, a whole word otherwise. Returns false for the
+   odd numbers, which do not exist for RV64. Registers past the implemented
+   identities give a null word. */
+static bool imsic_array_reg(RISCVCPUState *s, ImsicFile *f, target_ulong sel,
+                            uint64_t **pword, int *pshift, uint64_t *pmask)
+{
+    uint64_t *array = sel >= 0xc0 ? f->eie : f->eip;
+    unsigned int k = sel & 0x3f;
+
+    if (s->cur_xlen == 32) {
+        *pshift = (k & 1) ? 32 : 0;
+        *pmask = 0xffffffff;
+    } else {
+        if (k & 1)
+            return false;
+        *pshift = 0;
+        *pmask = UINT64_MAX;
+    }
+    *pword = (k / 2) < IMSIC_WORDS ? &array[k / 2] : nullptr;
+    return true;
+}
+
+/* mireg or sireg. Returns -1 if the selected register does not exist. */
+static int ireg_read(RISCVCPUState *s, int file, target_ulong sel,
+                     target_ulong *pval)
+{
+    if (sel >= 0x30 && sel <= 0x3f) {
+        /* the iprio array, all read-only zero */
+        if (s->cur_xlen != 32 && (sel & 1))
+            return -1;
+        *pval = 0;
+        return 0;
+    }
+    if (sel >= 0x70 && sel <= 0xff && s->intr_arch == RISCV_INTR_AIA_IMSIC) {
+        ImsicFile *f = &s->imsic[file];
+        uint64_t *word, mask;
+        int shift;
+
+        if (sel == 0x70) {
+            *pval = f->eidelivery;
+        } else if (sel == 0x72) {
+            *pval = f->eithreshold;
+        } else if (sel >= 0x80) {
+            if (!imsic_array_reg(s, f, sel, &word, &shift, &mask))
+                return -1;
+            *pval = word != nullptr ? (*word >> shift) & mask : 0;
+        } else {
+            *pval = 0; /* reserved */
+        }
+        return 0;
+    }
+    return -1;
+}
+
+static int ireg_write(RISCVCPUState *s, int file, target_ulong sel,
+                      target_ulong val)
+{
+    if (sel >= 0x30 && sel <= 0x3f) {
+        if (s->cur_xlen != 32 && (sel & 1))
+            return -1;
+        return 0;
+    }
+    if (sel >= 0x70 && sel <= 0xff && s->intr_arch == RISCV_INTR_AIA_IMSIC) {
+        ImsicFile *f = &s->imsic[file];
+        uint64_t *word, mask;
+        int shift;
+
+        if (sel == 0x70) {
+            f->eidelivery = val & 1;
+        } else if (sel == 0x72) {
+            f->eithreshold = val <= RISCV_IMSIC_NUM_IDS ? val :
+                RISCV_IMSIC_NUM_IDS;
+        } else if (sel >= 0x80) {
+            if (!imsic_array_reg(s, f, sel, &word, &shift, &mask))
+                return -1;
+            if (word != nullptr) {
+                *word = (*word & ~(mask << shift)) |
+                    (((uint64_t)val & mask) << shift);
+                f->eip[0] &= ~(uint64_t)1; /* identity 0 does not exist */
+                f->eie[0] &= ~(uint64_t)1;
+            }
+        }
+        imsic_update(s, file);
+        return 0;
+    }
+    return -1;
+}
+
 /* return -1 if invalid CSR. 0 if OK. 'will_write' indicate that the
    csr will be written after (used for CSR access check) */
 static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
@@ -968,6 +1126,76 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
         if (s->priv < PRV_M && (s->mstatus & MSTATUS_TVM))
             goto invalid_csr;
         val = s->satp;
+        break;
+
+    /* Smaia and Ssaia */
+    case 0x150: /* siselect */
+        if (s->intr_arch == RISCV_INTR_BASE)
+            goto invalid_csr;
+        val = s->siselect;
+        break;
+    case 0x151: /* sireg */
+        if (s->intr_arch == RISCV_INTR_BASE ||
+            ireg_read(s, IMSIC_FILE_S, s->siselect, &val) < 0)
+            goto invalid_csr;
+        break;
+    case 0x15c: /* stopei */
+        if (s->intr_arch != RISCV_INTR_AIA_IMSIC)
+            goto invalid_csr;
+        val = imsic_topei(s, IMSIC_FILE_S);
+        break;
+    case 0xdb0: /* stopi */
+        if (s->intr_arch == RISCV_INTR_BASE)
+            goto invalid_csr;
+        val = top_interrupt(s, true);
+        break;
+    case 0x114: /* sieh */
+    case 0x154: /* siph */
+        if (s->intr_arch == RISCV_INTR_BASE || s->cur_xlen != 32)
+            goto invalid_csr;
+        val = 0;
+        break;
+    case 0x308: /* mvien */
+        if (s->intr_arch == RISCV_INTR_BASE)
+            goto invalid_csr;
+        val = 0;
+        break;
+    case 0x309: /* mvip */
+        if (s->intr_arch == RISCV_INTR_BASE)
+            goto invalid_csr;
+        /* with mvien read-only zero, only aliases of writable mip bits */
+        val = s->mip & MIP_SSIP;
+        if (!(s->menvcfg & MENVCFG_STCE))
+            val |= s->mip & MIP_STIP;
+        break;
+    case 0x313: /* midelegh */
+    case 0x314: /* mieh */
+    case 0x318: /* mvienh */
+    case 0x319: /* mviph */
+    case 0x354: /* miph */
+        if (s->intr_arch == RISCV_INTR_BASE || s->cur_xlen != 32)
+            goto invalid_csr;
+        val = 0;
+        break;
+    case 0x350: /* miselect */
+        if (s->intr_arch == RISCV_INTR_BASE)
+            goto invalid_csr;
+        val = s->miselect;
+        break;
+    case 0x351: /* mireg */
+        if (s->intr_arch == RISCV_INTR_BASE ||
+            ireg_read(s, IMSIC_FILE_M, s->miselect, &val) < 0)
+            goto invalid_csr;
+        break;
+    case 0x35c: /* mtopei */
+        if (s->intr_arch != RISCV_INTR_AIA_IMSIC)
+            goto invalid_csr;
+        val = imsic_topei(s, IMSIC_FILE_M);
+        break;
+    case 0xfb0: /* mtopi */
+        if (s->intr_arch == RISCV_INTR_BASE)
+            goto invalid_csr;
+        val = top_interrupt(s, false);
         break;
     case 0x300:
         val = get_mstatus(s, (target_ulong)-1);
@@ -1202,7 +1430,63 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
 #endif
         tlb_flush_all(s);
         return 2;
-        
+
+    /* Smaia and Ssaia */
+    case 0x150: /* siselect */
+        if (s->intr_arch == RISCV_INTR_BASE)
+            return -1;
+        s->siselect = val & 0x1ff;
+        break;
+    case 0x151: /* sireg */
+        if (s->intr_arch == RISCV_INTR_BASE)
+            return -1;
+        return ireg_write(s, IMSIC_FILE_S, s->siselect, val);
+    case 0x15c: /* stopei */
+        if (s->intr_arch != RISCV_INTR_AIA_IMSIC)
+            return -1;
+        imsic_claim(s, IMSIC_FILE_S);
+        break;
+    case 0x114: /* sieh */
+    case 0x154: /* siph */
+        if (s->intr_arch == RISCV_INTR_BASE || s->cur_xlen != 32)
+            return -1;
+        break;
+    case 0x308: /* mvien */
+        if (s->intr_arch == RISCV_INTR_BASE)
+            return -1;
+        break;
+    case 0x309: /* mvip */
+        if (s->intr_arch == RISCV_INTR_BASE)
+            return -1;
+        mask = MIP_SSIP;
+        if (!(s->menvcfg & MENVCFG_STCE))
+            mask |= MIP_STIP;
+        s->mip = (s->mip & ~mask) | (val & mask);
+        break;
+    case 0x313: /* midelegh */
+    case 0x314: /* mieh */
+    case 0x318: /* mvienh */
+    case 0x319: /* mviph */
+    case 0x354: /* miph */
+        if (s->intr_arch == RISCV_INTR_BASE || s->cur_xlen != 32)
+            return -1;
+        break;
+    case 0x350: /* miselect */
+        if (s->intr_arch == RISCV_INTR_BASE)
+            return -1;
+        /* WARL: the range the implemented registers need */
+        s->miselect = val & (s->intr_arch == RISCV_INTR_AIA_IMSIC ? 0xff : 0x3f);
+        break;
+    case 0x351: /* mireg */
+        if (s->intr_arch == RISCV_INTR_BASE)
+            return -1;
+        return ireg_write(s, IMSIC_FILE_M, s->miselect, val);
+    case 0x35c: /* mtopei */
+        if (s->intr_arch != RISCV_INTR_AIA_IMSIC)
+            return -1;
+        imsic_claim(s, IMSIC_FILE_M);
+        break;
+
     case 0x300:
         set_mstatus(s, val);
         break;
@@ -1503,10 +1787,6 @@ static inline uint32_t get_pending_irq_mask(RISCVCPUState *s)
     return pending_ints & enabled_ints;
 }
 
-/* the order the privileged spec requires simultaneous interrupts to be taken
-   in: MEI, MSI, MTI, SEI, SSI, STI */
-static const uint8_t irq_priority[] = { 11, 3, 7, 9, 1, 5 };
-
 static __exception int raise_interrupt(RISCVCPUState *s)
 {
     uint32_t mask;
@@ -1705,6 +1985,22 @@ void RISCVCPUState::SetRtcTimeSource(RtcTimeSource *source)
 void RISCVCPUState::FlushTlbWriteRangeRam(uint8_t *ram_ptr, size_t ram_size)
 {
     glue(riscv_cpu_flush_tlb_write_range_ram, MAX_XLEN)(this, ram_ptr, ram_size);
+}
+
+void RISCVCPUState::SetInterruptArch(RISCVInterruptArch arch)
+{
+    intr_arch = arch;
+}
+
+void RISCVCPUState::ImsicSetPending(bool supervisor, uint32_t id)
+{
+    int file = supervisor ? IMSIC_FILE_S : IMSIC_FILE_M;
+
+    if (intr_arch != RISCV_INTR_AIA_IMSIC || id == 0 ||
+        id > RISCV_IMSIC_NUM_IDS)
+        return;
+    imsic[file].eip[id / 64] |= (uint64_t)1 << (id % 64);
+    imsic_update(this, file);
 }
 
 } // anonymous namespace

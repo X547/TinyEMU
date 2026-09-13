@@ -1552,7 +1552,7 @@ void SDHCIDevice::BuildFDT(FDTContext &ctx)
     ctx.fdt->BeginNodeNum("mmc", fMmioRes->base);
     ctx.fdt->PropStr("compatible", fCompatible);
     ctx.fdt->PropU64Range("reg", fMmioRes->base, fMmioRes->size);
-    fdt_prop_plic_irq(ctx, fIrqRes->base);
+    fdt_prop_irq(ctx, fIrqRes->base);
 
     /* Both the register clock and the card clock are that one fixed clock. */
     uint32_t tab[2] = {clock_phandle, clock_phandle};

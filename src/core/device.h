@@ -33,6 +33,7 @@ class Bus;
 class Device;
 class FDTBuilder;
 class MDIOBus;
+class PCIMsiTarget;
 struct PCIBus;
 
 
@@ -42,7 +43,12 @@ struct PCIBus;
    that /chosen can never name a node that was not emitted. */
 struct FDTContext {
     FDTBuilder *fdt = nullptr;
-    uint32_t plic_phandle = 0;
+    /* The controller the wired interrupt lines go to, and the number of cells
+       its specifiers take: 1 is the line alone, 2 adds the trigger type. */
+    uint32_t irq_phandle = 0;
+    int irq_cells = 1;
+    /* The controller PCI MSIs are delivered to, or 0 if there is none. */
+    uint32_t msi_phandle = 0;
     /* Handed out to PCI host bridges as they emit their nodes, so that a
        machine with more than one names its devices unambiguously. */
     uint32_t pci_domain = 0;
@@ -50,10 +56,17 @@ struct FDTContext {
 };
 
 
-/* Emit the "interrupts-extended" property naming the PLIC line a resource was
+/* Interrupt specifiers can be up to this many cells. */
+#define FDT_IRQ_SPEC_MAX 2
+
+/* Store the specifier for 'line', without the phandle, in 'tab'; returns the
+   number of cells written. */
+int fdt_irq_spec(const FDTContext &ctx, uint32_t *tab, uint64_t line);
+
+/* Emit the "interrupts-extended" property naming the line a resource was
    assigned. Kept in one place so that every device describes the line it
    actually got. */
-void fdt_prop_plic_irq(FDTContext &ctx, uint64_t line);
+void fdt_prop_irq(FDTContext &ctx, uint64_t line);
 
 
 class Device {
@@ -172,6 +185,7 @@ private:
        itself. */
     IRQSignal *fIrqTable = fIrqSignals;
     int fIrqCount;
+    PCIMsiTarget *fMsiTarget = nullptr;
 
 public:
     SystemBus(PhysMemoryMap *mem_map, IRQTarget *irq_target, int irq_count);
@@ -199,6 +213,11 @@ public:
 
     /* Valid for a line returned by an assigned RES_IRQ resource. */
     IRQSignal *IrqSignalFor(uint64_t line);
+
+    /* The machine's MSI controller, for host bridges without a receiver of
+       their own; null when the machine has none. */
+    void SetMsiTarget(PCIMsiTarget *target) {fMsiTarget = target;}
+    PCIMsiTarget *MsiTarget() const {return fMsiTarget;}
 
     /* Assign one record out of whichever space its type names. Buses further
        down pass up the records they cannot serve themselves. */

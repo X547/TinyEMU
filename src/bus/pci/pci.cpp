@@ -708,12 +708,13 @@ void pci_device_send_msi(PCIDevice *d, uint64_t addr, uint32_t data)
     }
 
     /* No receiver on this bus: an MSI is architecturally a posted memory
-       write, so perform it. On a machine with no MSI controller the write
-       lands in RAM and nothing observes it, which is what the hardware would
-       do too. */
+       write, so perform it, into RAM or onto whatever device decodes the
+       address. */
     uint8_t *ptr = b->mem_map->GetRamPtr(addr, true);
     if (ptr)
         put_le32(ptr, data);
+    else
+        b->mem_map->IoWrite(addr, data, 2);
 }
 
 void pci_device_set_config8(PCIDevice *d, uint16_t addr, uint8_t val)

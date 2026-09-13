@@ -398,6 +398,10 @@ static int virt_machine_parse_config(VirtMachineParams *p,
     if (vm_get_int_opt(cfg, "cpus", &p->cpu_count, 1) < 0)
         goto tag_fail;
 
+    if (vm_get_str_opt(cfg, "interrupt_controller", &str) < 0)
+        goto tag_fail;
+    p->interrupt_controller = strdup_null(str);
+
     tag_name = "bios";
     if (vm_get_str_opt(cfg, tag_name, &str) < 0)
         goto tag_fail;
@@ -712,6 +716,7 @@ void virt_machine_free_config(VirtMachineParams *p)
     int i;
 
     free(p->machine_name);
+    free(p->interrupt_controller);
     free(p->cmdline);
     for(i = 0; i < VM_FILE_COUNT; i++) {
         free(p->files[i].filename);

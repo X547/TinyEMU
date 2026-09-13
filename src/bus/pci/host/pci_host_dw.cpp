@@ -300,6 +300,8 @@ void PCIHostDWDevice::SendMsi(uint64_t addr, uint32_t data)
         uint8_t *ptr = sys->MemMap()->GetRamPtr(addr, true);
         if (ptr != nullptr) {
             put_le32(ptr, data);
+        } else {
+            sys->MemMap()->IoWrite(addr, data, 2);
         }
         return;
     }
@@ -624,11 +626,10 @@ void PCIHostDWDevice::BuildFDT(FDTContext &ctx)
 
     /* The message signalled interrupt comes first: that is the entry a driver
        reads to find this controller's own receiver. */
-    fdt->PropU32("interrupt-parent", ctx.plic_phandle);
-    n = 0;
-    tab[n++] = fMsiIrqRes->base;
+    fdt->PropU32("interrupt-parent", ctx.irq_phandle);
+    n = fdt_irq_spec(ctx, tab, fMsiIrqRes->base);
     for (int i = 0; i < 4; i++) {
-        tab[n++] = fIrqRes[i]->base;
+        n += fdt_irq_spec(ctx, tab + n, fIrqRes[i]->base);
     }
     fdt->PropTabU32("interrupts", tab, n);
     fdt->PropStrList("interrupt-names", "msi", "inta", "intb", "intc", "intd",
@@ -650,8 +651,8 @@ void PCIHostDWDevice::BuildFDT(FDTContext &ctx)
         tab[n++] = 0;
         tab[n++] = 0;
         tab[n++] = pin; /* child interrupt specifier */
-        tab[n++] = ctx.plic_phandle;
-        tab[n++] = fIrqRes[pin - 1]->base;
+        tab[n++] = ctx.irq_phandle;
+        n += fdt_irq_spec(ctx, tab + n, fIrqRes[pin - 1]->base);
     }
     assert(n <= (int)countof(tab));
     fdt->PropTabU32("interrupt-map", tab, n);

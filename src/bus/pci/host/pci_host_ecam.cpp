@@ -124,6 +124,11 @@ bool PCIHostECAMDevice::Prepare()
     fPciBus = pci_bus_init(sys->MemMap(),
                            fIoRes != nullptr ? sys->PortMap() : nullptr);
     pci_bus_set_pcie(fPciBus, true);
+    /* The bridge has no MSI receiver, but the machine may have an MSI
+       controller the messages can be written to directly. */
+    if (sys->MsiTarget() != nullptr) {
+        pci_bus_set_msi_target(fPciBus, sys->MsiTarget());
+    }
     fChildBus = pci_attach_bus_create(this, fPciBus);
     return fChildBus != nullptr;
 }
@@ -173,7 +178,8 @@ void PCIHostECAMDevice::EcamWrite(uint32_t offset, uint32_t val, int size_log2)
 void PCIHostECAMDevice::BuildFDT(FDTContext &ctx)
 {
     FDTBuilder *fdt = ctx.fdt;
-    uint32_t tab[PCIE_ECAM_SLOT_COUNT * 4 * 6];
+    /* an interrupt-map entry: unit address, pin, phandle and specifier */
+    uint32_t tab[PCIE_ECAM_SLOT_COUNT * 4 * (5 + FDT_IRQ_SPEC_MAX)];
     int n;
 
     fdt->BeginNodeNum("pci", fEcamRes->base);
@@ -247,12 +253,16 @@ void PCIHostECAMDevice::BuildFDT(FDTContext &ctx)
             tab[n++] = 0;
             tab[n++] = 0;
             tab[n++] = pin;         /* child interrupt specifier */
-            tab[n++] = ctx.plic_phandle;
-            tab[n++] = fIrqRes[intx]->base;
+            tab[n++] = ctx.irq_phandle;
+            n += fdt_irq_spec(ctx, tab + n, fIrqRes[intx]->base);
         }
     }
     assert(n <= (int)countof(tab));
     fdt->PropTabU32("interrupt-map", tab, n);
+
+    if (ctx.msi_phandle != 0) {
+        fdt->PropU32("msi-parent", ctx.msi_phandle);
+    }
 
     fdt->EndNode();
 }

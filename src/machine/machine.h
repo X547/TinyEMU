@@ -151,6 +151,9 @@ typedef struct {
     char *machine_name;
     uint64_t ram_size;
     int cpu_count;
+    /* "plic", "aplic" or "aplic-imsic"; NULL when the configuration does not
+       say, which leaves the choice to the machine */
+    char *interrupt_controller;
     bool rtc_real_time;
     bool rtc_local_time;
     /* Whether the configuration declares a display, and how big. The window

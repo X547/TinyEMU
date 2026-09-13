@@ -53,6 +53,18 @@ public:
 };
 
 
+/* What a hart implements for interrupt control, as the machine's interrupt
+   controller requires: the base privileged architecture, the Smaia and Ssaia
+   CSRs, or those together with IMSIC interrupt files. */
+enum RISCVInterruptArch {
+    RISCV_INTR_BASE,
+    RISCV_INTR_AIA,
+    RISCV_INTR_AIA_IMSIC,
+};
+
+/* Interrupt identities each IMSIC interrupt file implements. */
+#define RISCV_IMSIC_NUM_IDS 255
+
 /* One implementation per supported XLEN; riscv_cpu.cpp is compiled once for
    each and each build keeps its implementation class internal. */
 class RISCVCPU {
@@ -72,6 +84,10 @@ public:
     virtual uint32_t Misa() = 0;
     virtual void FlushTlbWriteRangeRam(uint8_t *ram_ptr, size_t ram_size) = 0;
     virtual void SetRtcTimeSource(RtcTimeSource *source) = 0;
+    virtual void SetInterruptArch(RISCVInterruptArch arch) = 0;
+    /* A write of 'id' to the seteipnum register of the hart's machine or
+       supervisor level IMSIC interrupt file. */
+    virtual void ImsicSetPending(bool supervisor, uint32_t id) = 0;
 };
 
 int riscv_cpu_get_max_xlen(void);
