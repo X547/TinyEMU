@@ -63,6 +63,7 @@ public:
     int stdin_fd = 0;
     int console_esc_state = 0;
     bool resize_pending = false;
+    bool quit_requested = false;
 
     void WriteData(const uint8_t *buf, int len) override;
     int ReadData(uint8_t *buf, int len) override;
@@ -134,7 +135,8 @@ int STDIODevice::ReadData(uint8_t *buf, int len)
             switch(ch) {
             case 'x':
                 printf("Terminated\n");
-                exit(0);
+                s->quit_requested = true;
+                return j;
             case 'h':
                 printf("\n"
                        "C-a h   print this help\n"
@@ -614,14 +616,17 @@ void virt_machine_run(VirtMachine *m)
                 m->serial_console->ReceiveByte(ch);
             }
         }
+        if (static_cast<STDIODevice *>(m->console)->quit_requested)
+            m->RequestShutdown(0);
 #endif
     }
 
 #ifdef CONFIG_SDL
     sdl_refresh(m);
 #endif
-    
-    m->Interp(MAX_EXEC_CYCLE);
+
+    if (!m->shutdown_requested)
+        m->Interp(MAX_EXEC_CYCLE);
 }
 
 /*******************************************************/
@@ -797,7 +802,7 @@ int main(int argc, char **argv)
 {
     VirtMachine *s;
     const char *path, *cmdline, *build_preload_file;
-    int c, option_index, ram_size, accel_enable;
+    int c, option_index, ram_size, accel_enable, exit_code;
     bool allow_ctrlc;
     BlockDeviceModeEnum drive_mode;
     VirtMachineParams p_s, *p = &p_s;
@@ -908,9 +913,10 @@ int main(int argc, char **argv)
         s->net->target->SetCarrier(true);
     }
     
-    for(;;) {
+    while (!s->shutdown_requested) {
         virt_machine_run(s);
     }
+    exit_code = s->exit_code;
     delete s;
-    return 0;
+    return exit_code;
 }

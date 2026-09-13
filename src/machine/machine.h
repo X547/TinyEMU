@@ -191,8 +191,21 @@ public:
     /* 16550 console, when the machine has one. Console input goes here only
        if no virtio console is present to take it. */
     SerialState *serial_console = nullptr;
+    /* Set once something asks the emulator to stop; the main loop then
+       returns exit_code. */
+    bool shutdown_requested = false;
+    int exit_code = 0;
 
     virtual ~VirtMachine() = default;
+
+    /* the first request decides the exit code */
+    void RequestShutdown(int code)
+    {
+        if (!shutdown_requested) {
+            shutdown_requested = true;
+            exit_code = code;
+        }
+    }
 
     /* in ms */
     virtual int GetSleepDuration(int delay) = 0;

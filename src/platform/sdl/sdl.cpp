@@ -355,7 +355,8 @@ void sdl_refresh(VirtMachine *m)
             sdl_handle_mouse_button_event(ev, m);
             break;
         case SDL_QUIT:
-            exit(0);
+            m->RequestShutdown(0);
+            break;
         }
     }
 }

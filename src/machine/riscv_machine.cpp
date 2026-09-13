@@ -242,6 +242,11 @@ static void htif_handle_cmd(RISCVMachine *s)
 {
     uint32_t device, cmd;
 
+    /* the guest keeps running until the current step ends and may repeat
+       the power off request meanwhile */
+    if (s->shutdown_requested)
+        return;
+
     device = s->htif_tohost >> 56;
     cmd = (s->htif_tohost >> 48) & 0xff;
     if (device == 0 && cmd == 0 && (s->htif_tohost & 1)) {
@@ -257,7 +262,7 @@ static void htif_handle_cmd(RISCVMachine *s)
         }
         /* Only the low 8 bits survive wait(2), and 0 there would turn a failure
            into a pass, so codes that do not fit are reported as 255. */
-        exit(code < 256 ? (int)code : 255);
+        s->RequestShutdown(code < 256 ? (int)code : 255);
     } else if (device == 1 && cmd == 1) {
         uint8_t buf[1];
         buf[0] = s->htif_tohost & 0xff;
@@ -1010,7 +1015,7 @@ void RISCVMachine::Interp(int max_exec_cycle)
     /* Round robin until the budget is spent or every hart is waiting for
        an interrupt. */
     uint64_t executed = 0;
-    while (executed < (uint64_t)max_exec_cycle) {
+    while (executed < (uint64_t)max_exec_cycle && !shutdown_requested) {
         bool ran = false;
         for (int hart = 0; hart < hart_count; hart++) {
             RISCVCPU *cpu = cpus[hart];
