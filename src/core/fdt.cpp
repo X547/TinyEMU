@@ -271,11 +271,11 @@ int FDTBuilder::Output(uint8_t *dst)
     h->size_dt_strings = cpu_to_be32(dt_strings_size);
     h->size_dt_struct = cpu_to_be32(dt_struct_size);
 
+    /* The blocks go in the order dtc writes them: memory reservations,
+       structure, strings. libfdt refuses to edit a blob in place when they
+       are in any other order, and firmware such as OpenSBI edits the tree it
+       hands on in place, silently dropping its changes when that fails. */
     pos = sizeof(struct fdt_header);
-
-    h->off_dt_struct = cpu_to_be32(pos);
-    memcpy(dst + pos, fTab, dt_struct_size);
-    pos += dt_struct_size;
 
     /* align to 8 */
     while ((pos & 7) != 0) {
@@ -293,6 +293,10 @@ int FDTBuilder::Output(uint8_t *dst)
     re->address = 0;
     re->size = 0;
     pos += sizeof(struct fdt_reserve_entry);
+
+    h->off_dt_struct = cpu_to_be32(pos);
+    memcpy(dst + pos, fTab, dt_struct_size);
+    pos += dt_struct_size;
 
     h->off_dt_strings = cpu_to_be32(pos);
     memcpy(dst + pos, fStringTable, dt_strings_size);
