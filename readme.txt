@@ -13,7 +13,8 @@ TinyEMU System Emulator by Fabrice Bellard
   - Compressed instructions
   - dynamic XLEN change
 
-- x86 system emulator based on KVM
+- x86 system emulator based on KVM, with an i686 interpreter (x87 FPU,
+  no SSE) when KVM is not available
 
 - VirtIO console, network, block device, input and 9P filesystem
 
@@ -545,10 +546,12 @@ the exit status, with no need to grep the console log.
 
 4.4) x86 emulator
 
-A small x86 emulator is included. It is not really an emulator because
-it uses the Linux KVM API to run the x86 code at near native
-performance. The x86 emulator uses the same set of VirtIO devices as
-the RISCV emulator and is able to run many operating systems.
+A small x86 emulator is included. When the Linux KVM API is available it
+runs the x86 code at near native performance. Otherwise, or with
+-no-accel, an interpreter takes its place: a 32 bit i686 with an x87 FPU
+and no SSE, which is slower but needs nothing from the host. The x86
+emulator uses the same set of VirtIO devices as the RISCV emulator and is
+able to run many operating systems.
 
 The x86 emulator accepts a Linux kernel image (bzImage). No BIOS image
 is necessary.
