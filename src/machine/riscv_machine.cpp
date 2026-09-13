@@ -922,6 +922,7 @@ riscv_machine_init(const VirtMachineParams *p)
     ctx.params = p;
     ctx.console = p->console;
     ctx.serial_output = s.get();
+    ctx.machine = s.get();
 
     if (!device_build_tree(s->bus.get(), p->root_devices, &ctx)) {
         return nullptr;

@@ -1897,6 +1897,7 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     ctx.params = p;
     ctx.console = p->console;
     ctx.serial_output = s;
+    ctx.machine = s;
 
     if (!device_build_tree(s->bus, p->root_devices, &ctx) ||
         !s->bus->AllocateAll() || !s->bus->RealizeAll()) {

@@ -152,6 +152,7 @@ inc = include_directories(
   'src/device/input',
   'src/device/intc',
   'src/device/net',
+  'src/device/power',
   'src/device/storage',
   'src/fs',
   'src/machine',
@@ -207,6 +208,7 @@ subdir('src/device/fs')
 subdir('src/device/input')
 subdir('src/device/intc')
 subdir('src/device/net')
+subdir('src/device/power')
 subdir('src/device/storage')
 subdir('src/fs')
 subdir('src/machine')

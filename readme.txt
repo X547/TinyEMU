@@ -175,6 +175,10 @@ Device types:
                          on line 4 unless "reg" (the port) and "irq" say
                          otherwise
   simplefb               "width", "height"
+  syscon-poweroff        power off register on the FDT bus, described as a
+                         "syscon" block and a "syscon-poweroff" node, which
+                         OpenSBI and Linux use to power off; see 4.3 for the
+                         exit status
   pci-host-ecam-generic  ECAM PCIe host bridge; "bus_count" (ECAM window
                          size in MB, default 16), "mmio_size" (aperture size
                          in MB, default 256), "mmio64_size" (size in MB of a
@@ -563,6 +567,12 @@ not fit in the 8 bits a process exit status carries are reported as
 255, so that a failing guest is never mistaken for a passing one. This
 lets a guest act as an automated test: it reports pass or fail through
 the exit status, with no need to grep the console log.
+
+The "syscon-poweroff" device does the same from a single 32 bit register,
+with the values of the SiFive test device: 0x5555 powers off with exit
+status 0, and (code << 16) | 0x3333 powers off with "code", or 1 when
+"code" is 0. Firmware that finds no HTIF registers, such as a generic
+OpenSBI, powers off through this device instead.
 
 4.4) x86 emulator
 

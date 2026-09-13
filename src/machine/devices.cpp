@@ -39,6 +39,7 @@
 #include "sd.h"
 #include "sdhci.h"
 #include "simplefb.h"
+#include "syscon_poweroff.h"
 #include "usb.h"
 #include "xhci.h"
 
@@ -108,6 +109,10 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
         }
 #endif
         return simplefb_node_create(ctx, width, height);
+    }
+
+    if (strcmp(type, "syscon-poweroff") == 0) {
+        return syscon_poweroff_node_create(ctx);
     }
 
 #ifdef CONFIG_X86EMU

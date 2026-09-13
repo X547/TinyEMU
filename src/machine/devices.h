@@ -34,6 +34,8 @@
    that no device needs to know the machine type it lives in. */
 struct DeviceContext {
     const VirtMachineParams *params = nullptr;
+    /* for a device that stops the emulator */
+    VirtMachine *machine = nullptr;
     CharacterDevice *console = nullptr;
     SerialOutput *serial_output = nullptr;
 
