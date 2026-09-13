@@ -194,14 +194,14 @@ public:
    USBDeviceNode attaches a USB device. */
 class SCSIDeviceNode final: public Device {
 private:
-    SCSIDevice *fDev;
+    std::unique_ptr<SCSIDevice> fDev;
     int fLun; /* < 0 asks for the first free unit */
 
 public:
-    SCSIDeviceNode(const char *name, SCSIDevice *dev, int lun);
+    SCSIDeviceNode(const char *name, std::unique_ptr<SCSIDevice> dev, int lun);
     ~SCSIDeviceNode() override;
 
-    SCSIDevice *Dev() const {return fDev;}
+    SCSIDevice *Dev() const {return fDev.get();}
 
     bool Realize() override;
 };
@@ -221,4 +221,4 @@ void scsi_set_good(SCSIRequest *req, uint32_t length);
 int scsi_cdb_len(uint8_t opcode);
 
 /* scsi_disk.cpp */
-Device *scsi_disk_node_create(BlockDevice *bs, int lun);
+Device *scsi_disk_node_create(std::unique_ptr<BlockDevice> bs, int lun);

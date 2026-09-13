@@ -361,16 +361,13 @@ bool ATABus::AssignResources(Device *dev)
 
 //#pragma mark - ATADeviceNode
 
-ATADeviceNode::ATADeviceNode(const char *name, ATADevice *dev):
-    Device(name), fDev(dev)
+ATADeviceNode::ATADeviceNode(const char *name, std::unique_ptr<ATADevice> dev):
+    Device(name), fDev(std::move(dev))
 {
 }
 
 
-ATADeviceNode::~ATADeviceNode()
-{
-    delete fDev;
-}
+ATADeviceNode::~ATADeviceNode() = default;
 
 
 bool ATADeviceNode::Realize()
@@ -380,5 +377,5 @@ bool ATADeviceNode::Realize()
         vm_error("%s: must be attached to an ATA bus\n", Name());
         return false;
     }
-    return bus->Target()->AttachDevice(fDev);
+    return bus->Target()->AttachDevice(fDev.get());
 }

@@ -311,10 +311,10 @@ private:
     class Completion;
     friend class Completion;
 
-    BlockDevice *fBlockDev;
+    std::unique_ptr<BlockDevice> fBlockDev;
     bool fReadOnly;
 
-    Completion *fCompletion = nullptr;
+    std::unique_ptr<Completion> fCompletion;
     SDDataCompletion *fPendingCompletion = nullptr;
     bool fPendingIsRead = false;
 
@@ -394,10 +394,11 @@ protected:
     bool HasPending() const {return fPendingCompletion != nullptr;}
 
 public:
-    SDMemoryCard(const char *name, BlockDevice *bs, bool read_only);
+    SDMemoryCard(const char *name, std::unique_ptr<BlockDevice> bs,
+                 bool read_only);
     ~SDMemoryCard() override;
 
-    BlockDevice *Backend() const {return fBlockDev;}
+    BlockDevice *Backend() const {return fBlockDev.get();}
     uint64_t BlockCount() const {return fBlockCount;}
 
     bool ReadOnly() const override {return fReadOnly;}
@@ -448,13 +449,13 @@ public:
    attaches a USB device. */
 class SDDeviceNode final: public Device {
 private:
-    SDDevice *fDev;
+    std::unique_ptr<SDDevice> fDev;
 
 public:
-    SDDeviceNode(const char *name, SDDevice *dev);
+    SDDeviceNode(const char *name, std::unique_ptr<SDDevice> dev);
     ~SDDeviceNode() override;
 
-    SDDevice *Dev() const {return fDev;}
+    SDDevice *Dev() const {return fDev.get();}
 
     bool Realize() override;
 };
@@ -477,7 +478,7 @@ void sd_reg_set_bits(uint8_t *reg, int size, int hi, int lo, uint64_t value);
    table of names. */
 
 /* sd_card.cpp */
-Device *sd_card_node_create(BlockDevice *bs, bool read_only);
+Device *sd_card_node_create(std::unique_ptr<BlockDevice> bs, bool read_only);
 
 /* mmc_card.cpp */
-Device *mmc_card_node_create(BlockDevice *bs, bool read_only);
+Device *mmc_card_node_create(std::unique_ptr<BlockDevice> bs, bool read_only);

@@ -138,22 +138,17 @@ void I440FXState::SetIRQ(int irq_num, int irq_level)
    nested inside the node are added to it before any of them is realized. */
 class I440FXDevice final: public Device {
 private:
-    I440FXState *fState = nullptr;
-    PCIBus *fPciBus = nullptr;
-    Bus *fChildBus = nullptr;
+    std::unique_ptr<I440FXState> fState;
+    PCIBusPtr fPciBus;
+    /* after fPciBus, so the devices go before the functions they registered */
+    std::unique_ptr<Bus> fChildBus;
     Resource *fAddrRes = nullptr;
     Resource *fDataRes = nullptr;
 
 public:
     I440FXDevice(const char *name): Device(name) {}
 
-    ~I440FXDevice() override
-    {
-        delete fChildBus;
-        delete fState;
-    }
-
-    I440FXState *State() const {return fState;}
+    I440FXState *State() const {return fState.get();}
 
     bool Prepare() override
     {
@@ -171,9 +166,9 @@ public:
             return false;
         }
 
-        fState = new I440FXState();
+        fState = std::make_unique<I440FXState>();
         fPciBus = pci_bus_init(sys->MemMap(), sys->PortMap());
-        fState->pci_bus = fPciBus;
+        fState->pci_bus = fPciBus.get();
         /* The lines are the machine's, which on a PC are wired before any
            device exists, so the array is contiguous from line 0. */
         fState->pic_irqs = sys->IrqSignalFor(0);
@@ -183,25 +178,25 @@ public:
            registers first. */
         for (int i = 0; i < 4; i++) {
             IRQSignal sig;
-            sig.Init(fState, i);
-            pci_bus_set_irq(fPciBus, i, &sig);
+            sig.Init(fState.get(), i);
+            pci_bus_set_irq(fPciBus.get(), i, &sig);
         }
 
-        fState->pci_dev = pci_register_device(fPciBus, "i440FX", 0, 0x8086,
-                                              0x1237, 0x02, 0x0600);
+        fState->pci_dev = pci_register_device(fPciBus.get(), "i440FX", 0,
+                                              0x8086, 0x1237, 0x02, 0x0600);
         /* Red Hat, Inc. / QEMU virtual machine, which is the pair guests
            recognise. */
         pci_device_set_config16(fState->pci_dev, PCI_SUBSYSTEM_VENDOR_ID,
                                 0x1af4);
         pci_device_set_config16(fState->pci_dev, PCI_SUBSYSTEM_ID, 0x1100);
 
-        fState->piix3_dev = pci_register_device(fPciBus, "PIIX3", 8, 0x8086,
-                                                0x7000, 0x00, 0x0601);
+        fState->piix3_dev = pci_register_device(fPciBus.get(), "PIIX3", 8,
+                                                0x8086, 0x7000, 0x00, 0x0601);
         pci_device_set_config8(fState->piix3_dev, PCI_HEADER_TYPE,
                                PCI_HEADER_TYPE_NORMAL |
                                PCI_HEADER_TYPE_MULTI);
 
-        fChildBus = pci_attach_bus_create(this, fPciBus);
+        fChildBus = pci_attach_bus_create(this, fPciBus.get());
         return fChildBus != nullptr;
     }
 
@@ -218,7 +213,7 @@ public:
         return true;
     }
 
-    Bus *ChildBus() override {return fChildBus;}
+    Bus *ChildBus() override {return fChildBus.get();}
 };
 
 

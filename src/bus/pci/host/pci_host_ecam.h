@@ -57,8 +57,9 @@
    time, so the table and the emulation cannot disagree. */
 class PCIHostECAMDevice final: public Device {
 private:
-    PCIBus *fPciBus = nullptr;
-    Bus *fChildBus = nullptr;
+    PCIBusPtr fPciBus;
+    /* after fPciBus, so the devices go before the functions they registered */
+    std::unique_ptr<Bus> fChildBus;
     Resource *fEcamRes = nullptr;
     Resource *fMmioRes = nullptr;
     Resource *fMmio64Res = nullptr;
@@ -78,12 +79,11 @@ private:
 public:
     PCIHostECAMDevice(const char *name, int bus_count, uint64_t mmio_size,
                       uint64_t mmio64_size, uint64_t io_size);
-    ~PCIHostECAMDevice() override;
 
     bool Prepare() override;
     bool Realize() override;
     void BuildFDT(FDTContext &ctx) override;
-    Bus *ChildBus() override {return fChildBus;}
+    Bus *ChildBus() override {return fChildBus.get();}
 
     DeviceIOAdapter<PCIHostECAMDevice, &PCIHostECAMDevice::EcamRead,
                     &PCIHostECAMDevice::EcamWrite> fEcamIo {*this};

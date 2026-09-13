@@ -32,6 +32,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <ctype.h>
+#include <string>
 
 #include "cutils.h"
 #include "json.h"
@@ -95,12 +96,9 @@ static JSONValue parse_string(const char **pp)
 
 static JSONProperty *json_object_get2(JSONObject *obj, const char *name)
 {
-    JSONProperty *f;
-    int i;
-    for(i = 0; i < obj->len; i++) {
-        f = &obj->props[i];
-        if (!strcmp(f->name.u.str->data, name))
-            return f;
+    for (JSONProperty &f : obj->props) {
+        if (!strcmp(f.name.u.str->data, name))
+            return &f;
     }
     return NULL;
 }
@@ -123,8 +121,7 @@ int json_object_set(JSONValue val, const char *name, JSONValue prop_val)
 {
     JSONObject *obj;
     JSONProperty *f;
-    int new_size;
-    
+
     if (val.type != JSON_OBJ)
         return -1;
     obj = val.u.obj;
@@ -133,14 +130,7 @@ int json_object_set(JSONValue val, const char *name, JSONValue prop_val)
         json_free(f->value);
         f->value = prop_val;
     } else {
-        if (obj->len >= obj->size) {
-            new_size = max_int(obj->len + 1, obj->size * 3 / 2);
-            obj->props = static_cast<JSONProperty *>(realloc(obj->props, new_size * sizeof(JSONProperty)));
-            obj->size = new_size;
-        }
-        f = &obj->props[obj->len++];
-        f->name = json_string_new(name);
-        f->value = prop_val;
+        obj->props.push_back({json_string_new(name), prop_val});
     }
     return 0;
 }
@@ -152,7 +142,7 @@ JSONValue json_array_get(JSONValue val, unsigned int idx)
     if (val.type != JSON_ARRAY)
         return json_undefined_new();
     array = val.u.array;
-    if (idx < array->len) {
+    if (idx < array->tab.size()) {
         return array->tab[idx];
     } else {
         return json_undefined_new();
@@ -162,21 +152,15 @@ JSONValue json_array_get(JSONValue val, unsigned int idx)
 int json_array_set(JSONValue val, unsigned int idx, JSONValue prop_val)
 {
     JSONArray *array;
-    int new_size;
-    
+
     if (val.type != JSON_ARRAY)
         return -1;
     array = val.u.array;
-    if (idx < array->len) {
+    if (idx < array->tab.size()) {
         json_free(array->tab[idx]);
         array->tab[idx] = prop_val;
-    } else if (idx == array->len) {
-        if (array->len >= array->size) {
-            new_size = max_int(array->len + 1, array->size * 3 / 2);
-            array->tab = static_cast<JSONValue *>(realloc(array->tab, new_size * sizeof(JSONValue)));
-            array->size = new_size;
-        }
-        array->tab[array->len++] = prop_val;
+    } else if (idx == array->tab.size()) {
+        array->tab.push_back(prop_val);
     } else {
         return -1;
     }
@@ -232,20 +216,16 @@ JSONValue __attribute__((format(printf, 1, 2))) json_error_new(const char *fmt, 
 JSONValue json_object_new(void)
 {
     JSONValue val;
-    JSONObject *obj;
-    obj = static_cast<JSONObject *>(mallocz(sizeof(JSONObject)));
     val.type = JSON_OBJ;
-    val.u.obj = obj;
+    val.u.obj = new JSONObject();
     return val;
 }
 
 JSONValue json_array_new(void)
 {
     JSONValue val;
-    JSONArray *array;
-    array = static_cast<JSONArray *>(mallocz(sizeof(JSONArray)));
     val.type = JSON_ARRAY;
-    val.u.array = array;
+    val.u.array = new JSONArray();
     return val;
 }
 
@@ -262,29 +242,17 @@ void json_free(JSONValue val)
     case JSON_UNDEFINED:
         break;
     case JSON_ARRAY:
-        {
-            JSONArray *array = val.u.array;
-            int i;
-            
-            for(i = 0; i < array->len; i++) {
-                json_free(array->tab[i]);
-            }
-            free(array);
+        for (JSONValue &el : val.u.array->tab) {
+            json_free(el);
         }
+        delete val.u.array;
         break;
     case JSON_OBJ:
-        {
-            JSONObject *obj = val.u.obj;
-            JSONProperty *f;
-            int i;
-            
-            for(i = 0; i < obj->len; i++) {
-                f = &obj->props[i];
-                json_free(f->name);
-                json_free(f->value);
-            }
-            free(obj);
+        for (JSONProperty &f : val.u.obj->props) {
+            json_free(f.name);
+            json_free(f.value);
         }
+        delete val.u.obj;
         break;
     default:
         abort();
@@ -339,12 +307,33 @@ static int parse_ident(char *buf, int buf_size, const char **pp)
     return 0;
 }
 
+/* Frees a value under construction unless it is released to the caller. */
+class JSONValueGuard {
+private:
+    JSONValue fVal;
+
+public:
+    explicit JSONValueGuard(JSONValue val): fVal(val) {}
+    ~JSONValueGuard() {json_free(fVal);}
+
+    JSONValueGuard(const JSONValueGuard &) = delete;
+    JSONValueGuard &operator=(const JSONValueGuard &) = delete;
+
+    JSONValue Get() const {return fVal;}
+    JSONValue Release()
+    {
+        JSONValue val = fVal;
+        fVal = json_undefined_new();
+        return val;
+    }
+};
+
 JSONValue json_parse_value2(const char **pp)
 {
     char buf[128];
     const char *p;
-    JSONValue val, val1, tag;
-    
+    JSONValue val;
+
     p = *pp;
     skip_spaces(&p);
     if (*p == '\0') {
@@ -356,27 +345,25 @@ JSONValue json_parse_value2(const char **pp)
         val = parse_string(&p);
     } else if (*p == '{') {
         p++;
-        val = json_object_new();
+        JSONValueGuard obj(json_object_new());
         for(;;) {
+            std::string name;
+
             skip_spaces(&p);
             if (*p == '}') {
                 p++;
                 break;
             }
             if (*p == '"') {
-                tag = parse_string(&p);
-                if (json_is_error(tag))
-                    return tag;
-            } else if (is_ident_first(*p)) {
-                if (parse_ident(buf, sizeof(buf), &p) < 0)
-                    goto invalid_prop;
-                tag = json_string_new(buf);
-            } else {
-                goto invalid_prop;
+                JSONValueGuard tag(parse_string(&p));
+                if (json_is_error(tag.Get()))
+                    return tag.Release();
+                name = tag.Get().u.str->data;
+            } else if (is_ident_first(*p) &&
+                       parse_ident(buf, sizeof(buf), &p) == 0) {
+                name = buf;
             }
-            //            printf("property: %s\n", json_get_str(tag));
-            if (tag.u.str->len == 0) {
-            invalid_prop:
+            if (name.empty()) {
                 return json_error_new("Invalid property name");
             }
             skip_spaces(&p);
@@ -384,9 +371,8 @@ JSONValue json_parse_value2(const char **pp)
                 return json_error_new("':' expected");
             }
             p++;
-            
-            val1 = json_parse_value2(&p);
-            json_object_set(val, tag.u.str->data, val1);
+
+            json_object_set(obj.Get(), name.c_str(), json_parse_value2(&p));
 
             skip_spaces(&p);
             if (*p == ',') {
@@ -395,11 +381,12 @@ JSONValue json_parse_value2(const char **pp)
                 return json_error_new("expecting ',' or '}'");
             }
         }
+        val = obj.Release();
     } else if (*p == '[') {
         int idx;
-        
+
         p++;
-        val = json_array_new();
+        JSONValueGuard array(json_array_new());
         idx = 0;
         for(;;) {
             skip_spaces(&p);
@@ -407,8 +394,7 @@ JSONValue json_parse_value2(const char **pp)
                 p++;
                 break;
             }
-            val1 = json_parse_value2(&p);
-            json_array_set(val, idx++, val1);
+            json_array_set(array.Get(), idx++, json_parse_value2(&p));
 
             skip_spaces(&p);
             if (*p == ',') {
@@ -417,6 +403,7 @@ JSONValue json_parse_value2(const char **pp)
                 return json_error_new("expecting ',' or ']'");
             }
         }
+        val = array.Release();
     } else if (is_ident_first(*p)) {
         if (parse_ident(buf, sizeof(buf), &p) < 0)
             goto unknown_id;

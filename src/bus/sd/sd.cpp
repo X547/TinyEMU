@@ -82,19 +82,17 @@ public:
 };
 
 
-SDMemoryCard::SDMemoryCard(const char *name, BlockDevice *bs, bool read_only):
-    SDDevice(name), fBlockDev(bs), fReadOnly(read_only)
+SDMemoryCard::SDMemoryCard(const char *name, std::unique_ptr<BlockDevice> bs,
+                           bool read_only):
+    SDDevice(name), fBlockDev(std::move(bs)), fReadOnly(read_only)
 {
-    fCompletion = new Completion(*this);
+    fCompletion = std::make_unique<Completion>(*this);
     int64_t sectors = fBlockDev->SectorCount();
     fBlockCount = sectors > 0 ? (uint64_t)sectors : 0;
 }
 
 
-SDMemoryCard::~SDMemoryCard()
-{
-    delete fCompletion;
-}
+SDMemoryCard::~SDMemoryCard() = default;
 
 
 void SDMemoryCard::Reset()
@@ -281,7 +279,7 @@ SDXferStatusEnum SDMemoryCard::ReadBlock(uint8_t *buf, uint32_t len,
 
     fPendingCompletion = completion;
     fPendingIsRead = true;
-    int ret = fBlockDev->ReadAsync(fDataSector, buf, 1, fCompletion);
+    int ret = fBlockDev->ReadAsync(fDataSector, buf, 1, fCompletion.get());
     if (ret > 0) {
         return SD_XFER_PENDING;
     }
@@ -315,7 +313,7 @@ SDXferStatusEnum SDMemoryCard::WriteBlock(const uint8_t *buf, uint32_t len,
 
     fPendingCompletion = completion;
     fPendingIsRead = false;
-    int ret = fBlockDev->WriteAsync(fDataSector, buf, 1, fCompletion);
+    int ret = fBlockDev->WriteAsync(fDataSector, buf, 1, fCompletion.get());
     if (ret > 0) {
         return SD_XFER_PENDING;
     }
@@ -377,16 +375,13 @@ bool SDBus::AssignResources(Device *dev)
 
 //#pragma mark - SDDeviceNode
 
-SDDeviceNode::SDDeviceNode(const char *name, SDDevice *dev):
-    Device(name), fDev(dev)
+SDDeviceNode::SDDeviceNode(const char *name, std::unique_ptr<SDDevice> dev):
+    Device(name), fDev(std::move(dev))
 {
 }
 
 
-SDDeviceNode::~SDDeviceNode()
-{
-    delete fDev;
-}
+SDDeviceNode::~SDDeviceNode() = default;
 
 
 bool SDDeviceNode::Realize()
@@ -396,5 +391,5 @@ bool SDDeviceNode::Realize()
         vm_error("%s: must be attached to an SD bus\n", Name());
         return false;
     }
-    return bus->Target()->AttachDevice(fDev);
+    return bus->Target()->AttachDevice(fDev.get());
 }

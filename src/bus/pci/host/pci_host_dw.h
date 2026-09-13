@@ -97,10 +97,11 @@ struct PCIeDWMsiGroup {
    and the devices go on the second one. */
 class PCIHostDWDevice final: public Device, public PCIMsiTarget {
 private:
-    PCIBus *fRootBus = nullptr; /* bus 0: the root port alone */
+    PCIBusPtr fRootBus;         /* bus 0: the root port alone */
     PCIBus *fDevBus = nullptr;  /* the secondary bus, where devices live */
     PCIDevice *fRootPort = nullptr;
-    Bus *fChildBus = nullptr;
+    /* after fRootBus, so the devices go before the functions they registered */
+    std::unique_ptr<Bus> fChildBus;
 
     Resource *fDbiRes = nullptr;
     Resource *fConfigRes = nullptr;
@@ -149,12 +150,11 @@ public:
     PCIHostDWDevice(const char *name, const char *compatible,
                     uint64_t mmio_size, uint64_t mmio64_size,
                     uint64_t io_size, int bus_count);
-    ~PCIHostDWDevice() override;
 
     bool Prepare() override;
     bool Realize() override;
     void BuildFDT(FDTContext &ctx) override;
-    Bus *ChildBus() override {return fChildBus;}
+    Bus *ChildBus() override {return fChildBus.get();}
 
     void SendMsi(uint64_t addr, uint32_t data) override;
 

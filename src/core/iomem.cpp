@@ -180,9 +180,10 @@ PhysMemoryRange *PhysMemoryMap::RegisterRam(uint64_t addr, uint64_t size,
         pr->dirty_bits_size = ((nb_pages + 31) / 32) * sizeof(uint32_t);
         pr->dirty_bits_index = 0;
         for (int i = 0; i < 2; i++) {
-            pr->dirty_bits_tab[i] = mallocz_t<uint32_t>(pr->dirty_bits_size);
+            pr->dirty_bits_tab[i] = std::make_unique<uint32_t[]>(
+                pr->dirty_bits_size / sizeof(uint32_t));
         }
-        pr->dirty_bits = pr->dirty_bits_tab[pr->dirty_bits_index];
+        pr->dirty_bits = pr->dirty_bits_tab[pr->dirty_bits_index].get();
     }
     return pr;
 }
@@ -217,7 +218,7 @@ const uint32_t *PhysMemoryMap::GetDirtyBits(PhysMemoryRange *pr)
     }
 
     pr->dirty_bits_index ^= 1;
-    pr->dirty_bits = pr->dirty_bits_tab[pr->dirty_bits_index];
+    pr->dirty_bits = pr->dirty_bits_tab[pr->dirty_bits_index].get();
     memset(pr->dirty_bits, 0, pr->dirty_bits_size);
     return dirty_bits;
 }

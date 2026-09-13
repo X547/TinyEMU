@@ -157,12 +157,12 @@ static void cmos_update_time(CMOSState *s, bool set_century)
     }
 }
 
-CMOSState *cmos_init(PhysMemoryMap *port_map, int addr,
-                     IRQSignal *irq, bool use_local_time)
+std::unique_ptr<CMOSState> cmos_init(PhysMemoryMap *port_map, int addr,
+                                     IRQSignal *irq, bool use_local_time)
 {
-    CMOSState *s;
+    std::unique_ptr<CMOSState> s;
     
-    s = new CMOSState();
+    s = std::make_unique<CMOSState>();
     s->use_local_time = use_local_time;
     
     s->cmos_index = 0;
@@ -172,7 +172,7 @@ CMOSState *cmos_init(PhysMemoryMap *port_map, int addr,
     s->cmos_data[RTC_REG_C] = 0x00;
     s->cmos_data[RTC_REG_D] = 0x80;
 
-    cmos_update_time(s, true);
+    cmos_update_time(s.get(), true);
     
     s->irq = irq;
     
@@ -328,17 +328,19 @@ struct PICState {
 
 static void pic_reset(PICState *s);
 
-PICState *pic_init(PhysMemoryMap *port_map, int port, int elcr_port,
-                   int elcr_mask, PICUpdateTarget *update_target)
+std::unique_ptr<PICState> pic_init(PhysMemoryMap *port_map, int port,
+                                   int elcr_port,
+                                   int elcr_mask,
+                                   PICUpdateTarget *update_target)
 {
-    PICState *s;
+    std::unique_ptr<PICState> s;
 
-    s = new PICState();
+    s = std::make_unique<PICState>();
     s->elcr_mask = elcr_mask;
     s->update_target = update_target;
     port_map->RegisterDevice(port, 2, &s->fIo, DEVIO_SIZE8);
     port_map->RegisterDevice(elcr_port, 1, &s->fElcrIo, DEVIO_SIZE8);
-    pic_reset(s);
+    pic_reset(s.get());
     return s;
 }
 
@@ -573,7 +575,7 @@ public:
 };
 
 struct PIC2State: public IRQTarget, public PICUpdateTarget {
-    PICState *pics[2] {};
+    std::unique_ptr<PICState> pics[2];
     int irq_requested = 0;
     CPUIRQTarget *cpu_irq_target = nullptr;
 #if defined(DEBUG_PIC)
@@ -585,21 +587,23 @@ struct PIC2State: public IRQTarget, public PICUpdateTarget {
     void UpdatePICIRQ() override;
 };
 
-PIC2State *pic2_init(PhysMemoryMap *port_map, uint32_t addr0, uint32_t addr1,
-                     uint32_t elcr_addr0, uint32_t elcr_addr1,
-                     CPUIRQTarget *cpu_irq_target, IRQSignal *irqs)
+std::unique_ptr<PIC2State> pic2_init(PhysMemoryMap *port_map, uint32_t addr0,
+                                     uint32_t addr1,
+                                     uint32_t elcr_addr0, uint32_t elcr_addr1,
+                                     CPUIRQTarget *cpu_irq_target,
+                                     IRQSignal *irqs)
 {
-    PIC2State *s;
+    std::unique_ptr<PIC2State> s;
     int i;
     
-    s = new PIC2State();
+    s = std::make_unique<PIC2State>();
 
     for(i = 0; i < 16; i++) {
-        irqs[i].Init(s, i);
+        irqs[i].Init(s.get(), i);
     }
     s->cpu_irq_target = cpu_irq_target;
-    s->pics[0] = pic_init(port_map, addr0, elcr_addr0, 0xf8, s);
-    s->pics[1] = pic_init(port_map, addr1, elcr_addr1, 0xde, s);
+    s->pics[0] = pic_init(port_map, addr0, elcr_addr0, 0xf8, s.get());
+    s->pics[1] = pic_init(port_map, addr1, elcr_addr1, 0xde, s.get());
     s->irq_requested = 0;
     return s;
 }
@@ -620,14 +624,14 @@ void PIC2State::UpdatePICIRQ()
     int irq2, irq;
 
     /* first look at slave pic */
-    irq2 = pic_get_irq(s->pics[1]);
+    irq2 = pic_get_irq(s->pics[1].get());
     if (irq2 >= 0) {
         /* if irq request by slave pic, signal master PIC */
-        pic_set_irq1(s->pics[0], 2, 1);
-        pic_set_irq1(s->pics[0], 2, 0);
+        pic_set_irq1(s->pics[0].get(), 2, 1);
+        pic_set_irq1(s->pics[0].get(), 2, 0);
     }
     /* look at requested irq */
-    irq = pic_get_irq(s->pics[0]);
+    irq = pic_get_irq(s->pics[0].get());
 #if 0
     console.log("irr=" + toHex2(s->pics[0].irr) + " imr=" + toHex2(s->pics[0].imr) + " isr=" + toHex2(s->pics[0].isr) + " irq="+ irq);
 #endif
@@ -649,7 +653,7 @@ void PIC2State::SetIRQ(int irq, int level)
         s->irq_level[irq] = level;
     }
 #endif
-    pic_set_irq1(s->pics[irq >> 3], irq & 7, level);
+    pic_set_irq1(s->pics[irq >> 3].get(), irq & 7, level);
     s->UpdatePICIRQ();
 }
 
@@ -658,13 +662,13 @@ static int pic2_get_hard_intno(PIC2State *s)
 {
     int irq, irq2, intno;
 
-    irq = pic_get_irq(s->pics[0]);
+    irq = pic_get_irq(s->pics[0].get());
     if (irq >= 0) {
-        pic_intack(s->pics[0], irq);
+        pic_intack(s->pics[0].get(), irq);
         if (irq == 2) {
-            irq2 = pic_get_irq(s->pics[1]);
+            irq2 = pic_get_irq(s->pics[1].get());
             if (irq2 >= 0) {
-                pic_intack(s->pics[1], irq2);
+                pic_intack(s->pics[1].get(), irq2);
             } else {
                 /* spurious IRQ on slave controller */
                 irq2 = 7;
@@ -743,21 +747,22 @@ struct PITState {
 
 static void pit_load_count(PITChannel *pc, int val);
 
-PITState *pit_init(PhysMemoryMap *port_map, int addr0, int addr1,
-                   IRQSignal *irq, PITTickSource *tick_source)
+std::unique_ptr<PITState> pit_init(PhysMemoryMap *port_map, int addr0,
+                                   int addr1, IRQSignal *irq,
+                                   PITTickSource *tick_source)
 {
-    PITState *s;
+    std::unique_ptr<PITState> s;
     PITChannel *pc;
     int i;
 
-    s = new PITState();
+    s = std::make_unique<PITState>();
 
     s->irq = irq;
     s->tick_source = tick_source;
     
     for(i = 0; i < 3; i++) {
         pc = &s->pit_channels[i];
-        pc->pit_state = s;
+        pc->pit_state = s.get();
         pc->mode = 3;
         pc->gate = (i != 2) >> 0;
         pit_load_count(pc, 0);
@@ -1046,10 +1051,10 @@ public:
     PhysMemoryMap *port_map;
     
     X86CPUState *cpu_state;
-    PIC2State *pic_state;
+    std::unique_ptr<PIC2State> pic_state;
     IRQSignal pic_irq[16];
-    PITState *pit_state;
-    CMOSState *cmos_state;
+    std::unique_ptr<PITState> pit_state;
+    std::unique_ptr<CMOSState> cmos_state;
 
     /* The configuration's devices, and what realizing them produced. */
     SystemBus *bus = nullptr;
@@ -1247,7 +1252,7 @@ void PCMachine::WriteData(const uint8_t *buf, int buf_len)
 
 int PCMachine::HardIntno()
 {
-    return pic2_get_hard_intno(pic_state);
+    return pic2_get_hard_intno(pic_state.get());
 }
 
 int64_t PCMachine::Ticks()
@@ -1764,34 +1769,36 @@ static bool pc_claim_fixed_ranges(PCMachine *s)
 }
 
 
-static VirtMachine *pc_machine_init(const VirtMachineParams *p)
+static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
 {
+    std::unique_ptr<PCMachine> owned;
     PCMachine *s;
     DeviceContext ctx;
 
     if (strcmp(p->machine_name, "pc") != 0) {
         vm_error("unsupported machine: %s\n", p->machine_name);
-        return NULL;
+        return nullptr;
     }
     if (p->cpu_count != 1) {
         vm_error("pc: only one processor is supported\n");
-        return NULL;
+        return nullptr;
     }
     if (p->interrupt_controller != nullptr) {
         vm_error("pc: the interrupt controller cannot be chosen\n");
-        return NULL;
+        return nullptr;
     }
     /* The nesting in the file is the nesting of the buses, so the root one
        has to be the kind this machine provides. */
     if (p->root_bus_type != NULL && strcmp(p->root_bus_type, "pc") != 0) {
         vm_error("pc: the root bus must be a 'pc' bus, not '%s'\n",
                  p->root_bus_type);
-        return NULL;
+        return nullptr;
     }
 
     assert(p->ram_size >= (1 << 20));
 
-    s = new PCMachine();
+    owned = std::make_unique<PCMachine>();
+    s = owned.get();
     s->vmc = p->vmc;
     s->ram_size = p->ram_size;
     
@@ -1884,7 +1891,7 @@ static VirtMachine *pc_machine_init(const VirtMachineParams *p)
     s->bus->MmioAlloc().SetWindow(FRAMEBUFFER_BASE_ADDR,
                                   PC_DEVICE_WINDOW_SIZE);
     if (!pc_claim_fixed_ranges(s)) {
-        return NULL;
+        return nullptr;
     }
 
     ctx.params = p;
@@ -1893,7 +1900,7 @@ static VirtMachine *pc_machine_init(const VirtMachineParams *p)
 
     if (!device_build_tree(s->bus, p->root_devices, &ctx) ||
         !s->bus->AllocateAll() || !s->bus->RealizeAll()) {
-        return NULL;
+        return nullptr;
     }
 
     s->console_dev = ctx.console_dev;
@@ -1928,7 +1935,7 @@ static VirtMachine *pc_machine_init(const VirtMachineParams *p)
                     p->cmdline ? p->cmdline : "");
     }
 
-    return (VirtMachine *)s;
+    return owned;
 }
 
 PCMachine::~PCMachine()
@@ -2127,6 +2134,12 @@ static void copy_kernel(PCMachine *s, const uint8_t *buf, int buf_len,
     load_address = 0x100000; /* we don't support older protocols */
 
     ram_ptr = get_ram_ptr(s, load_address);
+    params = reinterpret_cast<struct linux_params *>(
+        get_ram_ptr(s, KERNEL_PARAMS_ADDR));
+    if (ram_ptr == NULL || params == NULL) {
+        fprintf(stderr, "No RAM to load the kernel into\n");
+        exit(1);
+    }
     copy_len = buf_len - header_len;
     if (copy_len > (s->ram_size - load_address)) {
         fprintf(stderr, "Not enough RAM\n");
@@ -2134,8 +2147,6 @@ static void copy_kernel(PCMachine *s, const uint8_t *buf, int buf_len,
     }
     memcpy(ram_ptr, buf + header_len, copy_len);
 
-    params = reinterpret_cast<struct linux_params *>(get_ram_ptr(s, KERNEL_PARAMS_ADDR));
-    
     memset(params, 0, sizeof(struct linux_params));
 
     /* copy the setup header */
@@ -2273,7 +2284,7 @@ static void copy_kernel(PCMachine *s, const uint8_t *buf, int buf_len,
         i440fx_map_interrupts(s->i440fx_state, elcr, pci_irqs);
         /* XXX: KVM support */
         if (s->pic_state) {
-            pic2_set_elcr(s->pic_state, elcr);
+            pic2_set_elcr(s->pic_state.get(), elcr);
         }
     }
 }
@@ -2286,13 +2297,13 @@ int PCMachine::GetSleepDuration(int delay)
 #ifdef USE_KVM
     if (s->kvm_enabled) {
         /* XXX: improve */
-        cmos_update_irq(s->cmos_state);
+        cmos_update_irq(s->cmos_state.get());
         delay = 0;
     } else
 #endif
     {
-        cmos_update_irq(s->cmos_state);
-        delay = min_int(delay, pit_update_irq(s->pit_state));
+        cmos_update_irq(s->cmos_state.get());
+        delay = min_int(delay, pit_update_irq(s->pit_state.get()));
         if (!x86_cpu_get_power_down(s->cpu_state))
             delay = 0;
     }
@@ -2321,7 +2332,7 @@ public:
         p->accel_enable = true;
     }
 
-    VirtMachine *Init(const VirtMachineParams *p) const override
+    std::unique_ptr<VirtMachine> Init(const VirtMachineParams *p) const override
     {
         return pc_machine_init(p);
     }

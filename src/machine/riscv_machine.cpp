@@ -67,11 +67,10 @@ class RISCVMachine final:
     public RtcTimeSource,
     public SerialOutput {
 public:
-    PhysMemoryMap *mem_map = nullptr;
-    SystemBus *bus = nullptr;
+    std::unique_ptr<PhysMemoryMap> mem_map;
     int max_xlen = 0;
     int hart_count = 0;
-    RISCVCPU *cpus[RISCV_MAX_HARTS] {};
+    std::unique_ptr<RISCVCPU> cpus[RISCV_MAX_HARTS];
     RISCVIntcType intc_type = RISCV_INTC_PLIC;
     uint64_t ram_size = 0;
     /* RTC */
@@ -79,8 +78,10 @@ public:
     uint64_t rtc_start_time = 0;
     uint64_t timecmp[RISCV_MAX_HARTS] {};
     /* the one selected by intc_type */
-    PLIC *plic = nullptr;
-    APLIC *aplic = nullptr;
+    std::unique_ptr<PLIC> plic;
+    std::unique_ptr<APLIC> aplic;
+    /* after everything its devices use, so that it goes first */
+    std::unique_ptr<SystemBus> bus;
     /* bits of the hart number in an IMSIC page address */
     int imsic_hart_bits = 0;
     /* HTIF */
@@ -787,9 +788,10 @@ static bool riscv_claim_fixed_ranges(RISCVMachine *s)
     return true;
 }
 
-static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
+static std::unique_ptr<VirtMachine>
+riscv_machine_init(const VirtMachineParams *p)
 {
-    RISCVMachine *s;
+    std::unique_ptr<RISCVMachine> s;
     int max_xlen, ram_flags;
     RISCVIntcType intc_type;
     DeviceContext ctx;
@@ -802,13 +804,13 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
         max_xlen = 128;
     } else {
         vm_error("unsupported machine: %s\n", p->machine_name);
-        return NULL;
+        return nullptr;
     }
 
     if (p->cpu_count < 1 || p->cpu_count > RISCV_MAX_HARTS) {
         vm_error("%s: cpus must be between 1 and %d\n", p->machine_name,
                  RISCV_MAX_HARTS);
-        return NULL;
+        return nullptr;
     }
     if (p->interrupt_controller == nullptr ||
         strcmp(p->interrupt_controller, "plic") == 0) {
@@ -821,24 +823,23 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
         vm_error("%s: interrupt_controller must be \"plic\", \"aplic\" or "
                  "\"aplic-imsic\", not \"%s\"\n", p->machine_name,
                  p->interrupt_controller);
-        return NULL;
+        return nullptr;
     }
 
-    s = new RISCVMachine();
+    s = std::make_unique<RISCVMachine>();
     s->intc_type = intc_type;
     s->vmc = p->vmc;
     s->ram_size = p->ram_size;
     s->max_xlen = max_xlen;
-    s->mem_map = new PhysMemoryMap();
+    s->mem_map = std::make_unique<PhysMemoryMap>();
     /* needed to handle the RAM dirty bits */
-    s->mem_map->SetTlbFlushTarget(s);
+    s->mem_map->SetTlbFlushTarget(s.get());
 
     for (int hart = 0; hart < p->cpu_count; hart++) {
-        s->cpus[hart] = riscv_cpu_create(s->mem_map, max_xlen, hart);
+        s->cpus[hart].reset(riscv_cpu_create(s->mem_map.get(), max_xlen, hart));
         if (!s->cpus[hart]) {
             vm_error("unsupported max_xlen=%d\n", max_xlen);
-            /* XXX: should free resources */
-            return NULL;
+            return nullptr;
         }
         s->hart_count++;
     }
@@ -848,11 +849,11 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
     s->mem_map->RegisterRam(0x00000000, LOW_RAM_SIZE, 0);
     s->rtc_real_time = p->rtc_real_time;
     if (p->rtc_real_time) {
-        s->rtc_start_time = rtc_get_real_time(s);
+        s->rtc_start_time = rtc_get_real_time(s.get());
     }
     /* the 'time' CSR must read the same counter as the CLINT */
     for (int hart = 0; hart < s->hart_count; hart++)
-        s->cpus[hart]->SetRtcTimeSource(s);
+        s->cpus[hart]->SetRtcTimeSource(s.get());
 
     s->mem_map->RegisterDevice(CLINT_BASE_ADDR, CLINT_SIZE, &s->fClintIo,
                                DEVIO_SIZE32);
@@ -861,10 +862,10 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
 
     IRQTarget *irq_target;
     if (intc_type == RISCV_INTC_PLIC) {
-        s->plic = new PLIC(s, s->hart_count);
-        s->mem_map->RegisterDevice(PLIC_BASE_ADDR, PLIC_SIZE, s->plic,
+        s->plic = std::make_unique<PLIC>(s.get(), s->hart_count);
+        s->mem_map->RegisterDevice(PLIC_BASE_ADDR, PLIC_SIZE, s->plic.get(),
                                    DEVIO_SIZE32);
-        irq_target = s->plic;
+        irq_target = s->plic.get();
     } else {
         AplicMsiLayout msi;
         RISCVInterruptArch arch = RISCV_INTR_AIA;
@@ -873,39 +874,40 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
             while ((1 << s->imsic_hart_bits) < s->hart_count)
                 s->imsic_hart_bits++;
             s->mem_map->RegisterDevice(IMSIC_M_BASE_ADDR,
-                                       imsic_region_size(s), &s->fImsicIoM,
-                                       DEVIO_SIZE32);
+                                       imsic_region_size(s.get()),
+                                       &s->fImsicIoM, DEVIO_SIZE32);
             s->mem_map->RegisterDevice(IMSIC_S_BASE_ADDR,
-                                       imsic_region_size(s), &s->fImsicIoS,
-                                       DEVIO_SIZE32);
+                                       imsic_region_size(s.get()),
+                                       &s->fImsicIoS, DEVIO_SIZE32);
             msi.m_base = IMSIC_M_BASE_ADDR;
             msi.s_base = IMSIC_S_BASE_ADDR;
             msi.hart_index_bits = s->imsic_hart_bits;
             arch = RISCV_INTR_AIA_IMSIC;
         }
-        s->aplic = new APLIC(s->mem_map, s, s->hart_count,
-                             RISCV_IRQ_LINES - 1,
-                             intc_type == RISCV_INTC_APLIC_IMSIC ?
-                             &msi : nullptr);
+        s->aplic = std::make_unique<APLIC>(s->mem_map.get(), s.get(),
+                                           s->hart_count, RISCV_IRQ_LINES - 1,
+                                           intc_type == RISCV_INTC_APLIC_IMSIC ?
+                                           &msi : nullptr);
         s->mem_map->RegisterDevice(APLIC_M_BASE_ADDR, APLIC_SIZE,
                                    s->aplic->DomainIO(false), DEVIO_SIZE32);
         s->mem_map->RegisterDevice(APLIC_S_BASE_ADDR, APLIC_SIZE,
                                    s->aplic->DomainIO(true), DEVIO_SIZE32);
-        irq_target = s->aplic;
+        irq_target = s->aplic.get();
         for (int hart = 0; hart < s->hart_count; hart++)
             s->cpus[hart]->SetInterruptArch(arch);
     }
 
-    s->bus = new SystemBus(s->mem_map, irq_target, RISCV_IRQ_LINES);
+    s->bus = std::make_unique<SystemBus>(s->mem_map.get(), irq_target,
+                                         RISCV_IRQ_LINES);
     if (intc_type == RISCV_INTC_APLIC_IMSIC) {
-        s->bus->SetMsiTarget(s);
+        s->bus->SetMsiTarget(s.get());
     }
     s->bus->MmioAlloc().SetWindow(DEVICE_WINDOW_BASE, DEVICE_WINDOW_SIZE);
     s->bus->MmioAlloc().SetHighWindow(HIGH_DEVICE_WINDOW_BASE,
                                       HIGH_DEVICE_WINDOW_SIZE);
     s->bus->IoAlloc().SetWindow(PCI_IO_WINDOW_BASE, PCI_IO_WINDOW_SIZE);
-    if (!riscv_claim_fixed_ranges(s)) {
-        return NULL;
+    if (!riscv_claim_fixed_ranges(s.get())) {
+        return nullptr;
     }
 
     /* The nesting in the file is the nesting of the buses, so the root one
@@ -914,21 +916,21 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
         strcmp(p->root_bus_type, "fdt") != 0) {
         vm_error("%s: the root bus must be an 'fdt' bus, not '%s'\n",
                  p->machine_name, p->root_bus_type);
-        return NULL;
+        return nullptr;
     }
 
     ctx.params = p;
     ctx.console = p->console;
-    ctx.serial_output = s;
+    ctx.serial_output = s.get();
 
-    if (!device_build_tree(s->bus, p->root_devices, &ctx)) {
-        return NULL;
+    if (!device_build_tree(s->bus.get(), p->root_devices, &ctx)) {
+        return nullptr;
     }
     if (!s->bus->AllocateAll()) {
-        return NULL;
+        return nullptr;
     }
     if (!s->bus->RealizeAll()) {
-        return NULL;
+        return nullptr;
     }
 
     s->console_dev = ctx.console_dev;
@@ -942,7 +944,7 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
         vm_error("No bios found");
     }
 
-    copy_bios(s, p->files[VM_FILE_BIOS].buf, p->files[VM_FILE_BIOS].len,
+    copy_bios(s.get(), p->files[VM_FILE_BIOS].buf, p->files[VM_FILE_BIOS].len,
               p->files[VM_FILE_KERNEL].buf, p->files[VM_FILE_KERNEL].len,
               p->files[VM_FILE_INITRD].buf, p->files[VM_FILE_INITRD].len,
               p->cmdline);
@@ -950,16 +952,7 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
     return s;
 }
 
-RISCVMachine::~RISCVMachine()
-{
-    /* XXX: stop all */
-    for (int hart = 0; hart < hart_count; hart++)
-        delete cpus[hart];
-    delete bus;
-    delete plic;
-    delete aplic;
-    delete mem_map;
-}
+RISCVMachine::~RISCVMachine() = default;
 
 /* in ms */
 int RISCVMachine::GetSleepDuration(int delay)
@@ -968,7 +961,7 @@ int RISCVMachine::GetSleepDuration(int delay)
 
     /* wait for an event: the only asynchronous events are the timers */
     for (int hart = 0; hart < hart_count; hart++) {
-        RISCVCPU *s = cpus[hart];
+        RISCVCPU *s = cpus[hart].get();
         uint64_t stimecmp;
 
         if (!(s->Mip() & MIP_MTIP)) {
@@ -1018,7 +1011,7 @@ void RISCVMachine::Interp(int max_exec_cycle)
     while (executed < (uint64_t)max_exec_cycle && !shutdown_requested) {
         bool ran = false;
         for (int hart = 0; hart < hart_count; hart++) {
-            RISCVCPU *cpu = cpus[hart];
+            RISCVCPU *cpu = cpus[hart].get();
             if (cpu->PowerDown())
                 continue;
             uint64_t start = cpu->Cycles();
@@ -1067,7 +1060,7 @@ public:
         (void)p;
     }
 
-    VirtMachine *Init(const VirtMachineParams *p) const override
+    std::unique_ptr<VirtMachine> Init(const VirtMachineParams *p) const override
     {
         return riscv_machine_init(p);
     }

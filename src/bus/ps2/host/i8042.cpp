@@ -427,10 +427,10 @@ I8042Controller *i8042_init(PS2Keyboard **pkbd, PS2Mouse **pmouse,
     PS2Mouse *mouse = ps2_mouse_create();
 
     if (!s->PortBus(I8042_PORT_KBD)->AddDevice(
-            new PS2DeviceNode("ps2-keyboard", kbd)) ||
+            std::make_unique<PS2DeviceNode>("ps2-keyboard", kbd)) ||
         !s->PortBus(I8042_PORT_KBD)->RealizeAll() ||
         !s->PortBus(I8042_PORT_AUX)->AddDevice(
-            new PS2DeviceNode("ps2-mouse", mouse)) ||
+            std::make_unique<PS2DeviceNode>("ps2-mouse", mouse)) ||
         !s->PortBus(I8042_PORT_AUX)->RealizeAll()) {
         delete s;
         return nullptr;
@@ -452,7 +452,7 @@ class I8042Input final: public InputEventTarget, public VMPortTarget {
 public:
     PS2Keyboard *kbd = nullptr;
     PS2Mouse *mouse = nullptr;
-    VMMouseState *vmmouse = nullptr;
+    VMMousePtr vmmouse;
 
     void SendKeyEvent(bool is_down, uint16_t key_code) override
     {
@@ -463,7 +463,7 @@ public:
                         unsigned int buttons) override
     {
         if (vmmouse != nullptr) {
-            vmmouse_send_mouse_event(vmmouse, dx, dy, dz, buttons);
+            vmmouse_send_mouse_event(vmmouse.get(), dx, dy, dz, buttons);
         } else {
             mouse->MouseEvent(dx, dy, dz, buttons);
         }
@@ -471,12 +471,12 @@ public:
 
     bool MouseIsAbsolute() override
     {
-        return vmmouse != nullptr && vmmouse_is_absolute(vmmouse);
+        return vmmouse != nullptr && vmmouse_is_absolute(vmmouse.get());
     }
 
     void VMPortCommand(uint32_t *regs) override
     {
-        vmmouse_handler(vmmouse, regs);
+        vmmouse_handler(vmmouse.get(), regs);
     }
 };
 
@@ -485,7 +485,7 @@ class I8042Device final: public Device {
 private:
     DeviceContext *fCtx;
     bool fVmmouse;
-    I8042Controller *fController = nullptr;
+    std::unique_ptr<I8042Controller> fController;
     I8042Input fInput;
     Resource *fDataRes = nullptr;
     Resource *fCmdRes = nullptr;
@@ -496,11 +496,6 @@ private:
 public:
     I8042Device(DeviceContext *ctx, bool vmmouse):
         Device("i8042"), fCtx(ctx), fVmmouse(vmmouse) {}
-
-    ~I8042Device() override
-    {
-        delete fController;
-    }
 
     bool Prepare() override
     {
@@ -533,10 +528,10 @@ public:
         PS2Keyboard *kbd;
         PS2Mouse *mouse;
 
-        fController = i8042_init(&kbd, &mouse, sys->PortMap(),
-                                 sys->IrqSignalFor(fKbdIrqRes->base),
-                                 sys->IrqSignalFor(fAuxIrqRes->base),
-                                 fDataRes->base);
+        fController.reset(i8042_init(&kbd, &mouse, sys->PortMap(),
+                                     sys->IrqSignalFor(fKbdIrqRes->base),
+                                     sys->IrqSignalFor(fAuxIrqRes->base),
+                                     fDataRes->base));
         if (fController == nullptr) {
             return false;
         }

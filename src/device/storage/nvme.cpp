@@ -202,13 +202,13 @@ class NVMeDevice;
    in, so no translation is needed. */
 class NVMeNamespace {
 private:
-    BlockDevice *fBlockDev;
+    std::unique_ptr<BlockDevice> fBlockDev;
     uint32_t fNsid = 0;
 
 public:
-    NVMeNamespace(BlockDevice *bs): fBlockDev(bs) {}
+    NVMeNamespace(std::unique_ptr<BlockDevice> bs): fBlockDev(std::move(bs)) {}
 
-    BlockDevice *Backend() const {return fBlockDev;}
+    BlockDevice *Backend() const {return fBlockDev.get();}
     uint32_t Nsid() const {return fNsid;}
     void SetNsid(uint32_t nsid) {fNsid = nsid;}
 
@@ -258,14 +258,12 @@ public:
 /* Attaches one namespace to the controller it was declared under. */
 class NVMeNamespaceNode final: public Device {
 private:
-    NVMeNamespace *fNs;
+    std::unique_ptr<NVMeNamespace> fNs;
     int fNsid; /* < 0 asks for the first free id */
 
 public:
-    NVMeNamespaceNode(NVMeNamespace *ns, int nsid):
-        Device("nvme-ns"), fNs(ns), fNsid(nsid) {}
-
-    ~NVMeNamespaceNode() override {delete fNs;}
+    NVMeNamespaceNode(std::unique_ptr<NVMeNamespace> ns, int nsid):
+        Device("nvme-ns"), fNs(std::move(ns)), fNsid(nsid) {}
 
     bool Realize() override
     {
@@ -282,7 +280,7 @@ public:
                 return false;
             }
         }
-        return bus->Target()->AttachNamespace(fNs, nsid);
+        return bus->Target()->AttachNamespace(fNs.get(), nsid);
     }
 };
 
@@ -312,7 +310,7 @@ private:
     PCIMsixState fMsix {};
     bool fIrqLevel = false;
 
-    NVMeBus *fChildBus = nullptr;
+    std::unique_ptr<NVMeBus> fChildBus;
     NVMeNamespace *fNamespaces[NVME_MAX_NAMESPACES + 1] {}; /* 1 based */
     uint32_t fMaxNsid = 0;
 
@@ -412,7 +410,7 @@ public:
 
     bool Prepare() override;
     bool Realize() override;
-    Bus *ChildBus() override {return fChildBus;}
+    Bus *ChildBus() override {return fChildBus.get();}
 
     void SetBar(int bar_num, uint64_t addr, bool enabled) override;
     uint32_t DeviceRead(uint32_t offset, int size_log2) override;
@@ -425,7 +423,6 @@ public:
 
 NVMeDevice::~NVMeDevice()
 {
-    delete fChildBus;
     free(fBuf);
 }
 
@@ -1535,7 +1532,7 @@ bool NVMeDevice::Prepare()
         return false;
     }
     /* The guest places the BAR, so no resources are declared. */
-    fChildBus = new NVMeBus(this, this);
+    fChildBus = std::make_unique<NVMeBus>(this, this);
     return true;
 }
 
@@ -1606,7 +1603,8 @@ Device *nvme_node_create(const char *name, uint32_t quirks)
 }
 
 
-Device *nvme_namespace_node_create(BlockDevice *bs, int nsid)
+Device *nvme_namespace_node_create(std::unique_ptr<BlockDevice> bs, int nsid)
 {
-    return new NVMeNamespaceNode(new NVMeNamespace(bs), nsid);
+    return new NVMeNamespaceNode(
+        std::make_unique<NVMeNamespace>(std::move(bs)), nsid);
 }

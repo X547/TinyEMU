@@ -126,12 +126,6 @@ PCIHostDWDevice::PCIHostDWDevice(const char *name, const char *compatible,
 }
 
 
-PCIHostDWDevice::~PCIHostDWDevice()
-{
-    delete fChildBus;
-}
-
-
 bool PCIHostDWDevice::Prepare()
 {
     SystemBus *sys = static_cast<SystemBus *>(ParentBus());
@@ -195,17 +189,17 @@ bool PCIHostDWDevice::Prepare()
        configured without an aperture to put it in. */
     fRootBus = pci_bus_init(sys->MemMap(),
                             fIoRes != nullptr ? sys->PortMap() : nullptr);
-    pci_bus_set_pcie(fRootBus, true);
+    pci_bus_set_pcie(fRootBus.get(), true);
 
     /* Devices signal through this controller's receiver rather than by
        writing to memory, so they may advertise MSI-X. The buses behind the
        root port inherit it. */
-    pci_bus_set_msi_target(fRootBus, this);
+    pci_bus_set_msi_target(fRootBus.get(), this);
 
     /* A real root port, so that the type 1 configuration write mask, the
        capability list and the bus routing all come from the same code every
        other bridge uses. */
-    fDevBus = pci_bridge_init(fRootBus, 0, "dw-root-port",
+    fDevBus = pci_bridge_init(fRootBus.get(), 0, "dw-root-port",
                               DW_ROOT_PORT_VENDOR_ID, DW_ROOT_PORT_DEVICE_ID,
                               PCI_EXP_TYPE_ROOT_PORT, &fRootPort);
     if (fDevBus == nullptr) {
@@ -250,7 +244,7 @@ bool PCIHostDWDevice::Realize()
         pci_bus_set_irq(fDevBus, i, sig);
         /* The root port raises nothing itself, but leaving its pins without
            a target would turn a modelling slip into a null dereference. */
-        pci_bus_set_irq(fRootBus, i, sig);
+        pci_bus_set_irq(fRootBus.get(), i, sig);
     }
 
     sys->MemMap()->RegisterDevice(fDbiRes->base, fDbiRes->size, &fDbiIo,
@@ -336,7 +330,7 @@ uint32_t PCIHostDWDevice::DbiRead(uint32_t offset, int size_log2)
     /* The root complex's own configuration space is the bottom of DBI, all
        4 KB of it save for the tail the port logic registers take over. */
     if (offset < DW_PORT_LOGIC_BASE) {
-        return pci_bus_config_read(fRootBus, offset, size_log2);
+        return pci_bus_config_read(fRootBus.get(), offset, size_log2);
     }
 
     uint32_t reg = offset & ~3u;
@@ -385,7 +379,7 @@ uint32_t PCIHostDWDevice::DbiRead(uint32_t offset, int size_log2)
 void PCIHostDWDevice::DbiWrite(uint32_t offset, uint32_t val, int size_log2)
 {
     if (offset < DW_PORT_LOGIC_BASE) {
-        pci_bus_config_write(fRootBus, offset, val, size_log2);
+        pci_bus_config_write(fRootBus.get(), offset, val, size_log2);
         return;
     }
 
@@ -516,7 +510,7 @@ bool PCIHostDWDevice::ConfigDecode(uint32_t offset, uint32_t *bus_addr_out)
        through here would show it to a driver twice. Everything below is left
        to the bus, which follows the numbers the guest programmed into the
        bridges it found. */
-    if (bus == (uint32_t)pci_bus_get_bus_num(fRootBus)) {
+    if (bus == (uint32_t)pci_bus_get_bus_num(fRootBus.get())) {
         return false;
     }
 

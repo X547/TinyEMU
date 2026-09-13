@@ -153,10 +153,14 @@ bool vmmouse_is_absolute(VMMouseState *s)
     return s->absolute;
 }
 
-VMMouseState *vmmouse_init(PS2Mouse *ps2_mouse)
+void VMMouseDeleter::operator()(VMMouseState *s) const
 {
-    VMMouseState *s;
-    s = static_cast<VMMouseState *>(mallocz(sizeof(*s)));
+    delete s;
+}
+
+VMMousePtr vmmouse_init(PS2Mouse *ps2_mouse)
+{
+    VMMousePtr s(new VMMouseState());
     s->ps2_mouse = ps2_mouse;
     return s;
 }

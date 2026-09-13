@@ -750,21 +750,22 @@ void VGAState::SetBar(int bar_num, uint64_t addr, bool enabled)
         s->rom_range->SetAddr(addr, enabled);
 }
 
-static FBDevice *pci_vga_init(PCIBus *bus, int width, int height,
-                              const uint8_t *vga_rom_buf, int vga_rom_size)
+static std::unique_ptr<FBDevice> pci_vga_init(PCIBus *bus, int width,
+                                              int height,
+                                              const uint8_t *vga_rom_buf,
+                                              int vga_rom_size)
 {
-    VGAState *s;
     PCIDevice *d;
     uint32_t bar_size;
     PhysMemoryMap *mem_map, *port_map;
-    
+
     d = pci_register_device(bus, "VGA", -1, 0x1234, 0x1111, 0x00, 0x0300);
-    
+
     mem_map = pci_device_get_mem_map(d);
     port_map = pci_device_get_port_map(d);
 
-    s = new VGAState();
-    FBDevice *fb_dev = s;
+    auto s = std::make_unique<VGAState>();
+    FBDevice *fb_dev = s.get();
 
     fb_dev->width = width;
     fb_dev->height = height;
@@ -783,7 +784,7 @@ static FBDevice *pci_vga_init(PCIBus *bus, int width, int height,
     bar_size = 1;
     while (bar_size < fb_dev->fb_size)
         bar_size <<= 1;
-    pci_register_bar(d, 0, bar_size, PCI_ADDRESS_SPACE_MEM, s);
+    pci_register_bar(d, 0, bar_size, PCI_ADDRESS_SPACE_MEM, s.get());
 
     if (vga_rom_size > 0) {
         int rom_size;
@@ -796,7 +797,8 @@ static FBDevice *pci_vga_init(PCIBus *bus, int width, int height,
         bar_size = 1;
         while (bar_size < rom_size)
             bar_size <<= 1;
-        pci_register_bar(d, PCI_ROM_SLOT, bar_size, PCI_ADDRESS_SPACE_MEM, s);
+        pci_register_bar(d, PCI_ROM_SLOT, bar_size, PCI_ADDRESS_SPACE_MEM,
+                         s.get());
     }
 
     /* VGA memory (for simple text mode no need for callbacks) */
@@ -847,7 +849,7 @@ private:
     DeviceContext *fCtx;
     int fWidth;
     int fHeight;
-    FBDevice *fFb = nullptr;
+    std::unique_ptr<FBDevice> fFb;
 
 public:
     VGADevice(DeviceContext *ctx, int width, int height):
@@ -877,7 +879,7 @@ public:
         if (fFb == nullptr) {
             return false;
         }
-        fCtx->fb_dev = fFb;
+        fCtx->fb_dev = fFb.get();
         return true;
     }
 };

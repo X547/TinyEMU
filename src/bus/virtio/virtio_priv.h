@@ -46,7 +46,20 @@ typedef struct {
 } QueueState;
 
 
-class VIRTIOTransport;
+struct VIRTIODevice;
+
+/* PCI and MMIO differ both in their register layout and in how the device
+   reaches guest RAM, so one transport object supplies both. */
+class VIRTIOTransport: public DeviceIO {
+protected:
+    VIRTIODevice &fDev;
+
+public:
+    VIRTIOTransport(VIRTIODevice &dev): fDev(dev) {}
+
+    virtual uint8_t *GetRamPtr(virtio_phys_addr_t paddr, bool is_rw) = 0;
+};
+
 
 struct VIRTIODevice: public PCIBarTarget {
     PhysMemoryMap *mem_map = nullptr;
@@ -56,7 +69,7 @@ struct VIRTIODevice: public PCIBarTarget {
     /* MMIO only */
     IRQSignal *irq = nullptr;
     /* owns the register layout and the DMA path for this bus */
-    VIRTIOTransport *transport = nullptr;
+    std::unique_ptr<VIRTIOTransport> transport;
     int debug = 0;
 
     uint32_t int_status = 0;

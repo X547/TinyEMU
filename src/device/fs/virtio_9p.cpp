@@ -28,77 +28,58 @@
 #include <assert.h>
 #include <stdarg.h>
 
+#include <map>
+
 #include "cutils.h"
-#include "list.h"
 #include "fs.h"
 #include "virtio.h"
 #include "virtio_priv.h"
 
 
-typedef struct {
-    struct list_head link;
-    uint32_t fid;
-    FSFile *fd;
-} FIDDesc;
-
 struct VIRTIO9PDevice: public VIRTIODevice {
+    /* the back end must outlive the device, which closes its fids with it */
     FSDevice *fs = nullptr;
     int msize = 0; /* maximum message size */
-    struct list_head fid_list {}; /* list of FIDDesc */
+    std::map<uint32_t, FSFile *> fids;
     bool req_in_progress = false;
+
+    ~VIRTIO9PDevice() override;
 
     int RecvRequest(int queue_idx, int desc_idx, int read_size,
                     int write_size) override;
 };
 
-static FIDDesc *fid_find1(VIRTIO9PDevice *s, uint32_t fid)
+VIRTIO9PDevice::~VIRTIO9PDevice()
 {
-    struct list_head *el;
-    FIDDesc *f;
-
-    list_for_each(el, &s->fid_list) {
-        f = list_entry(el, FIDDesc, link);
-        if (f->fid == fid)
-            return f;
-    }
-    return NULL;
+    for (auto &entry : fids)
+        fs->Delete(entry.second);
 }
 
 static FSFile *fid_find(VIRTIO9PDevice *s, uint32_t fid)
 {
-    FIDDesc *f;
-
-    f = fid_find1(s, fid);
-    if (!f)
+    auto it = s->fids.find(fid);
+    if (it == s->fids.end())
         return NULL;
-    return f->fd;
+    return it->second;
 }
 
 static void fid_delete(VIRTIO9PDevice *s, uint32_t fid)
 {
-    FIDDesc *f;
-
-    f = fid_find1(s, fid);
-    if (f) {
-        s->fs->Delete(f->fd);
-        list_del(&f->link);
-        free(f);
+    auto it = s->fids.find(fid);
+    if (it != s->fids.end()) {
+        s->fs->Delete(it->second);
+        s->fids.erase(it);
     }
 }
 
 static void fid_set(VIRTIO9PDevice *s, uint32_t fid, FSFile *fd)
 {
-    FIDDesc *f;
-
-    f = fid_find1(s, fid);
-    if (f) {
-        s->fs->Delete(f->fd);
-        f->fd = fd;
+    auto it = s->fids.find(fid);
+    if (it != s->fids.end()) {
+        s->fs->Delete(it->second);
+        it->second = fd;
     } else {
-        f = static_cast<FIDDesc *>(malloc(sizeof(*f)));
-        f->fid = fid;
-        f->fd = fd;
-        list_add(&f->link, &s->fid_list);
+        s->fids[fid] = fd;
     }
 }
 
@@ -1015,17 +996,16 @@ int VIRTIO9PDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
     goto error;
 }
 
-VIRTIODevice *virtio_9p_init(VIRTIOBusDef *bus, FSDevice *fs,
-                             const char *mount_tag)
+std::unique_ptr<VIRTIODevice> virtio_9p_init(VIRTIOBusDef *bus, FSDevice *fs,
+                                             const char *mount_tag)
 
 {
-    VIRTIO9PDevice *s;
     int len;
     uint8_t *cfg;
 
     len = strlen(mount_tag);
-    s = new VIRTIO9PDevice();
-    virtio_init(s, bus, 9, 2 + len);
+    auto s = std::make_unique<VIRTIO9PDevice>();
+    virtio_init(s.get(), bus, 9, 2 + len);
     s->device_features = 1 << 0;
 
     /* set the mount tag */
@@ -1036,7 +1016,6 @@ VIRTIODevice *virtio_9p_init(VIRTIOBusDef *bus, FSDevice *fs,
 
     s->fs = fs;
     s->msize = 8192;
-    init_list_head(&s->fid_list);
-    
+
     return s;
 }

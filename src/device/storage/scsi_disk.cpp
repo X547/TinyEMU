@@ -56,7 +56,7 @@ private:
         void Complete(int ret) override {fDisk.BlockDone(ret);}
     };
 
-    BlockDevice *fBlockDev;
+    std::unique_ptr<BlockDevice> fBlockDev;
     Completion fCompletion {*this};
     SCSIRequest *fPending = nullptr;
     uint32_t fPendingLength = 0;
@@ -77,7 +77,8 @@ private:
                    bool is_write);
 
 public:
-    SCSIDisk(BlockDevice *bs): SCSIDevice("scsi-disk"), fBlockDev(bs) {}
+    SCSIDisk(std::unique_ptr<BlockDevice> bs):
+        SCSIDevice("scsi-disk"), fBlockDev(std::move(bs)) {}
 
     void Reset() override;
     bool Submit(SCSIRequest *req) override;
@@ -451,7 +452,8 @@ bool SCSIDisk::Submit(SCSIRequest *req)
 
 //#pragma mark - factory
 
-Device *scsi_disk_node_create(BlockDevice *bs, int lun)
+Device *scsi_disk_node_create(std::unique_ptr<BlockDevice> bs, int lun)
 {
-    return new SCSIDeviceNode("scsi-disk", new SCSIDisk(bs), lun);
+    return new SCSIDeviceNode("scsi-disk",
+                              std::make_unique<SCSIDisk>(std::move(bs)), lun);
 }

@@ -34,7 +34,7 @@
 
 typedef struct {
     uint32_t type;
-    uint8_t *buf;
+    std::unique_ptr<uint8_t[]> buf;
     int write_size;
     int queue_idx;
     int desc_idx;
@@ -51,7 +51,7 @@ struct VIRTIOBlockDevice: public VIRTIODevice {
         void Complete(int ret) override;
     };
 
-    BlockDevice *bs = nullptr;
+    BlockDevice *bs = nullptr; /* owned by the node that created the device */
 
     bool req_in_progress = false;
     BlockRequest req {}; /* request in progress */
@@ -90,12 +90,11 @@ static void virtio_block_req_end_buf(VIRTIODevice *s, uint8_t status)
     int queue_idx = s1->req.queue_idx;
     int desc_idx = s1->req.desc_idx;
     int write_size = s1->req.write_size;
-    uint8_t *buf = s1->req.buf;
+    uint8_t *buf = s1->req.buf.get();
 
     buf[write_size - 1] = status;
     memcpy_to_queue(s, queue_idx, desc_idx, 0, buf, write_size);
-    free(buf);
-    s1->req.buf = nullptr;
+    s1->req.buf.reset();
     virtio_consume_desc(s, queue_idx, desc_idx, write_size);
 }
 
@@ -161,9 +160,10 @@ int VIRTIOBlockDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
     s1->req.desc_idx = desc_idx;
     switch(h.type) {
     case VIRTIO_BLK_T_IN:
-        s1->req.buf = static_cast<uint8_t *>(malloc(write_size));
+        /* not zeroed, the read fills it */
+        s1->req.buf.reset(new uint8_t[write_size]);
         s1->req.write_size = write_size;
-        ret = bs->ReadAsync(h.sector_num, s1->req.buf,
+        ret = bs->ReadAsync(h.sector_num, s1->req.buf.get(),
                             (write_size - 1) / SECTOR_SIZE, &s1->fCompletion);
         if (ret > 0) {
             /* asyncronous read */
@@ -194,14 +194,14 @@ int VIRTIOBlockDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
         virtio_block_req_end(s, 0);
         break;
     case VIRTIO_BLK_T_GET_ID:
-        s1->req.buf = mallocz_t<uint8_t>(write_size);
+        s1->req.buf = std::make_unique<uint8_t[]>(write_size);
         s1->req.write_size = write_size;
         if (write_size > 1) {
             int id_len = write_size - 1;
             if (id_len > VIRTIO_BLK_ID_BYTES) {
                 id_len = VIRTIO_BLK_ID_BYTES;
             }
-            strncpy((char *)s1->req.buf, "tinyemu-blk", id_len);
+            strncpy((char *)s1->req.buf.get(), "tinyemu-blk", id_len);
         }
         virtio_block_req_end(s, 0);
         break;
@@ -214,13 +214,13 @@ int VIRTIOBlockDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
     return 0;
 }
 
-VIRTIODevice *virtio_block_init(VIRTIOBusDef *bus, BlockDevice *bs)
+std::unique_ptr<VIRTIODevice> virtio_block_init(VIRTIOBusDef *bus,
+                                                BlockDevice *bs)
 {
-    VIRTIOBlockDevice *s;
     uint64_t nb_sectors;
 
-    s = new VIRTIOBlockDevice();
-    virtio_init(s, bus, 2, 8);
+    auto s = std::make_unique<VIRTIOBlockDevice>();
+    virtio_init(s.get(), bus, 2, 8);
     s->bs = bs;
     
     nb_sectors = bs->SectorCount();

@@ -225,9 +225,12 @@ uint32_t dwmac_quirks_from_name(const char *name)
 }
 
 
-DwmacDevice::~DwmacDevice()
+DwmacDevice::~DwmacDevice() = default;
+
+
+Bus *DwmacDevice::ChildBus()
 {
-    delete fMdioBus;
+    return fMdioBus.get();
 }
 
 
@@ -257,7 +260,7 @@ bool DwmacDevice::Prepare()
         return false;
     }
 
-    fMdioBus = new MDIOBus(this);
+    fMdioBus = std::make_unique<MDIOBus>(this);
     return true;
 }
 
@@ -287,7 +290,7 @@ bool DwmacDevice::Realize()
         return false;
     }
 
-    fNet = fNode->net;
+    fNet = std::move(fNode->net);
     fMemMap = sys->MemMap();
     Reset();
 
@@ -295,7 +298,7 @@ bool DwmacDevice::Realize()
                             DEVIO_SIZE8 | DEVIO_SIZE16 | DEVIO_SIZE32);
 
     fNet->target = this;
-    fCtx->net = fNet;
+    fCtx->net = fNet.get();
     return true;
 }
 

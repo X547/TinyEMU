@@ -513,7 +513,7 @@ void BlockDeviceHTTP::WGetWrite(int err, void *data, size_t size)
             vm_error("expecting an array\n");
             goto config_error;
         }
-        prefetch_len = array.u.array->len;
+        prefetch_len = array.u.array->Length();
         idx = 0;
         while (idx < prefetch_len) {
             l = min_int(prefetch_len - idx, bf->prefetch_group_len);

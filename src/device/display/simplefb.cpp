@@ -136,7 +136,7 @@ private:
     int fWidth;
     int fHeight;
     Resource *fMmio = nullptr;
-    FBDevice *fFb = nullptr;
+    std::unique_ptr<FBDevice> fFb;
 
 public:
     SimpleFBDevice(DeviceContext *ctx, int width, int height):
@@ -155,8 +155,8 @@ public:
     bool Realize() override
     {
         SystemBus *sys = static_cast<SystemBus *>(ParentBus());
-        fFb = simplefb_init(sys->MemMap(), fMmio->base, fWidth, fHeight);
-        fCtx->fb_dev = fFb;
+        fFb.reset(simplefb_init(sys->MemMap(), fMmio->base, fWidth, fHeight));
+        fCtx->fb_dev = fFb.get();
         fCtx->fb_base = fMmio->base;
         return fFb != nullptr;
     }

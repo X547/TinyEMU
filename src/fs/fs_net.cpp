@@ -1887,7 +1887,7 @@ void fs_dump_cache_load(FSDevice *fs1, const char *cfg_filename)
         fprintf(stderr, "expecting preload array\n");
         goto config_error;
     }
-    for(i = 0; i < array.u.array->len; i++) {
+    for(i = 0; i < array.u.array->Length(); i++) {
         val = json_array_get(array, i);
         name = json_get_str(val);
         if (!name) {

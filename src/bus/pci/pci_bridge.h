@@ -63,7 +63,7 @@ public:
        given one of its own.
 
    Returns null on failure. */
-Bus *pci_attach_bus_create(Device *owner, PCIBus *bus);
+std::unique_ptr<Bus> pci_attach_bus_create(Device *owner, PCIBus *bus);
 
 
 /* The "pci-bridge" configuration node: a port on the bus above and, behind

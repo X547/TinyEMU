@@ -59,12 +59,6 @@ PCIHostECAMDevice::PCIHostECAMDevice(const char *name, int bus_count,
 }
 
 
-PCIHostECAMDevice::~PCIHostECAMDevice()
-{
-    delete fChildBus;
-}
-
-
 bool PCIHostECAMDevice::Prepare()
 {
     SystemBus *sys = static_cast<SystemBus *>(ParentBus());
@@ -123,13 +117,13 @@ bool PCIHostECAMDevice::Prepare()
        space it never reserved out of reach. */
     fPciBus = pci_bus_init(sys->MemMap(),
                            fIoRes != nullptr ? sys->PortMap() : nullptr);
-    pci_bus_set_pcie(fPciBus, true);
+    pci_bus_set_pcie(fPciBus.get(), true);
     /* The bridge has no MSI receiver, but the machine may have an MSI
        controller the messages can be written to directly. */
     if (sys->MsiTarget() != nullptr) {
-        pci_bus_set_msi_target(fPciBus, sys->MsiTarget());
+        pci_bus_set_msi_target(fPciBus.get(), sys->MsiTarget());
     }
-    fChildBus = pci_attach_bus_create(this, fPciBus);
+    fChildBus = pci_attach_bus_create(this, fPciBus.get());
     return fChildBus != nullptr;
 }
 
@@ -144,7 +138,7 @@ bool PCIHostECAMDevice::Realize()
             vm_error("%s: bad INTx line %d\n", Name(), (int)fIrqRes[i]->base);
             return false;
         }
-        pci_bus_set_irq(fPciBus, i, sig);
+        pci_bus_set_irq(fPciBus.get(), i, sig);
     }
 
     sys->MemMap()->RegisterDevice(fEcamRes->base, fEcamRes->size, &fEcamIo,
@@ -165,13 +159,13 @@ bool PCIHostECAMDevice::Realize()
    at bit 20, then devfn, then twelve bits of register. */
 uint32_t PCIHostECAMDevice::EcamRead(uint32_t offset, int size_log2)
 {
-    return pci_bus_config_read(fPciBus, offset, size_log2);
+    return pci_bus_config_read(fPciBus.get(), offset, size_log2);
 }
 
 
 void PCIHostECAMDevice::EcamWrite(uint32_t offset, uint32_t val, int size_log2)
 {
-    pci_bus_config_write(fPciBus, offset, val, size_log2);
+    pci_bus_config_write(fPciBus.get(), offset, val, size_log2);
 }
 
 

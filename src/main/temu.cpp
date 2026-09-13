@@ -42,6 +42,8 @@
 #endif
 #include <sys/stat.h>
 #include <signal.h>
+#include <memory>
+#include <vector>
 
 #include "cutils.h"
 #include "iomem.h"
@@ -65,6 +67,8 @@ public:
     bool resize_pending = false;
     bool quit_requested = false;
 
+    ~STDIODevice() override;
+
     void WriteData(const uint8_t *buf, int len) override;
     int ReadData(uint8_t *buf, int len) override;
 };
@@ -72,6 +76,12 @@ public:
 static struct termios oldtty;
 static int old_fd0_flags;
 static STDIODevice *global_stdio_device;
+
+STDIODevice::~STDIODevice()
+{
+    if (global_stdio_device == this)
+        global_stdio_device = nullptr;
+}
 
 static void term_exit(void)
 {
@@ -183,21 +193,20 @@ static void console_get_size(STDIODevice *s, int *pw, int *ph)
     *ph = height;
 }
 
-CharacterDevice *console_init(bool allow_ctrlc)
+static std::unique_ptr<CharacterDevice> console_init(bool allow_ctrlc)
 {
-    STDIODevice *s;
     struct sigaction sig;
 
     term_init(allow_ctrlc);
 
-    s = new STDIODevice();
+    auto s = std::make_unique<STDIODevice>();
     s->stdin_fd = 0;
     /* Note: the glibc does not properly tests the return value of
        write() in printf, so some messages on stdout may be lost */
     fcntl(s->stdin_fd, F_SETFL, O_NONBLOCK);
 
     s->resize_pending = true;
-    global_stdio_device = s;
+    global_stdio_device = s.get();
     
     /* use a signal to get the host terminal resize events */
     sig.sa_handler = term_resize_handler;
@@ -218,12 +227,17 @@ typedef enum {
 
 #define SECTOR_SIZE 512
 
+struct FileCloser {
+    void operator()(FILE *f) const {fclose(f);}
+};
+
 class BlockDeviceFile final: public BlockDevice {
 public:
-    FILE *f = nullptr;
+    std::unique_ptr<FILE, FileCloser> f;
     int64_t nb_sectors = 0;
     BlockDeviceModeEnum mode {};
-    uint8_t **sector_table = nullptr;
+    /* snapshot mode: the sectors written so far, null where unchanged */
+    std::vector<std::unique_ptr<uint8_t[]>> sector_table;
 
     int64_t SectorCount() override {return nb_sectors;}
     int ReadAsync(uint64_t sector_num, uint8_t *buf, int n,
@@ -254,17 +268,17 @@ int BlockDeviceFile::ReadAsync(uint64_t sector_num, uint8_t *buf, int n,
         int i;
         for(i = 0; i < n; i++) {
             if (!bf->sector_table[sector_num]) {
-                fseek(bf->f, sector_num * SECTOR_SIZE, SEEK_SET);
-                fread(buf, 1, SECTOR_SIZE, bf->f);
+                fseek(bf->f.get(), sector_num * SECTOR_SIZE, SEEK_SET);
+                fread(buf, 1, SECTOR_SIZE, bf->f.get());
             } else {
-                memcpy(buf, bf->sector_table[sector_num], SECTOR_SIZE);
+                memcpy(buf, bf->sector_table[sector_num].get(), SECTOR_SIZE);
             }
             sector_num++;
             buf += SECTOR_SIZE;
         }
     } else {
-        fseek(bf->f, sector_num * SECTOR_SIZE, SEEK_SET);
-        fread(buf, 1, n * SECTOR_SIZE, bf->f);
+        fseek(bf->f.get(), sector_num * SECTOR_SIZE, SEEK_SET);
+        fread(buf, 1, n * SECTOR_SIZE, bf->f.get());
     }
     /* synchronous read */
     return 0;
@@ -282,8 +296,8 @@ int BlockDeviceFile::WriteAsync(uint64_t sector_num, const uint8_t *buf, int n,
         ret = -1; /* error */
         break;
     case BF_MODE_RW:
-        fseek(bf->f, sector_num * SECTOR_SIZE, SEEK_SET);
-        fwrite(buf, 1, n * SECTOR_SIZE, bf->f);
+        fseek(bf->f.get(), sector_num * SECTOR_SIZE, SEEK_SET);
+        fwrite(buf, 1, n * SECTOR_SIZE, bf->f.get());
         ret = 0;
         break;
     case BF_MODE_SNAPSHOT:
@@ -293,9 +307,10 @@ int BlockDeviceFile::WriteAsync(uint64_t sector_num, const uint8_t *buf, int n,
                 return -1;
             for(i = 0; i < n; i++) {
                 if (!bf->sector_table[sector_num]) {
-                    bf->sector_table[sector_num] = static_cast<uint8_t *>(malloc(SECTOR_SIZE));
+                    bf->sector_table[sector_num].reset(
+                        new uint8_t[SECTOR_SIZE]);
                 }
-                memcpy(bf->sector_table[sector_num], buf, SECTOR_SIZE);
+                memcpy(bf->sector_table[sector_num].get(), buf, SECTOR_SIZE);
                 sector_num++;
                 buf += SECTOR_SIZE;
             }
@@ -309,10 +324,9 @@ int BlockDeviceFile::WriteAsync(uint64_t sector_num, const uint8_t *buf, int n,
     return ret;
 }
 
-static BlockDevice *block_device_init(const char *filename,
-                                      BlockDeviceModeEnum mode)
+static std::unique_ptr<BlockDevice> block_device_init(const char *filename,
+                                                      BlockDeviceModeEnum mode)
 {
-    BlockDeviceFile *bf;
     int64_t file_size;
     FILE *f;
     const char *mode_str;
@@ -322,7 +336,7 @@ static BlockDevice *block_device_init(const char *filename,
     } else {
         mode_str = "rb";
     }
-    
+
     f = fopen(filename, mode_str);
     if (!f) {
         perror(filename);
@@ -331,17 +345,16 @@ static BlockDevice *block_device_init(const char *filename,
     fseek(f, 0, SEEK_END);
     file_size = ftello(f);
 
-    bf = new BlockDeviceFile();
+    auto bf = std::make_unique<BlockDeviceFile>();
 
     bf->mode = mode;
     bf->nb_sectors = file_size / 512;
-    bf->f = f;
+    bf->f.reset(f);
 
     if (mode == BF_MODE_SNAPSHOT) {
-        bf->sector_table = static_cast<uint8_t **>(mallocz(sizeof(bf->sector_table[0]) *
-                                   bf->nb_sectors));
+        bf->sector_table.resize(bf->nb_sectors);
     }
-    
+
     return bf;
 }
 
@@ -349,8 +362,14 @@ static BlockDevice *block_device_init(const char *filename,
 
 class TunState final: public EthernetDevice {
 public:
-    int fd;
-    bool select_filled;
+    int fd = -1;
+    bool select_filled = false;
+
+    ~TunState() override
+    {
+        if (fd >= 0)
+            close(fd);
+    }
 
     void WritePacket(const uint8_t *buf, int len) override;
     void SelectFill(int *pfd_max, fd_set *rfds, fd_set *wfds,
@@ -419,12 +438,11 @@ void TunState::SelectPoll(fd_set *rfds, fd_set *wfds, fd_set *efds,
    ifconfig eth0 192.168.3.2
    route add -net 0.0.0.0 netmask 0.0.0.0 gw 192.168.3.1
 */
-static EthernetDevice *tun_open(const char *ifname)
+static std::unique_ptr<EthernetDevice> tun_open(const char *ifname)
 {
     struct ifreq ifr;
     int fd, ret;
-    TunState *s;
-    
+
     fd = open("/dev/net/tun", O_RDWR);
     if (fd < 0) {
         fprintf(stderr, "Error: could not open /dev/net/tun\n");
@@ -441,7 +459,7 @@ static EthernetDevice *tun_open(const char *ifname)
     }
     fcntl(fd, F_SETFL, O_NONBLOCK);
 
-    s = new TunState();
+    auto s = std::make_unique<TunState>();
     s->fd = fd;
     s->mac_addr[0] = 0x02;
     s->mac_addr[1] = 0x00;
@@ -477,6 +495,15 @@ class SlirpEthernetDevice final: public EthernetDevice {
 public:
     Slirp *state = nullptr;
 
+    ~SlirpEthernetDevice() override
+    {
+        if (state != nullptr) {
+            slirp_cleanup(state);
+            if (slirp_state == state)
+                slirp_state = nullptr;
+        }
+    }
+
     void WritePacket(const uint8_t *buf, int len) override
     {
         slirp_input(state, buf, len);
@@ -510,9 +537,8 @@ extern "C" void slirp_output(void *opaque, const uint8_t *pkt, int pkt_len)
 }
 
 
-static EthernetDevice *slirp_open(void)
+static std::unique_ptr<EthernetDevice> slirp_open(void)
 {
-    SlirpEthernetDevice *net;
     struct in_addr net_addr  = { .s_addr = htonl(0x0a000200) }; /* 10.0.2.0 */
     struct in_addr mask = { .s_addr = htonl(0xffffff00) }; /* 255.255.255.0 */
     struct in_addr host = { .s_addr = htonl(0x0a000202) }; /* 10.0.2.2 */
@@ -526,10 +552,10 @@ static EthernetDevice *slirp_open(void)
         fprintf(stderr, "Only a single slirp instance is allowed\n");
         return NULL;
     }
-    net = new SlirpEthernetDevice();
+    auto net = std::make_unique<SlirpEthernetDevice>();
 
     slirp_state = slirp_init(restricted, net_addr, mask, host, vhostname,
-                             "", bootfile, dhcp, dns, net);
+                             "", bootfile, dhcp, dns, net.get());
     net->state = slirp_state;
     
     net->mac_addr[0] = 0x02;
@@ -691,16 +717,17 @@ static void open_block_backend(VMDeviceNode *node, BackendOpenState *st)
 {
     char *fname;
 
-    if (node->filename == nullptr) {
-        fprintf(stderr, "%s: expecting a 'file' property\n", node->type);
+    if (node->filename.empty()) {
+        fprintf(stderr, "%s: expecting a 'file' property\n",
+                node->type.c_str());
         exit(1);
     }
-    fname = get_file_path(st->p->cfg_filename, node->filename);
+    fname = get_file_path(st->p->cfg_filename, node->filename.c_str());
 #ifdef CONFIG_FS_NET
     if (is_url(fname)) {
         net_completed = false;
-        node->block_dev = block_device_init_http(fname, 128 * 1024,
-                                                 &sNetStartCallback);
+        node->block_dev.reset(block_device_init_http(fname, 128 * 1024,
+                                                     &sNetStartCallback));
         /* wait until the drive is initialized */
         fs_net_event_loop(&sNetPollCompletion);
     } else
@@ -710,26 +737,27 @@ static void open_block_backend(VMDeviceNode *node, BackendOpenState *st)
     }
     free(fname);
     if (node->block_dev == nullptr) {
-        fprintf(stderr, "%s: could not open\n", node->filename);
+        fprintf(stderr, "%s: could not open\n", node->filename.c_str());
         exit(1);
     }
 }
 
 static void open_fs_backend(VMDeviceNode *node, BackendOpenState *st)
 {
-    const char *path = node->filename;
+    const char *path = node->filename.c_str();
 
-    if (path == nullptr) {
-        fprintf(stderr, "%s: expecting a 'file' property\n", node->type);
+    if (node->filename.empty()) {
+        fprintf(stderr, "%s: expecting a 'file' property\n",
+                node->type.c_str());
         exit(1);
     }
 #ifdef CONFIG_FS_NET
     if (is_url(path)) {
-        node->fs_dev = fs_net_init(path, nullptr);
+        node->fs_dev.reset(fs_net_init(path, nullptr));
         if (!node->fs_dev)
             exit(1);
         if (st->build_preload_file)
-            fs_dump_cache_load(node->fs_dev, st->build_preload_file);
+            fs_dump_cache_load(node->fs_dev.get(), st->build_preload_file);
         fs_net_event_loop(nullptr);
         return;
     }
@@ -785,24 +813,25 @@ static void open_device_backend(VMDeviceNode *node, void *opaque)
 {
     BackendOpenState *st = static_cast<BackendOpenState *>(opaque);
 
-    if (!strcmp(node->type, "virtio-block") ||
-        !strcmp(node->type, "ata-disk") ||
-        !strcmp(node->type, "scsi-disk") || !strcmp(node->type, "nvme-ns") ||
-        !strcmp(node->type, "sd-card") || !strcmp(node->type, "mmc-card")) {
+    const std::string &type = node->type;
+
+    if (type == "virtio-block" || type == "ata-disk" ||
+        type == "scsi-disk" || type == "nvme-ns" ||
+        type == "sd-card" || type == "mmc-card") {
         open_block_backend(node, st);
-    } else if (!strcmp(node->type, "virtio-9p")) {
+    } else if (type == "virtio-9p") {
         open_fs_backend(node, st);
-    } else if (!strcmp(node->type, "virtio-net") ||
-               !strcmp(node->type, "dwmac")) {
+    } else if (type == "virtio-net" || type == "dwmac") {
         open_net_backend(node, st);
     }
 }
 
 int main(int argc, char **argv)
 {
-    VirtMachine *s;
+    std::unique_ptr<CharacterDevice> console;
+    std::unique_ptr<VirtMachine> s; /* after the console it writes to */
     const char *path, *cmdline, *build_preload_file;
-    int c, option_index, ram_size, accel_enable, exit_code;
+    int c, option_index, ram_size, accel_enable;
     bool allow_ctrlc;
     BlockDeviceModeEnum drive_mode;
     VirtMachineParams p_s, *p = &p_s;
@@ -899,7 +928,8 @@ int main(int argc, char **argv)
     fprintf(stderr, "Console not supported yet\n");
     exit(1);
 #else
-    p->console = console_init(allow_ctrlc);
+    console = console_init(allow_ctrlc);
+    p->console = console.get();
 #endif
     p->rtc_real_time = true;
 
@@ -914,9 +944,7 @@ int main(int argc, char **argv)
     }
     
     while (!s->shutdown_requested) {
-        virt_machine_run(s);
+        virt_machine_run(s.get());
     }
-    exit_code = s->exit_code;
-    delete s;
-    return exit_code;
+    return s->exit_code;
 }

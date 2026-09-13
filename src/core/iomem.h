@@ -25,6 +25,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <memory>
 
 
 #define DEVIO_SIZE8  (1 << 0)
@@ -106,7 +107,7 @@ struct PhysMemoryRange {
     uint8_t *phys_mem;
     int dirty_bits_size; /* in bytes */
     uint32_t *dirty_bits; /* nullptr if not used */
-    uint32_t *dirty_bits_tab[2];
+    std::unique_ptr<uint32_t[]> dirty_bits_tab[2];
     int dirty_bits_index; /* 0-1 */
     /* the following is used for I/O access */
     DeviceIO *io;

@@ -95,8 +95,8 @@ private:
        than confusing a driver later. */
     uint32_t fVersion = 0;
 
-    EthernetDevice *fNet = nullptr;
-    MDIOBus *fMdioBus = nullptr;
+    std::unique_ptr<EthernetDevice> fNet; /* taken over from the node */
+    std::unique_ptr<MDIOBus> fMdioBus;
     PhysMemoryMap *fMemMap = nullptr;
     IRQSignal *fIrq = nullptr;
     bool fIrqLevel = false;
@@ -163,7 +163,7 @@ public:
     bool Prepare() override;
     bool Realize() override;
     void BuildFDT(FDTContext &ctx) override;
-    Bus *ChildBus() override {return fMdioBus;}
+    Bus *ChildBus() override;
 
     /* EthernetTarget */
     bool CanWritePacket() override;

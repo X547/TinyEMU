@@ -24,6 +24,8 @@
 #ifndef JSON_H
 #define JSON_H
 
+#include <vector>
+
 typedef enum {
     JSON_STR,
     JSON_INT,
@@ -57,15 +59,13 @@ typedef struct JSONProperty {
 } JSONProperty;
 
 typedef struct JSONObject {
-    int len;
-    int size;
-    JSONProperty *props;
+    std::vector<JSONProperty> props;
 } JSONObject;
 
 typedef struct JSONArray {
-    int len;
-    int size;
-    JSONValue *tab;
+    std::vector<JSONValue> tab;
+
+    int Length() const {return (int)tab.size();}
 } JSONArray;
 
 JSONValue json_string_new2(const char *str, int len);

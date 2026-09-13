@@ -93,7 +93,7 @@ private:
                   bool multiple);
 
 public:
-    SDCard(BlockDevice *bs, bool read_only);
+    SDCard(std::unique_ptr<BlockDevice> bs, bool read_only);
 
     SDCardTypeEnum CardType() const override {return SD_CARD_SD;}
     int BusWidth() const override {return 4;}
@@ -103,8 +103,8 @@ public:
 };
 
 
-SDCard::SDCard(BlockDevice *bs, bool read_only):
-    SDMemoryCard("sd-card", bs, read_only)
+SDCard::SDCard(std::unique_ptr<BlockDevice> bs, bool read_only):
+    SDMemoryCard("sd-card", std::move(bs), read_only)
 {
     /* A medium larger than two gigabytes cannot be described by a version 1
        CSD at all, so it has to be a high capacity card; a smaller one is a
@@ -581,7 +581,7 @@ int SDCard::AppCommand(const SDCommand &cmd, uint8_t *response)
 
 //#pragma mark - factory
 
-Device *sd_card_node_create(BlockDevice *bs, bool read_only)
+Device *sd_card_node_create(std::unique_ptr<BlockDevice> bs, bool read_only)
 {
     /* The smallest capacity a version 1 CSD can describe is four blocks, and
        an image below that would have the card claiming more than it holds. */
@@ -589,5 +589,6 @@ Device *sd_card_node_create(BlockDevice *bs, bool read_only)
         vm_error("sd-card: the image is too small to be a card\n");
         return nullptr;
     }
-    return new SDDeviceNode("sd-card", new SDCard(bs, read_only));
+    return new SDDeviceNode("sd-card",
+                            std::make_unique<SDCard>(std::move(bs), read_only));
 }

@@ -36,6 +36,7 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <errno.h>
+#include <string>
 
 #include "cutils.h"
 #include "list.h"
@@ -44,7 +45,7 @@
 struct FSFileDisk;
 
 struct FSDeviceDisk: public FSDevice {
-    char *root_path;
+    std::string root_path;
 
     void End() override;
     void Delete(FSFile *f) override;
@@ -184,7 +185,7 @@ static void fs_statfs(FSDevice *fs1, FSStatFS *st)
 {
     FSDeviceDisk *fs = (FSDeviceDisk *)fs1;
     struct statvfs st1;
-    statvfs(fs->root_path, &st1);
+    statvfs(fs->root_path.c_str(), &st1);
     st->f_bsize = st1.f_bsize;
     st->f_blocks = st1.f_blocks;
     st->f_bfree = st1.f_bfree;
@@ -215,11 +216,11 @@ static int fs_attach(FSDevice *fs1, FSFileDisk **pf,
     struct stat st;
     FSFileDisk *f;
     
-    if (lstat(fs->root_path, &st) != 0) {
+    if (lstat(fs->root_path.c_str(), &st) != 0) {
         *pf = NULL;
         return -errno_to_p9(errno);
     }
-    f = fid_create(fs1, strdup(fs->root_path), uid);
+    f = fid_create(fs1, strdup(fs->root_path.c_str()), uid);
     stat_to_qid(qid, &st);
     *pf = f;
     return 0;
@@ -663,21 +664,18 @@ static int fs_getlock(FSDevice *fs, FSFileDisk *f, FSLock *lock)
 
 static void fs_disk_end(FSDevice *fs1)
 {
-    FSDeviceDisk *fs = (FSDeviceDisk *)fs1;
-    free(fs->root_path);
+    (void)fs1;
 }
 
-FSDevice *fs_disk_init(const char *root_path)
+std::unique_ptr<FSDevice> fs_disk_init(const char *root_path)
 {
-    FSDeviceDisk *fs;
     struct stat st;
 
-    lstat(root_path, &st);
-    if (!S_ISDIR(st.st_mode))
-        return NULL;
+    if (lstat(root_path, &st) != 0 || !S_ISDIR(st.st_mode))
+        return nullptr;
 
-    fs = new FSDeviceDisk();
-    fs->root_path = strdup(root_path);
+    auto fs = std::make_unique<FSDeviceDisk>();
+    fs->root_path = root_path;
     return fs;
 }
 

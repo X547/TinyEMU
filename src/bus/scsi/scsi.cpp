@@ -84,16 +84,14 @@ bool SCSIBus::AssignResources(Device *dev)
 
 //#pragma mark - SCSIDeviceNode
 
-SCSIDeviceNode::SCSIDeviceNode(const char *name, SCSIDevice *dev, int lun):
-    Device(name), fDev(dev), fLun(lun)
+SCSIDeviceNode::SCSIDeviceNode(const char *name,
+                               std::unique_ptr<SCSIDevice> dev, int lun):
+    Device(name), fDev(std::move(dev)), fLun(lun)
 {
 }
 
 
-SCSIDeviceNode::~SCSIDeviceNode()
-{
-    delete fDev;
-}
+SCSIDeviceNode::~SCSIDeviceNode() = default;
 
 
 bool SCSIDeviceNode::Realize()
@@ -113,5 +111,5 @@ bool SCSIDeviceNode::Realize()
             return false;
         }
     }
-    return target->AttachDevice(fDev, lun);
+    return target->AttachDevice(fDev.get(), lun);
 }

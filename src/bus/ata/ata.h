@@ -302,13 +302,13 @@ public:
    SDDeviceNode attaches a card. */
 class ATADeviceNode final: public Device {
 private:
-    ATADevice *fDev;
+    std::unique_ptr<ATADevice> fDev;
 
 public:
-    ATADeviceNode(const char *name, ATADevice *dev);
+    ATADeviceNode(const char *name, std::unique_ptr<ATADevice> dev);
     ~ATADeviceNode() override;
 
-    ATADevice *Dev() const {return fDev;}
+    ATADevice *Dev() const {return fDev.get();}
 
     bool Realize() override;
 };
@@ -316,5 +316,6 @@ public:
 
 /* A disk. 'read_only' refuses writes the way a jumpered drive would, rather
    than letting them fail one at a time in the back end. */
-ATADevice *ata_disk_create(BlockDevice *bs, bool read_only);
-Device *ata_disk_node_create(BlockDevice *bs, bool read_only);
+std::unique_ptr<ATADevice> ata_disk_create(std::unique_ptr<BlockDevice> bs,
+                                           bool read_only);
+Device *ata_disk_node_create(std::unique_ptr<BlockDevice> bs, bool read_only);

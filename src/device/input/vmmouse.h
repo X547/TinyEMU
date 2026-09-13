@@ -24,6 +24,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <memory>
 
 #include "ps2.h"
 
@@ -33,7 +34,12 @@
    turns the protocol off again, the events go to that pointer. */
 typedef struct VMMouseState VMMouseState;
 
-VMMouseState *vmmouse_init(PS2Mouse *ps2_mouse);
+struct VMMouseDeleter {
+    void operator()(VMMouseState *s) const;
+};
+typedef std::unique_ptr<VMMouseState, VMMouseDeleter> VMMousePtr;
+
+VMMousePtr vmmouse_init(PS2Mouse *ps2_mouse);
 bool vmmouse_is_absolute(VMMouseState *s);
 void vmmouse_send_mouse_event(VMMouseState *s, int x, int y, int dz,
                               int buttons);

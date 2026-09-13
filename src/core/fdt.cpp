@@ -91,7 +91,8 @@ void FDTBuilder::PutData(const uint8_t *data, int len)
 {
     int len1 = (len + 3) / 4;
     AllocLen(fTabLen + len1);
-    memcpy(fTab + fTabLen, data, len);
+    if (len > 0)
+        memcpy(fTab + fTabLen, data, len);
     memset((uint8_t *)(fTab + fTabLen) + len, 0, -len & 3);
     fTabLen += len1;
 }

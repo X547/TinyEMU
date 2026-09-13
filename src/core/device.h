@@ -23,6 +23,9 @@
  */
 #pragma once
 
+#include <memory>
+#include <string>
+
 #include "iomem.h"
 #include "resource.h"
 
@@ -71,16 +74,16 @@ void fdt_prop_irq(FDTContext &ctx, uint64_t line);
 
 class Device {
 private:
-    char *fName = nullptr;
+    std::string fName;
     Bus *fParentBus = nullptr;
     Resource fResources[RESOURCE_MAX_PER_DEVICE] {};
     int fResourceCount = 0;
 
 public:
-    Device(const char *name);
-    virtual ~Device();
+    Device(const char *name): fName(name) {}
+    virtual ~Device() = default;
 
-    const char *Name() const {return fName;}
+    const char *Name() const {return fName.c_str();}
     Bus *ParentBus() const {return fParentBus;}
     void SetParentBus(Bus *bus) {fParentBus = bus;}
 
@@ -115,7 +118,7 @@ public:
 
 class Bus {
 private:
-    Device *fDevices[BUS_MAX_DEVICES] {};
+    std::unique_ptr<Device> fDevices[BUS_MAX_DEVICES];
     int fDeviceCount = 0;
     Device *fOwner; /* the device providing this bus, null for the root */
 
@@ -127,13 +130,13 @@ public:
 
     Device *Owner() const {return fOwner;}
     int DeviceCount() const {return fDeviceCount;}
-    Device *DeviceAt(int index) {return fDevices[index];}
+    Device *DeviceAt(int index) {return fDevices[index].get();}
 
-    /* Takes ownership. Calls Prepare() once the parent link is set. A bus
-       that has to interpose something between itself and its children (a
-       PCI Express switch puts each of them behind a port of its own)
-       overrides this and adds the device further down. */
-    virtual bool AddDevice(Device *dev);
+    /* Calls Prepare() once the parent link is set. A bus that has to
+       interpose something between itself and its children (a PCI Express
+       switch puts each of them behind a port of its own) overrides this and
+       adds the device further down. */
+    virtual bool AddDevice(std::unique_ptr<Device> dev);
 
     /* Assign the resource records a child declared. */
     virtual bool AssignResources(Device *dev) = 0;
@@ -175,7 +178,7 @@ private:
     /* The machine's port space. Created on demand, because a machine with no
        host bridge and no port instructions never addresses one. */
     PhysMemoryMap *fPortMap = nullptr;
-    bool fOwnsPortMap = true;
+    std::unique_ptr<PhysMemoryMap> fOwnedPortMap;
     bool fPortBased = false;
     RangeAllocator fMmioAlloc {"MMIO"};
     RangeAllocator fIoAlloc {"IO"};
@@ -193,7 +196,6 @@ public:
        does, because its chipset is fixed: a PC. */
     SystemBus(PhysMemoryMap *mem_map, PhysMemoryMap *port_map,
               IRQSignal *irqs, int irq_count);
-    ~SystemBus() override;
 
     const char *Type() const override {return "system";}
 

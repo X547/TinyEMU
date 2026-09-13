@@ -303,12 +303,11 @@ void VIRTIOInputDevice::ConfigWrite()
     }
 }
 
-VIRTIODevice *virtio_input_init(VIRTIOBusDef *bus, VirtioInputTypeEnum type)
+std::unique_ptr<VIRTIODevice> virtio_input_init(VIRTIOBusDef *bus,
+                                                VirtioInputTypeEnum type)
 {
-    VIRTIOInputDevice *s;
-
-    s = new VIRTIOInputDevice();
-    virtio_init(s, bus, 18, 256);
+    auto s = std::make_unique<VIRTIOInputDevice>();
+    virtio_init(s.get(), bus, 18, 256);
     s->queue[0].manual_recv = true;
     s->device_features = 0;
     s->type = type;

@@ -27,6 +27,7 @@
 #include <inttypes.h>
 #include <assert.h>
 #include <stdarg.h>
+#include <string>
 
 #include "cutils.h"
 #include "pci.h"
@@ -49,10 +50,10 @@ struct PCIDevice: public IRQTarget {
     uint8_t config[PCI_EXT_CONFIG_SIZE];
     uint16_t next_cap_offset; /* offset of the next capability */
     uint16_t next_ext_cap_offset; /* offset of the next extended capability */
-    char *name; /* for debug only */
+    std::string name; /* for debug only */
     PCIIORegion io_regions[PCI_NUM_REGIONS];
     /* Non-null on a type 1 function: the bus this bridge forwards to. */
-    PCIBus *secondary_bus;
+    PCIBusPtr secondary_bus;
     int pcie_type; /* -1 without a PCI Express capability */
 
     void SetIRQ(int irq_num, int level) override;
@@ -63,7 +64,7 @@ struct PCIBus {
     /* The bridge this bus hangs from, or null on a root bus. It supplies the
        bus number, the MSI receiver and the INTx path. */
     PCIDevice *parent_bridge;
-    PCIDevice *device[256];
+    std::unique_ptr<PCIDevice> device[256];
     PhysMemoryMap *mem_map;
     PhysMemoryMap *port_map;
     uint32_t irq_state[4][8]; /* one bit per device */
@@ -71,6 +72,11 @@ struct PCIBus {
     PCIMsiTarget *msi_target; /* null if the bridge has no MSI receiver */
     bool is_pcie;
 };
+
+void PCIBusDeleter::operator()(PCIBus *b) const
+{
+    delete b;
+}
 
 static bool pci_is_bridge(const PCIDevice *d)
 {
@@ -153,9 +159,10 @@ static PCIDevice *pci_register_device_type(PCIBus *b, const char *name,
     if (b->device[devfn])
         return NULL;
 
-    d = new PCIDevice();
+    b->device[devfn] = std::make_unique<PCIDevice>();
+    d = b->device[devfn].get();
     d->bus = b;
-    d->name = strdup(name);
+    d->name = name;
     d->devfn = devfn;
 
     put_le16(d->config + PCI_VENDOR_ID, vendor_id);
@@ -165,12 +172,10 @@ static PCIDevice *pci_register_device_type(PCIBus *b, const char *name,
     d->config[PCI_HEADER_TYPE] = header_type;
     d->next_cap_offset = first_cap_offset;
     d->next_ext_cap_offset = PCI_EXT_CAP_START;
-    d->secondary_bus = NULL;
     d->pcie_type = -1;
 
     for(i = 0; i < 4; i++)
         d->irq[i].Init(d, i);
-    b->device[devfn] = d;
 
     /* A function on a PCI Express hierarchy must say so, because that is what
        tells a guest its configuration space runs past 256 bytes. */
@@ -224,7 +229,7 @@ static uint32_t pci_device_config_read(PCIDevice *d, uint32_t addr,
     }
 #ifdef DEBUG_CONFIG
     printf("pci_config_read: dev=%s addr=0x%03x val=0x%x s=%d\n",
-           d->name, addr, val, 1 << size_log2);
+           d->name.c_str(), addr, val, 1 << size_log2);
 #endif
     return val;
 }
@@ -462,7 +467,7 @@ static void pci_device_config_write(PCIDevice *d, uint32_t addr,
 
 #ifdef DEBUG_CONFIG
     printf("pci_config_write: dev=%s addr=0x%03x val=0x%x s=%d\n",
-           d->name, addr, data, 1 << size_log2);
+           d->name.c_str(), addr, data, 1 << size_log2);
 #endif
     if (size_log2 == 2 && pci_bar_reg(d, addr) >= 0) {
         if (pci_write_bar(d, addr, data) == 0)
@@ -491,15 +496,15 @@ static PCIDevice *pci_find_device(PCIBus *b, int bus_num, int devfn)
     int i;
 
     if (bus_num == pci_bus_get_bus_num(b))
-        return b->device[devfn];
+        return b->device[devfn].get();
 
     for(i = 0; i < 256; i++) {
-        PCIDevice *br = b->device[i];
-        if (br == NULL || br->secondary_bus == NULL)
+        PCIDevice *br = b->device[i].get();
+        if (br == NULL || br->secondary_bus == nullptr)
             continue;
         if (bus_num >= br->config[PCI_SECONDARY_BUS] &&
             bus_num <= br->config[PCI_SUBORDINATE_BUS])
-            return pci_find_device(br->secondary_bus, bus_num, devfn);
+            return pci_find_device(br->secondary_bus.get(), bus_num, devfn);
     }
     return NULL;
 }
@@ -555,9 +560,9 @@ void PCIIOWindow::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
     fPortMap->IoWrite(fPortBase + offset, val, size_log2);
 }
 
-PCIBus *pci_bus_init(PhysMemoryMap *mem_map, PhysMemoryMap *port_map)
+PCIBusPtr pci_bus_init(PhysMemoryMap *mem_map, PhysMemoryMap *port_map)
 {
-    PCIBus *b = new PCIBus();
+    PCIBusPtr b(new PCIBus());
     b->bus_num = 0;
     b->parent_bridge = NULL;
     b->mem_map = mem_map;
@@ -651,9 +656,9 @@ PCIBus *pci_bridge_init(PCIBus *parent, int devfn, const char *name,
     d->config[PCI_IO_BASE] = PCI_IO_RANGE_TYPE_32;
     d->config[PCI_IO_LIMIT] = PCI_IO_RANGE_TYPE_32;
 
-    b = pci_bus_init(parent->mem_map, parent->port_map);
+    d->secondary_bus = pci_bus_init(parent->mem_map, parent->port_map);
+    b = d->secondary_bus.get();
     b->parent_bridge = d;
-    d->secondary_bus = b;
 
     /* The four INTx lines of the new bus land on the bridge's own pins, so
        every tier applies the swizzle its hardware counterpart applies. */
@@ -743,7 +748,7 @@ int pci_device_get_devfn(PCIDevice *d)
 PCIDevice *pci_bus_get_device(PCIBus *b, int devfn)
 {
     assert(devfn >= 0 && devfn < 256);
-    return b->device[devfn];
+    return b->device[devfn].get();
 }
 
 /* return the offset of the capability or < 0 if error. */
@@ -838,12 +843,6 @@ static uint32_t size_mask(int size_log2)
     return (1u << (8 << size_log2)) - 1;
 }
 
-PCIMsixState::~PCIMsixState()
-{
-    delete[] fTable;
-    delete[] fPba;
-}
-
 bool PCIMsixState::Init(PCIDevice *dev, int bar_num, int vector_count,
                         uint32_t table_offset, uint32_t pba_offset)
 {
@@ -869,8 +868,8 @@ bool PCIMsixState::Init(PCIDevice *dev, int bar_num, int vector_count,
     fDev = dev;
     fCapOffset = offset;
     fVectorCount = vector_count;
-    fTable = new PCIMsixEntry[vector_count] {};
-    fPba = new uint32_t[(vector_count + 31) / 32] {};
+    fTable = std::make_unique<PCIMsixEntry[]>(vector_count);
+    fPba = std::make_unique<uint32_t[]>((vector_count + 31) / 32);
     return true;
 }
 

@@ -128,12 +128,11 @@ void VIRTIONetDevice::SetCarrier(bool carrier_state)
     (void)carrier_state;
 }
 
-VIRTIODevice *virtio_net_init(VIRTIOBusDef *bus, EthernetDevice *es)
+std::unique_ptr<VIRTIODevice> virtio_net_init(VIRTIOBusDef *bus,
+                                              EthernetDevice *es)
 {
-    VIRTIONetDevice *s;
-
-    s = new VIRTIONetDevice();
-    virtio_init(s, bus, 1, 6 + 2);
+    auto s = std::make_unique<VIRTIONetDevice>();
+    virtio_init(s.get(), bus, 1, 6 + 2);
     /* VIRTIO_NET_F_MAC, VIRTIO_NET_F_STATUS */
     s->device_features = (1 << 5) /* | (1 << 16) */;
     s->queue[0].manual_recv = true;
@@ -145,6 +144,6 @@ VIRTIODevice *virtio_net_init(VIRTIOBusDef *bus, EthernetDevice *es)
 
     s->header_size = sizeof(VIRTIONetHeader);
     
-    es->target = s;
+    es->target = s.get();
     return s;
 }

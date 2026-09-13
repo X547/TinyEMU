@@ -79,7 +79,8 @@ public:
                            BlockDeviceCompletion *completion) = 0;
 };
 
-VIRTIODevice *virtio_block_init(VIRTIOBusDef *bus, BlockDevice *bs);
+std::unique_ptr<VIRTIODevice> virtio_block_init(VIRTIOBusDef *bus,
+                                                BlockDevice *bs);
 
 /* network device */
 
@@ -110,7 +111,8 @@ public:
                             int select_ret) = 0;
 };
 
-VIRTIODevice *virtio_net_init(VIRTIOBusDef *bus, EthernetDevice *es);
+std::unique_ptr<VIRTIODevice> virtio_net_init(VIRTIOBusDef *bus,
+                                              EthernetDevice *es);
 
 /* console device */
 
@@ -122,7 +124,8 @@ public:
     virtual int ReadData(uint8_t *buf, int len) = 0;
 };
 
-VIRTIODevice *virtio_console_init(VIRTIOBusDef *bus, CharacterDevice *cs);
+std::unique_ptr<VIRTIODevice> virtio_console_init(VIRTIOBusDef *bus,
+                                                  CharacterDevice *cs);
 bool virtio_console_can_write_data(VIRTIODevice *s);
 int virtio_console_get_write_len(VIRTIODevice *s);
 int virtio_console_write_data(VIRTIODevice *s, const uint8_t *buf, int buf_len);
@@ -143,14 +146,15 @@ int virtio_input_send_key_event(VIRTIODevice *s, bool is_down,
 int virtio_input_send_mouse_event(VIRTIODevice *s, int dx, int dy, int dz,
                                   unsigned int buttons);
 
-VIRTIODevice *virtio_input_init(VIRTIOBusDef *bus, VirtioInputTypeEnum type);
+std::unique_ptr<VIRTIODevice> virtio_input_init(VIRTIOBusDef *bus,
+                                                VirtioInputTypeEnum type);
 
 /* 9p filesystem device */
 
 #include "fs.h"
 
-VIRTIODevice *virtio_9p_init(VIRTIOBusDef *bus, FSDevice *fs,
-                             const char *mount_tag);
+std::unique_ptr<VIRTIODevice> virtio_9p_init(VIRTIOBusDef *bus, FSDevice *fs,
+                                             const char *mount_tag);
 
 /* device tree nodes */
 

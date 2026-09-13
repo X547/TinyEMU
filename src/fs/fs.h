@@ -24,6 +24,8 @@
 
 #pragma once
 
+#include <memory>
+
 /* FSQID.type */
 #define P9_QTDIR 0x80
 #define P9_QTAPPEND 0x40
@@ -219,7 +221,7 @@ public:
     virtual bool IsNet() const {return false;}
 };
 
-FSDevice *fs_disk_init(const char *root_path);
+std::unique_ptr<FSDevice> fs_disk_init(const char *root_path);
 FSDevice *fs_mem_init(void);
 FSDevice *fs_net_init(const char *url, StartCallback *start);
 void fs_net_set_pwd(FSDevice *fs, const char *pwd);

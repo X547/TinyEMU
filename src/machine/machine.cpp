@@ -213,84 +213,70 @@ static const VirtMachineClass *virt_machine_find_class(const char *machine_name)
 
 //#pragma mark - device tree
 
-static void free_device_list(VMDeviceNode *node)
-{
-    while (node != NULL) {
-        VMDeviceNode *next = node->next;
-        free_device_list(node->children);
-        free(node->type);
-        free(node->id);
-        free(node->filename);
-        free(node->child_bus_type);
-        free(node);
-        node = next;
-    }
-}
+VMDeviceNode::~VMDeviceNode() = default;
 
 void vm_walk_devices(VMDeviceNode *node, VMDeviceNodeVisitor visit,
                      void *opaque)
 {
-    for (; node != NULL; node = node->next) {
+    for (; node != NULL; node = node->next.get()) {
         visit(node, opaque);
-        vm_walk_devices(node->children, visit, opaque);
+        vm_walk_devices(node->children.get(), visit, opaque);
     }
 }
 
 static int parse_bus(JSONValue bus_obj, VMDeviceNode *owner,
-                     VMDeviceNode **list_out);
+                     std::unique_ptr<VMDeviceNode> *list_out);
 
 /* A device is { type: "...", id: "...", <device properties> }, plus an
    optional "bus" object when the device provides one. */
-static VMDeviceNode *parse_device(JSONValue obj, VMDeviceNode *parent)
+static std::unique_ptr<VMDeviceNode> parse_device(JSONValue obj,
+                                                  VMDeviceNode *parent)
 {
     const char *str;
-    VMDeviceNode *node;
     JSONValue bus;
 
     if (obj.type != JSON_OBJ) {
         vm_error("device: object expected\n");
-        return NULL;
+        return nullptr;
     }
 
-    node = mallocz_t<VMDeviceNode>();
+    auto node = std::make_unique<VMDeviceNode>();
     node->props = obj;
     node->parent = parent;
 
     if (vm_get_str(obj, "type", &str) < 0)
-        goto fail;
-    node->type = strdup(str);
+        return nullptr;
+    node->type = str;
 
     if (vm_get_str_opt(obj, "id", &str) < 0)
-        goto fail;
-    node->id = strdup_null(str);
+        return nullptr;
+    if (str)
+        node->id = str;
 
     if (vm_get_str_opt(obj, "file", &str) < 0)
-        goto fail;
-    node->filename = strdup_null(str);
+        return nullptr;
+    if (str)
+        node->filename = str;
 
     bus = json_object_get(obj, "bus");
     if (!json_is_undefined(bus)) {
-        if (parse_bus(bus, node, &node->children) < 0)
-            goto fail;
+        if (parse_bus(bus, node.get(), &node->children) < 0)
+            return nullptr;
     }
     return node;
-
- fail:
-    free_device_list(node);
-    return NULL;
 }
 
 /* A bus is { type: "...", devices: [ ... ] }. */
 static int parse_bus(JSONValue bus_obj, VMDeviceNode *owner,
-                     VMDeviceNode **list_out)
+                     std::unique_ptr<VMDeviceNode> *list_out)
 {
     const char *bus_type;
     JSONValue devices;
-    VMDeviceNode *first = NULL;
-    VMDeviceNode **tail = &first;
+    std::unique_ptr<VMDeviceNode> first;
+    std::unique_ptr<VMDeviceNode> *tail = &first;
     int count = 0;
 
-    *list_out = NULL;
+    list_out->reset();
 
     if (bus_obj.type != JSON_OBJ) {
         vm_error("bus: object expected\n");
@@ -301,7 +287,7 @@ static int parse_bus(JSONValue bus_obj, VMDeviceNode *owner,
     /* Kept so that the machine can check it against the bus the owning device
        really provides, rather than accepting any name at all. */
     if (owner != NULL)
-        owner->child_bus_type = strdup(bus_type);
+        owner->child_bus_type = bus_type;
 
     devices = json_object_get(bus_obj, "devices");
     if (json_is_undefined(devices))
@@ -311,19 +297,16 @@ static int parse_bus(JSONValue bus_obj, VMDeviceNode *owner,
         return -1;
     }
 
-    for (int i = 0; i < devices.u.array->len; i++) {
-        VMDeviceNode *node = parse_device(json_array_get(devices, i), owner);
-        if (node == NULL) {
-            free_device_list(first);
+    for (int i = 0; i < devices.u.array->Length(); i++) {
+        *tail = parse_device(json_array_get(devices, i), owner);
+        if (*tail == nullptr)
             return -1;
-        }
-        *tail = node;
-        tail = &node->next;
+        tail = &(*tail)->next;
         count++;
     }
     if (owner != NULL)
         owner->child_count = count;
-    *list_out = first;
+    *list_out = std::move(first);
     return 0;
 }
 
@@ -334,12 +317,11 @@ static void flatten_visit(VMDeviceNode *node, void *opaque)
 {
     VirtMachineParams *p = static_cast<VirtMachineParams *>(opaque);
 
-    if (strcmp(node->type, "simplefb") != 0 &&
-        strcmp(node->type, "vga") != 0)
+    if (node->type != "simplefb" && node->type != "vga")
         return;
 
     free(p->display_device);
-    p->display_device = strdup(node->type);
+    p->display_device = strdup(node->type.c_str());
     vm_get_int_opt(node->props, "width", &p->width, 800);
     vm_get_int_opt(node->props, "height", &p->height, 600);
 }
@@ -437,8 +419,12 @@ static int virt_machine_parse_config(VirtMachineParams *p,
     if (vm_get_str(obj, "type", &str) < 0)
         goto tag_fail;
     p->root_bus_type = strdup(str);
-    if (parse_bus(obj, NULL, &p->root_devices) < 0)
-        goto tag_fail;
+    {
+        std::unique_ptr<VMDeviceNode> root_devices;
+        if (parse_bus(obj, NULL, &root_devices) < 0)
+            goto tag_fail;
+        p->root_devices = root_devices.release();
+    }
     if (flatten_device_tree(p) < 0)
         goto tag_fail;
 
@@ -476,7 +462,7 @@ static int virt_machine_parse_config(VirtMachineParams *p,
     p->cfg_json = cfg;
     return 0;
  tag_fail:
-    free_device_list(p->root_devices);
+    delete p->root_devices;
     p->root_devices = NULL;
     json_free(cfg);
     return -1;
@@ -722,7 +708,7 @@ void virt_machine_free_config(VirtMachineParams *p)
         free(p->files[i].filename);
         free(p->files[i].buf);
     }
-    free_device_list(p->root_devices);
+    delete p->root_devices;
     p->root_devices = NULL;
     free(p->root_bus_type);
     p->root_bus_type = NULL;
@@ -732,7 +718,7 @@ void virt_machine_free_config(VirtMachineParams *p)
     free(p->cfg_filename);
 }
 
-VirtMachine *virt_machine_init(VirtMachineParams *p)
+std::unique_ptr<VirtMachine> virt_machine_init(VirtMachineParams *p)
 {
     return p->vmc->Init(p);
 }

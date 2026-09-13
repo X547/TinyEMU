@@ -54,28 +54,16 @@ void fdt_prop_irq(FDTContext &ctx, uint64_t line)
 
 //#pragma mark - Device
 
-Device::Device(const char *name):
-    fName(strdup(name))
-{
-}
-
-
-Device::~Device()
-{
-    free(fName);
-}
-
-
 Resource *Device::AddResource(ResourceTypeEnum type, uint64_t size,
                               uint64_t align, bool high)
 {
     if (fResourceCount >= RESOURCE_MAX_PER_DEVICE) {
-        vm_error("%s: too many resources\n", fName);
+        vm_error("%s: too many resources\n", Name());
         return nullptr;
     }
     Resource *res = &fResources[fResourceCount++];
     res->type = type;
-    res->name = fName;
+    res->name = Name();
     res->size = size;
     res->align = align;
     res->fixed = false;
@@ -116,13 +104,15 @@ Resource *Device::FindResource(ResourceTypeEnum type, int index)
 
 Bus::~Bus()
 {
-    for (int i = 0; i < fDeviceCount; i++) {
-        delete fDevices[i];
+    /* Latest first, so a device goes before the siblings it was added after
+       and may refer to. */
+    for (int i = fDeviceCount - 1; i >= 0; i--) {
+        fDevices[i].reset();
     }
 }
 
 
-bool Bus::AddDevice(Device *dev)
+bool Bus::AddDevice(std::unique_ptr<Device> dev)
 {
     if (dev == nullptr) {
         return false;
@@ -130,12 +120,12 @@ bool Bus::AddDevice(Device *dev)
     if (fDeviceCount >= BUS_MAX_DEVICES) {
         vm_error("%s bus: too many devices (max %d)\n", Type(),
                  BUS_MAX_DEVICES);
-        delete dev;
         return false;
     }
-    fDevices[fDeviceCount++] = dev;
-    dev->SetParentBus(this);
-    if (!dev->Prepare()) {
+    Device *added = dev.get();
+    fDevices[fDeviceCount++] = std::move(dev);
+    added->SetParentBus(this);
+    if (!added->Prepare()) {
         return false;
     }
     return true;
@@ -156,7 +146,7 @@ Bus *Bus::Root()
 bool Bus::AllocateAll()
 {
     for (int i = 0; i < fDeviceCount; i++) {
-        Device *dev = fDevices[i];
+        Device *dev = fDevices[i].get();
         if (!AssignResources(dev)) {
             return false;
         }
@@ -172,7 +162,7 @@ bool Bus::AllocateAll()
 bool Bus::RealizeAll()
 {
     for (int i = 0; i < fDeviceCount; i++) {
-        Device *dev = fDevices[i];
+        Device *dev = fDevices[i].get();
         if (!dev->Realize()) {
             vm_error("failed to realize device '%s'\n", dev->Name());
             return false;
@@ -219,7 +209,6 @@ SystemBus::SystemBus(PhysMemoryMap *mem_map, PhysMemoryMap *port_map,
     Bus(nullptr),
     fMemMap(mem_map),
     fPortMap(port_map),
-    fOwnsPortMap(false),
     fPortBased(true),
     fIrqTable(irqs),
     fIrqCount(irq_count)
@@ -230,18 +219,11 @@ SystemBus::SystemBus(PhysMemoryMap *mem_map, PhysMemoryMap *port_map,
 }
 
 
-SystemBus::~SystemBus()
-{
-    if (fOwnsPortMap) {
-        delete fPortMap;
-    }
-}
-
-
 PhysMemoryMap *SystemBus::PortMap()
 {
     if (fPortMap == nullptr) {
-        fPortMap = new PhysMemoryMap();
+        fOwnedPortMap = std::make_unique<PhysMemoryMap>();
+        fPortMap = fOwnedPortMap.get();
     }
     return fPortMap;
 }

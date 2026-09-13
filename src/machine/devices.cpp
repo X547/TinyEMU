@@ -84,7 +84,7 @@ static bool pci_host_io_size(const char *type, int size_kb, uint64_t *out)
 
 Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
 {
-    const char *type = node->type;
+    const char *type = node->type.c_str();
     VMDeviceNode *mutable_node = const_cast<VMDeviceNode *>(node);
 
     if (strcmp(type, "ns16550a") == 0) {
@@ -120,7 +120,7 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
     }
 
     if (strcmp(type, "pci-host-i440fx") == 0) {
-        return i440fx_node_create(node->id != nullptr ? node->id : "i440fx");
+        return i440fx_node_create(node->IdOr("i440fx"));
     }
 #endif
 
@@ -130,7 +130,7 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
                      "drive on it\n");
             return nullptr;
         }
-        return ata_pci_node_create(node->id != nullptr ? node->id : "ide");
+        return ata_pci_node_create(node->IdOr("ide"));
     }
 
     if (strcmp(type, "ata-disk") == 0) {
@@ -142,7 +142,8 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
             vm_error("ata-disk: no block back end\n");
             return nullptr;
         }
-        return ata_disk_node_create(mutable_node->block_dev, read_only != 0);
+        return ata_disk_node_create(std::move(mutable_node->block_dev),
+                                    read_only != 0);
     }
 
     if (strcmp(type, "pci-host-ecam-generic") == 0) {
@@ -161,7 +162,7 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
         if (!pci_host_io_size(type, io_size_kb, &io_size)) {
             return nullptr;
         }
-        return new PCIHostECAMDevice(node->id != nullptr ? node->id : "pcie",
+        return new PCIHostECAMDevice(node->IdOr("pcie"),
                                      bus_count, (uint64_t)mmio_size_mb << 20,
                                      (uint64_t)mmio64_size_mb << 20, io_size);
     }
@@ -192,15 +193,14 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
         if (compatible == nullptr) {
             compatible = PCIE_DW_DEFAULT_COMPATIBLE;
         }
-        return new PCIHostDWDevice(node->id != nullptr ? node->id : "pcie",
+        return new PCIHostDWDevice(node->IdOr("pcie"),
                                    compatible, (uint64_t)mmio_size_mb << 20,
                                    (uint64_t)mmio64_size_mb << 20, io_size,
                                    bus_count);
     }
 
     if (strcmp(type, "pci-bridge") == 0) {
-        return pci_bridge_node_create(node->id != nullptr ? node->id
-                                                          : "pci-bridge");
+        return pci_bridge_node_create(node->IdOr("pci-bridge"));
     }
 
     if (strcmp(type, "nvme") == 0) {
@@ -213,7 +213,7 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
                 vm_error("nvme: 'quirks' must be an array of names\n");
                 return nullptr;
             }
-            for (int i = 0; i < list.u.array->len; i++) {
+            for (int i = 0; i < list.u.array->Length(); i++) {
                 JSONValue item = json_array_get(list, i);
                 if (item.type != JSON_STR) {
                     vm_error("nvme: 'quirks' must be an array of names\n");
@@ -232,7 +232,7 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
                      "namespace on it\n");
             return nullptr;
         }
-        return nvme_node_create(node->id != nullptr ? node->id : "nvme",
+        return nvme_node_create(node->IdOr("nvme"),
                                 quirks);
     }
 
@@ -245,7 +245,8 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
             vm_error("nvme-ns: no block back end\n");
             return nullptr;
         }
-        return nvme_namespace_node_create(mutable_node->block_dev, nsid);
+        return nvme_namespace_node_create(std::move(mutable_node->block_dev),
+                                          nsid);
     }
 
     if (strcmp(type, "sdhci") == 0) {
@@ -266,7 +267,7 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
             vm_error("sdhci: 'clock' must be between 1 and 255 MHz\n");
             return nullptr;
         }
-        return sdhci_node_create(node->id != nullptr ? node->id : "sdhci",
+        return sdhci_node_create(node->IdOr("sdhci"),
                                  compatible, (uint32_t)clock_mhz * 1000000);
     }
 
@@ -280,10 +281,11 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
             return nullptr;
         }
         if (strcmp(type, "sd-card") == 0) {
-            return sd_card_node_create(mutable_node->block_dev,
+            return sd_card_node_create(std::move(mutable_node->block_dev),
                                        read_only != 0);
         }
-        return mmc_card_node_create(mutable_node->block_dev, read_only != 0);
+        return mmc_card_node_create(std::move(mutable_node->block_dev),
+                                    read_only != 0);
     }
 
     if (strcmp(type, "xhci") == 0) {
@@ -294,7 +296,7 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
                           XHCI_DEFAULT_USB3_PORTS)) {
             return nullptr;
         }
-        return xhci_node_create(node->id != nullptr ? node->id : "xhci",
+        return xhci_node_create(node->IdOr("xhci"),
                                 usb2_ports, usb3_ports);
     }
 
@@ -358,7 +360,7 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
             vm_error("scsi-disk: no block back end\n");
             return nullptr;
         }
-        return scsi_disk_node_create(mutable_node->block_dev, lun);
+        return scsi_disk_node_create(std::move(mutable_node->block_dev), lun);
     }
 
     if (strcmp(type, "dwmac") == 0) {
@@ -385,7 +387,7 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
                 vm_error("dwmac: 'quirks' must be an array of names\n");
                 return nullptr;
             }
-            for (int i = 0; i < list.u.array->len; i++) {
+            for (int i = 0; i < list.u.array->Length(); i++) {
                 JSONValue item = json_array_get(list, i);
                 if (item.type != JSON_STR) {
                     vm_error("dwmac: 'quirks' must be an array of names\n");
@@ -467,32 +469,34 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
 
 bool device_build_tree(Bus *bus, VMDeviceNode *nodes, DeviceContext *ctx)
 {
-    for (VMDeviceNode *node = nodes; node != nullptr; node = node->next) {
-        Device *dev = device_create(node, ctx);
+    for (VMDeviceNode *node = nodes; node != nullptr; node = node->next.get()) {
+        std::unique_ptr<Device> owned(device_create(node, ctx));
+        Device *dev = owned.get();
         if (dev == nullptr) {
             return false;
         }
-        if (!bus->AddDevice(dev)) {
+        if (!bus->AddDevice(std::move(owned))) {
             return false;
         }
         if (node->children != nullptr) {
             Bus *child = dev->ChildBus();
             if (child == nullptr) {
                 vm_error("%s: device type '%s' does not provide a bus\n",
-                         dev->Name(), node->type);
+                         dev->Name(), node->type.c_str());
                 return false;
             }
             /* The nesting in the file is the nesting of the buses, so a name
                that does not match the bus the device really provides is a
                mistake in the configuration rather than something to ignore. */
-            if (node->child_bus_type != nullptr &&
-                strcmp(node->child_bus_type, child->Type()) != 0) {
+            if (!node->child_bus_type.empty() &&
+                node->child_bus_type != child->Type()) {
                 vm_error("%s: device type '%s' provides a '%s' bus, but the "
                          "configuration declares a '%s' bus\n", dev->Name(),
-                         node->type, child->Type(), node->child_bus_type);
+                         node->type.c_str(), child->Type(),
+                         node->child_bus_type.c_str());
                 return false;
             }
-            if (!device_build_tree(child, node->children, ctx)) {
+            if (!device_build_tree(child, node->children.get(), ctx)) {
                 return false;
             }
         }

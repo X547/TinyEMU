@@ -75,12 +75,10 @@ bool PCIBusWrapper::AssignResources(Device *dev)
    a second one put on the same bus would be invisible to the guest. */
 class PCIePortDevice final: public Device {
 private:
-    PCIBusWrapper *fChildBus = nullptr;
+    std::unique_ptr<PCIBusWrapper> fChildBus;
 
 public:
     PCIePortDevice(const char *name): Device(name) {}
-
-    ~PCIePortDevice() override {delete fChildBus;}
 
     bool Prepare() override
     {
@@ -94,13 +92,13 @@ public:
             vm_error("%s: could not create the port\n", Name());
             return false;
         }
-        fChildBus = new PCIBusWrapper(this, sec);
+        fChildBus = std::make_unique<PCIBusWrapper>(this, sec);
         return true;
     }
 
     bool Realize() override {return true;}
 
-    Bus *ChildBus() override {return fChildBus;}
+    Bus *ChildBus() override {return fChildBus.get();}
 };
 
 
@@ -117,13 +115,12 @@ private:
 public:
     PCISwitchBus(Device *owner, PCIBus *bus): PCIBusWrapper(owner, bus) {}
 
-    bool AddDevice(Device *dev) override
+    bool AddDevice(std::unique_ptr<Device> dev) override
     {
         char name[64];
-        PCIePortDevice *port;
 
         if (!pci_bus_is_pcie(AsPCIBus())) {
-            return Bus::AddDevice(dev);
+            return Bus::AddDevice(std::move(dev));
         }
         if (dev == nullptr) {
             return false;
@@ -131,24 +128,24 @@ public:
 
         snprintf(name, sizeof(name), "%s-port%d", Owner()->Name(),
                  fPortCount++);
-        port = new PCIePortDevice(name);
-        if (!Bus::AddDevice(port)) {
-            delete dev;
+        auto port = std::make_unique<PCIePortDevice>(name);
+        PCIePortDevice *added = port.get();
+        if (!Bus::AddDevice(std::move(port))) {
             return false;
         }
-        return port->ChildBus()->AddDevice(dev);
+        return added->ChildBus()->AddDevice(std::move(dev));
     }
 };
 
 
 //#pragma mark - pci_attach_bus_create
 
-Bus *pci_attach_bus_create(Device *owner, PCIBus *bus)
+std::unique_ptr<Bus> pci_attach_bus_create(Device *owner, PCIBus *bus)
 {
     char name[64];
 
     if (pci_bus_is_root(bus) || !pci_bus_is_pcie(bus)) {
-        return new PCIBusWrapper(owner, bus);
+        return std::make_unique<PCIBusWrapper>(owner, bus);
     }
 
     if (pci_bus_bridge_port_type(bus) == PCI_EXP_TYPE_UPSTREAM) {
@@ -166,7 +163,7 @@ Bus *pci_attach_bus_create(Device *owner, PCIBus *bus)
         }
         bus = inner;
     }
-    return new PCISwitchBus(owner, bus);
+    return std::make_unique<PCISwitchBus>(owner, bus);
 }
 
 
@@ -176,12 +173,10 @@ Bus *pci_attach_bus_create(Device *owner, PCIBus *bus)
    behind it has to exist before the devices nested inside it are added. */
 class PCIBridgeDevice final: public Device {
 private:
-    Bus *fChildBus = nullptr;
+    std::unique_ptr<Bus> fChildBus;
 
 public:
     PCIBridgeDevice(const char *name): Device(name) {}
-
-    ~PCIBridgeDevice() override {delete fChildBus;}
 
     bool Prepare() override
     {
@@ -207,7 +202,7 @@ public:
 
     bool Realize() override {return true;}
 
-    Bus *ChildBus() override {return fChildBus;}
+    Bus *ChildBus() override {return fChildBus.get();}
 };
 
 

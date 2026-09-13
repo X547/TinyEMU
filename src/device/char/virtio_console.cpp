@@ -119,12 +119,11 @@ void virtio_console_resize_event(VIRTIODevice *s, int width, int height)
     virtio_config_change_notify(s);
 }
 
-VIRTIODevice *virtio_console_init(VIRTIOBusDef *bus, CharacterDevice *cs)
+std::unique_ptr<VIRTIODevice> virtio_console_init(VIRTIOBusDef *bus,
+                                                  CharacterDevice *cs)
 {
-    VIRTIOConsoleDevice *s;
-
-    s = new VIRTIOConsoleDevice();
-    virtio_init(s, bus, 3, 4);
+    auto s = std::make_unique<VIRTIOConsoleDevice>();
+    virtio_init(s.get(), bus, 3, 4);
     s->device_features = (1 << 0); /* VIRTIO_CONSOLE_F_SIZE */
     s->queue[0].manual_recv = true;
     

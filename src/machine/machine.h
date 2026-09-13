@@ -24,6 +24,8 @@
 #pragma once
 
 #include <stdint.h>
+#include <memory>
+#include <string>
 
 #include "json.h"
 
@@ -115,34 +117,39 @@ typedef struct {
 } VMFileEntry;
 
 typedef struct VMDeviceNode VMDeviceNode;
-typedef struct VirtMachineClass VirtMachineClass;
+class VirtMachineClass;
 
 /* One node of the configuration's device tree. A node that declares child
    devices provides a bus; the nesting in the config file is the nesting of
    the buses in the machine.
 
    'props' points into the parsed configuration, which VirtMachineParams keeps
-   alive for as long as the tree exists. The back end pointers are filled in
-   between parsing and machine construction, by whoever can open files and
-   sockets. */
+   alive for as long as the tree exists. The back ends are opened between
+   parsing and machine construction, by whoever can open files and sockets,
+   and the device built from the node takes them over. */
 struct VMDeviceNode {
-    char *type;
-    char *id;
-    JSONValue props;
+    std::string type;
+    std::string id; /* empty when not given */
+    JSONValue props {};
 
-    VMDeviceNode *parent;
-    VMDeviceNode *next; /* next sibling */
-    VMDeviceNode *children;
-    int child_count;
+    VMDeviceNode *parent = nullptr;
+    std::unique_ptr<VMDeviceNode> next; /* next sibling */
+    std::unique_ptr<VMDeviceNode> children;
+    int child_count = 0;
     /* The bus type the configuration declared for those children, checked
        against the bus the device actually provides. */
-    char *child_bus_type;
+    std::string child_bus_type;
 
     /* resolved back ends */
-    char *filename;
-    BlockDevice *block_dev;
-    FSDevice *fs_dev;
-    EthernetDevice *net;
+    std::string filename; /* empty when not given */
+    std::unique_ptr<BlockDevice> block_dev;
+    std::unique_ptr<FSDevice> fs_dev;
+    std::unique_ptr<EthernetDevice> net;
+
+    ~VMDeviceNode();
+
+    const char *IdOr(const char *def) const
+        {return id.empty() ? def : id.c_str();}
 };
 
 typedef struct {
@@ -225,7 +232,8 @@ public:
 
     virtual const char *MachineNames() const = 0;
     virtual void SetDefaults(VirtMachineParams *p) const = 0;
-    virtual VirtMachine *Init(const VirtMachineParams *p) const = 0;
+    virtual std::unique_ptr<VirtMachine>
+        Init(const VirtMachineParams *p) const = 0;
 };
 
 extern const VirtMachineClass &gRiscvMachineClass;
@@ -249,7 +257,7 @@ void virt_machine_load_config_file(VirtMachineParams *p,
 void vm_add_cmdline(VirtMachineParams *p, const char *cmdline);
 char *get_file_path(const char *base_filename, const char *filename);
 void virt_machine_free_config(VirtMachineParams *p);
-VirtMachine *virt_machine_init(VirtMachineParams *p);
+std::unique_ptr<VirtMachine> virt_machine_init(VirtMachineParams *p);
 
 /* gui */
 void sdl_refresh(VirtMachine *m);

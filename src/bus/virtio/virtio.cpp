@@ -156,19 +156,6 @@ static void virtio_raise_irq(VIRTIODevice *s, uint32_t int_type,
     s->irq->Set(1);
 }
 
-/* PCI and MMIO differ both in their register layout and in how the device
-   reaches guest RAM, so one transport object supplies both. */
-class VIRTIOTransport: public DeviceIO {
-protected:
-    VIRTIODevice &fDev;
-
-public:
-    VIRTIOTransport(VIRTIODevice &dev): fDev(dev) {}
-
-    virtual uint8_t *GetRamPtr(virtio_phys_addr_t paddr, bool is_rw) = 0;
-};
-
-
 class VIRTIOPCITransport final: public VIRTIOTransport {
 public:
     VIRTIOPCITransport(VIRTIODevice &dev): VIRTIOTransport(dev) {}
@@ -285,11 +272,11 @@ void virtio_init(VIRTIODevice *s, VIRTIOBusDef *bus,
         s->msix.Init(s->pci_dev, bar_num, VIRTIO_MSIX_VECTOR_COUNT,
                      VIRTIO_PCI_MSIX_TABLE_OFFSET, VIRTIO_PCI_MSIX_PBA_OFFSET);
 
-        s->transport = new VIRTIOPCITransport(*s);
+        s->transport = std::make_unique<VIRTIOPCITransport>(*s);
         s->irq = pci_device_get_irq(s->pci_dev, 0);
         s->mem_map = pci_device_get_mem_map(s->pci_dev);
         s->mem_range = s->mem_map->RegisterDevice(0, VIRTIO_PCI_BAR_SIZE,
-                                                  s->transport,
+                                                  s->transport.get(),
                                                   DEVIO_SIZE8 | DEVIO_SIZE16 | DEVIO_SIZE32 | DEVIO_DISABLED);
         pci_register_bar(s->pci_dev, bar_num, VIRTIO_PCI_BAR_SIZE,
                          PCI_ADDRESS_SPACE_MEM, s);
@@ -297,9 +284,9 @@ void virtio_init(VIRTIODevice *s, VIRTIOBusDef *bus,
         /* MMIO case */
         s->mem_map = bus->mem_map;
         s->irq = bus->irq;
-        s->transport = new VIRTIOMMIOTransport(*s);
+        s->transport = std::make_unique<VIRTIOMMIOTransport>(*s);
         s->mem_range = s->mem_map->RegisterDevice(bus->addr, VIRTIO_PAGE_SIZE,
-                                                  s->transport,
+                                                  s->transport.get(),
                                                   DEVIO_SIZE8 | DEVIO_SIZE16 | DEVIO_SIZE32);
     }
 
@@ -1052,15 +1039,18 @@ private:
     const char *fTag = nullptr;
     Resource *fMmio = nullptr;
     Resource *fIrq = nullptr;
-    VIRTIODevice *fDev = nullptr;
-    VirtioInputTarget *fInputTarget = nullptr;
+    /* taken over from the node; declared first, so that fDev goes before
+       the back end it uses */
+    std::unique_ptr<BlockDevice> fBlockDev;
+    std::unique_ptr<FSDevice> fFsDev;
+    std::unique_ptr<EthernetDevice> fNet;
+    std::unique_ptr<VIRTIODevice> fDev;
+    std::unique_ptr<VirtioInputTarget> fInputTarget;
 
 public:
     VirtioDevice(const char *name, VirtioKindEnum kind, DeviceContext *ctx,
                  VMDeviceNode *node):
         Device(name), fKind(kind), fCtx(ctx), fNode(node) {}
-
-    ~VirtioDevice() override {delete fInputTarget;}
 
     void SetInputType(VirtioInputTypeEnum type) {fInputType = type;}
     void SetTag(const char *tag) {fTag = tag;}
@@ -1100,7 +1090,8 @@ public:
                 vm_error("%s: no block back end\n", Name());
                 return false;
             }
-            fDev = virtio_block_init(&vbus, fNode->block_dev);
+            fBlockDev = std::move(fNode->block_dev);
+            fDev = virtio_block_init(&vbus, fBlockDev.get());
             break;
         case VIRTIO_KIND_NET:
             if (fNode->net == nullptr) {
@@ -1113,8 +1104,9 @@ public:
                 vm_error("%s: only one network device is supported\n", Name());
                 return false;
             }
-            fDev = virtio_net_init(&vbus, fNode->net);
-            fCtx->net = fNode->net;
+            fNet = std::move(fNode->net);
+            fDev = virtio_net_init(&vbus, fNet.get());
+            fCtx->net = fNet.get();
             break;
         case VIRTIO_KIND_CONSOLE:
             if (fCtx->console == nullptr) {
@@ -1122,26 +1114,27 @@ public:
                 return false;
             }
             fDev = virtio_console_init(&vbus, fCtx->console);
-            fCtx->console_dev = fDev;
+            fCtx->console_dev = fDev.get();
             break;
         case VIRTIO_KIND_9P:
             if (fNode->fs_dev == nullptr) {
                 vm_error("%s: no filesystem back end\n", Name());
                 return false;
             }
-            fDev = virtio_9p_init(&vbus, fNode->fs_dev, fTag);
+            fFsDev = std::move(fNode->fs_dev);
+            fDev = virtio_9p_init(&vbus, fFsDev.get(), fTag);
             break;
         case VIRTIO_KIND_INPUT:
             fDev = virtio_input_init(&vbus, fInputType);
             if (fDev == nullptr) {
                 break;
             }
-            fInputTarget = new VirtioInputTarget(
-                fDev, fInputType == VIRTIO_INPUT_TYPE_TABLET);
+            fInputTarget = std::make_unique<VirtioInputTarget>(
+                fDev.get(), fInputType == VIRTIO_INPUT_TYPE_TABLET);
             if (fInputType == VIRTIO_INPUT_TYPE_KEYBOARD) {
-                fCtx->keyboard = fInputTarget;
+                fCtx->keyboard = fInputTarget.get();
             } else {
-                fCtx->mouse = fInputTarget;
+                fCtx->mouse = fInputTarget.get();
             }
             break;
         }

@@ -24,10 +24,19 @@
 #ifndef PCI_H
 #define PCI_H
 
+#include <memory>
+
 #include "iomem.h"
 
 typedef struct PCIBus PCIBus;
 typedef struct PCIDevice PCIDevice;
+
+/* A bus owns the functions registered on it, and a bridge function the bus
+   behind it, so only a root bus needs an owner of its own. */
+struct PCIBusDeleter {
+    void operator()(PCIBus *b) const;
+};
+typedef std::unique_ptr<PCIBus, PCIBusDeleter> PCIBusPtr;
 
 /* bar type */
 #define PCI_ADDRESS_SPACE_MEM		0x00
@@ -176,15 +185,13 @@ private:
     PCIDevice *fDev = nullptr;
     int fCapOffset = -1;
     int fVectorCount = 0;
-    PCIMsixEntry *fTable = nullptr;
-    uint32_t *fPba = nullptr; /* one bit per vector */
+    std::unique_ptr<PCIMsixEntry[]> fTable;
+    std::unique_ptr<uint32_t[]> fPba; /* one bit per vector */
 
     bool MaskedAll() const;
     uint32_t *TableSlot(uint32_t offset);
 
 public:
-    ~PCIMsixState();
-
     /* Add the capability and allocate the table. 'table_offset' and
        'pba_offset' are byte offsets within BAR 'bar_num', which the device
        must map itself. Returns whether the capability was offered. */
@@ -237,7 +244,7 @@ public:
 /* A bare PCI bus, with no host bridge attached yet. 'port_map' may be null on
    machines without a port I/O space. The caller wires the four INTx lines with
    pci_bus_set_irq(). */
-PCIBus *pci_bus_init(PhysMemoryMap *mem_map, PhysMemoryMap *port_map);
+PCIBusPtr pci_bus_init(PhysMemoryMap *mem_map, PhysMemoryMap *port_map);
 void pci_bus_set_irq(PCIBus *b, int pin, const IRQSignal *sig);
 
 /* The bus number this bus answers configuration cycles for. Defaults to 0.
