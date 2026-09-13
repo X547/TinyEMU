@@ -5,7 +5,6 @@
 #
 # Format: <test name> <whitespace> <reason>
 
-rv64ua-p-lrsc		sc does not clear the reservation, so a second sc to the same address succeeds (riscv_cpu_template.h, case 3)
 rv64ud-p-move		fmv.d.x / fmv.x.d NaN boxing
 rv64mi-p-breakpoint	debug triggers (tdata1/tdata2) are not implemented
 rv64mi-p-pmpaddr	PMP is not implemented

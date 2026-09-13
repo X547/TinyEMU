@@ -1410,6 +1410,8 @@ static void no_inline glue(riscv_cpu_interp_x, XLEN)(RISCVCPUState *s,
                     } else {                                            \
                         val = 1;                                        \
                     }                                                   \
+                    /* an SC always ends the reservation */             \
+                    s->load_res = (target_ulong)-1;                     \
                     break;                                              \
                 case 1: /* amiswap.w */                                 \
                 case 0: /* amoadd.w */                                  \

@@ -77,10 +77,11 @@ public:
 int riscv_cpu_get_max_xlen(void);
 
 /* Return nullptr if max_xlen is not supported by this build. */
-RISCVCPU *riscv_cpu_create(PhysMemoryMap *mem_map, int max_xlen);
+RISCVCPU *riscv_cpu_create(PhysMemoryMap *mem_map, int max_xlen,
+                           uint32_t hart_id);
 
-RISCVCPU *riscv_cpu_create32(PhysMemoryMap *mem_map);
-RISCVCPU *riscv_cpu_create64(PhysMemoryMap *mem_map);
-RISCVCPU *riscv_cpu_create128(PhysMemoryMap *mem_map);
+RISCVCPU *riscv_cpu_create32(PhysMemoryMap *mem_map, uint32_t hart_id);
+RISCVCPU *riscv_cpu_create64(PhysMemoryMap *mem_map, uint32_t hart_id);
+RISCVCPU *riscv_cpu_create128(PhysMemoryMap *mem_map, uint32_t hart_id);
 
 #endif /* RISCV_CPU_H */

@@ -42,7 +42,6 @@ struct PCIBus;
    that /chosen can never name a node that was not emitted. */
 struct FDTContext {
     FDTBuilder *fdt = nullptr;
-    uint32_t intc_phandle = 0; /* per-hart interrupt controller */
     uint32_t plic_phandle = 0;
     /* Handed out to PCI host bridges as they emit their nodes, so that a
        machine with more than one names its devices unambiguously. */

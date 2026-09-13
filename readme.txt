@@ -126,6 +126,12 @@ commas and /* */ comments are accepted). Format version 2 declares devices
 inside the bus they attach to; see sample-riscv64.cfg and sample-pc.cfg for
 commented examples.
 
+"cpus" sets the number of processors, 1 unless given. A RISC-V machine takes
+up to 64; each hart gets its own CLINT timer and software interrupt and a
+machine and a supervisor mode PLIC context. The harts take turns on one host
+thread, so more of them do not make the guest faster. The PC machine has one
+processor.
+
 The root bus of an FDT machine is declared as:
 
 bus: { type: "fdt", devices: [ ... ] }

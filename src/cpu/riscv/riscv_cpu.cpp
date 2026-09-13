@@ -1583,6 +1583,10 @@ static void glue(riscv_cpu_interp, MAX_XLEN)(RISCVCPUState *s, int n_cycles)
             abort();
         }
     }
+    /* Another hart may run before this one resumes and write to the reserved
+       address, which nothing here would notice. A spurious SC failure is
+       allowed, a spurious success is not. */
+    s->load_res = (target_ulong)-1;
 }
 
 /* Note: the value is not accurate when called in riscv_cpu_interp() */
@@ -1611,12 +1615,15 @@ static bool glue(riscv_cpu_get_power_down, MAX_XLEN)(RISCVCPUState *s)
     return s->power_down_flag;
 }
 
-static RISCVCPUState *glue(riscv_cpu_init, MAX_XLEN)(PhysMemoryMap *mem_map)
+static RISCVCPUState *glue(riscv_cpu_init, MAX_XLEN)(PhysMemoryMap *mem_map,
+                                                     uint32_t hart_id)
 {
     RISCVCPUState *s;
 
     s = new RISCVCPUState();
     s->mem_map = mem_map;
+    s->mhartid = hart_id;
+    s->load_res = (target_ulong)-1;
     s->pc = 0x1000;
     s->priv = PRV_M;
     s->cur_xlen = MAX_XLEN;
@@ -1703,22 +1710,24 @@ void RISCVCPUState::FlushTlbWriteRangeRam(uint8_t *ram_ptr, size_t ram_size)
 } // anonymous namespace
 
 
-RISCVCPU *glue(riscv_cpu_create, MAX_XLEN)(PhysMemoryMap *mem_map)
+RISCVCPU *glue(riscv_cpu_create, MAX_XLEN)(PhysMemoryMap *mem_map,
+                                           uint32_t hart_id)
 {
-    return glue(riscv_cpu_init, MAX_XLEN)(mem_map);
+    return glue(riscv_cpu_init, MAX_XLEN)(mem_map, hart_id);
 }
 
 #if CONFIG_RISCV_MAX_XLEN == MAX_XLEN
-RISCVCPU *riscv_cpu_create(PhysMemoryMap *mem_map, int max_xlen)
+RISCVCPU *riscv_cpu_create(PhysMemoryMap *mem_map, int max_xlen,
+                           uint32_t hart_id)
 {
     switch (max_xlen) {
         case 32:
-            return riscv_cpu_create32(mem_map);
+            return riscv_cpu_create32(mem_map, hart_id);
         case 64:
-            return riscv_cpu_create64(mem_map);
+            return riscv_cpu_create64(mem_map, hart_id);
 #if CONFIG_RISCV_MAX_XLEN == 128
         case 128:
-            return riscv_cpu_create128(mem_map);
+            return riscv_cpu_create128(mem_map, hart_id);
 #endif
         default:
             return nullptr;

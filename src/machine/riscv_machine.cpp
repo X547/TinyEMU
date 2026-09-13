@@ -47,6 +47,13 @@
 
 /* RISCV machine */
 
+#define RISCV_MAX_HARTS 64
+
+/* PLIC input lines; line 0 does not exist. */
+#define PLIC_NUM_SOURCES 32
+/* one machine mode and one supervisor mode context per hart */
+#define PLIC_MAX_CONTEXTS (2 * RISCV_MAX_HARTS)
+
 class RISCVMachine final:
     public VirtMachine,
     public IRQTarget,
@@ -57,14 +64,19 @@ public:
     PhysMemoryMap *mem_map = nullptr;
     SystemBus *bus = nullptr;
     int max_xlen = 0;
-    RISCVCPU *cpu_state = nullptr;
+    int hart_count = 0;
+    RISCVCPU *cpus[RISCV_MAX_HARTS] {};
     uint64_t ram_size = 0;
     /* RTC */
     bool rtc_real_time = false;
     uint64_t rtc_start_time = 0;
-    uint64_t timecmp = 0;
-    /* PLIC */
-    uint32_t plic_pending_irq = 0, plic_served_irq = 0;
+    uint64_t timecmp[RISCV_MAX_HARTS] {};
+    /* PLIC. Bit n of each mask is source n. */
+    uint32_t plic_level = 0; /* input line levels */
+    uint32_t plic_served_irq = 0; /* claimed and not yet completed */
+    uint8_t plic_priority[PLIC_NUM_SOURCES] {};
+    uint32_t plic_enable[PLIC_MAX_CONTEXTS] {};
+    uint8_t plic_threshold[PLIC_MAX_CONTEXTS] {};
     /* HTIF */
     uint64_t htif_tohost = 0, htif_fromhost = 0;
 
@@ -149,9 +161,6 @@ public:
 #define PCI_IO_WINDOW_BASE 0
 #define PCI_IO_WINDOW_SIZE 0x1000000 /* 16 MB */
 
-/* PLIC input lines; line 0 does not exist. */
-#define PLIC_NUM_SOURCES 32
-
 #define RTC_FREQ 1000000
 #define RTC_FREQ_DIV 16 /* arbitrary, relative to CPU freq to have a
                            10 MHz frequency */
@@ -170,7 +179,11 @@ static uint64_t rtc_get_time(RISCVMachine *m)
     if (m->rtc_real_time) {
         val = rtc_get_real_time(m) - m->rtc_start_time;
     } else {
-        val = m->cpu_state->Cycles() / RTC_FREQ_DIV;
+        /* the sum keeps advancing while some harts wait for interrupts */
+        val = 0;
+        for (int i = 0; i < m->hart_count; i++)
+            val += m->cpus[i]->Cycles();
+        val /= RTC_FREQ_DIV;
     }
     //    printf("rtc_time=%" PRId64 "\n", val);
     return val;
@@ -273,31 +286,34 @@ void RISCVMachine::WriteData(const uint8_t *buf, int buf_len)
     }
 }
 
+/* CLINT register layout: one msip word and one 64 bit mtimecmp per hart */
+#define CLINT_MSIP_BASE     0x0000
+#define CLINT_MTIMECMP_BASE 0x4000
+#define CLINT_MTIME         0xbff8
+
 uint32_t RISCVMachine::ClintRead(uint32_t offset, int size_log2)
 {
     RISCVMachine *m = this;
-    uint32_t val;
+    uint32_t val = 0;
+    uint32_t hart;
 
     assert(size_log2 == 2);
-    switch(offset) {
-    case 0: /* msip for hart 0 */
-        val = (m->cpu_state->Mip() & MIP_MSIP) != 0;
-        break;
-    case 0xbff8:
+    if (offset < CLINT_MTIMECMP_BASE) {
+        hart = (offset - CLINT_MSIP_BASE) / 4;
+        if (hart < (uint32_t)m->hart_count)
+            val = (m->cpus[hart]->Mip() & MIP_MSIP) != 0;
+    } else if (offset < CLINT_MTIME) {
+        hart = (offset - CLINT_MTIMECMP_BASE) / 8;
+        if (hart < (uint32_t)m->hart_count) {
+            if ((offset - CLINT_MTIMECMP_BASE) % 8 == 0)
+                val = m->timecmp[hart];
+            else
+                val = m->timecmp[hart] >> 32;
+        }
+    } else if (offset == CLINT_MTIME) {
         val = rtc_get_time(m);
-        break;
-    case 0xbffc:
+    } else if (offset == CLINT_MTIME + 4) {
         val = rtc_get_time(m) >> 32;
-        break;
-    case 0x4000:
-        val = m->timecmp;
-        break;
-    case 0x4004:
-        val = m->timecmp >> 32;
-        break;
-    default:
-        val = 0;
-        break;
     }
     return val;
 }
@@ -305,70 +321,118 @@ uint32_t RISCVMachine::ClintRead(uint32_t offset, int size_log2)
 void RISCVMachine::ClintWrite(uint32_t offset, uint32_t val, int size_log2)
 {
     RISCVMachine *m = this;
+    uint32_t hart;
 
     assert(size_log2 == 2);
-    switch(offset) {
-    case 0: /* msip for hart 0: a software interrupt to this hart */
+    if (offset < CLINT_MTIMECMP_BASE) {
+        /* a software interrupt to that hart */
+        hart = (offset - CLINT_MSIP_BASE) / 4;
+        if (hart >= (uint32_t)m->hart_count)
+            return;
         if (val & 1) {
-            m->cpu_state->SetMip(MIP_MSIP);
+            m->cpus[hart]->SetMip(MIP_MSIP);
         } else {
-            m->cpu_state->ResetMip(MIP_MSIP);
+            m->cpus[hart]->ResetMip(MIP_MSIP);
         }
-        break;
-    case 0x4000:
-        m->timecmp = (m->timecmp & ~0xffffffff) | val;
-        m->cpu_state->ResetMip(MIP_MTIP);
-        break;
-    case 0x4004:
-        m->timecmp = (m->timecmp & 0xffffffff) | ((uint64_t)val << 32);
-        m->cpu_state->ResetMip(MIP_MTIP);
-        break;
-    default:
-        break;
+    } else if (offset < CLINT_MTIME) {
+        hart = (offset - CLINT_MTIMECMP_BASE) / 8;
+        if (hart >= (uint32_t)m->hart_count)
+            return;
+        uint64_t &cmp = m->timecmp[hart];
+        if ((offset - CLINT_MTIMECMP_BASE) % 8 == 0)
+            cmp = (cmp & ~0xffffffffull) | val;
+        else
+            cmp = (cmp & 0xffffffff) | ((uint64_t)val << 32);
+        m->cpus[hart]->ResetMip(MIP_MTIP);
     }
+}
+
+/* PLIC register layout. Context 2n takes machine mode external interrupts
+   for hart n and context 2n + 1 supervisor mode ones, in the order the
+   device tree lists them. */
+#define PLIC_PENDING_BASE  0x001000
+#define PLIC_ENABLE_BASE   0x002000
+#define PLIC_ENABLE_SIZE   0x80
+#define PLIC_CONTEXT_BASE  0x200000
+#define PLIC_CONTEXT_SIZE  0x1000
+#define PLIC_MAX_PRIORITY  7
+
+/* The sources are level triggered: a line that is still high once its
+   interrupt has been completed is pending again. */
+static uint32_t plic_pending(RISCVMachine *s)
+{
+    return s->plic_level & ~s->plic_served_irq;
+}
+
+/* The source a claim on 'ctx' would return, or 0. */
+static uint32_t plic_best_irq(RISCVMachine *s, int ctx)
+{
+    uint32_t mask = plic_pending(s) & s->plic_enable[ctx];
+    uint32_t best = 0, best_priority = s->plic_threshold[ctx];
+
+    while (mask != 0) {
+        uint32_t irq = ctz32(mask);
+        mask &= mask - 1;
+        /* ties go to the lowest source number */
+        if (s->plic_priority[irq] > best_priority) {
+            best = irq;
+            best_priority = s->plic_priority[irq];
+        }
+    }
+    return best;
 }
 
 static void plic_update_mip(RISCVMachine *s)
 {
-    RISCVCPU *cpu = s->cpu_state;
-    uint32_t mask;
-    mask = s->plic_pending_irq & ~s->plic_served_irq;
-    if (mask) {
-        cpu->SetMip(MIP_MEIP | MIP_SEIP);
-    } else {
-        cpu->ResetMip(MIP_MEIP | MIP_SEIP);
+    for (int hart = 0; hart < s->hart_count; hart++) {
+        RISCVCPU *cpu = s->cpus[hart];
+        if (plic_best_irq(s, 2 * hart) != 0) {
+            cpu->SetMip(MIP_MEIP);
+        } else {
+            cpu->ResetMip(MIP_MEIP);
+        }
+        if (plic_best_irq(s, 2 * hart + 1) != 0) {
+            cpu->SetMip(MIP_SEIP);
+        } else {
+            cpu->ResetMip(MIP_SEIP);
+        }
     }
 }
-
-#define PLIC_HART_BASE 0x200000
-#define PLIC_HART_SIZE 0x1000
 
 uint32_t RISCVMachine::PlicRead(uint32_t offset, int size_log2)
 {
     RISCVMachine *s = this;
-    uint32_t val, mask;
-    int i;
+    uint32_t val = 0;
+    uint32_t context_count = 2 * s->hart_count;
+
     assert(size_log2 == 2);
-    switch(offset) {
-    case PLIC_HART_BASE:
-    case PLIC_HART_BASE + PLIC_HART_SIZE:
-        val = 0;
-        break;
-    case PLIC_HART_BASE + 4:
-    case PLIC_HART_BASE + PLIC_HART_SIZE + 4:
-        mask = s->plic_pending_irq & ~s->plic_served_irq;
-        if (mask != 0) {
-            i = ctz32(mask);
-            s->plic_served_irq |= 1 << i;
-            plic_update_mip(s);
-            val = i + 1;
-        } else {
-            val = 0;
+    if (offset < PLIC_PENDING_BASE) {
+        uint32_t irq = offset / 4;
+        if (irq < PLIC_NUM_SOURCES)
+            val = s->plic_priority[irq];
+    } else if (offset < PLIC_ENABLE_BASE) {
+        if (offset == PLIC_PENDING_BASE)
+            val = plic_pending(s);
+    } else if (offset < PLIC_CONTEXT_BASE) {
+        uint32_t ctx = (offset - PLIC_ENABLE_BASE) / PLIC_ENABLE_SIZE;
+        uint32_t reg = (offset - PLIC_ENABLE_BASE) % PLIC_ENABLE_SIZE;
+        if (ctx < context_count && reg == 0)
+            val = s->plic_enable[ctx];
+    } else {
+        uint32_t ctx = (offset - PLIC_CONTEXT_BASE) / PLIC_CONTEXT_SIZE;
+        uint32_t reg = (offset - PLIC_CONTEXT_BASE) % PLIC_CONTEXT_SIZE;
+        if (ctx >= context_count)
+            return 0;
+        if (reg == 0) {
+            val = s->plic_threshold[ctx];
+        } else if (reg == 4) {
+            /* claim */
+            val = plic_best_irq(s, ctx);
+            if (val != 0) {
+                s->plic_served_irq |= 1u << val;
+                plic_update_mip(s);
+            }
         }
-        break;
-    default:
-        val = 0;
-        break;
     }
     return val;
 }
@@ -376,29 +440,50 @@ uint32_t RISCVMachine::PlicRead(uint32_t offset, int size_log2)
 void RISCVMachine::PlicWrite(uint32_t offset, uint32_t val, int size_log2)
 {
     RISCVMachine *s = this;
+    uint32_t context_count = 2 * s->hart_count;
 
     assert(size_log2 == 2);
-    switch(offset) {
-    case PLIC_HART_BASE + 4:
-    case PLIC_HART_BASE + PLIC_HART_SIZE + 4:
-        val--;
-        if (val < 32) {
-            s->plic_served_irq &= ~(1 << val);
-            plic_update_mip(s);
+    if (offset < PLIC_PENDING_BASE) {
+        uint32_t irq = offset / 4;
+        if (irq == 0 || irq >= PLIC_NUM_SOURCES)
+            return;
+        s->plic_priority[irq] = val & PLIC_MAX_PRIORITY;
+    } else if (offset < PLIC_ENABLE_BASE) {
+        /* the pending bits are read-only */
+        return;
+    } else if (offset < PLIC_CONTEXT_BASE) {
+        uint32_t ctx = (offset - PLIC_ENABLE_BASE) / PLIC_ENABLE_SIZE;
+        uint32_t reg = (offset - PLIC_ENABLE_BASE) % PLIC_ENABLE_SIZE;
+        if (ctx >= context_count || reg != 0)
+            return;
+        s->plic_enable[ctx] = val & ~1u; /* source 0 does not exist */
+    } else {
+        uint32_t ctx = (offset - PLIC_CONTEXT_BASE) / PLIC_CONTEXT_SIZE;
+        uint32_t reg = (offset - PLIC_CONTEXT_BASE) % PLIC_CONTEXT_SIZE;
+        if (ctx >= context_count)
+            return;
+        if (reg == 0) {
+            s->plic_threshold[ctx] = val & PLIC_MAX_PRIORITY;
+        } else if (reg == 4) {
+            /* complete; like QEMU, whether the source is still enabled for
+               this context does not matter */
+            if (val == 0 || val >= PLIC_NUM_SOURCES)
+                return;
+            s->plic_served_irq &= ~(1u << val);
+        } else {
+            return;
         }
-        break;
-    default:
-        break;
     }
+    plic_update_mip(s);
 }
 
 void RISCVMachine::SetIRQ(int irq_num, int level)
 {
-    uint32_t mask = 1 << (irq_num - 1);
+    uint32_t mask = 1u << irq_num;
     if (level) {
-        plic_pending_irq |= mask;
+        plic_level |= mask;
     } else {
-        plic_pending_irq &= ~mask;
+        plic_level &= ~mask;
     }
     plic_update_mip(this);
 }
@@ -420,8 +505,10 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
     FDTContext ctx;
     int size, max_xlen, i;
     char isa_string[128], *q;
+    char ext_list[256], *ext_end;
     uint32_t misa;
-    uint32_t tab[4];
+    uint32_t intc_phandle[RISCV_MAX_HARTS];
+    uint32_t tab[4 * RISCV_MAX_HARTS];
 
     ctx.fdt = &fdt;
 
@@ -436,21 +523,8 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
     fdt.PropStr("compatible", "ucbbar,riscvemu-bar_dev");
     fdt.PropStr("model", "ucbbar,riscvemu-bare");
 
-    /* CPU list */
-    fdt.BeginNode("cpus");
-    fdt.PropU32("#address-cells", 1);
-    fdt.PropU32("#size-cells", 0);
-    fdt.PropU32("timebase-frequency", RTC_FREQ);
-
-    /* cpu */
-    fdt.BeginNodeNum("cpu", 0);
-    fdt.PropStr("device_type", "cpu");
-    fdt.PropU32("reg", 0);
-    fdt.PropStr("status", "okay");
-    fdt.PropStr("compatible", "riscv");
-
     max_xlen = m->max_xlen;
-    misa = m->cpu_state->Misa();
+    misa = m->cpus[0]->Misa();
 
     /* Extensions implemented outside of misa, which only has room for the
        single letter ones. */
@@ -484,21 +558,13 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
        by an underscore. */
     for (const char *ext: multi_letter_ext)
         q += snprintf(q, sizeof(isa_string) - (q - isa_string), "_%s", ext);
-    fdt.PropStr("riscv,isa", isa_string);
 
-    /* Linux 6.6 and later parse "riscv,isa-base" plus "riscv,isa-extensions"
-       instead, and a kernel built without CONFIG_RISCV_ISA_FALLBACK (Ubuntu's
-       generic riscv64 kernel, for one) discards any hart that carries only the
-       deprecated "riscv,isa". With every hart discarded there is no boot CPU
-       left and of_parse_and_init_cpus() hits a BUG() before the console is
-       even up, so both forms are emitted. */
-    fdt.PropStr("riscv,isa-base", max_xlen <= 32 ? "rv32i" : "rv64i");
     {
         /* A packed list of NUL terminated strings. The privilege modes 'S'
            and 'U' are not extensions and have no place here, unlike in the
            "riscv,isa" string above. */
         static const char canonical[] = "imafdqch";
-        char ext_list[256], *p = ext_list;
+        char *p = ext_list;
         for (const char *c = canonical; *c != '\0'; c++) {
             if (misa & (1 << (*c - 'a'))) {
                 *p++ = *c;
@@ -510,21 +576,46 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
             memcpy(p, ext, len);
             p += len;
         }
-        fdt.Prop("riscv,isa-extensions", ext_list, p - ext_list);
+        ext_end = p;
     }
 
-    fdt.PropStr("mmu-type", max_xlen <= 32 ? "riscv,sv32" : "riscv,sv48");
-    fdt.PropU32("clock-frequency", 2000000000);
+    /* CPU list */
+    fdt.BeginNode("cpus");
+    fdt.PropU32("#address-cells", 1);
+    fdt.PropU32("#size-cells", 0);
+    fdt.PropU32("timebase-frequency", RTC_FREQ);
 
-    fdt.BeginNode("interrupt-controller");
-    fdt.PropU32("#interrupt-cells", 1);
-    fdt.PropEmpty("interrupt-controller");
-    fdt.PropStr("compatible", "riscv,cpu-intc");
-    ctx.intc_phandle = fdt.AllocPhandle();
-    fdt.PropU32("phandle", ctx.intc_phandle);
-    fdt.EndNode(); /* interrupt-controller */
+    for (int hart = 0; hart < m->hart_count; hart++) {
+        fdt.BeginNodeNum("cpu", hart);
+        fdt.PropStr("device_type", "cpu");
+        fdt.PropU32("reg", hart);
+        fdt.PropStr("status", "okay");
+        fdt.PropStr("compatible", "riscv");
 
-    fdt.EndNode(); /* cpu */
+        fdt.PropStr("riscv,isa", isa_string);
+        /* Linux 6.6 and later parse "riscv,isa-base" plus
+           "riscv,isa-extensions" instead, and a kernel built without
+           CONFIG_RISCV_ISA_FALLBACK (Ubuntu's generic riscv64 kernel, for
+           one) discards any hart that carries only the deprecated
+           "riscv,isa". With every hart discarded there is no boot CPU left
+           and of_parse_and_init_cpus() hits a BUG() before the console is
+           even up, so both forms are emitted. */
+        fdt.PropStr("riscv,isa-base", max_xlen <= 32 ? "rv32i" : "rv64i");
+        fdt.Prop("riscv,isa-extensions", ext_list, ext_end - ext_list);
+
+        fdt.PropStr("mmu-type", max_xlen <= 32 ? "riscv,sv32" : "riscv,sv48");
+        fdt.PropU32("clock-frequency", 2000000000);
+
+        fdt.BeginNode("interrupt-controller");
+        fdt.PropU32("#interrupt-cells", 1);
+        fdt.PropEmpty("interrupt-controller");
+        fdt.PropStr("compatible", "riscv,cpu-intc");
+        intc_phandle[hart] = fdt.AllocPhandle();
+        fdt.PropU32("phandle", intc_phandle[hart]);
+        fdt.EndNode(); /* interrupt-controller */
+
+        fdt.EndNode(); /* cpu */
+    }
 
     fdt.EndNode(); /* cpus */
 
@@ -547,11 +638,13 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
     fdt.BeginNodeNum("clint", CLINT_BASE_ADDR);
     fdt.PropStr("compatible", "riscv,clint0");
 
-    tab[0] = ctx.intc_phandle;
-    tab[1] = 3; /* M IPI irq */
-    tab[2] = ctx.intc_phandle;
-    tab[3] = 7; /* M timer irq */
-    fdt.PropTabU32("interrupts-extended", tab, 4);
+    for (int hart = 0; hart < m->hart_count; hart++) {
+        tab[4 * hart] = intc_phandle[hart];
+        tab[4 * hart + 1] = 3; /* M IPI irq */
+        tab[4 * hart + 2] = intc_phandle[hart];
+        tab[4 * hart + 3] = 7; /* M timer irq */
+    }
+    fdt.PropTabU32("interrupts-extended", tab, 4 * m->hart_count);
 
     fdt.PropU64Range("reg", CLINT_BASE_ADDR, CLINT_SIZE);
 
@@ -567,11 +660,14 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
     fdt.PropU32("riscv,ndev", PLIC_NUM_SOURCES - 1);
     fdt.PropU64Range("reg", PLIC_BASE_ADDR, PLIC_SIZE);
 
-    tab[0] = ctx.intc_phandle;
-    tab[1] = 9; /* S ext irq */
-    tab[2] = ctx.intc_phandle;
-    tab[3] = 11; /* M ext irq */
-    fdt.PropTabU32("interrupts-extended", tab, 4);
+    /* the context numbering PlicRead() and PlicWrite() decode */
+    for (int hart = 0; hart < m->hart_count; hart++) {
+        tab[4 * hart] = intc_phandle[hart];
+        tab[4 * hart + 1] = 11; /* M ext irq */
+        tab[4 * hart + 2] = intc_phandle[hart];
+        tab[4 * hart + 3] = 9; /* S ext irq */
+    }
+    fdt.PropTabU32("interrupts-extended", tab, 4 * m->hart_count);
 
     ctx.plic_phandle = fdt.AllocPhandle();
     fdt.PropU32("phandle", ctx.plic_phandle);
@@ -692,7 +788,8 @@ uint64_t RISCVMachine::RtcTime()
 
 void RISCVMachine::FlushTlbWriteRange(uint8_t *ram_addr, size_t ram_size)
 {
-    cpu_state->FlushTlbWriteRangeRam(ram_addr, ram_size);
+    for (int hart = 0; hart < hart_count; hart++)
+        cpus[hart]->FlushTlbWriteRangeRam(ram_addr, ram_size);
 }
 
 /* Reserve the parts of the map the architecture fixes, so that anything the
@@ -725,6 +822,12 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
         return NULL;
     }
 
+    if (p->cpu_count < 1 || p->cpu_count > RISCV_MAX_HARTS) {
+        vm_error("%s: cpus must be between 1 and %d\n", p->machine_name,
+                 RISCV_MAX_HARTS);
+        return NULL;
+    }
+
     s = new RISCVMachine();
     s->vmc = p->vmc;
     s->ram_size = p->ram_size;
@@ -733,11 +836,14 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
     /* needed to handle the RAM dirty bits */
     s->mem_map->SetTlbFlushTarget(s);
 
-    s->cpu_state = riscv_cpu_create(s->mem_map, max_xlen);
-    if (!s->cpu_state) {
-        vm_error("unsupported max_xlen=%d\n", max_xlen);
-        /* XXX: should free resources */
-        return NULL;
+    for (int hart = 0; hart < p->cpu_count; hart++) {
+        s->cpus[hart] = riscv_cpu_create(s->mem_map, max_xlen, hart);
+        if (!s->cpus[hart]) {
+            vm_error("unsupported max_xlen=%d\n", max_xlen);
+            /* XXX: should free resources */
+            return NULL;
+        }
+        s->hart_count++;
     }
     /* RAM */
     ram_flags = 0;
@@ -748,7 +854,8 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
         s->rtc_start_time = rtc_get_real_time(s);
     }
     /* the 'time' CSR must read the same counter as the CLINT */
-    s->cpu_state->SetRtcTimeSource(s);
+    for (int hart = 0; hart < s->hart_count; hart++)
+        s->cpus[hart]->SetRtcTimeSource(s);
 
     s->mem_map->RegisterDevice(CLINT_BASE_ADDR, CLINT_SIZE, &s->fClintIo,
                                DEVIO_SIZE32);
@@ -811,7 +918,8 @@ static VirtMachine *riscv_machine_init(const VirtMachineParams *p)
 RISCVMachine::~RISCVMachine()
 {
     /* XXX: stop all */
-    delete cpu_state;
+    for (int hart = 0; hart < hart_count; hart++)
+        delete cpus[hart];
     delete bus;
     delete mem_map;
 }
@@ -819,43 +927,71 @@ RISCVMachine::~RISCVMachine()
 /* in ms */
 int RISCVMachine::GetSleepDuration(int delay)
 {
-    RISCVCPU *s = cpu_state;
-    int64_t delay1;
-    uint64_t stimecmp;
+    uint64_t now = rtc_get_time(this);
 
-    /* wait for an event: the only asynchronous event is the RTC timer */
-    if (!(s->Mip() & MIP_MTIP)) {
-        delay1 = timecmp - rtc_get_time(this);
-        if (delay1 <= 0) {
-            s->SetMip(MIP_MTIP);
-            delay = 0;
-        } else {
-            /* convert delay to ms */
-            delay1 = delay1 / (RTC_FREQ / 1000);
-            if (delay1 < delay)
-                delay = delay1;
+    /* wait for an event: the only asynchronous events are the timers */
+    for (int hart = 0; hart < hart_count; hart++) {
+        RISCVCPU *s = cpus[hart];
+        uint64_t stimecmp;
+
+        if (!(s->Mip() & MIP_MTIP)) {
+            if (now >= timecmp[hart]) {
+                s->SetMip(MIP_MTIP);
+                delay = 0;
+            } else {
+                /* convert delay to ms */
+                uint64_t delay1 = (timecmp[hart] - now) / (RTC_FREQ / 1000);
+                if (delay1 < (uint64_t)delay)
+                    delay = delay1;
+            }
         }
-    }
-    /* the supervisor timer runs off the same counter when Sstc is enabled */
-    stimecmp = s->UpdateSTimer();
-    if (stimecmp != UINT64_MAX) {
-        delay1 = stimecmp - rtc_get_time(this);
-        if (delay1 <= 0) {
-            delay = 0;
-        } else {
-            delay1 = delay1 / (RTC_FREQ / 1000);
-            if (delay1 < delay)
-                delay = delay1;
+        /* the supervisor timer runs off the same counter when Sstc is
+           enabled */
+        stimecmp = s->UpdateSTimer();
+        if (stimecmp != UINT64_MAX) {
+            if (now >= stimecmp) {
+                delay = 0;
+            } else {
+                uint64_t delay1 = (stimecmp - now) / (RTC_FREQ / 1000);
+                if (delay1 < (uint64_t)delay)
+                    delay = delay1;
+            }
         }
+        if (!s->PowerDown())
+            delay = 0;
     }
-    if (!s->PowerDown())
-        delay = 0;
     return delay;
 }
 
+/* Instructions a hart runs before the next one gets its turn. Short enough
+   that a hart busy waiting on another, for an IPI to be answered or a lock
+   to be dropped, does not waste much. */
+#define HART_QUANTUM 10000
+
 void RISCVMachine::Interp(int max_exec_cycle)
 {
-    cpu_state->Interp(max_exec_cycle);
+    if (hart_count == 1) {
+        cpus[0]->Interp(max_exec_cycle);
+        return;
+    }
+
+    /* Round robin until the budget is spent or every hart is waiting for
+       an interrupt. */
+    uint64_t executed = 0;
+    while (executed < (uint64_t)max_exec_cycle) {
+        bool ran = false;
+        for (int hart = 0; hart < hart_count; hart++) {
+            RISCVCPU *cpu = cpus[hart];
+            if (cpu->PowerDown())
+                continue;
+            uint64_t start = cpu->Cycles();
+            cpu->Interp(HART_QUANTUM);
+            executed += cpu->Cycles() - start;
+            ran = true;
+        }
+        if (!ran)
+            break;
+    }
 }
 
 void RISCVMachine::SendKeyEvent(bool is_down, uint16_t key_code)

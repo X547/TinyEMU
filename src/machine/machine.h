@@ -150,6 +150,7 @@ typedef struct {
     const VirtMachineClass *vmc;
     char *machine_name;
     uint64_t ram_size;
+    int cpu_count;
     bool rtc_real_time;
     bool rtc_local_time;
     /* Whether the configuration declares a display, and how big. The window

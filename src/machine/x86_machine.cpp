@@ -1773,6 +1773,10 @@ static VirtMachine *pc_machine_init(const VirtMachineParams *p)
         vm_error("unsupported machine: %s\n", p->machine_name);
         return NULL;
     }
+    if (p->cpu_count != 1) {
+        vm_error("pc: only one processor is supported\n");
+        return NULL;
+    }
     /* The nesting in the file is the nesting of the buses, so the root one
        has to be the kind this machine provides. */
     if (p->root_bus_type != NULL && strcmp(p->root_bus_type, "pc") != 0) {

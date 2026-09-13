@@ -29,14 +29,14 @@ override the defaults.
 ```
 rv64ui   pass=54   fail=0   known-fail=0   build-fail=0
 rv64um   pass=13   fail=0   known-fail=0   build-fail=0
-rv64ua   pass=18   fail=0   known-fail=1   build-fail=0
+rv64ua   pass=19   fail=0   known-fail=0   build-fail=0
 rv64uc   pass=1    fail=0   known-fail=0   build-fail=0
 rv64uf   pass=11   fail=0   known-fail=0   build-fail=0
 rv64ud   pass=11   fail=0   known-fail=1   build-fail=0
 rv64mi   pass=14   fail=0   known-fail=3   build-fail=0
 rv64si   pass=7    fail=0   known-fail=0   build-fail=0
 ====
-TOTAL    pass=129  fail=0   known-fail=5   build-fail=0
+TOTAL    pass=130  fail=0   known-fail=4   build-fail=0
 ```
 
 ## known-failures.txt
@@ -44,8 +44,7 @@ TOTAL    pass=129  fail=0   known-fail=5   build-fail=0
 Tests listed there are reported but do not fail the run, so the suite can be
 used as a regression gate while the underlying gaps are still open. A listed
 test that starts passing is reported as an unexpected pass, so the entry can be
-removed. `rv64ua-p-lrsc` is a real bug; the rest are unimplemented optional
-features.
+removed.
 
 ## What the two local files are for
 

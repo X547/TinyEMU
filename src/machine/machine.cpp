@@ -394,7 +394,10 @@ static int virt_machine_parse_config(VirtMachineParams *p,
     if (vm_get_int(cfg, tag_name, &val) < 0)
         goto tag_fail;
     p->ram_size = (uint64_t)val << 20;
-    
+
+    if (vm_get_int_opt(cfg, "cpus", &p->cpu_count, 1) < 0)
+        goto tag_fail;
+
     tag_name = "bios";
     if (vm_get_str_opt(cfg, tag_name, &str) < 0)
         goto tag_fail;
