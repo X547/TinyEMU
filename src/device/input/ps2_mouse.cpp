@@ -306,7 +306,8 @@ void PS2MouseDevice::Write(uint8_t val)
 }
 
 
-PS2Mouse *ps2_mouse_create()
+Device *ps2_mouse_node_create(int port)
 {
-    return new PS2MouseDevice();
+    return new PS2DeviceNode("ps2-mouse", std::make_unique<PS2MouseDevice>(),
+                             port);
 }

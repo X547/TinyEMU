@@ -121,10 +121,6 @@ public:
 };
 
 
-PS2Keyboard *ps2_keyboard_create();
-PS2Mouse *ps2_mouse_create();
-
-
 /* The correspondence between scancode set 1 and set 2, which is the whole of
    what an AT controller's translation does.
 
@@ -137,20 +133,23 @@ uint8_t ps2_set2_to_set1(uint8_t code);
 
 
 /* Implemented by a controller so that a device declared in the configuration
-   can be plugged into one of its ports. */
+   can be plugged into one of its ports. Ports are numbered from 0. */
 class PS2BusTarget {
 public:
     virtual ~PS2BusTarget() = default;
 
+    /* The lowest port with nothing on it, or -1 when all are taken. */
+    virtual int FindFreePort() = 0;
+
     /* A port carries one device; a second one is reported rather than
        silently ignored. */
-    virtual bool AttachDevice(PS2Device *dev) = 0;
+    virtual bool AttachDevice(PS2Device *dev, int port) = 0;
 };
 
 
-/* The bus one controller port provides. Like the SD and USB buses, what it
-   hands out is a place on a bus rather than host address space, so it
-   assigns no resource records. */
+/* The bus a controller provides, carrying one device per port. Like the SD
+   and USB buses, what it hands out is a place on a bus rather than host
+   address space, so it assigns no resource records. */
 class PS2Bus final: public Bus {
 private:
     PS2BusTarget *fTarget;
@@ -166,19 +165,23 @@ public:
 };
 
 
-/* Attaches one device to the port it was declared on, the way SDDeviceNode
-   attaches a card. A controller whose devices come from the configuration
-   rather than from its own construction wraps each of them in one of
-   these. */
+/* Attaches one device to a port of the controller it was declared under, the
+   way USBDeviceNode attaches a USB device. */
 class PS2DeviceNode final: public Device {
 private:
-    PS2Device *fDev;
+    std::unique_ptr<PS2Device> fDev;
+    int fPort; /* -1 asks for the first free port */
 
 public:
-    PS2DeviceNode(const char *name, PS2Device *dev);
+    PS2DeviceNode(const char *name, std::unique_ptr<PS2Device> dev, int port);
     ~PS2DeviceNode() override;
 
-    PS2Device *Dev() const {return fDev;}
+    PS2Device *Dev() const {return fDev.get();}
 
     bool Realize() override;
 };
+
+
+/* The "ps2-keyboard" and "ps2-mouse" configuration nodes. */
+Device *ps2_keyboard_node_create(int port);
+Device *ps2_mouse_node_create(int port);

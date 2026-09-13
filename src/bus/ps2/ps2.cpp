@@ -217,16 +217,14 @@ bool PS2Bus::AssignResources(Device *dev)
 
 //#pragma mark - PS2DeviceNode
 
-PS2DeviceNode::PS2DeviceNode(const char *name, PS2Device *dev):
-    Device(name), fDev(dev)
+PS2DeviceNode::PS2DeviceNode(const char *name, std::unique_ptr<PS2Device> dev,
+                             int port):
+    Device(name), fDev(std::move(dev)), fPort(port)
 {
 }
 
 
-PS2DeviceNode::~PS2DeviceNode()
-{
-    delete fDev;
-}
+PS2DeviceNode::~PS2DeviceNode() = default;
 
 
 bool PS2DeviceNode::Realize()
@@ -236,5 +234,15 @@ bool PS2DeviceNode::Realize()
         vm_error("%s: must be attached to a PS/2 bus\n", Name());
         return false;
     }
-    return bus->Target()->AttachDevice(fDev);
+
+    PS2BusTarget *target = bus->Target();
+    int port = fPort;
+    if (port < 0) {
+        port = target->FindFreePort();
+        if (port < 0) {
+            vm_error("%s: no free port\n", Name());
+            return false;
+        }
+    }
+    return target->AttachDevice(fDev.get(), port);
 }

@@ -35,6 +35,7 @@
 #include "pci_bridge.h"
 #include "pci_host_dw.h"
 #include "pci_host_ecam.h"
+#include "ps2.h"
 #include "scsi.h"
 #include "sd.h"
 #include "sdhci.h"
@@ -116,7 +117,7 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
     }
 
 #ifdef CONFIG_X86EMU
-    if (strcmp(type, "ps2") == 0) {
+    if (strcmp(type, "i8042") == 0) {
         int vmmouse;
         if (!node_int_opt(node, "vmmouse", &vmmouse, 1)) {
             return nullptr;
@@ -458,6 +459,24 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
             return nullptr;
         }
         return virtio_input_node_create(ctx, mutable_node, input_type);
+    }
+
+    if (strcmp(type, "ps2-keyboard") == 0 || strcmp(type, "ps2-mouse") == 0) {
+        int port;
+        if (!node_int_opt(node, "port", &port, -1)) {
+            return nullptr;
+        }
+        if (strcmp(type, "ps2-keyboard") == 0) {
+            return ps2_keyboard_node_create(port);
+        }
+        return ps2_mouse_node_create(port);
+    }
+
+    if (strcmp(type, "ps2") == 0) {
+        vm_error("'ps2' is now an 'i8042' controller carrying a "
+                 "'ps2-keyboard' and a 'ps2-mouse' on the PS/2 bus it "
+                 "provides\n");
+        return nullptr;
     }
 
     if (strcmp(type, "ide") == 0) {

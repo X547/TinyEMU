@@ -106,7 +106,6 @@ I8042Controller::I8042Controller(PhysMemoryMap *port_map, IRQSignal *kbd_irq,
     for (int i = 0; i < I8042_PORT_COUNT; i++) {
         fPorts[i].owner = this;
         fPorts[i].index = i;
-        fPorts[i].bus = new PS2Bus(nullptr, &fPorts[i]);
     }
 
     /* A PC's controller comes up translating, and the keyboard behind it
@@ -120,32 +119,30 @@ I8042Controller::I8042Controller(PhysMemoryMap *port_map, IRQSignal *kbd_irq,
 }
 
 
-I8042Controller::~I8042Controller()
+int I8042Controller::FindFreePort()
 {
-    /* The bus owns whatever was attached to it. */
     for (int i = 0; i < I8042_PORT_COUNT; i++) {
-        delete fPorts[i].bus;
+        if (fPorts[i].dev == nullptr) {
+            return i;
+        }
     }
+    return -1;
 }
 
 
-PS2Bus *I8042Controller::PortBus(int port)
+bool I8042Controller::AttachDevice(PS2Device *dev, int port)
 {
     if (port < 0 || port >= I8042_PORT_COUNT) {
-        return nullptr;
-    }
-    return fPorts[port].bus;
-}
-
-
-bool I8042Controller::Port::AttachDevice(PS2Device *new_dev)
-{
-    if (dev != nullptr) {
-        vm_error("i8042: port %d already carries a device\n", index);
+        vm_error("i8042: 'port' must be 0 or 1\n");
         return false;
     }
-    dev = new_dev;
-    new_dev->SetPort(this);
+    Port *p = &fPorts[port];
+    if (p->dev != nullptr) {
+        vm_error("i8042: port %d already carries a device\n", port);
+        return false;
+    }
+    p->dev = dev;
+    dev->SetPort(p);
     return true;
 }
 
@@ -411,43 +408,13 @@ void I8042Controller::DataWrite(uint32_t addr, uint32_t val, int size_log2)
 }
 
 
-//#pragma mark - factory
-
-I8042Controller *i8042_init(PS2Keyboard **pkbd, PS2Mouse **pmouse,
-                            PhysMemoryMap *port_map, IRQSignal *kbd_irq,
-                            IRQSignal *aux_irq, uint32_t io_base)
-{
-    I8042Controller *s = new I8042Controller(port_map, kbd_irq, aux_irq,
-                                             io_base);
-
-    /* The PC's topology is fixed, so the two devices are put on the two
-       ports here rather than being declared. They go on through the bus all
-       the same, which is the path a configuration driven controller uses. */
-    PS2Keyboard *kbd = ps2_keyboard_create();
-    PS2Mouse *mouse = ps2_mouse_create();
-
-    if (!s->PortBus(I8042_PORT_KBD)->AddDevice(
-            std::make_unique<PS2DeviceNode>("ps2-keyboard", kbd)) ||
-        !s->PortBus(I8042_PORT_KBD)->RealizeAll() ||
-        !s->PortBus(I8042_PORT_AUX)->AddDevice(
-            std::make_unique<PS2DeviceNode>("ps2-mouse", mouse)) ||
-        !s->PortBus(I8042_PORT_AUX)->RealizeAll()) {
-        delete s;
-        return nullptr;
-    }
-
-    *pkbd = kbd;
-    *pmouse = mouse;
-    return s;
-}
-
-
 //#pragma mark - the configuration node
 
 /* Routes the window's input events to whichever of the two protocols the
-   guest is driving: key events always reach the keyboard, and pointer events
-   go through the backdoor, which passes them on to the PS/2 pointer for as
-   long as no driver has turned the absolute protocol on. */
+   guest is driving: key events reach the keyboard, and pointer events go
+   through the backdoor, which passes them on to the PS/2 pointer for as long
+   as no driver has turned the absolute protocol on. Either device may be
+   missing, and then its events go nowhere. */
 class I8042Input final: public InputEventTarget, public VMPortTarget {
 public:
     PS2Keyboard *kbd = nullptr;
@@ -456,7 +423,9 @@ public:
 
     void SendKeyEvent(bool is_down, uint16_t key_code) override
     {
-        kbd->PutKeycode(is_down, key_code);
+        if (kbd != nullptr) {
+            kbd->PutKeycode(is_down, key_code);
+        }
     }
 
     void SendMouseEvent(int dx, int dy, int dz,
@@ -464,7 +433,7 @@ public:
     {
         if (vmmouse != nullptr) {
             vmmouse_send_mouse_event(vmmouse.get(), dx, dy, dz, buttons);
-        } else {
+        } else if (mouse != nullptr) {
             mouse->MouseEvent(dx, dy, dz, buttons);
         }
     }
@@ -476,17 +445,25 @@ public:
 
     void VMPortCommand(uint32_t *regs) override
     {
-        vmmouse_handler(vmmouse.get(), regs);
+        /* Without a pointer the registers come back untouched, which a
+           driver reads as no backdoor. */
+        if (vmmouse != nullptr) {
+            vmmouse_handler(vmmouse.get(), regs);
+        }
     }
 };
 
 
-class I8042Device final: public Device {
+/* The bus is created in Prepare(), because the devices nested inside the
+   node are added to it before any of them is realized. They attach to the
+   controller when they are realized, which is after the controller is. */
+class I8042Device final: public Device, public PS2BusTarget {
 private:
     DeviceContext *fCtx;
     bool fVmmouse;
     std::unique_ptr<I8042Controller> fController;
     I8042Input fInput;
+    std::unique_ptr<PS2Bus> fChildBus;
     Resource *fDataRes = nullptr;
     Resource *fCmdRes = nullptr;
     Resource *fVmportRes = nullptr;
@@ -519,36 +496,52 @@ public:
                 return false;
             }
         }
+        fChildBus = std::make_unique<PS2Bus>(this, this);
         return true;
     }
 
     bool Realize() override
     {
         SystemBus *sys = static_cast<SystemBus *>(ParentBus());
-        PS2Keyboard *kbd;
-        PS2Mouse *mouse;
 
-        fController.reset(i8042_init(&kbd, &mouse, sys->PortMap(),
-                                     sys->IrqSignalFor(fKbdIrqRes->base),
-                                     sys->IrqSignalFor(fAuxIrqRes->base),
-                                     fDataRes->base));
-        if (fController == nullptr) {
-            return false;
-        }
-
-        fInput.kbd = kbd;
-        fInput.mouse = mouse;
+        fController = std::make_unique<I8042Controller>(
+            sys->PortMap(), sys->IrqSignalFor(fKbdIrqRes->base),
+            sys->IrqSignalFor(fAuxIrqRes->base), fDataRes->base);
         if (fVmmouse) {
-            fInput.vmmouse = vmmouse_init(mouse);
             fCtx->vmport = &fInput;
             fCtx->vmport_base = fVmportRes->base;
         }
-        fCtx->keyboard = &fInput;
-        fCtx->mouse = &fInput;
+        return true;
+    }
+
+    Bus *ChildBus() override {return fChildBus.get();}
+
+    /* PS2BusTarget */
+    int FindFreePort() override {return fController->FindFreePort();}
+
+    bool AttachDevice(PS2Device *dev, int port) override
+    {
+        if (!fController->AttachDevice(dev, port)) {
+            return false;
+        }
+        /* Whichever port they are on, the host's input goes to the keyboard
+           and the pointer the configuration declared. */
+        if (PS2Keyboard *kbd = dynamic_cast<PS2Keyboard *>(dev)) {
+            fInput.kbd = kbd;
+            fCtx->keyboard = &fInput;
+        } else if (PS2Mouse *mouse = dynamic_cast<PS2Mouse *>(dev)) {
+            fInput.mouse = mouse;
+            if (fVmmouse) {
+                fInput.vmmouse = vmmouse_init(mouse);
+            }
+            fCtx->mouse = &fInput;
+        }
         return true;
     }
 };
 
+
+//#pragma mark - factory
 
 Device *i8042_node_create(DeviceContext *ctx, bool vmmouse)
 {

@@ -201,10 +201,15 @@ Device types:
   vga                    the standard VGA on a PCI bus, which is also what
                          decodes the legacy VGA and VBE ports; "width",
                          "height", and the machine's vga_bios as its ROM
-  ps2                    the PC's i8042 with a keyboard and a pointer on its
-                         two ports; "vmmouse" (default 1) adds the VMware
-                         backdoor port the absolute pointer protocol is read
-                         through
+  i8042                  the PC's keyboard controller; "vmmouse" (default 1)
+                         adds the VMware backdoor port the absolute pointer
+                         protocol is read through, and a nested PS/2 bus
+                         carrying up to two devices
+  ps2-keyboard           PS/2 keyboard; "port" (0 or 1, default the first
+                         free one)
+  ps2-mouse              PS/2 pointer; "port" as above. Any order works: a
+                         mouse on port 0 and a keyboard on port 1 is what
+                         the controller sees if the mouse is listed first
   pci-ide                PCI IDE controller with bus master DMA, and a nested
                          ATA bus. On the PC it runs in compatibility mode --
                          0x1f0 and 0x170 on lines 14 and 15, with only the bus
@@ -267,7 +272,7 @@ are separate parts:
 
     pc bus -> pci-host-i440fx -> PCI bus -> pci-ide -> ATA bus -> ata-disk
 
-Only "ps2" and "ns16550a" go straight on the pc bus; everything else a PC
+Only "i8042" and "ns16550a" go straight on the pc bus; everything else a PC
 carries is a PCI device and belongs inside the bridge. sample-pc.cfg is a
 commented example of a whole PC, as sample-riscv64.cfg is of an FDT machine.
 
@@ -591,7 +596,7 @@ What it has before any device is declared is the part a PC cannot be without:
 RAM, the two interrupt controllers, the timer and the clock. Everything else
 -- the host bridge, the display, the keyboard controller, the disks -- is
 declared, and where a device may sit is decided by the hierarchy: a PCI device
-only works inside a "pci-host-i440fx", and only "ps2" and "ns16550a" go
+only works inside a "pci-host-i440fx", and only "i8042" and "ns16550a" go
 straight on the pc bus.
 
 The x86 emulator comes from my JS/Linux project (2011) which was one

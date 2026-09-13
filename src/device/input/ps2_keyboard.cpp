@@ -211,7 +211,8 @@ void PS2KeyboardDevice::Write(uint8_t val)
 }
 
 
-PS2Keyboard *ps2_keyboard_create()
+Device *ps2_keyboard_node_create(int port)
 {
-    return new PS2KeyboardDevice();
+    return new PS2DeviceNode("ps2-keyboard",
+                             std::make_unique<PS2KeyboardDevice>(), port);
 }

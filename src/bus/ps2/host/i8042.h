@@ -41,7 +41,7 @@ struct DeviceContext;
 #define I8042_VMPORT 0x5658
 
 /* The two ports the PC's controller has: the keyboard one, and the auxiliary
-   one a pointer hangs off. */
+   one a pointer usually hangs off. The configuration numbers them from 0. */
 #define I8042_PORT_KBD 0
 #define I8042_PORT_AUX 1
 #define I8042_PORT_COUNT 2
@@ -58,19 +58,15 @@ struct DeviceContext;
    the translation lives here rather than in the keyboard. */
 class I8042Controller final {
 private:
-    /* One port: the bus it provides, the device plugged into it, and the two
-       ends of the wire between them. Each port is its own bus target, so
-       which port a device lands on is the bus it was declared on rather than
-       the order the devices happened to be added in. */
-    class Port final: public PS2Port, public PS2BusTarget {
+    /* One port: the device plugged into it, and the two ends of the wire
+       between them. */
+    class Port final: public PS2Port {
     public:
         I8042Controller *owner = nullptr;
         int index = 0;
-        PS2Bus *bus = nullptr;
         PS2Device *dev = nullptr;
 
         void PS2DataAvailable(bool available) override;
-        bool AttachDevice(PS2Device *dev) override;
     };
 
     Port fPorts[I8042_PORT_COUNT];
@@ -104,11 +100,10 @@ private:
 public:
     I8042Controller(PhysMemoryMap *port_map, IRQSignal *kbd_irq,
                     IRQSignal *aux_irq, uint32_t io_base);
-    ~I8042Controller();
 
-    /* The bus one port provides, for a machine that declares what hangs off
-       it. The PC machine puts a keyboard and a pointer on them itself. */
-    PS2Bus *PortBus(int port);
+    /* 'port' counts from 0, as PS2BusTarget does. */
+    int FindFreePort();
+    bool AttachDevice(PS2Device *dev, int port);
 
     DeviceIOAdapter<I8042Controller, &I8042Controller::DataRead,
                     &I8042Controller::DataWrite> fDataIo {*this};
@@ -117,14 +112,8 @@ public:
 };
 
 
-/* Build a PC controller with the keyboard and the pointer a PC has, and hand
-   both back so that the machine can deliver host input events to them. */
-I8042Controller *i8042_init(PS2Keyboard **pkbd, PS2Mouse **pmouse,
-                            PhysMemoryMap *port_map, IRQSignal *kbd_irq,
-                            IRQSignal *aux_irq, uint32_t io_base);
-
-
-/* The "ps2" configuration node: the controller, the keyboard and the pointer
-   a PC has, on the addresses a PC has always had them on. 'vmmouse' adds the
-   backdoor port the pointer's absolute protocol is read through. */
+/* The "i8042" configuration node: the controller on the addresses a PC has
+   always had it on, and a PS/2 bus carrying the devices declared on its
+   ports. 'vmmouse' adds the backdoor port the pointer's absolute protocol is
+   read through. */
 Device *i8042_node_create(DeviceContext *ctx, bool vmmouse);
