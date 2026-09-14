@@ -33,7 +33,7 @@
 
 
 struct VIRTIONetDevice: public VIRTIODevice, public EthernetTarget {
-    EthernetDevice *es = nullptr;
+    HostEthernet *es = nullptr;
     int header_size = 0;
 
     int RecvRequest(int queue_idx, int desc_idx, int read_size,
@@ -60,7 +60,7 @@ int VIRTIONetDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
 {
     VIRTIODevice *s = this;
     VIRTIONetDevice *s1 = (VIRTIONetDevice *)s;
-    EthernetDevice *es = s1->es;
+    HostEthernet *es = s1->es;
     VIRTIONetHeader h;
     uint8_t *buf;
     int len;
@@ -129,7 +129,7 @@ void VIRTIONetDevice::SetCarrier(bool carrier_state)
 }
 
 std::unique_ptr<VIRTIODevice> virtio_net_init(VIRTIOBusDef *bus,
-                                              EthernetDevice *es)
+                                              HostEthernet *es)
 {
     auto s = std::make_unique<VIRTIONetDevice>();
     virtio_init(s.get(), bus, 1, 6 + 2);

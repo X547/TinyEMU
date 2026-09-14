@@ -27,16 +27,11 @@
 #include <string.h>
 #include <inttypes.h>
 #include <assert.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <unistd.h>
-#include <time.h>
 #include <ctype.h>
 #include <string>
 
 #include "cutils.h"
 #include "json.h"
-#include "fs_utils.h"
 
 static JSONValue parse_string(const char **pp)
 {

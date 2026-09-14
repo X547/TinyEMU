@@ -78,20 +78,15 @@ static inline int min_int(int a, int b)
 
 void *mallocz(size_t size);
 
-#if defined(_WIN32) || defined(__HAIKU__)
 static inline uint32_t bswap_32(uint32_t v)
 {
-    return ((v & 0xff000000) >> 24) | ((v & 0x00ff0000) >>  8) |
-        ((v & 0x0000ff00) <<  8) | ((v & 0x000000ff) << 24);
+    return __builtin_bswap32(v);
 }
 
 static inline uint64_t bswap_64(uint64_t v)
 {
-    return ((uint64_t)bswap_32(v) << 32) | bswap_32(v >> 32);
+    return __builtin_bswap64(v);
 }
-#else
-#include <byteswap.h>
-#endif
 
 static inline uint16_t get_le16(const uint8_t *ptr)
 {
@@ -191,6 +186,18 @@ static inline int ctz32(uint32_t a)
             return i;
     }
     return 32;
+}
+
+static inline int from_hex(int c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    else if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    else if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    else
+        return -1;
 }
 
 

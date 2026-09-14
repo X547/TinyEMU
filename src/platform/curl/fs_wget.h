@@ -37,6 +37,9 @@
 
 #define LOG() printf("%s:%d\n", __func__, __LINE__)
 
+class HostBlockDevice;
+class StartCallback;
+
 /* XHR */
 
 /* Receives the body of a transfer.
@@ -65,20 +68,12 @@ XHRState *fs_wget(const char *url, const char *user, const char *password,
                   WGetWriteHandler *write_handler, bool single_write);
 void fs_wget_free(XHRState *s);
 
-void fs_wget_init(void);
+class EventLoop;
+
+/* Transfers progress from 'loop', which is busy while any is in flight. */
+void fs_wget_init(EventLoop &loop);
 void fs_wget_end(void);
 
-/* Return true to leave the event loop. */
-class FSNetEventLoopCompletion {
-public:
-    virtual ~FSNetEventLoopCompletion() = default;
-
-    virtual bool IsCompleted() = 0;
-};
-
-void fs_net_set_fdset(int *pfd_max, fd_set *rfds, fd_set *wfds, fd_set *efds,
-                      int *ptimeout);
-void fs_net_event_loop(FSNetEventLoopCompletion *completion);
 
 /* crypto */
 
@@ -105,6 +100,10 @@ void pbkdf2_hmac_sha256(const uint8_t *pwd, int pwd_len,
                         const uint8_t *salt, int salt_len,
                         int iter, int key_len, uint8_t *out);
 
+/* XHR block device; 'start' runs once the image description is loaded */
+HostBlockDevice *block_device_init_http(const char *url, int max_cache_size_kb,
+                                        StartCallback *start);
+
 /* XHR file */
 
 /* Notified once a whole file has been fetched into the filesystem. */
@@ -112,10 +111,10 @@ class FSWGetFileHandler {
 public:
     virtual ~FSWGetFileHandler() = default;
 
-    virtual void FileLoaded(FSDevice *fs, FSFile *f, int64_t size) = 0;
+    virtual void FileLoaded(HostFileSystem *fs, FSFile *f, int64_t size) = 0;
 };
 
-void fs_wget_file2(FSDevice *fs, FSFile *f, const char *url,
+void fs_wget_file2(HostFileSystem *fs, FSFile *f, const char *url,
                    const char *user, const char *password,
                    FSFile *posted_file, uint64_t post_data_len,
                    FSWGetFileHandler *handler, AES_KEY *aes_state);

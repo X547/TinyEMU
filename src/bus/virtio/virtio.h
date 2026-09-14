@@ -24,8 +24,10 @@
 #ifndef VIRTIO_H
 #define VIRTIO_H
 
-#include <sys/select.h>
-
+#include "host_block.h"
+#include "host_console.h"
+#include "host_ethernet.h"
+#include "host_fs.h"
 #include "iomem.h"
 #include "pci.h"
 
@@ -57,79 +59,21 @@ void virtio_set_debug(VIRTIODevice *s, int debug_flags);
 
 /* block device */
 
-/* Notified when an asynchronous block request finishes. */
-class BlockDeviceCompletion {
-public:
-    virtual ~BlockDeviceCompletion() = default;
-
-    virtual void Complete(int ret) = 0;
-};
-
-
-/* A completion pointer may be null when the caller does not care; requests
-   that finish synchronously return 0 without notifying. */
-class BlockDevice {
-public:
-    virtual ~BlockDevice() = default;
-
-    virtual int64_t SectorCount() = 0;
-    virtual int ReadAsync(uint64_t sector_num, uint8_t *buf, int n,
-                          BlockDeviceCompletion *completion) = 0;
-    virtual int WriteAsync(uint64_t sector_num, const uint8_t *buf, int n,
-                           BlockDeviceCompletion *completion) = 0;
-};
-
 std::unique_ptr<VIRTIODevice> virtio_block_init(VIRTIOBusDef *bus,
-                                                BlockDevice *bs);
+                                                HostBlockDevice *bs);
 
 /* network device */
 
-/* The device half of the link, implemented by virtio-net and installed on
-   the host-side EthernetDevice once the device exists. */
-class EthernetTarget {
-public:
-    virtual ~EthernetTarget() = default;
-
-    virtual bool CanWritePacket() = 0;
-    virtual void WritePacket(const uint8_t *buf, int len) = 0;
-    virtual void SetCarrier(bool carrier_state) = 0;
-};
-
-
-/* The host half of the link: a tun interface, slirp, ... */
-class EthernetDevice {
-public:
-    uint8_t mac_addr[6] {}; /* mac address of the interface */
-    EthernetTarget *target = nullptr; /* set by the device */
-
-    virtual ~EthernetDevice() = default;
-
-    virtual void WritePacket(const uint8_t *buf, int len) = 0;
-    virtual void SelectFill(int *pfd_max, fd_set *rfds, fd_set *wfds,
-                            fd_set *efds, int *pdelay) = 0;
-    virtual void SelectPoll(fd_set *rfds, fd_set *wfds, fd_set *efds,
-                            int select_ret) = 0;
-};
-
 std::unique_ptr<VIRTIODevice> virtio_net_init(VIRTIOBusDef *bus,
-                                              EthernetDevice *es);
+                                              HostEthernet *es);
 
 /* console device */
 
-class CharacterDevice {
-public:
-    virtual ~CharacterDevice() = default;
-
-    virtual void WriteData(const uint8_t *buf, int len) = 0;
-    virtual int ReadData(uint8_t *buf, int len) = 0;
-};
-
+/* 'cs' may be null, which discards the output. */
 std::unique_ptr<VIRTIODevice> virtio_console_init(VIRTIOBusDef *bus,
-                                                  CharacterDevice *cs);
-bool virtio_console_can_write_data(VIRTIODevice *s);
-int virtio_console_get_write_len(VIRTIODevice *s);
-int virtio_console_write_data(VIRTIODevice *s, const uint8_t *buf, int buf_len);
-void virtio_console_resize_event(VIRTIODevice *s, int width, int height);
+                                                  HostConsole *cs);
+/* Where host input for a console device goes. */
+ConsoleTarget *virtio_console_target(VIRTIODevice *s);
 
 /* input device */
 
@@ -151,26 +95,25 @@ std::unique_ptr<VIRTIODevice> virtio_input_init(VIRTIOBusDef *bus,
 
 /* 9p filesystem device */
 
-#include "fs.h"
-
-std::unique_ptr<VIRTIODevice> virtio_9p_init(VIRTIOBusDef *bus, FSDevice *fs,
+std::unique_ptr<VIRTIODevice> virtio_9p_init(VIRTIOBusDef *bus, HostFileSystem *fs,
                                              const char *mount_tag);
 
 /* device tree nodes */
 
 class Device;
 struct DeviceContext;
-struct VMDeviceNode;
 
 /* One wrapper serves every virtio device on either transport: which resources
    it takes is decided by the bus it is attached to, so the same node works on
    an MMIO machine and behind a PCI bridge. */
-Device *virtio_block_node_create(DeviceContext *ctx, VMDeviceNode *node);
-Device *virtio_net_node_create(DeviceContext *ctx, VMDeviceNode *node);
-Device *virtio_console_node_create(DeviceContext *ctx, VMDeviceNode *node);
-Device *virtio_9p_node_create(DeviceContext *ctx, VMDeviceNode *node,
+Device *virtio_block_node_create(DeviceContext *ctx,
+                                 std::unique_ptr<HostBlockDevice> bs);
+Device *virtio_net_node_create(DeviceContext *ctx,
+                               std::unique_ptr<HostEthernet> net);
+Device *virtio_console_node_create(DeviceContext *ctx);
+Device *virtio_9p_node_create(DeviceContext *ctx,
+                              std::unique_ptr<HostFileSystem> fs,
                               const char *mount_tag);
-Device *virtio_input_node_create(DeviceContext *ctx, VMDeviceNode *node,
-                                 VirtioInputTypeEnum type);
+Device *virtio_input_node_create(DeviceContext *ctx, VirtioInputTypeEnum type);
 
 #endif /* VIRTIO_H */

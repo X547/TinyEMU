@@ -29,16 +29,16 @@
 #include <stdarg.h>
 
 #include "cutils.h"
-#include "fs.h"
+#include "fs_net.h"
 
-FSFile *fs_dup(FSDevice *fs, FSFile *f)
+FSFile *fs_dup(HostFileSystem *fs, FSFile *f)
 {
     FSQID qid;
     fs->Walk(&f, &qid, f, 0, NULL);
     return f;
 }
 
-FSFile *fs_walk_path1(FSDevice *fs, FSFile *f, const char *path,
+FSFile *fs_walk_path1(HostFileSystem *fs, FSFile *f, const char *path,
                       char **pname)
 {
     const char *p;
@@ -92,12 +92,12 @@ FSFile *fs_walk_path1(FSDevice *fs, FSFile *f, const char *path,
     return f;
 }
 
-FSFile *fs_walk_path(FSDevice *fs, FSFile *f, const char *path)
+FSFile *fs_walk_path(HostFileSystem *fs, FSFile *f, const char *path)
 {
     return fs_walk_path1(fs, f, path, NULL);
 }
 
-void fs_end(FSDevice *fs)
+void fs_end(HostFileSystem *fs)
 {
     fs->End();
     delete fs;

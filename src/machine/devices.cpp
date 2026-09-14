@@ -23,6 +23,7 @@
  */
 #include "devices.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "ata.h"
@@ -62,6 +63,62 @@ static bool node_int_opt(const VMDeviceNode *node, const char *name, int *pval,
 }
 
 
+/* The node's "file", relative to the configuration file, opened as a disk
+   image. Reports and returns nullptr on failure. */
+static std::unique_ptr<HostBlockDevice> node_open_block(const VMDeviceNode *node,
+                                                        DeviceContext *ctx)
+{
+    std::unique_ptr<HostBlockDevice> bs;
+    char *fname;
+
+    if (node->filename.empty()) {
+        vm_error("%s: expecting a 'file' property\n", node->type.c_str());
+        return nullptr;
+    }
+    fname = get_file_path(ctx->params->cfg_filename, node->filename.c_str());
+    bs = ctx->platform->OpenBlockDevice(fname);
+    free(fname);
+    if (bs == nullptr) {
+        vm_error("%s: could not open\n", node->filename.c_str());
+    }
+    return bs;
+}
+
+
+/* The network back end the node's "driver" names. Reports and returns
+   nullptr on failure. */
+static std::unique_ptr<HostEthernet> node_open_ethernet(const VMDeviceNode *node,
+                                                        DeviceContext *ctx)
+{
+    const char *driver, *ifname;
+
+    if (vm_get_str(node->props, "driver", &driver) < 0 ||
+        vm_get_str_opt(node->props, "ifname", &ifname) < 0) {
+        return nullptr;
+    }
+    return ctx->platform->OpenEthernet(driver, ifname);
+}
+
+
+/* The node's "file", relative to the configuration file, opened as a
+   directory tree to share. Reports and returns nullptr on failure. */
+static std::unique_ptr<HostFileSystem> node_open_fs(const VMDeviceNode *node,
+                                                    DeviceContext *ctx)
+{
+    std::unique_ptr<HostFileSystem> fs;
+    char *fname;
+
+    if (node->filename.empty()) {
+        vm_error("%s: expecting a 'file' property\n", node->type.c_str());
+        return nullptr;
+    }
+    fname = get_file_path(ctx->params->cfg_filename, node->filename.c_str());
+    fs = ctx->platform->OpenFileSystem(fname);
+    free(fname);
+    return fs;
+}
+
+
 /* An "io_size" in KB as a byte count. A PCI to PCI bridge forwards I/O in
    4 KB units and the window registers hold a power of two, so an aperture
    that is neither is one no guest could place devices in. 0 asks for a host
@@ -87,7 +144,6 @@ static bool pci_host_io_size(const char *type, int size_kb, uint64_t *out)
 Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
 {
     const char *type = node->type.c_str();
-    VMDeviceNode *mutable_node = const_cast<VMDeviceNode *>(node);
 
     if (strcmp(type, "ns16550a") == 0) {
         int port, irq;
@@ -95,7 +151,7 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
             !node_int_opt(node, "irq", &irq, -1)) {
             return nullptr;
         }
-        return uart_node_create(ctx, ctx->serial_output, port, irq);
+        return uart_node_create(ctx, port, irq);
     }
 
     if (strcmp(type, "simplefb") == 0 || strcmp(type, "vga") == 0) {
@@ -144,12 +200,11 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
         if (!node_int_opt(node, "read_only", &read_only, 0)) {
             return nullptr;
         }
-        if (mutable_node->block_dev == nullptr) {
-            vm_error("ata-disk: no block back end\n");
+        auto bs = node_open_block(node, ctx);
+        if (bs == nullptr) {
             return nullptr;
         }
-        return ata_disk_node_create(std::move(mutable_node->block_dev),
-                                    read_only != 0);
+        return ata_disk_node_create(std::move(bs), read_only != 0);
     }
 
     if (strcmp(type, "pci-host-ecam-generic") == 0) {
@@ -247,12 +302,11 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
         if (!node_int_opt(node, "nsid", &nsid, -1)) {
             return nullptr;
         }
-        if (mutable_node->block_dev == nullptr) {
-            vm_error("nvme-ns: no block back end\n");
+        auto bs = node_open_block(node, ctx);
+        if (bs == nullptr) {
             return nullptr;
         }
-        return nvme_namespace_node_create(std::move(mutable_node->block_dev),
-                                          nsid);
+        return nvme_namespace_node_create(std::move(bs), nsid);
     }
 
     if (strcmp(type, "sdhci") == 0) {
@@ -282,16 +336,14 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
         if (!node_int_opt(node, "read_only", &read_only, 0)) {
             return nullptr;
         }
-        if (mutable_node->block_dev == nullptr) {
-            vm_error("%s: no block back end\n", type);
+        auto bs = node_open_block(node, ctx);
+        if (bs == nullptr) {
             return nullptr;
         }
         if (strcmp(type, "sd-card") == 0) {
-            return sd_card_node_create(std::move(mutable_node->block_dev),
-                                       read_only != 0);
+            return sd_card_node_create(std::move(bs), read_only != 0);
         }
-        return mmc_card_node_create(std::move(mutable_node->block_dev),
-                                    read_only != 0);
+        return mmc_card_node_create(std::move(bs), read_only != 0);
     }
 
     if (strcmp(type, "xhci") == 0) {
@@ -362,11 +414,11 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
         if (!node_int_opt(node, "lun", &lun, -1)) {
             return nullptr;
         }
-        if (mutable_node->block_dev == nullptr) {
-            vm_error("scsi-disk: no block back end\n");
+        auto bs = node_open_block(node, ctx);
+        if (bs == nullptr) {
             return nullptr;
         }
-        return scsi_disk_node_create(std::move(mutable_node->block_dev), lun);
+        return scsi_disk_node_create(std::move(bs), lun);
     }
 
     if (strcmp(type, "dwmac") == 0) {
@@ -407,7 +459,11 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
                 quirks |= bits;
             }
         }
-        return new DwmacDevice(ctx, mutable_node, compatible, phy_mode,
+        auto net = node_open_ethernet(node, ctx);
+        if (net == nullptr) {
+            return nullptr;
+        }
+        return new DwmacDevice(ctx, std::move(net), compatible, phy_mode,
                                quirks);
     }
 
@@ -423,15 +479,23 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
     }
 
     if (strcmp(type, "virtio-block") == 0) {
-        return virtio_block_node_create(ctx, mutable_node);
+        auto bs = node_open_block(node, ctx);
+        if (bs == nullptr) {
+            return nullptr;
+        }
+        return virtio_block_node_create(ctx, std::move(bs));
     }
 
     if (strcmp(type, "virtio-net") == 0) {
-        return virtio_net_node_create(ctx, mutable_node);
+        auto net = node_open_ethernet(node, ctx);
+        if (net == nullptr) {
+            return nullptr;
+        }
+        return virtio_net_node_create(ctx, std::move(net));
     }
 
     if (strcmp(type, "virtio-console") == 0) {
-        return virtio_console_node_create(ctx, mutable_node);
+        return virtio_console_node_create(ctx);
     }
 
     if (strcmp(type, "virtio-9p") == 0) {
@@ -439,7 +503,11 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
         if (vm_get_str(node->props, "tag", &tag) < 0) {
             return nullptr;
         }
-        return virtio_9p_node_create(ctx, mutable_node, tag);
+        auto fs = node_open_fs(node, ctx);
+        if (fs == nullptr) {
+            return nullptr;
+        }
+        return virtio_9p_node_create(ctx, std::move(fs), tag);
     }
 
     if (strcmp(type, "virtio-input") == 0) {
@@ -458,7 +526,7 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
             vm_error("virtio-input: unsupported kind '%s'\n", kind);
             return nullptr;
         }
-        return virtio_input_node_create(ctx, mutable_node, input_type);
+        return virtio_input_node_create(ctx, input_type);
     }
 
     if (strcmp(type, "ps2-keyboard") == 0 || strcmp(type, "ps2-mouse") == 0) {
@@ -526,4 +594,31 @@ bool device_build_tree(Bus *bus, VMDeviceNode *nodes, DeviceContext *ctx)
         }
     }
     return true;
+}
+
+
+void device_context_connect(DeviceContext *ctx)
+{
+    Platform *platform = ctx->platform;
+    HostConsole *console = platform->Console();
+
+    if (console != nullptr) {
+        console->SetTarget(ctx->console_input != nullptr ? ctx->console_input
+                                                         : ctx->serial_input);
+    }
+    if (platform->Screen() != nullptr && ctx->fb_dev != nullptr) {
+        platform->Screen()->SetSource(ctx->fb_dev, ctx->fb_dev->width,
+                                      ctx->fb_dev->height);
+    }
+    if (platform->Keyboard() != nullptr) {
+        platform->Keyboard()->SetTarget(ctx->keyboard);
+    }
+    if (platform->Pointer() != nullptr) {
+        platform->Pointer()->SetTarget(ctx->mouse);
+    }
+    for (HostEthernet *net : ctx->ethernet) {
+        if (net->target != nullptr) {
+            net->target->SetCarrier(true);
+        }
+    }
 }

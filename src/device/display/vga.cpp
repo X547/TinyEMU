@@ -150,7 +150,7 @@ public:
     uint16_t vbe_index;
     uint16_t vbe_regs[VBE_DISPI_INDEX_NB];
 
-    void Refresh(SimpleFBDraw *draw) override;
+    void Refresh(HostScreen *screen) override;
     void SetBar(int bar_num, uint64_t addr, bool enabled) override;
 
     uint32_t VbeRead(uint32_t offset, int size_log2);
@@ -256,7 +256,7 @@ static int update_palette16(VGAState *s, uint32_t *palette)
 
 /* the text refresh is just for debugging and initial boot message, so
    it is very incomplete */
-static void vga_text_refresh(VGAState *s, SimpleFBDraw *draw)
+static void vga_text_refresh(VGAState *s, HostScreen *screen)
 {
     FBDevice *fb_dev = s;
     int width, height, cwidth, cheight, cy, cx, x1, y1, width1, height1;
@@ -382,27 +382,27 @@ static void vga_text_refresh(VGAState *s, SimpleFBDraw *draw)
         }
         if (cx_max >= cx_min) {
             //            printf("redraw %d %d %d\n", cy, cx_min, cx_max);
-            draw->Draw(fb_dev,
-                       x1 + cx_min * cwidth, y1 + cy * cheight,
-                       (cx_max - cx_min + 1) * cwidth, cheight);
+            screen->Update(x1 + cx_min * cwidth, y1 + cy * cheight,
+                           (cx_max - cx_min + 1) * cwidth, cheight);
         }
         ch_addr1 += line_offset;
     }
 }
 
-void VGAState::Refresh(SimpleFBDraw *draw)
+void VGAState::Refresh(HostScreen *screen)
 {
     VGAState *s = this;
     FBDevice *fb_dev = this;
 
+    screen->SetFramebuffer(fb_data, width, height, stride);
     if (!(s->ar_index & 0x20)) {
         /* blank */
     } else if (s->gr[0x06] & 1) {
         /* graphic mode (VBE) */
-        simplefb_refresh(fb_dev, draw, s->mem_range, s->fb_page_count);
+        simplefb_refresh(fb_dev, screen, s->mem_range, s->fb_page_count);
     } else {
         /* text mode */
-        vga_text_refresh(s, draw);
+        vga_text_refresh(s, screen);
     }
 }
 

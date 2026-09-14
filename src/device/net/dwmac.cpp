@@ -196,12 +196,12 @@ static uint32_t version_for_compatible(const char *compatible)
 
 //#pragma mark - construction
 
-DwmacDevice::DwmacDevice(DeviceContext *ctx, VMDeviceNode *node,
+DwmacDevice::DwmacDevice(DeviceContext *ctx, std::unique_ptr<HostEthernet> net,
                          const char *compatible, const char *phy_mode,
                          uint32_t quirks):
     Device("dwmac"),
     fCtx(ctx),
-    fNode(node),
+    fNet(std::move(net)),
     fCompatible(compatible),
     fPhyMode(phy_mode),
     fQuirks(quirks)
@@ -269,14 +269,8 @@ bool DwmacDevice::Realize()
 {
     SystemBus *sys = static_cast<SystemBus *>(ParentBus());
 
-    if (fNode->net == nullptr) {
+    if (fNet == nullptr) {
         vm_error("%s: no network back end\n", Name());
-        return false;
-    }
-    /* The emulator polls a single back end from its main loop, so a second
-       network device would simply never receive anything. */
-    if (fCtx->net != nullptr) {
-        vm_error("%s: only one network device is supported\n", Name());
         return false;
     }
     if (Phy() == nullptr) {
@@ -290,7 +284,6 @@ bool DwmacDevice::Realize()
         return false;
     }
 
-    fNet = std::move(fNode->net);
     fMemMap = sys->MemMap();
     Reset();
 
@@ -298,7 +291,7 @@ bool DwmacDevice::Realize()
                             DEVIO_SIZE8 | DEVIO_SIZE16 | DEVIO_SIZE32);
 
     fNet->target = this;
-    fCtx->net = fNet.get();
+    fCtx->ethernet.push_back(fNet.get());
     return true;
 }
 

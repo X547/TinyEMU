@@ -91,7 +91,7 @@ static const uint8_t kReportDesc[] = {
 
 //#pragma mark - HIDTablet
 
-class HIDTablet final: public HIDDevice, public InputEventTarget {
+class HIDTablet final: public HIDDevice, public PointerTarget {
 private:
     uint16_t fX = 0;
     uint16_t fY = 0;
@@ -112,7 +112,7 @@ public:
     int InputReportSize() const override {return TABLET_REPORT_SIZE;}
     void Reset() override;
 
-    /* InputEventTarget */
+    /* PointerTarget */
     bool MouseIsAbsolute() override {return true;}
     void SendMouseEvent(int dx, int dy, int dz,
                         unsigned int buttons) override;

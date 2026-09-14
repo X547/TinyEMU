@@ -9,7 +9,7 @@
 
 
 SerialState::SerialState(PhysMemoryMap *port_map, int addr, IRQSignal *irq,
-                         SerialOutput *output):
+                         HostConsole *output):
     fIrq(irq),
     fOutput(output)
 {
@@ -42,6 +42,14 @@ void SerialState::ReceiveByte(uint8_t ch)
 }
 
 
+void SerialState::Receive(const uint8_t *buf, int len)
+{
+    if (len > 0) {
+        ReceiveByte(buf[0]);
+    }
+}
+
+
 void SerialState::Write(uint32_t offset, uint32_t val, int size_log2)
 {
     (void)size_log2;
@@ -57,7 +65,8 @@ void SerialState::Write(uint32_t offset, uint32_t val, int size_log2)
 
                 /* write to the terminal */
                 ch = val;
-                fOutput->WriteData(&ch, 1);
+                if (fOutput != nullptr)
+                    fOutput->WriteData(&ch, 1);
                 fLsr |= UART_LSR_THRE;
                 fLsr |= UART_LSR_TEMT;
                 UpdateIRQ();
@@ -157,7 +166,6 @@ void SerialState::SendBreak()
 class UartDevice final: public Device {
 private:
     DeviceContext *fCtx;
-    SerialOutput *fOutput;
     /* The port and line the configuration asked for, or -1 for whatever the
        machine hands out. */
     int fPort;
@@ -167,9 +175,8 @@ private:
     Resource *fIrq = nullptr;
 
 public:
-    UartDevice(DeviceContext *ctx, SerialOutput *output, int port, int irq):
-        Device("serial"), fCtx(ctx), fOutput(output), fPort(port),
-        fIrqLine(irq) {}
+    UartDevice(DeviceContext *ctx, int port, int irq):
+        Device("serial"), fCtx(ctx), fPort(port), fIrqLine(irq) {}
 
     ~UartDevice() override {delete fSerial;}
 
@@ -213,8 +220,8 @@ public:
             return false;
         }
         fSerial = new SerialState(sys->RegisterMap(), fRegs->base, irq,
-                                  fOutput);
-        fCtx->serial_console = fSerial;
+                                  fCtx->platform->Console());
+        fCtx->serial_input = fSerial;
         return true;
     }
 
@@ -240,8 +247,7 @@ public:
 
 //#pragma mark - factory
 
-Device *uart_node_create(DeviceContext *ctx, SerialOutput *output, int port,
-                         int irq)
+Device *uart_node_create(DeviceContext *ctx, int port, int irq)
 {
-    return new UartDevice(ctx, output, port, irq);
+    return new UartDevice(ctx, port, irq);
 }

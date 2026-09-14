@@ -29,9 +29,6 @@
 #include <stdarg.h>
 #include <sys/statvfs.h>
 #include <sys/stat.h>
-#if !defined(__HAIKU__)
-#include <sys/sysmacros.h>
-#endif
 #include <unistd.h>
 #include <fcntl.h>
 #include <dirent.h>
@@ -39,12 +36,13 @@
 #include <string>
 
 #include "cutils.h"
+#include "fs_disk_os.h"
 #include "list.h"
-#include "fs.h"
+#include "platform_backends.h"
 
 struct FSFileDisk;
 
-struct FSDeviceDisk: public FSDevice {
+struct FSDeviceDisk: public HostFileSystem {
     std::string root_path;
 
     void End() override;
@@ -83,7 +81,7 @@ struct FSDeviceDisk: public FSDevice {
     int GetLock(FSFile *f, FSLock *lock) override;
 };
 
-static void fs_close(FSDevice *fs, FSFileDisk *f);
+static void fs_close(HostFileSystem *fs, FSFileDisk *f);
 
 struct FSFileDisk: public FSFile {
     uint32_t uid = 0;
@@ -96,7 +94,7 @@ struct FSFileDisk: public FSFile {
     } u {};
 };
 
-static void fs_delete(FSDevice *fs, FSFileDisk *f)
+static void fs_delete(HostFileSystem *fs, FSFileDisk *f)
 {
     if (f->is_opened)
         fs_close(fs, f);
@@ -105,7 +103,7 @@ static void fs_delete(FSDevice *fs, FSFileDisk *f)
 }
 
 /* warning: path belong to fid_create() */
-static FSFileDisk *fid_create(FSDevice *s1, char *path, uint32_t uid)
+static FSFileDisk *fid_create(HostFileSystem *s1, char *path, uint32_t uid)
 {
     FSFileDisk *f;
     f = new FSFileDisk();
@@ -181,7 +179,7 @@ static void stat_to_qid(FSQID *qid, const struct stat *st)
     qid->path = st->st_ino;
 }
 
-static void fs_statfs(FSDevice *fs1, FSStatFS *st)
+static void fs_statfs(HostFileSystem *fs1, FSStatFS *st)
 {
     FSDeviceDisk *fs = (FSDeviceDisk *)fs1;
     struct statvfs st1;
@@ -208,7 +206,7 @@ static char *compose_path(const char *path, const char *name)
     return d;
 }
 
-static int fs_attach(FSDevice *fs1, FSFileDisk **pf,
+static int fs_attach(HostFileSystem *fs1, FSFileDisk **pf,
                      FSQID *qid, uint32_t uid,
                      const char *uname, const char *aname)
 {
@@ -226,7 +224,7 @@ static int fs_attach(FSDevice *fs1, FSFileDisk **pf,
     return 0;
 }
 
-static int fs_walk(FSDevice *fs, FSFileDisk **pf, FSQID *qids,
+static int fs_walk(HostFileSystem *fs, FSFileDisk **pf, FSQID *qids,
                    FSFileDisk *f, int n, char **names)
 {
     char *path, *path1;
@@ -249,7 +247,7 @@ static int fs_walk(FSDevice *fs, FSFileDisk **pf, FSQID *qids,
 }
 
 
-static int fs_mkdir(FSDevice *fs, FSQID *qid, FSFileDisk *f,
+static int fs_mkdir(HostFileSystem *fs, FSQID *qid, FSFileDisk *f,
                     const char *name, uint32_t mode, uint32_t gid)
 {
     char *path;
@@ -269,7 +267,7 @@ static int fs_mkdir(FSDevice *fs, FSQID *qid, FSFileDisk *f,
     return 0;
 }
 
-static int fs_open(FSDevice *fs, FSQID *qid, FSFileDisk *f, uint32_t flags,
+static int fs_open(HostFileSystem *fs, FSQID *qid, FSFileDisk *f, uint32_t flags,
                    FSOpenCompletion *completion)
 {
     struct stat st;
@@ -299,7 +297,7 @@ static int fs_open(FSDevice *fs, FSQID *qid, FSFileDisk *f, uint32_t flags,
     return 0;
 }
 
-static int fs_create(FSDevice *fs, FSQID *qid, FSFileDisk *f, const char *name, 
+static int fs_create(HostFileSystem *fs, FSQID *qid, FSFileDisk *f, const char *name, 
                      uint32_t flags, uint32_t mode, uint32_t gid)
 {
     struct stat st;
@@ -329,7 +327,7 @@ static int fs_create(FSDevice *fs, FSQID *qid, FSFileDisk *f, const char *name,
     return 0;
 }
 
-static int fs_readdir(FSDevice *fs, FSFileDisk *f, uint64_t offset,
+static int fs_readdir(HostFileSystem *fs, FSFileDisk *f, uint64_t offset,
                       uint8_t *buf, int count)
 {
     struct dirent *de;
@@ -351,29 +349,7 @@ static int fs_readdir(FSDevice *fs, FSFileDisk *f, uint64_t offset,
         if ((pos + len) > count)
             break;
         offset = telldir(f->u.dirp);
-#if defined(__HAIKU__)
-            d_type = 0;
-            type = P9_QTFILE;
-#else
-        d_type = de->d_type;
-        if (d_type == DT_UNKNOWN) {
-            char *path;
-            struct stat st;
-            path = compose_path(f->path, de->d_name);
-            if (lstat(path, &st) == 0) {
-                d_type = st.st_mode >> 12;
-            } else {
-                d_type = DT_REG; /* default */
-            }
-            free(path);
-        }
-        if (d_type == DT_DIR)
-            type = P9_QTDIR;
-        else if (d_type == DT_LNK)
-            type = P9_QTSYMLINK;
-        else
-            type = P9_QTFILE;
-#endif
+        fs_disk_dirent_type(f->path, de, &type, &d_type);
         buf[pos++] = type;
         put_le32(buf + pos, 0); /* version */
         pos += 4;
@@ -390,7 +366,7 @@ static int fs_readdir(FSDevice *fs, FSFileDisk *f, uint64_t offset,
     return pos;
 }
 
-static int fs_read(FSDevice *fs, FSFileDisk *f, uint64_t offset,
+static int fs_read(HostFileSystem *fs, FSFileDisk *f, uint64_t offset,
                    uint8_t *buf, int count)
 {
     int ret;
@@ -404,7 +380,7 @@ static int fs_read(FSDevice *fs, FSFileDisk *f, uint64_t offset,
         return ret;
 }
 
-static int fs_write(FSDevice *fs, FSFileDisk *f, uint64_t offset,
+static int fs_write(HostFileSystem *fs, FSFileDisk *f, uint64_t offset,
                     const uint8_t *buf, int count)
 {
     int ret;
@@ -418,7 +394,7 @@ static int fs_write(FSDevice *fs, FSFileDisk *f, uint64_t offset,
         return ret;
 }
 
-static void fs_close(FSDevice *fs, FSFileDisk *f)
+static void fs_close(HostFileSystem *fs, FSFileDisk *f)
 {
     if (!f->is_opened)
         return;
@@ -429,7 +405,7 @@ static void fs_close(FSDevice *fs, FSFileDisk *f)
     f->is_opened = false;
 }
 
-static int fs_stat(FSDevice *fs, FSFileDisk *f, FSStat *st)
+static int fs_stat(HostFileSystem *fs, FSFileDisk *f, FSStat *st)
 {
     struct stat st1;
 
@@ -453,7 +429,7 @@ static int fs_stat(FSDevice *fs, FSFileDisk *f, FSStat *st)
     return 0;
 }
 
-static int fs_setattr(FSDevice *fs, FSFileDisk *f, uint32_t mask,
+static int fs_setattr(HostFileSystem *fs, FSFileDisk *f, uint32_t mask,
                       uint32_t mode, uint32_t uid, uint32_t gid,
                       uint64_t size, uint64_t atime_sec, uint64_t atime_nsec,
                       uint64_t mtime_sec, uint64_t mtime_nsec)
@@ -514,7 +490,7 @@ static int fs_setattr(FSDevice *fs, FSFileDisk *f, uint32_t mask,
     return 0;
 }
 
-static int fs_link(FSDevice *fs, FSFileDisk *df, FSFileDisk *f, const char *name)
+static int fs_link(HostFileSystem *fs, FSFileDisk *df, FSFileDisk *f, const char *name)
 {
     char *path;
     
@@ -527,7 +503,7 @@ static int fs_link(FSDevice *fs, FSFileDisk *df, FSFileDisk *f, const char *name
     return 0;
 }
 
-static int fs_symlink(FSDevice *fs, FSQID *qid,
+static int fs_symlink(HostFileSystem *fs, FSQID *qid,
                       FSFileDisk *f, const char *name, const char *symgt, uint32_t gid)
 {
     char *path;
@@ -547,20 +523,19 @@ static int fs_symlink(FSDevice *fs, FSQID *qid,
     return 0;
 }
 
-static int fs_mknod(FSDevice *fs, FSQID *qid,
+static int fs_mknod(HostFileSystem *fs, FSQID *qid,
              FSFileDisk *f, const char *name, uint32_t mode, uint32_t major,
              uint32_t minor, uint32_t gid)
 {
-#if defined(__HAIKU__)
-    return -errno_to_p9(ENOTSUP);
-#else
     char *path;
     struct stat st;
-    
+    int ret;
+
     path = compose_path(f->path, name);
-    if (mknod(path, mode, makedev(major, minor)) < 0) {
+    ret = fs_disk_mknod(path, mode, major, minor);
+    if (ret != 0) {
         free(path);
-        return -errno_to_p9(errno);
+        return -errno_to_p9(ret);
     }
     if (lstat(path, &st) != 0) {
         free(path);
@@ -569,10 +544,9 @@ static int fs_mknod(FSDevice *fs, FSQID *qid,
     free(path);
     stat_to_qid(qid, &st);
     return 0;
-#endif
 }
 
-static int fs_readlink(FSDevice *fs, char *buf, int buf_size, FSFileDisk *f)
+static int fs_readlink(HostFileSystem *fs, char *buf, int buf_size, FSFileDisk *f)
 {
     int ret;
     ret = readlink(f->path, buf, buf_size - 1);
@@ -582,7 +556,7 @@ static int fs_readlink(FSDevice *fs, char *buf, int buf_size, FSFileDisk *f)
     return 0;
 }
 
-static int fs_renameat(FSDevice *fs, FSFileDisk *f, const char *name, 
+static int fs_renameat(HostFileSystem *fs, FSFileDisk *f, const char *name, 
                 FSFileDisk *new_f, const char *new_name)
 {
     char *path, *new_path;
@@ -598,7 +572,7 @@ static int fs_renameat(FSDevice *fs, FSFileDisk *f, const char *name,
     return 0;
 }
 
-static int fs_unlinkat(FSDevice *fs, FSFileDisk *f, const char *name)
+static int fs_unlinkat(HostFileSystem *fs, FSFileDisk *f, const char *name)
 {
     char *path;
     int ret;
@@ -612,7 +586,7 @@ static int fs_unlinkat(FSDevice *fs, FSFileDisk *f, const char *name)
     
 }
 
-static int fs_lock(FSDevice *fs, FSFileDisk *f, const FSLock *lock)
+static int fs_lock(HostFileSystem *fs, FSFileDisk *f, const FSLock *lock)
 {
     int ret;
     struct flock fl;
@@ -637,7 +611,7 @@ static int fs_lock(FSDevice *fs, FSFileDisk *f, const FSLock *lock)
     return ret;
 }
 
-static int fs_getlock(FSDevice *fs, FSFileDisk *f, FSLock *lock)
+static int fs_getlock(HostFileSystem *fs, FSFileDisk *f, FSLock *lock)
 {
     int ret;
     struct flock fl;
@@ -662,12 +636,12 @@ static int fs_getlock(FSDevice *fs, FSFileDisk *f, FSLock *lock)
     return ret;
 }
 
-static void fs_disk_end(FSDevice *fs1)
+static void fs_disk_end(HostFileSystem *fs1)
 {
     (void)fs1;
 }
 
-std::unique_ptr<FSDevice> fs_disk_init(const char *root_path)
+std::unique_ptr<HostFileSystem> disk_fs_open(const char *root_path)
 {
     struct stat st;
 
@@ -683,7 +657,7 @@ std::unique_ptr<FSDevice> fs_disk_init(const char *root_path)
 //#pragma mark - FSDeviceDisk
 
 /* The implementation stays a set of free functions over FSDeviceDisk /
-   FSFileDisk; these forwarders are the only bridge to the FSDevice
+   FSFileDisk; these forwarders are the only bridge to the HostFileSystem
    interface, which speaks in terms of the abstract FSFile. */
 static FSFileDisk *F(FSFile *f) {return static_cast<FSFileDisk *>(f);}
 

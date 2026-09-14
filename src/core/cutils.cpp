@@ -27,7 +27,6 @@
 #include <inttypes.h>
 #include <assert.h>
 #include <stdarg.h>
-#include <sys/time.h>
 #include <ctype.h>
 
 #include "cutils.h"

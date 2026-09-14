@@ -415,7 +415,8 @@ void I8042Controller::DataWrite(uint32_t addr, uint32_t val, int size_log2)
    through the backdoor, which passes them on to the PS/2 pointer for as long
    as no driver has turned the absolute protocol on. Either device may be
    missing, and then its events go nowhere. */
-class I8042Input final: public InputEventTarget, public VMPortTarget {
+class I8042Input final: public KeyboardTarget, public PointerTarget,
+    public VMPortTarget {
 public:
     PS2Keyboard *kbd = nullptr;
     PS2Mouse *mouse = nullptr;

@@ -55,18 +55,6 @@ static inline bool isspace_nolf(int c)
     return (c == ' ' || c == '\t');
 }
 
-static inline int from_hex(int c)
-{
-    if (c >= '0' && c <= '9')
-        return c - '0';
-    else if (c >= 'A' && c <= 'F')
-        return c - 'A' + 10;
-    else if (c >= 'a' && c <= 'f')
-        return c - 'a' + 10;
-    else
-        return -1;
-}
-
 static inline uint64_t block_align(uint64_t val, uint64_t align)
 {
     return (val + align - 1) & ~(align - 1);

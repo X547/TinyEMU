@@ -34,7 +34,7 @@ FBDevice *simplefb_init(PhysMemoryMap *map, uint64_t phys_addr,
 /* Walk the dirty bits of a frame buffer mapping and hand the back end the
    rectangles that changed. Shared with the VGA device, which is a simple
    frame buffer once the guest has put it in a linear mode. */
-void simplefb_refresh(FBDevice *fb_dev, SimpleFBDraw *draw,
+void simplefb_refresh(FBDevice *fb_dev, HostScreen *screen,
                       PhysMemoryRange *mem_range, int fb_page_count);
 
 Device *simplefb_node_create(DeviceContext *ctx, int width, int height);

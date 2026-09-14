@@ -997,7 +997,7 @@ void virtio_config_change_notify(VIRTIODevice *s)
 //#pragma mark - VirtioDevice
 
 /* A virtio input device as a machine input target. */
-class VirtioInputTarget final: public InputEventTarget {
+class VirtioInputTarget final: public KeyboardTarget, public PointerTarget {
 private:
     VIRTIODevice *fDev;
     bool fAbsolute;
@@ -1034,25 +1034,28 @@ class VirtioDevice final: public Device {
 private:
     VirtioKindEnum fKind;
     DeviceContext *fCtx;
-    VMDeviceNode *fNode;
     VirtioInputTypeEnum fInputType = VIRTIO_INPUT_TYPE_KEYBOARD;
     const char *fTag = nullptr;
     Resource *fMmio = nullptr;
     Resource *fIrq = nullptr;
-    /* taken over from the node; declared first, so that fDev goes before
-       the back end it uses */
-    std::unique_ptr<BlockDevice> fBlockDev;
-    std::unique_ptr<FSDevice> fFsDev;
-    std::unique_ptr<EthernetDevice> fNet;
+    /* declared first, so that fDev goes before the back end it uses */
+    std::unique_ptr<HostBlockDevice> fBlockDev;
+    std::unique_ptr<HostFileSystem> fFsDev;
+    std::unique_ptr<HostEthernet> fNet;
     std::unique_ptr<VIRTIODevice> fDev;
     std::unique_ptr<VirtioInputTarget> fInputTarget;
 
 public:
-    VirtioDevice(const char *name, VirtioKindEnum kind, DeviceContext *ctx,
-                 VMDeviceNode *node):
-        Device(name), fKind(kind), fCtx(ctx), fNode(node) {}
+    VirtioDevice(const char *name, VirtioKindEnum kind, DeviceContext *ctx):
+        Device(name), fKind(kind), fCtx(ctx) {}
 
     void SetInputType(VirtioInputTypeEnum type) {fInputType = type;}
+    void SetBlockDevice(std::unique_ptr<HostBlockDevice> bs)
+        {fBlockDev = std::move(bs);}
+    void SetEthernet(std::unique_ptr<HostEthernet> net)
+        {fNet = std::move(net);}
+    void SetFileSystem(std::unique_ptr<HostFileSystem> fs)
+        {fFsDev = std::move(fs);}
     void SetTag(const char *tag) {fTag = tag;}
 
     bool Prepare() override
@@ -1086,42 +1089,29 @@ public:
 
         switch (fKind) {
         case VIRTIO_KIND_BLOCK:
-            if (fNode->block_dev == nullptr) {
+            if (fBlockDev == nullptr) {
                 vm_error("%s: no block back end\n", Name());
                 return false;
             }
-            fBlockDev = std::move(fNode->block_dev);
             fDev = virtio_block_init(&vbus, fBlockDev.get());
             break;
         case VIRTIO_KIND_NET:
-            if (fNode->net == nullptr) {
+            if (fNet == nullptr) {
                 vm_error("%s: no network back end\n", Name());
                 return false;
             }
-            /* The emulator polls a single back end from its main loop, so a
-               second network device would simply never receive anything. */
-            if (fCtx->net != nullptr) {
-                vm_error("%s: only one network device is supported\n", Name());
-                return false;
-            }
-            fNet = std::move(fNode->net);
             fDev = virtio_net_init(&vbus, fNet.get());
-            fCtx->net = fNet.get();
+            fCtx->ethernet.push_back(fNet.get());
             break;
         case VIRTIO_KIND_CONSOLE:
-            if (fCtx->console == nullptr) {
-                vm_error("%s: no console back end\n", Name());
-                return false;
-            }
-            fDev = virtio_console_init(&vbus, fCtx->console);
-            fCtx->console_dev = fDev.get();
+            fDev = virtio_console_init(&vbus, fCtx->platform->Console());
+            fCtx->console_input = virtio_console_target(fDev.get());
             break;
         case VIRTIO_KIND_9P:
-            if (fNode->fs_dev == nullptr) {
+            if (fFsDev == nullptr) {
                 vm_error("%s: no filesystem back end\n", Name());
                 return false;
             }
-            fFsDev = std::move(fNode->fs_dev);
             fDev = virtio_9p_init(&vbus, fFsDev.get(), fTag);
             break;
         case VIRTIO_KIND_INPUT:
@@ -1159,39 +1149,46 @@ public:
 
 //#pragma mark - factory
 
-Device *virtio_block_node_create(DeviceContext *ctx, VMDeviceNode *node)
+Device *virtio_block_node_create(DeviceContext *ctx,
+                                 std::unique_ptr<HostBlockDevice> bs)
 {
-    return new VirtioDevice("virtio-block", VIRTIO_KIND_BLOCK, ctx, node);
+    VirtioDevice *dev = new VirtioDevice("virtio-block", VIRTIO_KIND_BLOCK,
+                                         ctx);
+    dev->SetBlockDevice(std::move(bs));
+    return dev;
 }
 
 
-Device *virtio_net_node_create(DeviceContext *ctx, VMDeviceNode *node)
+Device *virtio_net_node_create(DeviceContext *ctx,
+                               std::unique_ptr<HostEthernet> net)
 {
-    return new VirtioDevice("virtio-net", VIRTIO_KIND_NET, ctx, node);
+    VirtioDevice *dev = new VirtioDevice("virtio-net", VIRTIO_KIND_NET, ctx);
+    dev->SetEthernet(std::move(net));
+    return dev;
 }
 
 
-Device *virtio_console_node_create(DeviceContext *ctx, VMDeviceNode *node)
+Device *virtio_console_node_create(DeviceContext *ctx)
 {
-    return new VirtioDevice("virtio-console", VIRTIO_KIND_CONSOLE, ctx, node);
+    return new VirtioDevice("virtio-console", VIRTIO_KIND_CONSOLE, ctx);
 }
 
 
-Device *virtio_9p_node_create(DeviceContext *ctx, VMDeviceNode *node,
+Device *virtio_9p_node_create(DeviceContext *ctx,
+                              std::unique_ptr<HostFileSystem> fs,
                               const char *mount_tag)
 {
-    VirtioDevice *dev = new VirtioDevice("virtio-9p", VIRTIO_KIND_9P, ctx,
-                                         node);
+    VirtioDevice *dev = new VirtioDevice("virtio-9p", VIRTIO_KIND_9P, ctx);
+    dev->SetFileSystem(std::move(fs));
     dev->SetTag(mount_tag);
     return dev;
 }
 
 
-Device *virtio_input_node_create(DeviceContext *ctx, VMDeviceNode *node,
-                                 VirtioInputTypeEnum type)
+Device *virtio_input_node_create(DeviceContext *ctx, VirtioInputTypeEnum type)
 {
     VirtioDevice *dev = new VirtioDevice("virtio-input", VIRTIO_KIND_INPUT,
-                                         ctx, node);
+                                         ctx);
     dev->SetInputType(type);
     return dev;
 }

@@ -7,4 +7,5 @@ if x86emu
   machine_sources += files('x86_machine.cpp')
 endif
 
-emu_libs += static_library('machine', machine_sources, kwargs: lib_kwargs)
+emu_libs += static_library('machine', machine_sources,
+  kwargs: lib_kwargs + {'include_directories': [inc, curl_inc]})

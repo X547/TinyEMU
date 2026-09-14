@@ -41,7 +41,7 @@ typedef struct {
 } BlockRequest;
 
 struct VIRTIOBlockDevice: public VIRTIODevice {
-    class Completion final: public BlockDeviceCompletion {
+    class Completion final: public BlockCompletion {
     private:
         VIRTIOBlockDevice &fDev;
 
@@ -51,7 +51,7 @@ struct VIRTIOBlockDevice: public VIRTIODevice {
         void Complete(int ret) override;
     };
 
-    BlockDevice *bs = nullptr; /* owned by the node that created the device */
+    HostBlockDevice *bs = nullptr; /* owned by the node that created the device */
 
     bool req_in_progress = false;
     BlockRequest req {}; /* request in progress */
@@ -145,7 +145,7 @@ int VIRTIOBlockDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
 {
     VIRTIODevice *s = this;
     VIRTIOBlockDevice *s1 = this;
-    BlockDevice *bs = s1->bs;
+    HostBlockDevice *bs = s1->bs;
     BlockRequestHeader h;
     uint8_t *buf;
     int len, ret;
@@ -215,7 +215,7 @@ int VIRTIOBlockDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
 }
 
 std::unique_ptr<VIRTIODevice> virtio_block_init(VIRTIOBusDef *bus,
-                                                BlockDevice *bs)
+                                                HostBlockDevice *bs)
 {
     uint64_t nb_sectors;
 

@@ -27,17 +27,14 @@
 #include <string.h>
 #include <inttypes.h>
 #include <assert.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <unistd.h>
-#include <time.h>
 
 #include "cutils.h"
+#include "host_time.h"
 #include "iomem.h"
 #include "virtio.h"
 #include "machine.h"
-#include "fs_utils.h"
 #ifdef CONFIG_FS_NET
+#include "fs_utils.h"
 #include "fs_wget.h"
 #endif
 
@@ -146,13 +143,9 @@ static char *cmdline_subst(const char *cmdline)
             if (*p == '}')
                 p++;
             if (!strcmp(var_name, "TZ")) {
-                time_t ti;
-                struct tm tm;
                 int n, sg;
                 /* get the offset to UTC */
-                time(&ti);
-                localtime_r(&ti, &tm);
-                n = tm.tm_gmtoff / 60;
+                n = host_utc_offset_minutes();
                 sg = '-';
                 if (n < 0) {
                     sg = '+';
@@ -310,28 +303,6 @@ static int parse_bus(JSONValue bus_obj, VMDeviceNode *owner,
     return 0;
 }
 
-/* The display window is opened before the machine is built, so its size has
-   to be known ahead of the device that provides it. Nothing else is taken out
-   of the tree here: every device is instantiated from the tree itself. */
-static void flatten_visit(VMDeviceNode *node, void *opaque)
-{
-    VirtMachineParams *p = static_cast<VirtMachineParams *>(opaque);
-
-    if (node->type != "simplefb" && node->type != "vga")
-        return;
-
-    free(p->display_device);
-    p->display_device = strdup(node->type.c_str());
-    vm_get_int_opt(node->props, "width", &p->width, 800);
-    vm_get_int_opt(node->props, "height", &p->height, 600);
-}
-
-static int flatten_device_tree(VirtMachineParams *p)
-{
-    vm_walk_devices(p->root_devices, flatten_visit, p);
-    return 0;
-}
-
 //#pragma mark - configuration
 
 static int virt_machine_parse_config(VirtMachineParams *p,
@@ -425,8 +396,6 @@ static int virt_machine_parse_config(VirtMachineParams *p,
             goto tag_fail;
         p->root_devices = root_devices.release();
     }
-    if (flatten_device_tree(p) < 0)
-        goto tag_fail;
 
     if (vm_get_str_opt(cfg, "vga_bios", &str) < 0)
         goto tag_fail;
@@ -714,7 +683,6 @@ void virt_machine_free_config(VirtMachineParams *p)
     p->root_bus_type = NULL;
     json_free(p->cfg_json);
     p->cfg_json = json_undefined_new();
-    free(p->display_device);
     free(p->cfg_filename);
 }
 

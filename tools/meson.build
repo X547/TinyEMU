@@ -4,7 +4,7 @@ if fs_net_enabled
     fs_utils_src,
     cutils_src,
     cpp_args: common_args,
-    include_directories: inc,
+    include_directories: [inc, curl_inc],
     dependencies: common_deps + [cc.find_library('m', required: false)],
     install: true,
   )

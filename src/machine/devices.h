@@ -23,8 +23,11 @@
  */
 #pragma once
 
+#include <vector>
+
 #include "device.h"
 #include "machine.h"
+#include "platform.h"
 #include "uart.h"
 #include "virtio.h"
 
@@ -36,21 +39,23 @@ struct DeviceContext {
     const VirtMachineParams *params = nullptr;
     /* for a device that stops the emulator */
     VirtMachine *machine = nullptr;
-    CharacterDevice *console = nullptr;
-    SerialOutput *serial_output = nullptr;
+    /* the host objects devices connect to */
+    Platform *platform = nullptr;
 
-    /* filled in as devices are realized */
-    VIRTIODevice *console_dev = nullptr;
+    /* Filled in as devices are realized, then connected to the platform.
+       Console input goes to a virtio console when there is one, and to the
+       16550 otherwise. */
+    ConsoleTarget *console_input = nullptr;
+    ConsoleTarget *serial_input = nullptr;
     /* Whichever devices claimed the keyboard and the pointer roles; the last
        one realized wins. */
-    InputEventTarget *keyboard = nullptr;
-    InputEventTarget *mouse = nullptr;
+    KeyboardTarget *keyboard = nullptr;
+    PointerTarget *mouse = nullptr;
     FBDevice *fb_dev = nullptr;
     /* Where the framebuffer was placed, for a machine that has to tell its
        guest in something other than a device tree. */
     uint64_t fb_base = 0;
-    SerialState *serial_console = nullptr;
-    EthernetDevice *net = nullptr;
+    std::vector<HostEthernet *> ethernet;
     /* The VMware backdoor, when a device answers it. The machine installs the
        port, because reading it means reading the processor's registers. */
     VMPortTarget *vmport = nullptr;
@@ -65,3 +70,6 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx);
 /* Instantiate a sibling list onto 'bus', recursing into the child bus of any
    device that provides one. */
 bool device_build_tree(Bus *bus, VMDeviceNode *nodes, DeviceContext *ctx);
+
+/* Hand the realized devices to the platform's host objects. */
+void device_context_connect(DeviceContext *ctx);

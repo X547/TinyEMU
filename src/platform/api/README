@@ -1,0 +1,3 @@
+Interfaces between the emulated hardware and the host. Headers here must not
+include operating system headers; the implementations live in the sibling
+directories and are chosen by the build.

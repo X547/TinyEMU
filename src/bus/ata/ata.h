@@ -27,7 +27,7 @@
 
 #include "device.h"
 
-class BlockDevice;
+class HostBlockDevice;
 
 #define ATA_SECTOR_SIZE 512
 
@@ -316,6 +316,6 @@ public:
 
 /* A disk. 'read_only' refuses writes the way a jumpered drive would, rather
    than letting them fail one at a time in the back end. */
-std::unique_ptr<ATADevice> ata_disk_create(std::unique_ptr<BlockDevice> bs,
+std::unique_ptr<ATADevice> ata_disk_create(std::unique_ptr<HostBlockDevice> bs,
                                            bool read_only);
-Device *ata_disk_node_create(std::unique_ptr<BlockDevice> bs, bool read_only);
+Device *ata_disk_node_create(std::unique_ptr<HostBlockDevice> bs, bool read_only);

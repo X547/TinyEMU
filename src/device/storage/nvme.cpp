@@ -198,17 +198,17 @@ class NVMeDevice;
 //#pragma mark - NVMeNamespace
 
 /* One namespace: a block back end plus the identity the guest reads from it.
-   Logical blocks are 512 bytes, which is what the backing BlockDevice counts
+   Logical blocks are 512 bytes, which is what the backing HostBlockDevice counts
    in, so no translation is needed. */
 class NVMeNamespace {
 private:
-    std::unique_ptr<BlockDevice> fBlockDev;
+    std::unique_ptr<HostBlockDevice> fBlockDev;
     uint32_t fNsid = 0;
 
 public:
-    NVMeNamespace(std::unique_ptr<BlockDevice> bs): fBlockDev(std::move(bs)) {}
+    NVMeNamespace(std::unique_ptr<HostBlockDevice> bs): fBlockDev(std::move(bs)) {}
 
-    BlockDevice *Backend() const {return fBlockDev.get();}
+    HostBlockDevice *Backend() const {return fBlockDev.get();}
     uint32_t Nsid() const {return fNsid;}
     void SetNsid(uint32_t nsid) {fNsid = nsid;}
 
@@ -292,7 +292,7 @@ class NVMeDevice final: public Device, public PCIBarTarget, public DeviceIO,
 private:
     /* The block back end answers through this when it takes a request
        asynchronously; the controller holds the command until it does. */
-    class Completion final: public BlockDeviceCompletion {
+    class Completion final: public BlockCompletion {
     private:
         NVMeDevice &fCtrl;
 
@@ -1603,7 +1603,7 @@ Device *nvme_node_create(const char *name, uint32_t quirks)
 }
 
 
-Device *nvme_namespace_node_create(std::unique_ptr<BlockDevice> bs, int nsid)
+Device *nvme_namespace_node_create(std::unique_ptr<HostBlockDevice> bs, int nsid)
 {
     return new NVMeNamespaceNode(
         std::make_unique<NVMeNamespace>(std::move(bs)), nsid);

@@ -27,15 +27,9 @@
 #include <string.h>
 #include <inttypes.h>
 #include <assert.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <unistd.h>
-#include <time.h>
-#ifdef __HAIKU__
-#include <OS.h>
-#endif
 
 #include "cutils.h"
+#include "host_time.h"
 #include "iomem.h"
 #include "riscv_cpu.h"
 #include "uart.h"
@@ -64,8 +58,7 @@ class RISCVMachine final:
     public HartIrqTarget,
     public PCIMsiTarget,
     public TlbFlushTarget,
-    public RtcTimeSource,
-    public SerialOutput {
+    public RtcTimeSource {
 public:
     std::unique_ptr<PhysMemoryMap> mem_map;
     int max_xlen = 0;
@@ -86,11 +79,7 @@ public:
     int imsic_hart_bits = 0;
     /* HTIF */
     uint64_t htif_tohost = 0, htif_fromhost = 0;
-
-    /* Whichever devices the configuration gave the keyboard and the pointer
-       roles to; null when it declared none. */
-    InputEventTarget *keyboard = nullptr;
-    InputEventTarget *mouse = nullptr;
+    HostConsole *console = nullptr;
 
     ~RISCVMachine() override;
 
@@ -124,15 +113,9 @@ public:
     /* RtcTimeSource */
     uint64_t RtcTime() override;
 
-    /* SerialOutput */
-    void WriteData(const uint8_t *buf, int buf_len) override;
-
     /* VirtMachine */
     int GetSleepDuration(int delay) override;
     void Interp(int max_exec_cycle) override;
-    bool MouseIsAbsolute() override;
-    void SendMouseEvent(int dx, int dy, int dz, unsigned int buttons) override;
-    void SendKeyEvent(bool is_down, uint16_t key_code) override;
 };
 
 #define LOW_RAM_SIZE   0x00010000 /* 64KB */
@@ -191,10 +174,7 @@ public:
 
 static uint64_t rtc_get_real_time(RISCVMachine *s)
 {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * RTC_FREQ +
-        (ts.tv_nsec / (1000000000 / RTC_FREQ));
+    return host_monotonic_us() / (1000000 / RTC_FREQ);
 }
 
 static uint64_t rtc_get_time(RISCVMachine *m)
@@ -267,17 +247,16 @@ static void htif_handle_cmd(RISCVMachine *s)
     } else if (device == 1 && cmd == 1) {
         uint8_t buf[1];
         buf[0] = s->htif_tohost & 0xff;
-        s->console->WriteData(buf, 1);
+        if (s->console != nullptr)
+            s->console->WriteData(buf, 1);
         s->htif_tohost = 0;
         s->htif_fromhost = ((uint64_t)device << 56) | ((uint64_t)cmd << 48);
     } else if (device == 1 && cmd == 0) {
         /* request keyboard interrupt */
         s->htif_tohost = 0;
-#ifdef __HAIKU__
     } else if (device == 2 && cmd == 0) {
-    	// get calendar time
-    	s->htif_fromhost = real_time_clock_usecs();
-#endif
+        /* calendar time, in microseconds since the Unix epoch */
+        s->htif_fromhost = host_real_time_us();
     } else {
         printf("HTIF: unsupported tohost=0x%016" PRIx64 "\n", s->htif_tohost);
     }
@@ -305,13 +284,6 @@ void RISCVMachine::HtifWrite(uint32_t offset, uint32_t val, int size_log2)
         break;
     default:
         break;
-    }
-}
-
-void RISCVMachine::WriteData(const uint8_t *buf, int buf_len)
-{
-    if (console != nullptr) {
-        console->WriteData(buf, buf_len);
     }
 }
 
@@ -858,7 +830,7 @@ riscv_machine_init(const VirtMachineParams *p)
     s->mem_map->RegisterDevice(CLINT_BASE_ADDR, CLINT_SIZE, &s->fClintIo,
                                DEVIO_SIZE32);
     s->mem_map->RegisterDevice(HTIF_BASE_ADDR, 16, &s->fHtifIo, DEVIO_SIZE32);
-    s->console = p->console;
+    s->console = p->platform->Console();
 
     IRQTarget *irq_target;
     if (intc_type == RISCV_INTC_PLIC) {
@@ -920,8 +892,7 @@ riscv_machine_init(const VirtMachineParams *p)
     }
 
     ctx.params = p;
-    ctx.console = p->console;
-    ctx.serial_output = s.get();
+    ctx.platform = p->platform;
     ctx.machine = s.get();
 
     if (!device_build_tree(s->bus.get(), p->root_devices, &ctx)) {
@@ -934,12 +905,7 @@ riscv_machine_init(const VirtMachineParams *p)
         return nullptr;
     }
 
-    s->console_dev = ctx.console_dev;
-    s->keyboard = ctx.keyboard;
-    s->mouse = ctx.mouse;
-    s->fb_dev = ctx.fb_dev;
-    s->serial_console = ctx.serial_console;
-    s->net = ctx.net;
+    device_context_connect(&ctx);
 
     if (!p->files[VM_FILE_BIOS].buf) {
         vm_error("No bios found");
@@ -1025,26 +991,6 @@ void RISCVMachine::Interp(int max_exec_cycle)
     }
 }
 
-void RISCVMachine::SendKeyEvent(bool is_down, uint16_t key_code)
-{
-    if (keyboard != nullptr) {
-        keyboard->SendKeyEvent(is_down, key_code);
-    }
-}
-
-bool RISCVMachine::MouseIsAbsolute()
-{
-    /* With no pointer the answer only decides which coordinates the front
-       end computes and then throws away. */
-    return mouse == nullptr || mouse->MouseIsAbsolute();
-}
-
-void RISCVMachine::SendMouseEvent(int dx, int dy, int dz, unsigned int buttons)
-{
-    if (mouse != nullptr) {
-        mouse->SendMouseEvent(dx, dy, dz, buttons);
-    }
-}
 
 
 //#pragma mark - RiscvMachineClass

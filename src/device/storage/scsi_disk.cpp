@@ -29,7 +29,7 @@
 #include "scsi.h"
 #include "virtio.h"
 
-/* The backing BlockDevice counts in 512 byte sectors, so that is also the
+/* The backing HostBlockDevice counts in 512 byte sectors, so that is also the
    logical block size this reports. */
 #define SCSI_DISK_BLOCK_SIZE 512
 
@@ -46,7 +46,7 @@ private:
     /* One block request may be outstanding, which is all a bulk-only
        transport can produce: it will not send the next command until it has
        collected the status of this one. */
-    class Completion final: public BlockDeviceCompletion {
+    class Completion final: public BlockCompletion {
     private:
         SCSIDisk &fDisk;
 
@@ -56,7 +56,7 @@ private:
         void Complete(int ret) override {fDisk.BlockDone(ret);}
     };
 
-    std::unique_ptr<BlockDevice> fBlockDev;
+    std::unique_ptr<HostBlockDevice> fBlockDev;
     Completion fCompletion {*this};
     SCSIRequest *fPending = nullptr;
     uint32_t fPendingLength = 0;
@@ -77,7 +77,7 @@ private:
                    bool is_write);
 
 public:
-    SCSIDisk(std::unique_ptr<BlockDevice> bs):
+    SCSIDisk(std::unique_ptr<HostBlockDevice> bs):
         SCSIDevice("scsi-disk"), fBlockDev(std::move(bs)) {}
 
     void Reset() override;
@@ -452,7 +452,7 @@ bool SCSIDisk::Submit(SCSIRequest *req)
 
 //#pragma mark - factory
 
-Device *scsi_disk_node_create(std::unique_ptr<BlockDevice> bs, int lun)
+Device *scsi_disk_node_create(std::unique_ptr<HostBlockDevice> bs, int lun)
 {
     return new SCSIDeviceNode("scsi-disk",
                               std::make_unique<SCSIDisk>(std::move(bs)), lun);

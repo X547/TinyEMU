@@ -133,7 +133,7 @@ static const uint8_t kKeyUsage[KBD_EVDEV_KEY_COUNT] = {
 
 //#pragma mark - HIDKeyboard
 
-class HIDKeyboard final: public HIDDevice, public InputEventTarget {
+class HIDKeyboard final: public HIDDevice, public KeyboardTarget {
 private:
     uint8_t fModifiers = 0;
     uint8_t fPressed[KBD_MAX_PRESSED] {}; /* held usages, in press order */
@@ -159,7 +159,7 @@ public:
     bool SetReport(uint8_t type, const uint8_t *buf, int len) override;
     void Reset() override;
 
-    /* InputEventTarget */
+    /* KeyboardTarget */
     void SendKeyEvent(bool is_down, uint16_t key_code) override;
 };
 

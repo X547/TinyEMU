@@ -4,6 +4,7 @@
 
 #include "cutils.h"
 #include "device.h"
+#include "host_console.h"
 #include "iomem.h"
 
 struct DeviceContext;
@@ -52,16 +53,7 @@ struct DeviceContext;
 
 #define UART_FIFO_LENGTH    16      /* 16550A Fifo Length */
 
-/* Implemented by whoever consumes the bytes the guest transmits. */
-class SerialOutput {
-public:
-    virtual ~SerialOutput() = default;
-
-    virtual void WriteData(const uint8_t *buf, int buf_len) = 0;
-};
-
-
-class SerialState {
+class SerialState final: public ConsoleTarget {
 private:
     uint8_t fDivider = 0;
     uint8_t fRbr = 0; /* receive register */
@@ -75,13 +67,14 @@ private:
     uint8_t fFcr = 0;
 
     IRQSignal *fIrq = nullptr;
-    SerialOutput *fOutput = nullptr;
+    HostConsole *fOutput = nullptr;
 
     void UpdateIRQ();
 
 public:
+    /* 'output' may be null, which discards what the guest transmits. */
     SerialState(PhysMemoryMap *port_map, int addr, IRQSignal *irq,
-                SerialOutput *output);
+                HostConsole *output);
 
     uint32_t Read(uint32_t offset, int size_log2);
     void Write(uint32_t offset, uint32_t val, int size_log2);
@@ -93,6 +86,10 @@ public:
 
     void SendBreak();
 
+    /* ConsoleTarget */
+    int ReceiveRoom() override {return CanReceive() ? 1 : 0;}
+    void Receive(const uint8_t *buf, int len) override;
+
     DeviceIOAdapter<SerialState, &SerialState::Read, &SerialState::Write> fIo {*this};
 };
 
@@ -100,5 +97,4 @@ public:
 /* The "ns16550a" configuration node. On a machine whose devices are addressed
    by port number the registers go at 'port' on line 'irq'; on one that maps
    them into memory both are allocated and -1 is what to pass. */
-Device *uart_node_create(DeviceContext *ctx, SerialOutput *output, int port,
-                         int irq);
+Device *uart_node_create(DeviceContext *ctx, int port, int irq);

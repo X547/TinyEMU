@@ -32,11 +32,16 @@
 #include "virtio_priv.h"
 
 
-struct VIRTIOConsoleDevice: public VIRTIODevice {
-    CharacterDevice *cs = nullptr;
+struct VIRTIOConsoleDevice: public VIRTIODevice, public ConsoleTarget {
+    HostConsole *cs = nullptr;
 
     int RecvRequest(int queue_idx, int desc_idx, int read_size,
                     int write_size) override;
+
+    /* ConsoleTarget */
+    int ReceiveRoom() override;
+    void Receive(const uint8_t *buf, int len) override;
+    void Resize(int width, int height) override;
 };
 
 int VIRTIOConsoleDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
@@ -44,33 +49,25 @@ int VIRTIOConsoleDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
 {
     VIRTIODevice *s = this;
     VIRTIOConsoleDevice *s1 = (VIRTIOConsoleDevice *)s;
-    CharacterDevice *cs = s1->cs;
+    HostConsole *cs = s1->cs;
     uint8_t *buf;
 
     if (queue_idx == 1) {
         /* send to console */
         buf = static_cast<uint8_t *>(malloc(read_size));
         memcpy_from_queue(s, buf, queue_idx, desc_idx, 0, read_size);
-        cs->WriteData(buf, read_size);
+        if (cs != nullptr)
+            cs->WriteData(buf, read_size);
         free(buf);
         virtio_consume_desc(s, queue_idx, desc_idx, 0);
     }
     return 0;
 }
 
-bool virtio_console_can_write_data(VIRTIODevice *s)
+/* the size of the receive buffer the guest has queued, 0 if none */
+int VIRTIOConsoleDevice::ReceiveRoom()
 {
-    QueueState *qs = &s->queue[0];
-    uint16_t avail_idx;
-
-    if (!qs->ready)
-        return false;
-    avail_idx = virtio_read16(s, qs->avail_addr + 2);
-    return qs->last_avail_idx != avail_idx;
-}
-
-int virtio_console_get_write_len(VIRTIODevice *s)
-{
+    VIRTIODevice *s = this;
     int queue_idx = 0;
     QueueState *qs = &s->queue[queue_idx];
     int desc_idx;
@@ -89,29 +86,31 @@ int virtio_console_get_write_len(VIRTIODevice *s)
     return write_size;
 }
 
-int virtio_console_write_data(VIRTIODevice *s, const uint8_t *buf, int buf_len)
+void VIRTIOConsoleDevice::Receive(const uint8_t *buf, int buf_len)
 {
+    VIRTIODevice *s = this;
     int queue_idx = 0;
     QueueState *qs = &s->queue[queue_idx];
     int desc_idx;
     uint16_t avail_idx;
 
     if (!qs->ready)
-        return 0;
+        return;
     avail_idx = virtio_read16(s, qs->avail_addr + 2);
     if (qs->last_avail_idx == avail_idx)
-        return 0;
-    desc_idx = virtio_read16(s, qs->avail_addr + 4 + 
+        return;
+    desc_idx = virtio_read16(s, qs->avail_addr + 4 +
                              (qs->last_avail_idx & (qs->num - 1)) * 2);
     memcpy_to_queue(s, queue_idx, desc_idx, 0, buf, buf_len);
     virtio_consume_desc(s, queue_idx, desc_idx, buf_len);
     qs->last_avail_idx++;
-    return buf_len;
 }
 
 /* send a resize event */
-void virtio_console_resize_event(VIRTIODevice *s, int width, int height)
+void VIRTIOConsoleDevice::Resize(int width, int height)
 {
+    VIRTIODevice *s = this;
+
     /* indicate the console size */
     put_le16(s->config_space + 0, width);
     put_le16(s->config_space + 2, height);
@@ -120,7 +119,7 @@ void virtio_console_resize_event(VIRTIODevice *s, int width, int height)
 }
 
 std::unique_ptr<VIRTIODevice> virtio_console_init(VIRTIOBusDef *bus,
-                                                  CharacterDevice *cs)
+                                                  HostConsole *cs)
 {
     auto s = std::make_unique<VIRTIOConsoleDevice>();
     virtio_init(s.get(), bus, 3, 4);
@@ -129,4 +128,9 @@ std::unique_ptr<VIRTIODevice> virtio_console_init(VIRTIOBusDef *bus,
     
     s->cs = cs;
     return s;
+}
+
+ConsoleTarget *virtio_console_target(VIRTIODevice *s)
+{
+    return static_cast<VIRTIOConsoleDevice *>(s);
 }

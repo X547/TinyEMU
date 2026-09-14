@@ -31,14 +31,14 @@
 #include <map>
 
 #include "cutils.h"
-#include "fs.h"
+#include "host_fs.h"
 #include "virtio.h"
 #include "virtio_priv.h"
 
 
 struct VIRTIO9PDevice: public VIRTIODevice {
     /* the back end must outlive the device, which closes its fids with it */
-    FSDevice *fs = nullptr;
+    HostFileSystem *fs = nullptr;
     int msize = 0; /* maximum message size */
     std::map<uint32_t, FSFile *> fids;
     bool req_in_progress = false;
@@ -379,10 +379,10 @@ struct P9OpenInfo: public FSOpenCompletion {
     int desc_idx;
     uint16_t tag;
 
-    void Complete(FSDevice *fs, FSQID *qid, int err) override;
+    void Complete(HostFileSystem *fs, FSQID *qid, int err) override;
 };
 
-static void virtio_9p_open_reply(FSDevice *fs, FSQID *qid, int err,
+static void virtio_9p_open_reply(HostFileSystem *fs, FSQID *qid, int err,
                                  P9OpenInfo *oi)
 {
     VIRTIO9PDevice *s = oi->dev;
@@ -400,7 +400,7 @@ static void virtio_9p_open_reply(FSDevice *fs, FSQID *qid, int err,
     delete oi;
 }
 
-void P9OpenInfo::Complete(FSDevice *fs, FSQID *qid, int err)
+void P9OpenInfo::Complete(HostFileSystem *fs, FSQID *qid, int err)
 {
     P9OpenInfo *oi = this;
     VIRTIO9PDevice *s = oi->dev;
@@ -424,7 +424,7 @@ int VIRTIO9PDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
     uint16_t tag;
     uint8_t buf[1024];
     int buf_len, err;
-    FSDevice *fs = s->fs;
+    HostFileSystem *fs = s->fs;
 
     if (queue_idx != 0)
         return 0;
@@ -996,7 +996,7 @@ int VIRTIO9PDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
     goto error;
 }
 
-std::unique_ptr<VIRTIODevice> virtio_9p_init(VIRTIOBusDef *bus, FSDevice *fs,
+std::unique_ptr<VIRTIODevice> virtio_9p_init(VIRTIOBusDef *bus, HostFileSystem *fs,
                                              const char *mount_tag)
 
 {

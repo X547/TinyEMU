@@ -27,50 +27,16 @@
 #include <memory>
 #include <string>
 
+#include "host_input.h"
+#include "host_screen.h"
 #include "json.h"
 
 /* This header is included both by the machines, which have already pulled in
    iomem.h/virtio.h, and by the bus and resource code, which has not. */
-class BlockDevice;
-class CharacterDevice;
-class EthernetDevice;
-class FSDevice;
 class PhysMemoryMap;
-class SerialState;
-class StartCallback;
+class Platform;
 struct PCIBus;
 struct PhysMemoryRange;
-struct VIRTIODevice;
-
-class FBDevice;
-
-/* Implemented by the display back end; called for each dirty rectangle. */
-class SimpleFBDraw {
-public:
-    virtual ~SimpleFBDraw() = default;
-
-    virtual void Draw(FBDevice *fb_dev, int x, int y, int w, int h) = 0;
-};
-
-
-/* A device that takes host input events. Which device model holds the
-   keyboard and the pointer is not the front end's business. */
-class InputEventTarget {
-public:
-    virtual ~InputEventTarget() = default;
-
-    /* 'key_code' is a Linux evdev key code, which is what the front ends
-       produce. */
-    virtual void SendKeyEvent(bool is_down, uint16_t key_code)
-        {(void)is_down; (void)key_code;}
-
-    /* When MouseIsAbsolute(), dx and dy are a position in 0..32767 rather
-       than a displacement. */
-    virtual void SendMouseEvent(int dx, int dy, int dz, unsigned int buttons)
-        {(void)dx; (void)dy; (void)dz; (void)buttons;}
-
-    virtual bool MouseIsAbsolute() {return false;}
-};
 
 
 /* Implemented by a device that answers the VMware backdoor port. The call
@@ -85,7 +51,8 @@ public:
 };
 
 
-class FBDevice {
+/* A frame buffer shown on the host screen. */
+class FBDevice: public ScreenSource {
 public:
     /* the following is set by the device */
     int width = 0;
@@ -93,10 +60,15 @@ public:
     int stride = 0; /* current stride in bytes */
     uint8_t *fb_data = nullptr; /* current pointer to the pixel data */
     int fb_size = 0; /* frame buffer memory size (info only) */
+};
 
-    virtual ~FBDevice() = default;
 
-    virtual void Refresh(SimpleFBDraw *draw) = 0;
+/* Run once something loaded over the network is ready. */
+class StartCallback {
+public:
+    virtual ~StartCallback() = default;
+
+    virtual void Start() = 0;
 };
 
 #define VM_CONFIG_VERSION 2
@@ -142,9 +114,6 @@ struct VMDeviceNode {
 
     /* resolved back ends */
     std::string filename; /* empty when not given */
-    std::unique_ptr<BlockDevice> block_dev;
-    std::unique_ptr<FSDevice> fs_dev;
-    std::unique_ptr<EthernetDevice> net;
 
     ~VMDeviceNode();
 
@@ -163,13 +132,7 @@ typedef struct {
     char *interrupt_controller;
     bool rtc_real_time;
     bool rtc_local_time;
-    /* Whether the configuration declares a display, and how big. The window
-       is opened before the machine exists, so this much is read out of the
-       tree ahead of time; everything else about the device comes from the
-       tree itself. NULL means no display. */
-    char *display_device;
-    int width, height; /* graphic width & height */
-    CharacterDevice *console;
+    Platform *platform;
 
     char *cmdline; /* bios or kernel command line */
     bool accel_enable; /* enable acceleration (KVM) */
@@ -188,16 +151,6 @@ typedef struct {
 class VirtMachine {
 public:
     const VirtMachineClass *vmc = nullptr;
-    /* network */
-    EthernetDevice *net = nullptr;
-    /* console */
-    VIRTIODevice *console_dev = nullptr;
-    CharacterDevice *console = nullptr;
-    /* graphics */
-    FBDevice *fb_dev = nullptr;
-    /* 16550 console, when the machine has one. Console input goes here only
-       if no virtio console is present to take it. */
-    SerialState *serial_console = nullptr;
     /* Set once something asks the emulator to stop; the main loop then
        returns exit_code. */
     bool shutdown_requested = false;
@@ -217,10 +170,6 @@ public:
     /* in ms */
     virtual int GetSleepDuration(int delay) = 0;
     virtual void Interp(int max_exec_cycle) = 0;
-    virtual bool MouseIsAbsolute() = 0;
-    virtual void SendMouseEvent(int dx, int dy, int dz,
-                                unsigned int buttons) = 0;
-    virtual void SendKeyEvent(bool is_down, uint16_t key_code) = 0;
 };
 
 
@@ -259,10 +208,3 @@ char *get_file_path(const char *base_filename, const char *filename);
 void virt_machine_free_config(VirtMachineParams *p);
 std::unique_ptr<VirtMachine> virt_machine_init(VirtMachineParams *p);
 
-/* gui */
-void sdl_refresh(VirtMachine *m);
-void sdl_init(int width, int height);
-
-/* block_net.c */
-BlockDevice *block_device_init_http(const char *url, int max_cache_size_kb,
-                                    StartCallback *start);

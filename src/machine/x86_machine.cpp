@@ -27,13 +27,9 @@
 #include <string.h>
 #include <inttypes.h>
 #include <assert.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <unistd.h>
-#include <time.h>
-#include <sys/time.h>
 
 #include "cutils.h"
+#include "host_time.h"
 #include "iomem.h"
 #include "devices.h"
 #include "simplefb.h"
@@ -49,6 +45,8 @@
 #endif
 
 #ifdef USE_KVM
+#include <fcntl.h>
+#include <unistd.h>
 #include <linux/kvm.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
@@ -115,42 +113,34 @@ static int to_bcd(CMOSState *s, unsigned int a)
 
 static void cmos_update_time(CMOSState *s, bool set_century)
 {
-    struct timeval tv;
-    struct tm tm;
-    time_t ti;
+    HostDateTime dt;
     int val;
-    
-    gettimeofday(&tv, NULL);
-    ti = tv.tv_sec;
-    if (s->use_local_time) {
-        localtime_r(&ti, &tm);
-    } else {
-        gmtime_r(&ti, &tm);
-    }
-    
-    s->cmos_data[RTC_SECONDS] = to_bcd(s, tm.tm_sec);
-    s->cmos_data[RTC_MINUTES] = to_bcd(s, tm.tm_min);
+
+    host_date_time(&dt, s->use_local_time);
+
+    s->cmos_data[RTC_SECONDS] = to_bcd(s, dt.second);
+    s->cmos_data[RTC_MINUTES] = to_bcd(s, dt.minute);
     if (s->cmos_data[RTC_REG_B] & 0x02) {
-        s->cmos_data[RTC_HOURS] = to_bcd(s, tm.tm_hour);
+        s->cmos_data[RTC_HOURS] = to_bcd(s, dt.hour);
     } else {
-        s->cmos_data[RTC_HOURS] = to_bcd(s, tm.tm_hour % 12);
-        if (tm.tm_hour >= 12)
+        s->cmos_data[RTC_HOURS] = to_bcd(s, dt.hour % 12);
+        if (dt.hour >= 12)
             s->cmos_data[RTC_HOURS] |= 0x80;
     }
-    s->cmos_data[RTC_DAY_OF_WEEK] = to_bcd(s, tm.tm_wday);
-    s->cmos_data[RTC_DAY_OF_MONTH] = to_bcd(s, tm.tm_mday);
-    s->cmos_data[RTC_MONTH] = to_bcd(s, tm.tm_mon + 1);
-    s->cmos_data[RTC_YEAR] = to_bcd(s, tm.tm_year % 100);
+    s->cmos_data[RTC_DAY_OF_WEEK] = to_bcd(s, dt.weekday);
+    s->cmos_data[RTC_DAY_OF_MONTH] = to_bcd(s, dt.day);
+    s->cmos_data[RTC_MONTH] = to_bcd(s, dt.month);
+    s->cmos_data[RTC_YEAR] = to_bcd(s, dt.year % 100);
 
     if (set_century) {
         /* not set by the hardware, but easier to do it here */
-        val = to_bcd(s, (tm.tm_year / 100) + 19);
+        val = to_bcd(s, dt.year / 100);
         s->cmos_data[0x32] = val;
         s->cmos_data[0x37] = val;
     }
-    
+
     /* update in progress flag: 8/32768 seconds after change */
-    if (tv.tv_usec < 244) {
+    if (dt.usec < 244) {
         s->cmos_data[RTC_REG_A] |= REG_A_UIP;
     } else {
         s->cmos_data[RTC_REG_A] &= ~REG_A_UIP;
@@ -184,11 +174,10 @@ std::unique_ptr<CMOSState> cmos_init(PhysMemoryMap *port_map, int addr,
 
 static uint32_t cmos_get_timer(CMOSState *s)
 {
-    struct timespec ts;
+    uint64_t us = host_monotonic_us();
 
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint32_t)ts.tv_sec * CMOS_FREQ +
-        ((uint64_t)ts.tv_nsec * CMOS_FREQ / 1000000000);
+    return (uint32_t)(us / 1000000) * CMOS_FREQ +
+        ((us % 1000000) * CMOS_FREQ / 1000000);
 }
 
 static void cmos_update_timer(CMOSState *s)
@@ -1040,7 +1029,6 @@ public:
 class PCMachine final:
     public VirtMachine,
     public TlbFlushTarget,
-    public SerialOutput,
     public CPUIRQTarget,
     public PITTickSource,
     public X86HardIntnoSource,
@@ -1059,8 +1047,7 @@ public:
     /* The configuration's devices, and what realizing them produced. */
     SystemBus *bus = nullptr;
     I440FXState *i440fx_state = nullptr;
-    InputEventTarget *keyboard = nullptr;
-    InputEventTarget *mouse = nullptr;
+    FBDevice *fb_dev = nullptr;
     /* The device answering the VMware backdoor port, and where it is. */
     VMPortTarget *vmport = nullptr;
     uint64_t fb_base = 0;
@@ -1103,8 +1090,6 @@ public:
 
     /* TlbFlushTarget */
     void FlushTlbWriteRange(uint8_t *ram_addr, size_t ram_size) override;
-    /* SerialOutput */
-    void WriteData(const uint8_t *buf, int buf_len) override;
     /* CPUIRQTarget */
     void SetCPUIRQ(int level) override;
     /* PITTickSource */
@@ -1117,9 +1102,6 @@ public:
     /* VirtMachine */
     int GetSleepDuration(int delay) override;
     void Interp(int max_exec_cycle) override;
-    bool MouseIsAbsolute() override;
-    void SendMouseEvent(int dx, int dy, int dz, unsigned int buttons) override;
-    void SendKeyEvent(bool is_down, uint16_t key_code) override;
 };
 
 static void copy_kernel(PCMachine *s, const uint8_t *buf, int buf_len,
@@ -1243,13 +1225,6 @@ void PCMachine::SetCPUIRQ(int level)
     x86_cpu_set_irq(cpu_state, level);
 }
 
-void PCMachine::WriteData(const uint8_t *buf, int buf_len)
-{
-    if (console != nullptr) {
-        console->WriteData(buf, buf_len);
-    }
-}
-
 int PCMachine::HardIntno()
 {
     return pic2_get_hard_intno(pic_state.get());
@@ -1257,11 +1232,9 @@ int PCMachine::HardIntno()
 
 int64_t PCMachine::Ticks()
 {
-    struct timespec ts;
+    uint64_t us = host_monotonic_us();
 
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * PIT_FREQ +
-        ((uint64_t)ts.tv_nsec * PIT_FREQ / 1000000000);
+    return (us / 1000000) * PIT_FREQ + (us % 1000000) * PIT_FREQ / 1000000;
 }
 
 /* The two PICs give sixteen lines, and the port space is what a 16 bit port
@@ -1736,11 +1709,9 @@ static void kvm_exec(PCMachine *s)
 
 uint64_t PCMachine::Tsc()
 {
-    struct timespec ts;
+    uint64_t us = host_monotonic_us();
 
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * TSC_FREQ +
-        (ts.tv_nsec / (1000000000 / TSC_FREQ));
+    return (us / 1000000) * TSC_FREQ + (us % 1000000) * (TSC_FREQ / 1000000);
 }
 
 void PCMachine::FlushTlbWriteRange(uint8_t *ram_addr, size_t ram_size)
@@ -1880,8 +1851,6 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
         s->cmos_state->cmos_data[0x14] = 0x06; /* mouse + FPU present */
     }
     
-    s->console = p->console;
-
     /* The devices the configuration declares. Everything above this point is
        what a PC has before any of them exists: RAM, the interrupt
        controllers, the timer and the clock. */
@@ -1895,8 +1864,7 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     }
 
     ctx.params = p;
-    ctx.console = p->console;
-    ctx.serial_output = s;
+    ctx.platform = p->platform;
     ctx.machine = s;
 
     if (!device_build_tree(s->bus, p->root_devices, &ctx) ||
@@ -1904,13 +1872,9 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
         return nullptr;
     }
 
-    s->console_dev = ctx.console_dev;
-    s->keyboard = ctx.keyboard;
-    s->mouse = ctx.mouse;
+    device_context_connect(&ctx);
     s->fb_dev = ctx.fb_dev;
     s->fb_base = ctx.fb_base;
-    s->serial_console = ctx.serial_console;
-    s->net = ctx.net;
 
     /* The VMware backdoor is read through the processor's registers, so the
        machine owns the port and the device only interprets the call. */
@@ -1949,25 +1913,6 @@ PCMachine::~PCMachine()
     delete s->bus;
     delete s->mem_map;
     delete s->port_map;
-}
-
-void PCMachine::SendKeyEvent(bool is_down, uint16_t key_code)
-{
-    if (keyboard != nullptr) {
-        keyboard->SendKeyEvent(is_down, key_code);
-    }
-}
-
-bool PCMachine::MouseIsAbsolute()
-{
-    return mouse != nullptr && mouse->MouseIsAbsolute();
-}
-
-void PCMachine::SendMouseEvent(int dx, int dy, int dz, unsigned int buttons)
-{
-    if (mouse != nullptr) {
-        mouse->SendMouseEvent(dx, dy, dz, buttons);
-    }
 }
 
 struct screen_info {

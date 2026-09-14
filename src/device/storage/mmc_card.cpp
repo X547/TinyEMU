@@ -107,7 +107,7 @@ private:
                   bool multiple);
 
 public:
-    MMCCard(std::unique_ptr<BlockDevice> bs, bool read_only);
+    MMCCard(std::unique_ptr<HostBlockDevice> bs, bool read_only);
 
     SDCardTypeEnum CardType() const override {return SD_CARD_MMC;}
     /* An embedded device is soldered down, with all eight data lines wired
@@ -120,7 +120,7 @@ public:
 };
 
 
-MMCCard::MMCCard(std::unique_ptr<BlockDevice> bs, bool read_only):
+MMCCard::MMCCard(std::unique_ptr<HostBlockDevice> bs, bool read_only):
     SDMemoryCard("mmc-card", std::move(bs), read_only)
 {
     /* The CSD's capacity fields stop at two gigabytes, so a device larger
@@ -488,7 +488,7 @@ int MMCCard::Command(const SDCommand &cmd, uint8_t *response)
 
 //#pragma mark - factory
 
-Device *mmc_card_node_create(std::unique_ptr<BlockDevice> bs, bool read_only)
+Device *mmc_card_node_create(std::unique_ptr<HostBlockDevice> bs, bool read_only)
 {
     if (bs->SectorCount() < 4) {
         vm_error("mmc-card: the image is too small to be a device\n");

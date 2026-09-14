@@ -27,8 +27,8 @@
 
 #include "device.h"
 
-class BlockDevice;
-class BlockDeviceCompletion;
+class HostBlockDevice;
+class BlockCompletion;
 
 /* The data block every card here moves. Both SD and MMC oblige a card to
    take 512 bytes, and a high capacity card of either kind fixes the length at
@@ -311,7 +311,7 @@ private:
     class Completion;
     friend class Completion;
 
-    std::unique_ptr<BlockDevice> fBlockDev;
+    std::unique_ptr<HostBlockDevice> fBlockDev;
     bool fReadOnly;
 
     std::unique_ptr<Completion> fCompletion;
@@ -394,11 +394,11 @@ protected:
     bool HasPending() const {return fPendingCompletion != nullptr;}
 
 public:
-    SDMemoryCard(const char *name, std::unique_ptr<BlockDevice> bs,
+    SDMemoryCard(const char *name, std::unique_ptr<HostBlockDevice> bs,
                  bool read_only);
     ~SDMemoryCard() override;
 
-    BlockDevice *Backend() const {return fBlockDev.get();}
+    HostBlockDevice *Backend() const {return fBlockDev.get();}
     uint64_t BlockCount() const {return fBlockCount;}
 
     bool ReadOnly() const override {return fReadOnly;}
@@ -478,7 +478,7 @@ void sd_reg_set_bits(uint8_t *reg, int size, int hi, int lo, uint64_t value);
    table of names. */
 
 /* sd_card.cpp */
-Device *sd_card_node_create(std::unique_ptr<BlockDevice> bs, bool read_only);
+Device *sd_card_node_create(std::unique_ptr<HostBlockDevice> bs, bool read_only);
 
 /* mmc_card.cpp */
-Device *mmc_card_node_create(std::unique_ptr<BlockDevice> bs, bool read_only);
+Device *mmc_card_node_create(std::unique_ptr<HostBlockDevice> bs, bool read_only);

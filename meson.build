@@ -94,7 +94,6 @@ endif
 
 sdl_dep = dependency('sdl', required: get_option('sdl'))
 if sdl_dep.found()
-  common_defines += '-DCONFIG_SDL'
   emu_deps += sdl_dep
 endif
 
@@ -118,12 +117,20 @@ if fs_net_enabled
   endif
 endif
 
+# The host operating system's platform code. OS specific parts are chosen by
+# picking source files, not by testing the OS name in the sources.
+platform_os = host_machine.system()
+
 # ----------------------------------------------------------------------------
 # include path
 #
 # Includes stay unqualified ("pci.h", not "bus/pci/pci.h"), so every directory
-# holding a header is on the search path. 'lib' is there so that temu.cpp's
-# "slirp/libslirp.h" resolves to lib/slirp/.
+# holding a header is on the search path. The emulated hardware only sees the
+# platform interfaces in src/platform/api; the implementations add their own
+# directories through platform_inc.
+
+# The configuration loader still fetches files over HTTP itself.
+curl_inc = include_directories('src/platform/curl')
 
 inc = include_directories(
   'lib',
@@ -154,8 +161,8 @@ inc = include_directories(
   'src/device/net',
   'src/device/power',
   'src/device/storage',
-  'src/fs',
   'src/machine',
+  'src/platform/api',
 )
 
 # ----------------------------------------------------------------------------
@@ -210,12 +217,12 @@ subdir('src/device/intc')
 subdir('src/device/net')
 subdir('src/device/power')
 subdir('src/device/storage')
-subdir('src/fs')
 subdir('src/machine')
-subdir('src/platform/sdl')
+subdir('src/platform')
 subdir('src/main')
 
-# After src/core and src/fs, which export the sources it shares with temu.
+# After src/core and src/platform, which export the sources it shares with
+# temu.
 subdir('tools')
 
 # ----------------------------------------------------------------------------

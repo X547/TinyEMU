@@ -25,9 +25,9 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
 
 #include "cutils.h"
+#include "host_time.h"
 #include "machine.h"
 #include "pci.h"
 #include "usb.h"
@@ -527,9 +527,7 @@ XHCIDevice::XHCIDevice(const char *name, int usb2_ports, int usb3_ports):
         fPorts[i].is_super = i < fUsb3Ports;
     }
 
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    fStartUs = (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+    fStartUs = host_monotonic_us();
 }
 
 
@@ -1821,10 +1819,7 @@ void XHCIDevice::RunCommandRing()
 
 uint32_t XHCIDevice::MfIndex() const
 {
-    struct timespec ts;
-
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    uint64_t us = (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+    uint64_t us = host_monotonic_us();
     return (uint32_t)(((us - fStartUs) / 125) & 0x3fff);
 }
 

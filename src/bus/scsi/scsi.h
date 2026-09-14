@@ -27,7 +27,7 @@
 
 #include "device.h"
 
-class BlockDevice;
+class HostBlockDevice;
 
 #define SCSI_MAX_CDB 16
 /* Fixed format sense data: the eight byte header plus ten additional bytes,
@@ -221,4 +221,4 @@ void scsi_set_good(SCSIRequest *req, uint32_t length);
 int scsi_cdb_len(uint8_t opcode);
 
 /* scsi_disk.cpp */
-Device *scsi_disk_node_create(std::unique_ptr<BlockDevice> bs, int lun);
+Device *scsi_disk_node_create(std::unique_ptr<HostBlockDevice> bs, int lun);

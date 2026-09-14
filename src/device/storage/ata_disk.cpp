@@ -56,7 +56,7 @@
 
 class ATADiskDevice final: public ATADevice {
 private:
-    std::unique_ptr<BlockDevice> fBs;
+    std::unique_ptr<HostBlockDevice> fBs;
     bool fReadOnly;
     int64_t fSectorCount = 0;
     int fCylinders = 0;
@@ -103,7 +103,7 @@ private:
     void CommandDone(bool irq = true);
 
 public:
-    ATADiskDevice(std::unique_ptr<BlockDevice> bs, bool read_only);
+    ATADiskDevice(std::unique_ptr<HostBlockDevice> bs, bool read_only);
 
     void ExecCommand(uint8_t cmd) override;
     void Reset() override;
@@ -114,7 +114,7 @@ public:
 };
 
 
-ATADiskDevice::ATADiskDevice(std::unique_ptr<BlockDevice> bs, bool read_only):
+ATADiskDevice::ATADiskDevice(std::unique_ptr<HostBlockDevice> bs, bool read_only):
     fBs(std::move(bs)), fReadOnly(read_only)
 {
     fSectorCount = fBs->SectorCount();
@@ -719,14 +719,14 @@ void ATADiskDevice::ExecCommand(uint8_t cmd)
 
 //#pragma mark - factory
 
-std::unique_ptr<ATADevice> ata_disk_create(std::unique_ptr<BlockDevice> bs,
+std::unique_ptr<ATADevice> ata_disk_create(std::unique_ptr<HostBlockDevice> bs,
                                            bool read_only)
 {
     return std::make_unique<ATADiskDevice>(std::move(bs), read_only);
 }
 
 
-Device *ata_disk_node_create(std::unique_ptr<BlockDevice> bs, bool read_only)
+Device *ata_disk_node_create(std::unique_ptr<HostBlockDevice> bs, bool read_only)
 {
     return new ATADeviceNode("ata-disk",
                              ata_disk_create(std::move(bs), read_only));

@@ -50,12 +50,12 @@ public:
     int fb_page_count = 0;
     PhysMemoryRange *mem_range = nullptr;
 
-    void Refresh(SimpleFBDraw *draw) override;
+    void Refresh(HostScreen *screen) override;
 };
 
 #define MAX_MERGE_DISTANCE 3
 
-void simplefb_refresh(FBDevice *fb_dev, SimpleFBDraw *draw,
+void simplefb_refresh(FBDevice *fb_dev, HostScreen *screen,
                       PhysMemoryRange *mem_range, int fb_page_count)
 {
     const uint32_t *dirty_bits;
@@ -87,7 +87,7 @@ void simplefb_refresh(FBDevice *fb_dev, SimpleFBDraw *draw,
                     y1 = page_y1;
                 } else {
                     /* flush */
-                    draw->Draw(fb_dev, 0, y0, fb_dev->width, y1 - y0);
+                    screen->Update(0, y0, fb_dev->width, y1 - y0);
                     y0 = page_y0;
                     y1 = page_y1;
                 }
@@ -97,13 +97,14 @@ void simplefb_refresh(FBDevice *fb_dev, SimpleFBDraw *draw,
     }
 
     if (y0 != y1) {
-        draw->Draw(fb_dev, 0, y0, fb_dev->width, y1 - y0);
+        screen->Update(0, y0, fb_dev->width, y1 - y0);
     }
 }
 
-void SimpleFBState::Refresh(SimpleFBDraw *draw)
+void SimpleFBState::Refresh(HostScreen *screen)
 {
-    simplefb_refresh(this, draw, mem_range, fb_page_count);
+    screen->SetFramebuffer(fb_data, width, height, stride);
+    simplefb_refresh(this, screen, mem_range, fb_page_count);
 }
 
 FBDevice *simplefb_init(PhysMemoryMap *map, uint64_t phys_addr,

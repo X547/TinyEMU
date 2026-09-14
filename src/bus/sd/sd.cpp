@@ -71,7 +71,7 @@ void sd_reg_set_bits(uint8_t *reg, int size, int hi, int lo, uint64_t value)
 
 /* The block back end answers through this when it takes a request
    asynchronously; the card holds the block until it does. */
-class SDMemoryCard::Completion final: public BlockDeviceCompletion {
+class SDMemoryCard::Completion final: public BlockCompletion {
 private:
     SDMemoryCard &fCard;
 
@@ -82,7 +82,7 @@ public:
 };
 
 
-SDMemoryCard::SDMemoryCard(const char *name, std::unique_ptr<BlockDevice> bs,
+SDMemoryCard::SDMemoryCard(const char *name, std::unique_ptr<HostBlockDevice> bs,
                            bool read_only):
     SDDevice(name), fBlockDev(std::move(bs)), fReadOnly(read_only)
 {

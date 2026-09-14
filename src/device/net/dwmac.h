@@ -86,7 +86,6 @@ uint32_t dwmac_quirks_from_name(const char *name);
 class DwmacDevice final: public Device, public EthernetTarget {
 private:
     DeviceContext *fCtx;
-    VMDeviceNode *fNode;
     const char *fCompatible;
     const char *fPhyMode;
     uint32_t fQuirks;
@@ -95,7 +94,7 @@ private:
        than confusing a driver later. */
     uint32_t fVersion = 0;
 
-    std::unique_ptr<EthernetDevice> fNet; /* taken over from the node */
+    std::unique_ptr<HostEthernet> fNet;
     std::unique_ptr<MDIOBus> fMdioBus;
     PhysMemoryMap *fMemMap = nullptr;
     IRQSignal *fIrq = nullptr;
@@ -156,8 +155,9 @@ private:
     void WriteWord(uint32_t offset, uint32_t val);
 
 public:
-    DwmacDevice(DeviceContext *ctx, VMDeviceNode *node, const char *compatible,
-                const char *phy_mode, uint32_t quirks);
+    DwmacDevice(DeviceContext *ctx, std::unique_ptr<HostEthernet> net,
+                const char *compatible, const char *phy_mode,
+                uint32_t quirks);
     ~DwmacDevice() override;
 
     bool Prepare() override;

@@ -92,8 +92,8 @@ typedef struct Cluster {
     FileBuffer fbuf;
 } Cluster;
 
-struct BlockDeviceHTTP: public BlockDevice, public WGetWriteHandler {
-    BlockDevice *bs = this;
+struct BlockDeviceHTTP: public HostBlockDevice, public WGetWriteHandler {
+    HostBlockDevice *bs = this;
     int max_cache_size_kb;
     char url[1024];
     int prefetch_count;
@@ -122,7 +122,7 @@ struct BlockDeviceHTTP: public BlockDevice, public WGetWriteHandler {
     uint64_t sector_num;
     int cur_block_num;
     int sector_index, sector_count;
-    BlockDeviceCompletion *completion;
+    BlockCompletion *completion;
     uint8_t *io_buf;
 
     /* prefetch */
@@ -132,9 +132,9 @@ struct BlockDeviceHTTP: public BlockDevice, public WGetWriteHandler {
 
     int64_t SectorCount() override;
     int ReadAsync(uint64_t sector_num, uint8_t *buf, int n,
-                  BlockDeviceCompletion *completion) override;
+                  BlockCompletion *completion) override;
     int WriteAsync(uint64_t sector_num, const uint8_t *buf, int n,
-                   BlockDeviceCompletion *completion) override;
+                   BlockCompletion *completion) override;
 };
 
 static void bf_update_block(CachedBlock *b, const uint8_t *data);
@@ -194,12 +194,12 @@ static CachedBlock *bf_add_block(BlockDeviceHTTP *bf, unsigned int block_num)
 
 int64_t BlockDeviceHTTP::SectorCount()
 {
-    BlockDevice *bs = this;
+    HostBlockDevice *bs = this;
     BlockDeviceHTTP *bf = static_cast<BlockDeviceHTTP *>(bs);
     return bf->nb_sectors;
 }
 
-static void bf_start_load_block(BlockDevice *bs, int block_num)
+static void bf_start_load_block(HostBlockDevice *bs, int block_num)
 {
     BlockDeviceHTTP *bf = static_cast<BlockDeviceHTTP *>(bs);
     char filename[1024];
@@ -223,7 +223,7 @@ static void bf_start_load_block(BlockDevice *bs, int block_num)
     fs_wget(filename, NULL, NULL, b->loader, true);
 }
 
-static void bf_start_load_prefetch_group(BlockDevice *bs, int group_num,
+static void bf_start_load_prefetch_group(HostBlockDevice *bs, int group_num,
                                          const int *tab_block_num,
                                          int n_block_num)
 {
@@ -284,7 +284,7 @@ void PrefetchGroupRequest::WGetWrite(int err, void *data, size_t size)
     free(req);
 }
 
-static int bf_rw_async1(BlockDevice *bs, bool is_sync)
+static int bf_rw_async1(HostBlockDevice *bs, bool is_sync)
 {
     BlockDeviceHTTP *bf = static_cast<BlockDeviceHTTP *>(bs);
     int offset, block_num, n, cluster_num;
@@ -366,7 +366,7 @@ static int bf_rw_async1(BlockDevice *bs, bool is_sync)
 static void bf_update_block(CachedBlock *b, const uint8_t *data)
 {
     BlockDeviceHTTP *bf = b->bf;
-    BlockDevice *bs = bf->bs;
+    HostBlockDevice *bs = bf->bs;
 
     assert(b->state == CBLOCK_LOADING);
     file_buffer_write(&b->fbuf, 0, data, bf->block_size * 512);
@@ -393,9 +393,9 @@ void CachedBlockLoader::WGetWrite(int err, void *data, size_t size)
 }
 
 int BlockDeviceHTTP::ReadAsync(uint64_t sector_num, uint8_t *buf, int n,
-                               BlockDeviceCompletion *completion)
+                               BlockCompletion *completion)
 {
-    BlockDevice *bs = this;
+    HostBlockDevice *bs = this;
     BlockDeviceHTTP *bf = static_cast<BlockDeviceHTTP *>(bs);
     //    printf("bf_read_async: sector_num=%" PRId64 " n=%d\n", sector_num, n);
     bf->is_write = false;
@@ -409,9 +409,9 @@ int BlockDeviceHTTP::ReadAsync(uint64_t sector_num, uint8_t *buf, int n,
 }
 
 int BlockDeviceHTTP::WriteAsync(uint64_t sector_num, const uint8_t *buf, int n,
-                                BlockDeviceCompletion *completion)
+                                BlockCompletion *completion)
 {
-    BlockDevice *bs = this;
+    HostBlockDevice *bs = this;
     BlockDeviceHTTP *bf = static_cast<BlockDeviceHTTP *>(bs);
     //    printf("bf_write_async: sector_num=%" PRId64 " n=%d\n", sector_num, n);
     bf->is_write = true;
@@ -424,10 +424,10 @@ int BlockDeviceHTTP::WriteAsync(uint64_t sector_num, const uint8_t *buf, int n,
     return bf_rw_async1(bs, true);
 }
 
-BlockDevice *block_device_init_http(const char *url, int max_cache_size_kb,
-                                    StartCallback *start)
+HostBlockDevice *block_device_init_http(const char *url, int max_cache_size_kb,
+                                        StartCallback *start)
 {
-    BlockDevice *bs;
+    HostBlockDevice *bs;
     BlockDeviceHTTP *bf;
     char *p;
 
@@ -452,7 +452,7 @@ BlockDevice *block_device_init_http(const char *url, int max_cache_size_kb,
 
 void BlockDeviceHTTP::WGetWrite(int err, void *data, size_t size)
 {
-    BlockDevice *bs = this;
+    HostBlockDevice *bs = this;
     BlockDeviceHTTP *bf = this;
     int block_size_kb, block_num;
     JSONValue cfg, array;
@@ -540,6 +540,8 @@ void BlockDeviceHTTP::WGetWrite(int err, void *data, size_t size)
     json_free(cfg);
     
     if (bf->start != nullptr) {
-        bf->start->Start();
+        StartCallback *start = bf->start;
+        bf->start = nullptr;
+        start->Start();
     }
 }

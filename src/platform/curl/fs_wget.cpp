@@ -27,14 +27,14 @@
 #include <inttypes.h>
 #include <assert.h>
 #include <stdarg.h>
-#include <sys/time.h>
 #include <ctype.h>
 
 #include "cutils.h"
 #include "list.h"
-#include "fs.h"
+#include "fs_net.h"
 #include "fs_utils.h"
 #include "fs_wget.h"
+#include "wait_set.h"
 
 #include <curl/curl.h>
 
@@ -54,13 +54,35 @@ struct XHRState {
 static CURLM *curl_multi_ctx;
 static struct list_head xhr_list; /* list of XHRState.link */
 
-void fs_wget_init(void)
+static bool fs_net_set_fdset(int *pfd_max, fd_set *rfds, fd_set *wfds,
+                             fd_set *efds, int *ptimeout);
+
+class CurlPollSource final: public PollSource {
+public:
+    void Prepare(WaitSet &ws) override
+    {
+        if (fs_net_set_fdset(&ws.fd_max, &ws.rfds, &ws.wfds, &ws.efds,
+                             &ws.timeout_ms)) {
+            ws.LimitTimeout(0);
+        }
+    }
+
+    /* the next Prepare() performs the transfers */
+    void Dispatch(WaitSet &ws) override {(void)ws;}
+
+    bool Busy() override {return !list_empty(&xhr_list);}
+};
+
+static CurlPollSource sCurlPollSource;
+
+void fs_wget_init(EventLoop &loop)
 {
     if (curl_multi_ctx)
         return;
     curl_global_init(CURL_GLOBAL_ALL);
     curl_multi_ctx = curl_multi_init();
     init_list_head(&xhr_list);
+    loop.Add(&sCurlPollSource);
 }
 
 void fs_wget_end(void)
@@ -138,16 +160,17 @@ void fs_wget_free(XHRState *s)
     free(s);
 }
 
-/* timeout is in ms */
-void fs_net_set_fdset(int *pfd_max, fd_set *rfds, fd_set *wfds, fd_set *efds,
-                      int *ptimeout)
+/* timeout is in ms; returns whether a transfer finished */
+static bool fs_net_set_fdset(int *pfd_max, fd_set *rfds, fd_set *wfds,
+                             fd_set *efds, int *ptimeout)
 {
     long timeout;
     int n, fd_max;
     CURLMsg *msg;
-    
+    bool finished = false;
+
     if (!curl_multi_ctx)
-        return;
+        return false;
     
     curl_multi_perform(curl_multi_ctx, &n);
 
@@ -177,6 +200,7 @@ void fs_net_set_fdset(int *pfd_max, fd_set *rfds, fd_set *wfds, fd_set *efds,
             dbuf_free(&s->dbuf);
             list_del(&s->link);
             free(s);
+            finished = true;
         }
     }
 
@@ -185,35 +209,7 @@ void fs_net_set_fdset(int *pfd_max, fd_set *rfds, fd_set *wfds, fd_set *efds,
     curl_multi_timeout(curl_multi_ctx, &timeout);
     if (timeout >= 0)
         *ptimeout = min_int(*ptimeout, timeout);
-}
-
-void fs_net_event_loop(FSNetEventLoopCompletion *completion)
-{
-    fd_set rfds, wfds, efds;
-    int timeout, fd_max;
-    struct timeval tv;
-    
-    if (!curl_multi_ctx)
-        return;
-
-    for(;;) {
-        fd_max = -1;
-        FD_ZERO(&rfds);
-        FD_ZERO(&wfds);
-        FD_ZERO(&efds);
-        timeout = 10000;
-        fs_net_set_fdset(&fd_max, &rfds, &wfds, &efds, &timeout);
-        if (completion != nullptr) {
-            if (completion->IsCompleted())
-                break;
-        } else {
-            if (list_empty(&xhr_list))
-                break;
-        }
-        tv.tv_sec = timeout / 1000;
-        tv.tv_usec = (timeout % 1000) * 1000;
-        select(fd_max + 1, &rfds, &wfds, &efds, &tv);
-    }
+    return finished;
 }
 
 XHRState *fs_wget(const char *url, const char *user, const char *password,
@@ -332,7 +328,7 @@ struct FSWGetFileState:
     public WGetWriteHandler,
     public WGetReadHandler,
     public DecryptFileHandler {
-    FSDevice *fs;
+    HostFileSystem *fs;
     FSFile *f;
     int64_t pos;
     FSWGetFileHandler *handler;
@@ -348,7 +344,7 @@ struct FSWGetFileState:
 int FSWGetFileState::DecryptWrite(const uint8_t *data, size_t size)
 {
     FSWGetFileState *s = this;
-    FSDevice *fs = s->fs;
+    HostFileSystem *fs = s->fs;
     int ret;
 
     ret = fs->Write(s->f, s->pos, data, size);
@@ -361,7 +357,7 @@ int FSWGetFileState::DecryptWrite(const uint8_t *data, size_t size)
 void FSWGetFileState::WGetWrite(int err, void *data, size_t size)
 {
     FSWGetFileState *s = this;
-    FSDevice *fs = s->fs;
+    HostFileSystem *fs = s->fs;
     int ret;
     int64_t ret_size;
     
@@ -397,7 +393,7 @@ void FSWGetFileState::WGetWrite(int err, void *data, size_t size)
 size_t FSWGetFileState::WGetRead(void *data, size_t size)
 {
     FSWGetFileState *s = this;
-    FSDevice *fs = s->fs;
+    HostFileSystem *fs = s->fs;
     int ret;
     
     if (!s->posted_file)
@@ -409,7 +405,7 @@ size_t FSWGetFileState::WGetRead(void *data, size_t size)
     return ret;
 }
 
-void fs_wget_file2(FSDevice *fs, FSFile *f, const char *url,
+void fs_wget_file2(HostFileSystem *fs, FSFile *f, const char *url,
                    const char *user, const char *password,
                    FSFile *posted_file, uint64_t post_data_len,
                    FSWGetFileHandler *handler, AES_KEY *aes_state)

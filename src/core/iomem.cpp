@@ -30,13 +30,8 @@
 #include <inttypes.h>
 #include <assert.h>
 
-#ifdef __HAIKU__
-#include <OS.h>
-#else
-#include <sys/mman.h>
-#endif
-
 #include "cutils.h"
+#include "host_memory.h"
 
 
 //#pragma mark - PhysMemoryRange
@@ -154,22 +149,7 @@ PhysMemoryRange *PhysMemoryMap::RegisterRam(uint64_t addr, uint64_t size,
 {
     PhysMemoryRange *pr = RegisterRamEntry(addr, size, devram_flags);
 
-#ifdef __HAIKU__
-    if (create_area("VM memory", reinterpret_cast<void **>(&pr->phys_mem),
-                    B_ANY_ADDRESS, size, B_NO_LOCK,
-                    B_READ_AREA | B_WRITE_AREA) < B_OK) {
-        pr->phys_mem = nullptr;
-    }
-#else
-    pr->phys_mem = static_cast<uint8_t *>(mmap(nullptr, size,
-                                               PROT_READ | PROT_WRITE,
-                                               MAP_PRIVATE | MAP_ANONYMOUS,
-                                               -1, 0));
-    if (pr->phys_mem == MAP_FAILED) {
-        pr->phys_mem = nullptr;
-    }
-#endif
-
+    pr->phys_mem = host_ram_alloc(size);
     if (pr->phys_mem == nullptr) {
         fprintf(stderr, "Could not allocate VM memory\n");
         exit(1);
@@ -191,11 +171,7 @@ PhysMemoryRange *PhysMemoryMap::RegisterRam(uint64_t addr, uint64_t size,
 
 void PhysMemoryMap::FreeRam(PhysMemoryRange *pr)
 {
-#ifdef __HAIKU__
-    delete_area(area_for(pr->phys_mem));
-#else
-    munmap(pr->phys_mem, pr->org_size);
-#endif
+    host_ram_free(pr->phys_mem, pr->org_size);
 }
 
 

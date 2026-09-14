@@ -27,13 +27,9 @@
 #include <string.h>
 #include <inttypes.h>
 #include <assert.h>
-#include <fcntl.h>
-#include <time.h>
-#ifdef __HAIKU__
-#include <OS.h> // system_time()
-#endif
 
 #include "cutils.h"
+#include "host_time.h"
 #include "iomem.h"
 #include "riscv_cpu.h"
 
@@ -86,18 +82,6 @@ static void __attribute__((format(printf, 1, 2), unused)) log_printf(const char 
     va_end(ap);
 }
 
-/* microseconds since boot */
-static uint64_t get_system_time(void)
-{
-#ifdef __HAIKU__
-    return system_time();
-#else
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
-#endif
-}
-
 #if MAX_XLEN == 128
 static void fprint_target_ulong(FILE *f, target_ulong a)
 {
@@ -129,7 +113,7 @@ static uint64_t riscv_cpu_rtc_time(RISCVCPUState *s)
     if (s->rtc_time_source != nullptr) {
         return s->rtc_time_source->RtcTime();
     }
-    return get_system_time();
+    return host_monotonic_us();
 }
 
 static void set_mip(RISCVCPUState *s, uint32_t mask)
