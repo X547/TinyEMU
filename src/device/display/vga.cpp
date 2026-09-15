@@ -880,6 +880,9 @@ public:
             return false;
         }
         fCtx->fb_dev = fFb.get();
+        fCtx->screen = fFb.get();
+        fCtx->screen_width = fFb->width;
+        fCtx->screen_height = fFb->height;
         return true;
     }
 };

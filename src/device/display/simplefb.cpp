@@ -159,6 +159,9 @@ public:
         fFb.reset(simplefb_init(sys->MemMap(), fMmio->base, fWidth, fHeight));
         fCtx->fb_dev = fFb.get();
         fCtx->fb_base = fMmio->base;
+        fCtx->screen = fFb.get();
+        fCtx->screen_width = fFb->width;
+        fCtx->screen_height = fFb->height;
         return fFb != nullptr;
     }
 

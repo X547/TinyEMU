@@ -28,6 +28,7 @@
 #include "host_console.h"
 #include "host_ethernet.h"
 #include "host_fs.h"
+#include "host_screen.h"
 #include "iomem.h"
 #include "pci.h"
 
@@ -98,6 +99,17 @@ std::unique_ptr<VIRTIODevice> virtio_input_init(VIRTIOBusDef *bus,
 std::unique_ptr<VIRTIODevice> virtio_9p_init(VIRTIOBusDef *bus, HostFileSystem *fs,
                                              const char *mount_tag);
 
+/* GPU device, 2D only */
+
+/* the range of display sizes offered to the guest */
+#define VIRTIO_GPU_MIN_SIZE 64
+#define VIRTIO_GPU_MAX_SIZE 8192
+
+/* 'width' x 'height' is the display size first offered to the guest. */
+std::unique_ptr<VIRTIODevice> virtio_gpu_init(VIRTIOBusDef *bus, int width,
+                                              int height);
+ScreenSource *virtio_gpu_screen_source(VIRTIODevice *s);
+
 /* device tree nodes */
 
 class Device;
@@ -115,5 +127,6 @@ Device *virtio_9p_node_create(DeviceContext *ctx,
                               std::unique_ptr<HostFileSystem> fs,
                               const char *mount_tag);
 Device *virtio_input_node_create(DeviceContext *ctx, VirtioInputTypeEnum type);
+Device *virtio_gpu_node_create(DeviceContext *ctx, int width, int height);
 
 #endif /* VIRTIO_H */

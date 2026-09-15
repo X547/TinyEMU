@@ -57,9 +57,14 @@ public:
 };
 
 
-/* A frame buffer shown on the host screen. */
+/* A frame buffer the guest writes directly, shown on the host screen. */
 class FBDevice: public ScreenSource {
 public:
+    /* Report the frame buffer with SetFramebuffer(), then each rectangle
+       that changed with Update(). Called periodically by the machine. */
+    virtual void Refresh(HostScreen *screen) = 0;
+
+
     /* the following is set by the device */
     int width = 0;
     int height = 0;
@@ -172,7 +177,7 @@ private:
     std::atomic<bool> fSleeping {false};
 
     HostScreen *fScreen = nullptr;
-    ScreenSource *fScreenSource = nullptr;
+    FBDevice *fScreenSource = nullptr;
     uint64_t fNextRefreshUs = 0;
 
     void ThreadLoop();
@@ -209,7 +214,7 @@ public:
     /* Takes the lock and shutdown control from the parameters. */
     void SetHost(const VirtMachineParams *p);
     /* 'source' is refreshed on 'screen' from the processor thread. */
-    void SetDisplay(HostScreen *screen, ScreenSource *source);
+    void SetDisplay(HostScreen *screen, FBDevice *source);
 
     /* the first request decides the exit code */
     void RequestShutdown(int code);

@@ -239,6 +239,9 @@ void virtio_init(VIRTIODevice *s, VIRTIOBusDef *bus,
         case 9:
             class_id = 0x2;
             break;
+        case 16:
+            class_id = 0x0380; /* display */
+            break;
         case 18:
             class_id = 0x0980;
             break;
@@ -773,6 +776,7 @@ void VIRTIOMMIOTransport::DeviceWrite(uint32_t offset, uint32_t val, int size_lo
                 /* reset */
                 s->irq->Set(0);
                 virtio_reset(s);
+                s->Reset();
             }
             break;
         case VIRTIO_MMIO_QUEUE_READY:
@@ -967,6 +971,7 @@ void VIRTIOPCITransport::DeviceWrite(uint32_t offset1, uint32_t val, int size_lo
                     /* reset */
                     s->irq->Set(0);
                     virtio_reset(s);
+                    s->Reset();
                 }
                 break;
             }
@@ -1025,6 +1030,7 @@ typedef enum {
     VIRTIO_KIND_CONSOLE,
     VIRTIO_KIND_9P,
     VIRTIO_KIND_INPUT,
+    VIRTIO_KIND_GPU,
 } VirtioKindEnum;
 
 
@@ -1038,6 +1044,8 @@ private:
     DeviceContext *fCtx;
     VirtioInputTypeEnum fInputType = VIRTIO_INPUT_TYPE_KEYBOARD;
     const char *fTag = nullptr;
+    int fWidth = 0;
+    int fHeight = 0;
     Resource *fMmio = nullptr;
     Resource *fIrq = nullptr;
     /* declared first, so that fDev goes before the back end it uses */
@@ -1059,6 +1067,7 @@ public:
     void SetFileSystem(std::unique_ptr<HostFileSystem> fs)
         {fFsDev = std::move(fs);}
     void SetTag(const char *tag) {fTag = tag;}
+    void SetSize(int width, int height) {fWidth = width; fHeight = height;}
 
     bool Prepare() override
     {
@@ -1129,6 +1138,12 @@ public:
                 fCtx->mouse = fInputTarget.get();
             }
             break;
+        case VIRTIO_KIND_GPU:
+            fDev = virtio_gpu_init(&vbus, fWidth, fHeight);
+            fCtx->screen = virtio_gpu_screen_source(fDev.get());
+            fCtx->screen_width = fWidth;
+            fCtx->screen_height = fHeight;
+            break;
         }
         return fDev != nullptr;
     }
@@ -1192,5 +1207,13 @@ Device *virtio_input_node_create(DeviceContext *ctx, VirtioInputTypeEnum type)
     VirtioDevice *dev = new VirtioDevice("virtio-input", VIRTIO_KIND_INPUT,
                                          ctx);
     dev->SetInputType(type);
+    return dev;
+}
+
+
+Device *virtio_gpu_node_create(DeviceContext *ctx, int width, int height)
+{
+    VirtioDevice *dev = new VirtioDevice("virtio-gpu", VIRTIO_KIND_GPU, ctx);
+    dev->SetSize(width, height);
     return dev;
 }

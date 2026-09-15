@@ -102,6 +102,8 @@ struct VIRTIODevice: public PCIBarTarget {
     virtual void ManualQueueNotify(int queue_idx) {(void)queue_idx;}
     /* called after the config is written */
     virtual void ConfigWrite() {}
+    /* The driver reset the device. */
+    virtual void Reset() {}
 
     /* return nullptr if no RAM at this address. The mapping is valid for
        one page */

@@ -715,7 +715,7 @@ void VirtMachine::SetHost(const VirtMachineParams *p)
 }
 
 
-void VirtMachine::SetDisplay(HostScreen *screen, ScreenSource *source)
+void VirtMachine::SetDisplay(HostScreen *screen, FBDevice *source)
 {
     fScreen = screen;
     fScreenSource = source;

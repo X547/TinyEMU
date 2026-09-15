@@ -529,6 +529,21 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
         return virtio_input_node_create(ctx, input_type);
     }
 
+    if (strcmp(type, "virtio-gpu") == 0) {
+        int width, height;
+        if (!node_int_opt(node, "width", &width, 1024) ||
+            !node_int_opt(node, "height", &height, 768)) {
+            return nullptr;
+        }
+        if (width < VIRTIO_GPU_MIN_SIZE || width > VIRTIO_GPU_MAX_SIZE ||
+            height < VIRTIO_GPU_MIN_SIZE || height > VIRTIO_GPU_MAX_SIZE) {
+            vm_error("virtio-gpu: 'width' and 'height' must be between %d "
+                     "and %d\n", VIRTIO_GPU_MIN_SIZE, VIRTIO_GPU_MAX_SIZE);
+            return nullptr;
+        }
+        return virtio_gpu_node_create(ctx, width, height);
+    }
+
     if (strcmp(type, "ps2-keyboard") == 0 || strcmp(type, "ps2-mouse") == 0) {
         int port;
         if (!node_int_opt(node, "port", &port, -1)) {
@@ -606,10 +621,15 @@ void device_context_connect(DeviceContext *ctx)
         console->SetTarget(ctx->console_input != nullptr ? ctx->console_input
                                                          : ctx->serial_input);
     }
-    if (platform->Screen() != nullptr && ctx->fb_dev != nullptr) {
-        platform->Screen()->SetSource(ctx->fb_dev, ctx->fb_dev->width,
-                                      ctx->fb_dev->height);
-        ctx->machine->SetDisplay(platform->Screen(), ctx->fb_dev);
+    HostScreen *screen = platform->Screen();
+    if (screen != nullptr && ctx->screen != nullptr) {
+        screen->SetSource(ctx->screen, ctx->screen_width, ctx->screen_height);
+        ctx->screen->SetScreen(screen);
+        /* only a frame buffer the guest writes directly has to be polled */
+        FBDevice *fb = dynamic_cast<FBDevice *>(ctx->screen);
+        if (fb != nullptr) {
+            ctx->machine->SetDisplay(screen, fb);
+        }
     }
     if (platform->Keyboard() != nullptr) {
         platform->Keyboard()->SetTarget(ctx->keyboard);

@@ -16,7 +16,7 @@ TinyEMU System Emulator by Fabrice Bellard
 - x86 system emulator based on KVM, with an i686 interpreter (x87 FPU,
   no SSE) when KVM is not available
 
-- VirtIO console, network, block device, input and 9P filesystem
+- VirtIO console, network, block device, input, 2D GPU and 9P filesystem
 
 - Graphical display with SDL
 
@@ -222,7 +222,12 @@ Device types:
   virtio-net             "driver" ("user" or "tap"), "ifname" for tap
   virtio-console         uses the emulator console
   virtio-input           "kind" ("keyboard", "mouse" or "tablet")
-  xhci                   USB 3.0 host controller on PCI; "usb2_ports"
+  virtio-gpu             2D display with a cursor; "width" and "height"
+                         (default 1024 and 768) are the size first offered
+                         to the guest, which is asked to follow when the
+                         window is resized. The guest reports what changed,
+                         so the screen is not polled
+  xhci                  USB 3.0 host controller on PCI; "usb2_ports"
                          (default 4) and "usb3_ports" (default 2), and a
                          nested USB bus
   usb-hub                USB 2.0 hub; "ports" (default 4), "port" (which port

@@ -51,6 +51,12 @@ struct DeviceContext {
        one realized wins. */
     KeyboardTarget *keyboard = nullptr;
     PointerTarget *mouse = nullptr;
+    /* The display shown on the host screen and its initial size; the last
+       one realized wins. */
+    ScreenSource *screen = nullptr;
+    int screen_width = 0;
+    int screen_height = 0;
+    /* A frame buffer the guest writes directly. */
     FBDevice *fb_dev = nullptr;
     /* Where the framebuffer was placed, for a machine that has to tell its
        guest in something other than a device tree. */
