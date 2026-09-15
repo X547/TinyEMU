@@ -273,7 +273,7 @@ void VIRTIOGPUDevice::Reset()
 {
     DisableScanout();
     if (screen != nullptr)
-        screen->SetCursor(nullptr, 0, 0);
+        screen->SetCursor(nullptr, 0, 0, 0, 0);
     resources.clear();
     host_memory = 0;
     events_read = 0;
@@ -557,7 +557,8 @@ uint32_t VIRTIOGPUDevice::DetachBacking(const uint8_t *cmd)
 }
 
 
-/* The position is the top left corner of the image. */
+/* The position is the top left corner of the image, and the hot spot the
+   pixel of it that points. */
 uint32_t VIRTIOGPUDevice::UpdateCursor(const uint8_t *cmd, bool move_only)
 {
     uint32_t scanout_id = get_le32(cmd + 24);
@@ -571,7 +572,7 @@ uint32_t VIRTIOGPUDevice::UpdateCursor(const uint8_t *cmd, bool move_only)
     if (!move_only) {
         uint32_t id = get_le32(cmd + 40);
         if (id == 0) {
-            screen->SetCursor(nullptr, 0, 0);
+            screen->SetCursor(nullptr, 0, 0, 0, 0);
         } else {
             GPUResource *res = FindResource(id);
             if (res == nullptr)
@@ -582,7 +583,11 @@ uint32_t VIRTIOGPUDevice::UpdateCursor(const uint8_t *cmd, bool move_only)
             uint32_t opaque = format_has_alpha(res->format) ? 0 : 0xff000000;
             for (size_t i = 0; i < pixels.size(); i++)
                 pixels[i] = get_le32(res->data.get() + i * 4) | opaque;
-            screen->SetCursor(pixels.data(), res->width, res->height);
+            int32_t hot_x = get_le32(cmd + 44);
+            int32_t hot_y = get_le32(cmd + 48);
+            screen->SetCursor(pixels.data(), res->width, res->height,
+                              std::clamp<int32_t>(hot_x, 0, res->width - 1),
+                              std::clamp<int32_t>(hot_y, 0, res->height - 1));
         }
     }
     screen->MoveCursor(x, y);

@@ -3,6 +3,11 @@ option('sdl',
   value: 'auto',
   description: 'SDL 1.2 graphical display support')
 
+option('haiku_gui',
+  type: 'feature',
+  value: 'auto',
+  description: 'native Haiku window instead of SDL (Haiku hosts only)')
+
 option('fs_net',
   type: 'feature',
   value: 'disabled',

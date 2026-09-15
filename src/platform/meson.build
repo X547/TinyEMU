@@ -1,7 +1,8 @@
 # Host integration: everything that talks to the operating system. The
 # emulator libraries see only the interfaces in api/.
 
-platform_inc = [inc, include_directories('common', 'curl', 'posix', 'sdl')]
+platform_inc = [inc, include_directories('common', 'curl', 'haiku', 'posix',
+                                         'sdl')]
 
 platform_kwargs = lib_kwargs + {
   'include_directories': platform_inc,
@@ -37,7 +38,7 @@ if get_option('slirp')
 else
   platform_sources += files('common/no_slirp_ethernet.cpp')
 endif
-if not sdl_dep.found()
+if not sdl_dep.found() and not haiku_gui
   platform_sources += files('common/no_display.cpp')
 endif
 if not fs_net_enabled
@@ -49,6 +50,12 @@ emu_libs += static_library('platform', platform_sources,
 
 if sdl_dep.found()
   subdir('sdl')
+endif
+if haiku_gui
+  emu_libs += static_library('platform_haiku_gui',
+    files('haiku/haiku_display.cpp', 'haiku/haiku_keymap.cpp'),
+    kwargs: platform_kwargs,
+  )
 endif
 if fs_net_enabled
   subdir('curl')

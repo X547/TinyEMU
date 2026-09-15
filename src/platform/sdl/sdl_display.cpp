@@ -36,6 +36,7 @@
 #include "device_lock.h"
 #include "platform_backends.h"
 #include "run_control.h"
+#include "screen_rect.h"
 #include "sdl_keymap.h"
 
 #define KEYCODE_MAX 127
@@ -71,50 +72,15 @@ static Uint32 resize_timer_hook(Uint32 interval, void *param)
 }
 
 
-struct ScreenRect {
-    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
-
-    ScreenRect() = default;
-    ScreenRect(int x, int y, int w, int h):
-        x0(x), y0(y), x1(x + w), y1(y + h) {}
-
-    bool Empty() const {return x0 >= x1 || y0 >= y1;}
-
-    ScreenRect operator&(const ScreenRect &r) const
-    {
-        ScreenRect res;
-        res.x0 = max_int(x0, r.x0);
-        res.y0 = max_int(y0, r.y0);
-        res.x1 = min_int(x1, r.x1);
-        res.y1 = min_int(y1, r.y1);
-        return res;
-    }
-
-    ScreenRect &operator|=(const ScreenRect &r)
-    {
-        if (r.Empty())
-            return *this;
-        if (Empty()) {
-            *this = r;
-        } else {
-            x0 = min_int(x0, r.x0);
-            y0 = min_int(y0, r.y0);
-            x1 = max_int(x1, r.x1);
-            y1 = max_int(y1, r.y1);
-        }
-        return *this;
-    }
-
-    SDL_Rect ToSDL() const
-    {
-        SDL_Rect r;
-        r.x = x0;
-        r.y = y0;
-        r.w = x1 - x0;
-        r.h = y1 - y0;
-        return r;
-    }
-};
+static SDL_Rect to_sdl(const ScreenRect &r)
+{
+    SDL_Rect res;
+    res.x = r.x0;
+    res.y = r.y0;
+    res.w = r.Width();
+    res.h = r.Height();
+    return res;
+}
 
 
 class SDLDisplay final: public HostDisplay {
@@ -202,7 +168,8 @@ public:
     void SetFramebuffer(uint8_t *data, int width, int height,
                         int stride) override;
     void Update(int x, int y, int w, int h) override;
-    void SetCursor(const uint32_t *pixels, int width, int height) override;
+    void SetCursor(const uint32_t *pixels, int width, int height,
+                   int hot_x, int hot_y) override;
     void MoveCursor(int x, int y) override;
 
     /* HostKeyboard, HostPointer */
@@ -327,8 +294,13 @@ void SDLDisplay::Update(int x, int y, int w, int h)
 }
 
 
-void SDLDisplay::SetCursor(const uint32_t *pixels, int width, int height)
+/* SDL 1.2 has no color cursors, so the image is drawn over the frame buffer
+   where the guest places it, and the hot spot is not needed. */
+void SDLDisplay::SetCursor(const uint32_t *pixels, int width, int height,
+                           int hot_x, int hot_y)
 {
+    (void)hot_x;
+    (void)hot_y;
     std::lock_guard<std::mutex> locker(fMutex);
 
     if (pixels == nullptr || width <= 0 || height <= 0) {
@@ -377,24 +349,15 @@ void SDLDisplay::PaintArea(const ScreenRect &area, const ScreenRect &cursor)
 
     ScreenRect fb = r & ScreenRect(0, 0, fFbWidth, fFbHeight);
     if (!fb.Empty() && fFbSurface != nullptr) {
-        SDL_Rect sr = fb.ToSDL();
+        SDL_Rect sr = to_sdl(fb);
         SDL_Rect dr = sr;
         SDL_BlitSurface(fFbSurface, &sr, fScreen, &dr);
     }
-    /* the strips right of and below the frame buffer */
-    if (r.x1 > fFbWidth) {
-        SDL_Rect sr = ScreenRect(max_int(r.x0, fFbWidth), r.y0,
-                           r.x1 - max_int(r.x0, fFbWidth),
-                           r.y1 - r.y0).ToSDL();
+    ScreenRect outside[2];
+    int count = screen_rect_outside(r, fFbWidth, fFbHeight, outside);
+    for (int i = 0; i < count; i++) {
+        SDL_Rect sr = to_sdl(outside[i]);
         SDL_FillRect(fScreen, &sr, 0);
-    }
-    if (r.y1 > fFbHeight) {
-        int x1 = min_int(r.x1, fFbWidth);
-        if (x1 > r.x0) {
-            SDL_Rect sr = ScreenRect(r.x0, max_int(r.y0, fFbHeight), x1 - r.x0,
-                               r.y1 - max_int(r.y0, fFbHeight)).ToSDL();
-            SDL_FillRect(fScreen, &sr, 0);
-        }
     }
 
     ScreenRect c = r & cursor;
@@ -412,14 +375,7 @@ void SDLDisplay::PaintArea(const ScreenRect &area, const ScreenRect &cursor)
                 dst = fFb[sy * fFbWidth + sx];
             uint32_t src = fCursor[(sy - fCursorY) * fCursorWidth +
                                    (sx - fCursorX)];
-            uint32_t a = src >> 24;
-            uint32_t out = 0;
-            for (int shift = 0; shift < 24; shift += 8) {
-                uint32_t s = (src >> shift) & 0xff;
-                uint32_t d = (dst >> shift) & 0xff;
-                out |= ((s * a + d * (255 - a) + 127) / 255) << shift;
-            }
-            pixels[y * w + x] = out;
+            pixels[y * w + x] = cursor_blend(dst, src);
         }
     }
     SDL_Surface *surface = SDL_CreateRGBSurfaceFrom(pixels.data(), w, h, 32,
@@ -427,7 +383,7 @@ void SDLDisplay::PaintArea(const ScreenRect &area, const ScreenRect &cursor)
                                                     0x0000ff00, 0x000000ff,
                                                     0x00000000);
     if (surface != nullptr) {
-        SDL_Rect dr = c.ToSDL();
+        SDL_Rect dr = to_sdl(c);
         SDL_BlitSurface(surface, nullptr, fScreen, &dr);
         SDL_FreeSurface(surface);
     }
@@ -508,7 +464,7 @@ void SDLDisplay::Draw()
         if (r.Empty())
             continue;
         PaintArea(r, cursor);
-        rects[count++] = r.ToSDL();
+        rects[count++] = to_sdl(r);
     }
     if (count > 0)
         SDL_UpdateRects(fScreen, count, rects);

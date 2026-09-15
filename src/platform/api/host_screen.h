@@ -56,9 +56,12 @@ public:
     virtual void SetFramebuffer(uint8_t *data, int width, int height,
                                 int stride) = 0;
     virtual void Update(int x, int y, int w, int h) = 0;
-    /* A cursor image of 32 bit ARGB pixels, drawn over the frame buffer;
-       copied. nullptr hides the cursor. */
-    virtual void SetCursor(const uint32_t *pixels, int width, int height) = 0;
+    /* A cursor image of 32 bit ARGB pixels, copied; nullptr hides the
+       cursor. (hot_x, hot_y) is the pixel of the image that points. A
+       screen may show it as the host's own cursor, which follows the host
+       pointer rather than MoveCursor(). */
+    virtual void SetCursor(const uint32_t *pixels, int width, int height,
+                           int hot_x, int hot_y) = 0;
     /* Where the cursor image's top left corner is, in frame buffer
        pixels. */
     virtual void MoveCursor(int x, int y) = 0;

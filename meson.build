@@ -93,7 +93,20 @@ if x86emu
   common_defines += '-DCONFIG_X86EMU'
 endif
 
-sdl_dep = dependency('sdl', required: get_option('sdl'))
+# The display: a native Haiku window where there is one, SDL otherwise. An
+# explicit -Dsdl=enabled keeps SDL on Haiku too.
+haiku_gui_opt = get_option('haiku_gui') \
+  .disable_auto_if(get_option('sdl').enabled()) \
+  .require(host_machine.system() == 'haiku',
+           error_message: 'the Haiku window needs a Haiku host')
+be_dep = cpp.find_library('be', required: haiku_gui_opt)
+haiku_gui = be_dep.found()
+if haiku_gui
+  emu_deps += be_dep
+  sdl_dep = dependency('', required: false)
+else
+  sdl_dep = dependency('sdl', required: get_option('sdl'))
+endif
 if sdl_dep.found()
   emu_deps += sdl_dep
 endif
@@ -245,6 +258,7 @@ executable('temu',
 
 summary({
   'SDL display': sdl_dep.found(),
+  'Haiku display': haiku_gui,
   'x86 emulator': x86emu,
   'slirp': get_option('slirp'),
   'network filesystem': fs_net_enabled,

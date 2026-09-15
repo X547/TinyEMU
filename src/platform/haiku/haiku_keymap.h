@@ -1,7 +1,5 @@
 /*
- * SDL key codes: Haiku
- *
- * Copyright (c) 2017 Fabrice Bellard
+ * Haiku key codes
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -21,12 +19,9 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-#include "sdl_keymap.h"
-#include "haiku_keymap.h"
+#pragma once
 
+#include <stdint.h>
 
-/* SDL passes Haiku's raw key codes as scancodes. */
-int sdl_get_keycode(const SDL_KeyboardEvent *ev)
-{
-    return haiku_key_to_evdev(ev->keysym.scancode);
-}
+/* The Linux evdev code for a Haiku raw key code, or 0 if there is none. */
+int haiku_key_to_evdev(int32_t haikuKey);
