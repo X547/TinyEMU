@@ -1,5 +1,5 @@
 /*
- * Host screen
+ * Emulator shutdown
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -19,33 +19,41 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-#pragma once
-
-#include <stdint.h>
-
-class HostScreen;
-
-/* Implemented by a display device. */
-class ScreenSource {
-public:
-    virtual ~ScreenSource() = default;
-
-    /* Report the frame buffer with SetFramebuffer(), then each rectangle
-       that changed with Update(). Called periodically by the machine. */
-    virtual void Refresh(HostScreen *screen) = 0;
-};
+#include "run_control.h"
 
 
-/* A window, or whatever else shows the guest's display. It is called from
-   whichever thread refreshes the source, and hands the work to its own. */
-class HostScreen {
-public:
-    virtual ~HostScreen() = default;
+void RunControl::RequestShutdown(int exit_code)
+{
+    std::function<void()> handler;
 
-    /* Show 'source' in a width x height area. nullptr detaches it. */
-    virtual void SetSource(ScreenSource *source, int width, int height) = 0;
-    /* 32 bit xRGB pixels, 'stride' bytes per row. */
-    virtual void SetFramebuffer(uint8_t *data, int width, int height,
-                                int stride) = 0;
-    virtual void Update(int x, int y, int w, int h) = 0;
-};
+    {
+        std::lock_guard<std::mutex> locker(fMutex);
+        if (fRequested.load())
+            return;
+        fExitCode = exit_code;
+        fRequested.store(true);
+        handler = fHandler;
+    }
+    if (handler)
+        handler();
+}
+
+
+int RunControl::ExitCode()
+{
+    std::lock_guard<std::mutex> locker(fMutex);
+    return fExitCode;
+}
+
+
+void RunControl::SetShutdownHandler(std::function<void()> handler)
+{
+    {
+        std::lock_guard<std::mutex> locker(fMutex);
+        fHandler = handler;
+        if (!fRequested.load())
+            return;
+    }
+    if (handler)
+        handler();
+}

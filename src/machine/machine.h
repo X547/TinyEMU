@@ -24,8 +24,12 @@
 #pragma once
 
 #include <stdint.h>
+#include <atomic>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 
 #include "host_input.h"
 #include "host_screen.h"
@@ -33,8 +37,10 @@
 
 /* This header is included both by the machines, which have already pulled in
    iomem.h/virtio.h, and by the bus and resource code, which has not. */
+class DeviceLock;
 class PhysMemoryMap;
 class Platform;
+class RunControl;
 struct PCIBus;
 struct PhysMemoryRange;
 
@@ -133,6 +139,8 @@ typedef struct {
     bool rtc_real_time;
     bool rtc_local_time;
     Platform *platform;
+    DeviceLock *device_lock;
+    RunControl *run_control;
 
     char *cmdline; /* bios or kernel command line */
     bool accel_enable; /* enable acceleration (KVM) */
@@ -148,28 +156,72 @@ typedef struct {
     VMFileEntry files[VM_FILE_COUNT];
 } VirtMachineParams;
 
+/* The processors run on a thread of their own, which also runs the machine's
+   timers and refreshes the screen. Everything else reaches the devices with
+   the device lock held. */
 class VirtMachine {
+private:
+    std::thread fThread;
+    /* the processor thread's, or no thread's while it is not running */
+    std::atomic<std::thread::id> fThreadId {};
+    std::atomic<bool> fStopRequested {false};
+    /* see Kick() and WaitForKick() */
+    std::mutex fWaitMutex;
+    std::condition_variable fWaitCond;
+    std::atomic<bool> fKicked {false};
+    std::atomic<bool> fSleeping {false};
+
+    HostScreen *fScreen = nullptr;
+    ScreenSource *fScreenSource = nullptr;
+    uint64_t fNextRefreshUs = 0;
+
+    void ThreadLoop();
+    int64_t RefreshScreen();
+    void WaitForKick(int64_t timeout_us);
+
+protected:
+    DeviceLock *fDeviceLock = nullptr;
+    RunControl *fRunControl = nullptr;
+
+    bool StopRequested() const {return fStopRequested.load();}
+    /* True on the processor thread, and on any thread while it is not
+       running. */
+    bool OnProcessorThread() const;
+
+    /* On the processor thread. */
+    virtual void ProcessorThreadStarted() {}
+    /* With the device lock held: runs the timers that are due and returns
+       the microseconds until the next one, or -1 if there is none. */
+    virtual int64_t RunTimers() = 0;
+    /* Whether every processor waits for an interrupt. */
+    virtual bool Idle() = 0;
+    /* Runs about max_exec_cycle instructions; takes the device lock for
+       each device access. */
+    virtual void Interp(int max_exec_cycle) = 0;
+    /* Makes Interp() return soon, from any thread. */
+    virtual void InterruptExecution() {}
+
 public:
     const VirtMachineClass *vmc = nullptr;
-    /* Set once something asks the emulator to stop; the main loop then
-       returns exit_code. */
-    bool shutdown_requested = false;
-    int exit_code = 0;
 
-    virtual ~VirtMachine() = default;
+    virtual ~VirtMachine();
+
+    /* Takes the lock and shutdown control from the parameters. */
+    void SetHost(const VirtMachineParams *p);
+    /* 'source' is refreshed on 'screen' from the processor thread. */
+    void SetDisplay(HostScreen *screen, ScreenSource *source);
 
     /* the first request decides the exit code */
-    void RequestShutdown(int code)
-    {
-        if (!shutdown_requested) {
-            shutdown_requested = true;
-            exit_code = code;
-        }
-    }
+    void RequestShutdown(int code);
+    bool ShutdownRequested() const;
 
-    /* in ms */
-    virtual int GetSleepDuration(int delay) = 0;
-    virtual void Interp(int max_exec_cycle) = 0;
+    void Start();
+    /* Returns once the processor thread has ended. */
+    void Stop();
+
+    /* Wakes the processor thread to look at its interrupts and timers again.
+       Any thread. */
+    void Kick();
 };
 
 

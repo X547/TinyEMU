@@ -32,27 +32,32 @@
 
 #include "cutils.h"
 #include "platform_backends.h"
+#include "run_control.h"
 #include "wait_set.h"
 
 
 class StdioConsole final: public HostConsole, public PollSource {
 private:
     EventLoop &fLoop;
+    RunControl &fRunControl;
     ConsoleTarget *fTarget = nullptr;
     int fStdinFd = 0;
     int fEscState = 0;
     bool fWatching = false;
+    /* the target had no room at the last Prepare() */
+    bool fBlocked = false;
 
     int ReadData(uint8_t *buf, int len);
     void GetSize(int *pw, int *ph);
 
 public:
-    StdioConsole(EventLoop &loop);
+    StdioConsole(EventLoop &loop, RunControl &run_control);
     ~StdioConsole() override;
 
     /* HostConsole */
     void WriteData(const uint8_t *buf, int len) override;
     void SetTarget(ConsoleTarget *target) override {fTarget = target;}
+    void TargetReady() override;
 
     /* PollSource */
     void Prepare(WaitSet &ws) override;
@@ -63,6 +68,8 @@ static struct termios oldtty;
 static int old_fd0_flags;
 /* set from the SIGWINCH handler; the first size is sent unasked */
 static volatile sig_atomic_t sResizePending = 1;
+/* woken by the SIGWINCH handler */
+static EventLoop *sResizeLoop;
 
 static void term_exit(void)
 {
@@ -99,11 +106,14 @@ static void term_resize_handler(int sig)
 {
     (void)sig;
     sResizePending = 1;
+    if (sResizeLoop != nullptr)
+        sResizeLoop->Wake();
 }
 
 
-StdioConsole::StdioConsole(EventLoop &loop):
-    fLoop(loop)
+StdioConsole::StdioConsole(EventLoop &loop, RunControl &run_control):
+    fLoop(loop),
+    fRunControl(run_control)
 {
     fLoop.Add(this);
 }
@@ -111,7 +121,17 @@ StdioConsole::StdioConsole(EventLoop &loop):
 
 StdioConsole::~StdioConsole()
 {
+    sResizeLoop = nullptr;
     fLoop.Remove(this);
+}
+
+
+void StdioConsole::TargetReady()
+{
+    if (fBlocked) {
+        fBlocked = false;
+        fLoop.Wake();
+    }
 }
 
 
@@ -135,7 +155,7 @@ int StdioConsole::ReadData(uint8_t *buf, int len)
         return 0;
     if (ret == 0) {
         /* EOF */
-        fLoop.RequestQuit(1);
+        fRunControl.RequestShutdown(1);
         return 0;
     }
 
@@ -147,7 +167,7 @@ int StdioConsole::ReadData(uint8_t *buf, int len)
             switch(ch) {
             case 'x':
                 printf("Terminated\n");
-                fLoop.RequestQuit(0);
+                fRunControl.RequestShutdown(0);
                 return j;
             case 'h':
                 printf("\n"
@@ -194,8 +214,12 @@ void StdioConsole::GetSize(int *pw, int *ph)
 void StdioConsole::Prepare(WaitSet &ws)
 {
     fWatching = false;
-    if (fTarget == nullptr || fTarget->ReceiveRoom() <= 0)
+    if (fTarget == nullptr)
         return;
+    if (fTarget->ReceiveRoom() <= 0) {
+        fBlocked = true;
+        return;
+    }
     if (sResizePending) {
         int width, height;
         sResizePending = 0;
@@ -222,13 +246,15 @@ void StdioConsole::Dispatch(WaitSet &ws)
 
 
 std::unique_ptr<HostConsole> host_console_create(EventLoop &loop,
+                                                 RunControl &run_control,
                                                  bool allow_ctrlc)
 {
     struct sigaction sig;
 
     term_init(allow_ctrlc);
 
-    auto s = std::make_unique<StdioConsole>(loop);
+    auto s = std::make_unique<StdioConsole>(loop, run_control);
+    sResizeLoop = &loop;
     /* Note: the glibc does not properly tests the return value of
        write() in printf, so some messages on stdout may be lost */
     fcntl(0, F_SETFL, O_NONBLOCK);

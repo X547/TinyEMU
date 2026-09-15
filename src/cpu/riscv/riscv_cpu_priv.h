@@ -24,6 +24,7 @@
 #ifndef RISCV_CPU_PRIV_H
 #define RISCV_CPU_PRIV_H
 
+/* included inside a namespace, so <atomic> comes from the includer */
 #include "riscv_cpu.h"
 #include "cutils.h"
 
@@ -255,9 +256,16 @@ struct RISCVCPUState: public RISCVCPU {
     target_ulong siselect;
     ImsicFile imsic[2]; /* IMSIC_FILE_M, IMSIC_FILE_S */
 
+    /* Posted from other threads and taken in by process_inbox(). */
+    std::atomic<bool> inbox_pending;
+    std::atomic<uint32_t> irq_lines;
+    std::atomic<uint64_t> msi_pending[2][IMSIC_WORDS];
+    uint32_t irq_line_mask; /* the mip bits irq_lines drives */
+
     target_ulong load_res; /* for atomic LR/SC */
 
     PhysMemoryMap *mem_map;
+    DeviceLock *device_lock;
 
     TLBEntry tlb_read[TLB_SIZE];
     TLBEntry tlb_write[TLB_SIZE];
@@ -265,14 +273,13 @@ struct RISCVCPUState: public RISCVCPU {
 
     void Interp(int n_cycles) override;
     uint64_t Cycles() override;
-    void SetMip(uint32_t mask) override;
-    void ResetMip(uint32_t mask) override;
-    uint32_t Mip() override;
+    void SetIrqLine(uint32_t mask, bool level) override;
     uint64_t UpdateSTimer() override;
     bool PowerDown() override;
     uint32_t Misa() override;
     void FlushTlbWriteRangeRam(uint8_t *ram_ptr, size_t ram_size) override;
     void SetRtcTimeSource(RtcTimeSource *source) override;
+    void SetDeviceLock(DeviceLock *lock) override;
     void SetInterruptArch(RISCVInterruptArch arch) override;
     void ImsicSetPending(bool supervisor, uint32_t id) override;
 };

@@ -38,6 +38,11 @@ struct VIRTIONetDevice: public VIRTIODevice, public EthernetTarget {
 
     int RecvRequest(int queue_idx, int desc_idx, int read_size,
                     int write_size) override;
+    void ManualQueueNotify(int queue_idx) override
+    {
+        if (queue_idx == 0)
+            es->TargetReady();
+    }
 
     /* EthernetTarget */
     bool CanWritePacket() override;

@@ -74,6 +74,8 @@ public:
 };
 
 static CurlPollSource sCurlPollSource;
+/* woken when a transfer is added, so that it is performed */
+static EventLoop *sLoop;
 
 void fs_wget_init(EventLoop &loop)
 {
@@ -82,6 +84,7 @@ void fs_wget_init(EventLoop &loop)
     curl_global_init(CURL_GLOBAL_ALL);
     curl_multi_ctx = curl_multi_init();
     init_list_head(&xhr_list);
+    sLoop = &loop;
     loop.Add(&sCurlPollSource);
 }
 
@@ -149,6 +152,8 @@ XHRState *fs_wget2(const char *url, const char *user, const char *password,
     }
     curl_multi_add_handle(curl_multi_ctx, s->eh);
     list_add_tail(&s->link, &xhr_list);
+    if (sLoop != nullptr)
+        sLoop->Wake();
     return s;
 }
 

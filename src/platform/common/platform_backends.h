@@ -29,21 +29,33 @@
 #include "host_input.h"
 #include "host_screen.h"
 
+class DeviceLock;
 class EventLoop;
 class HostEthernet;
+class RunControl;
 
-/* A window with the keyboard and the pointer that come with it. */
+/* A window with the keyboard and the pointer that come with it. It owns the
+   window system's event loop. */
 class HostDisplay: public HostScreen, public HostKeyboard, public HostPointer {
+public:
+    /* On the main thread: runs the window system until Quit(). */
+    virtual void Run() = 0;
+    /* Any thread; also before Run(), which then returns at once. */
+    virtual void Quit() = 0;
 };
 
 /* Each is implemented by exactly one file the build picks. A back end the
    build leaves out reports that and returns nullptr. */
 
+/* C-a x and the end of input request a shutdown from 'run_control'. */
 std::unique_ptr<HostConsole> host_console_create(EventLoop &loop,
+                                                 RunControl &run_control,
                                                  bool allow_ctrlc);
 
-/* nullptr when the build has no display */
-std::unique_ptr<HostDisplay> host_display_create(EventLoop &loop);
+/* nullptr when the build has no display. Input reaches the devices with
+   'lock' held; closing the window requests a shutdown. */
+std::unique_ptr<HostDisplay> host_display_create(DeviceLock &lock,
+                                                 RunControl &run_control);
 
 typedef enum {
     BLOCK_MODE_RO,

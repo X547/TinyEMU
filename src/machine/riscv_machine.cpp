@@ -70,6 +70,8 @@ public:
     bool rtc_real_time = false;
     uint64_t rtc_start_time = 0;
     uint64_t timecmp[RISCV_MAX_HARTS] {};
+    /* the MSIP and MTIP levels the CLINT drives */
+    uint32_t clint_lines[RISCV_MAX_HARTS] {};
     /* the one selected by intc_type */
     std::unique_ptr<PLIC> plic;
     std::unique_ptr<APLIC> aplic;
@@ -82,6 +84,8 @@ public:
     HostConsole *console = nullptr;
 
     ~RISCVMachine() override;
+
+    void SetClintLine(int hart, uint32_t mask, bool level);
 
     /* memory-mapped register blocks */
     uint32_t HtifRead(uint32_t offset, int size_log2);
@@ -114,7 +118,8 @@ public:
     uint64_t RtcTime() override;
 
     /* VirtMachine */
-    int GetSleepDuration(int delay) override;
+    int64_t RunTimers() override;
+    bool Idle() override;
     void Interp(int max_exec_cycle) override;
 };
 
@@ -225,7 +230,7 @@ static void htif_handle_cmd(RISCVMachine *s)
 
     /* the guest keeps running until the current step ends and may repeat
        the power off request meanwhile */
-    if (s->shutdown_requested)
+    if (s->ShutdownRequested())
         return;
 
     device = s->htif_tohost >> 56;
@@ -302,7 +307,7 @@ uint32_t RISCVMachine::ClintRead(uint32_t offset, int size_log2)
     if (offset < CLINT_MTIMECMP_BASE) {
         hart = (offset - CLINT_MSIP_BASE) / 4;
         if (hart < (uint32_t)m->hart_count)
-            val = (m->cpus[hart]->Mip() & MIP_MSIP) != 0;
+            val = (m->clint_lines[hart] & MIP_MSIP) != 0;
     } else if (offset < CLINT_MTIME) {
         hart = (offset - CLINT_MTIMECMP_BASE) / 8;
         if (hart < (uint32_t)m->hart_count) {
@@ -330,11 +335,7 @@ void RISCVMachine::ClintWrite(uint32_t offset, uint32_t val, int size_log2)
         hart = (offset - CLINT_MSIP_BASE) / 4;
         if (hart >= (uint32_t)m->hart_count)
             return;
-        if (val & 1) {
-            m->cpus[hart]->SetMip(MIP_MSIP);
-        } else {
-            m->cpus[hart]->ResetMip(MIP_MSIP);
-        }
+        m->SetClintLine(hart, MIP_MSIP, val & 1);
     } else if (offset < CLINT_MTIME) {
         hart = (offset - CLINT_MTIMECMP_BASE) / 8;
         if (hart >= (uint32_t)m->hart_count)
@@ -344,8 +345,18 @@ void RISCVMachine::ClintWrite(uint32_t offset, uint32_t val, int size_log2)
             cmp = (cmp & ~0xffffffffull) | val;
         else
             cmp = (cmp & 0xffffffff) | ((uint64_t)val << 32);
-        m->cpus[hart]->ResetMip(MIP_MTIP);
+        m->SetClintLine(hart, MIP_MTIP, false);
     }
+}
+
+void RISCVMachine::SetClintLine(int hart, uint32_t mask, bool level)
+{
+    if (level)
+        clint_lines[hart] |= mask;
+    else
+        clint_lines[hart] &= ~mask;
+    cpus[hart]->SetIrqLine(mask, level);
+    Kick();
 }
 
 /* The memory regions of the IMSIC interrupt files. The interrupt files
@@ -362,8 +373,10 @@ void RISCVMachine::ImsicWriteM(uint32_t offset, uint32_t val, int size_log2)
     uint32_t hart = offset / IMSIC_PAGE_SIZE;
 
     if (offset % IMSIC_PAGE_SIZE == IMSIC_SETEIPNUM_LE &&
-        hart < (uint32_t)hart_count)
+        hart < (uint32_t)hart_count) {
         cpus[hart]->ImsicSetPending(false, val);
+        Kick();
+    }
 }
 
 void RISCVMachine::ImsicWriteS(uint32_t offset, uint32_t val, int size_log2)
@@ -371,8 +384,10 @@ void RISCVMachine::ImsicWriteS(uint32_t offset, uint32_t val, int size_log2)
     uint32_t hart = offset / IMSIC_PAGE_SIZE;
 
     if (offset % IMSIC_PAGE_SIZE == IMSIC_SETEIPNUM_LE &&
-        hart < (uint32_t)hart_count)
+        hart < (uint32_t)hart_count) {
         cpus[hart]->ImsicSetPending(true, val);
+        Kick();
+    }
 }
 
 /* PCI MSIs are written straight to the IMSIC pages. */
@@ -388,12 +403,8 @@ static uint64_t imsic_region_size(RISCVMachine *m)
 
 void RISCVMachine::SetExternalIrq(int hart, bool supervisor, int level)
 {
-    uint32_t mask = supervisor ? MIP_SEIP : MIP_MEIP;
-    if (level) {
-        cpus[hart]->SetMip(mask);
-    } else {
-        cpus[hart]->ResetMip(mask);
-    }
+    cpus[hart]->SetIrqLine(supervisor ? MIP_SEIP : MIP_MEIP, level);
+    Kick();
 }
 
 static uint8_t *get_ram_ptr(RISCVMachine *s, uint64_t paddr, bool is_rw)
@@ -730,6 +741,7 @@ uint64_t RISCVMachine::RtcTime()
 
 void RISCVMachine::FlushTlbWriteRange(uint8_t *ram_addr, size_t ram_size)
 {
+    assert(OnProcessorThread());
     for (int hart = 0; hart < hart_count; hart++)
         cpus[hart]->FlushTlbWriteRangeRam(ram_addr, ram_size);
 }
@@ -799,6 +811,7 @@ riscv_machine_init(const VirtMachineParams *p)
     }
 
     s = std::make_unique<RISCVMachine>();
+    s->SetHost(p);
     s->intc_type = intc_type;
     s->vmc = p->vmc;
     s->ram_size = p->ram_size;
@@ -813,6 +826,7 @@ riscv_machine_init(const VirtMachineParams *p)
             vm_error("unsupported max_xlen=%d\n", max_xlen);
             return nullptr;
         }
+        s->cpus[hart]->SetDeviceLock(p->device_lock);
         s->hart_count++;
     }
     /* RAM */
@@ -921,43 +935,44 @@ riscv_machine_init(const VirtMachineParams *p)
 
 RISCVMachine::~RISCVMachine() = default;
 
-/* in ms */
-int RISCVMachine::GetSleepDuration(int delay)
+/* The counter runs at RTC_FREQ, which is one tick per microsecond. */
+int64_t RISCVMachine::RunTimers()
 {
     uint64_t now = rtc_get_time(this);
+    int64_t delay = -1;
 
-    /* wait for an event: the only asynchronous events are the timers */
     for (int hart = 0; hart < hart_count; hart++) {
-        RISCVCPU *s = cpus[hart].get();
-        uint64_t stimecmp;
+        uint64_t next = UINT64_MAX;
 
-        if (!(s->Mip() & MIP_MTIP)) {
-            if (now >= timecmp[hart]) {
-                s->SetMip(MIP_MTIP);
-                delay = 0;
-            } else {
-                /* convert delay to ms */
-                uint64_t delay1 = (timecmp[hart] - now) / (RTC_FREQ / 1000);
-                if (delay1 < (uint64_t)delay)
-                    delay = delay1;
-            }
+        if (!(clint_lines[hart] & MIP_MTIP)) {
+            if (now >= timecmp[hart])
+                SetClintLine(hart, MIP_MTIP, true);
+            else
+                next = timecmp[hart];
         }
         /* the supervisor timer runs off the same counter when Sstc is
            enabled */
-        stimecmp = s->UpdateSTimer();
-        if (stimecmp != UINT64_MAX) {
-            if (now >= stimecmp) {
-                delay = 0;
-            } else {
-                uint64_t delay1 = (stimecmp - now) / (RTC_FREQ / 1000);
-                if (delay1 < (uint64_t)delay)
-                    delay = delay1;
-            }
+        uint64_t stimecmp = cpus[hart]->UpdateSTimer();
+        if (stimecmp < next)
+            next = stimecmp;
+        if (next != UINT64_MAX) {
+            uint64_t d = next > now ? next - now : 0;
+            if (d > INT64_MAX)
+                d = INT64_MAX;
+            if (delay < 0 || (int64_t)d < delay)
+                delay = d;
         }
-        if (!s->PowerDown())
-            delay = 0;
     }
     return delay;
+}
+
+bool RISCVMachine::Idle()
+{
+    for (int hart = 0; hart < hart_count; hart++) {
+        if (!cpus[hart]->PowerDown())
+            return false;
+    }
+    return true;
 }
 
 /* Instructions a hart runs before the next one gets its turn. Short enough
@@ -975,7 +990,7 @@ void RISCVMachine::Interp(int max_exec_cycle)
     /* Round robin until the budget is spent or every hart is waiting for
        an interrupt. */
     uint64_t executed = 0;
-    while (executed < (uint64_t)max_exec_cycle && !shutdown_requested) {
+    while (executed < (uint64_t)max_exec_cycle && !StopRequested()) {
         bool ran = false;
         for (int hart = 0; hart < hart_count; hart++) {
             RISCVCPU *cpu = cpus[hart].get();

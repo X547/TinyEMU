@@ -21,7 +21,9 @@
  */
 #pragma once
 
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 
 #include "event_loop.h"
 #include "platform.h"
@@ -40,16 +42,35 @@ struct PlatformOptions {
    whose devices own some of them. */
 class HostPlatform final: public Platform {
 private:
-    EventLoop &fLoop;
+    DeviceLock &fDeviceLock;
+    EventLoop fLoop;
     PlatformOptions fOptions;
     std::unique_ptr<HostConsole> fConsole;
     std::unique_ptr<HostDisplay> fDisplay;
 
+    /* RunGui() without a display waits for this */
+    std::mutex fGuiMutex;
+    std::condition_variable fGuiCond;
+    bool fGuiQuit = false;
+
 public:
-    HostPlatform(EventLoop &loop, const PlatformOptions &options);
+    HostPlatform(DeviceLock &lock, RunControl &run_control,
+                 const PlatformOptions &options);
     ~HostPlatform() override;
 
+    /* Before StartIo(), for loading what the machine needs. */
     EventLoop &Loop() {return fLoop;}
+
+    /* The host descriptors are served on a thread of their own between
+       these. */
+    void StartIo();
+    void StopIo();
+
+    /* On the main thread: runs the window system, or just waits when there
+       is none, until QuitGui(). */
+    void RunGui();
+    /* Any thread. */
+    void QuitGui();
 
     /* Platform */
     HostConsole *Console() override {return fConsole.get();}

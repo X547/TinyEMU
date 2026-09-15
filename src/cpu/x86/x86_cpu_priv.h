@@ -26,6 +26,7 @@
 #include <setjmp.h>
 #include <stdint.h>
 #include <string.h>
+#include <atomic>
 
 #include "cutils.h"
 #include "iomem.h"
@@ -403,7 +404,7 @@ struct X86CPUState {
 
     X87State fpu;
 
-    bool irq_level;
+    std::atomic<bool> irq_level; /* set from any thread */
     bool irq_inhibit;    /* for one instruction after STI or a load of SS */
     bool power_down;
     int old_exception;   /* the exception being delivered, or -1 */
@@ -417,6 +418,7 @@ struct X86CPUState {
     uintptr_t code_addend;
 
     PhysMemoryMap *mem_map;
+    DeviceLock *device_lock; /* taken around every device access */
     DeviceIO *port_io;
     X86HardIntnoSource *hard_intno_source;
     X86TscSource *tsc_source;

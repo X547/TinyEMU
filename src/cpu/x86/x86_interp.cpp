@@ -432,12 +432,14 @@ static uint32_t port_in(X86CPUState *s, uint32_t port, int size)
     if (s->port_io == nullptr) {
         return size_mask(size);
     }
+    DeviceLocker locker(*s->device_lock);
     return trunc_size(s->port_io->DeviceRead(port, size), size);
 }
 
 static void port_out(X86CPUState *s, uint32_t port, uint32_t val, int size)
 {
     if (s->port_io != nullptr) {
+        DeviceLocker locker(*s->device_lock);
         s->port_io->DeviceWrite(port, trunc_size(val, size), size);
     }
 }
@@ -1937,9 +1939,13 @@ void x86_exec(X86CPUState *s)
     while (s->cycles < s->cycles_end && !s->power_down) {
         if (unlikely(s->irq_inhibit)) {
             s->irq_inhibit = false;
-        } else if (unlikely(s->irq_level) &&
+        } else if (unlikely(s->irq_level.load(std::memory_order_relaxed)) &&
                    get_bit(s->eflags, EFLAGS_IF)) {
-            int intno = s->hard_intno_source->HardIntno();
+            int intno;
+            {
+                DeviceLocker locker(*s->device_lock);
+                intno = s->hard_intno_source->HardIntno();
+            }
             do_interrupt(s, intno, false, 0, s->eip, true);
         }
         bool single_step = get_bit(s->eflags, EFLAGS_TF);

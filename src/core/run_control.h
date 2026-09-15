@@ -1,5 +1,5 @@
 /*
- * Host screen
+ * Emulator shutdown
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -21,31 +21,25 @@
  */
 #pragma once
 
-#include <stdint.h>
+#include <atomic>
+#include <functional>
+#include <mutex>
 
-class HostScreen;
+/* Requests to stop the emulator, from any thread. The first one decides the
+   exit code. */
+class RunControl {
+private:
+    std::mutex fMutex;
+    std::atomic<bool> fRequested {false};
+    int fExitCode = 0;
+    std::function<void()> fHandler;
 
-/* Implemented by a display device. */
-class ScreenSource {
 public:
-    virtual ~ScreenSource() = default;
+    void RequestShutdown(int exit_code);
+    bool ShutdownRequested() const {return fRequested.load();}
+    int ExitCode();
 
-    /* Report the frame buffer with SetFramebuffer(), then each rectangle
-       that changed with Update(). Called periodically by the machine. */
-    virtual void Refresh(HostScreen *screen) = 0;
-};
-
-
-/* A window, or whatever else shows the guest's display. It is called from
-   whichever thread refreshes the source, and hands the work to its own. */
-class HostScreen {
-public:
-    virtual ~HostScreen() = default;
-
-    /* Show 'source' in a width x height area. nullptr detaches it. */
-    virtual void SetSource(ScreenSource *source, int width, int height) = 0;
-    /* 32 bit xRGB pixels, 'stride' bytes per row. */
-    virtual void SetFramebuffer(uint8_t *data, int width, int height,
-                                int stride) = 0;
-    virtual void Update(int x, int y, int w, int h) = 0;
+    /* Called once, on the thread of the first request, or at once if that
+       has already happened. It must not block. */
+    void SetShutdownHandler(std::function<void()> handler);
 };

@@ -9,6 +9,7 @@ emu_libs += static_library('core',
     'iomem.cpp',
     'json.cpp',
     'resource.cpp',
+    'run_control.cpp',
   ),
   kwargs: lib_kwargs,
 )

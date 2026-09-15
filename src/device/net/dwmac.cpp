@@ -880,6 +880,14 @@ void DwmacDevice::WriteWord(uint32_t offset, uint32_t val)
     case GMAC_CONFIG:
         Reg(offset) = val;
         TxPoll();
+        fNet->TargetReady();
+        return;
+
+    /* what may give the receiver descriptors again */
+    case DMA_CHAN_BASE + DMA_CHAN_RX_CONTROL:
+    case DMA_CHAN_BASE + DMA_CHAN_RXDESC_TAIL:
+        Reg(offset) = val;
+        fNet->TargetReady();
         return;
 
     case DMA_BUS_MODE:

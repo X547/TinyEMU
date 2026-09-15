@@ -115,6 +115,8 @@ uint32_t SerialState::Read(uint32_t offset, int size_log2)
                 ret = fRbr;
                 fLsr &= ~(UART_LSR_DR | UART_LSR_BI);
                 UpdateIRQ();
+                if (fOutput != nullptr)
+                    fOutput->TargetReady();
             }
             break;
         case 1:

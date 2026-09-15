@@ -25,17 +25,56 @@
 #include <string.h>
 
 
-HostPlatform::HostPlatform(EventLoop &loop, const PlatformOptions &options):
-    fLoop(loop),
+HostPlatform::HostPlatform(DeviceLock &lock, RunControl &run_control,
+                           const PlatformOptions &options):
+    fDeviceLock(lock),
     fOptions(options)
 {
     url_backend_init(fLoop);
-    fConsole = host_console_create(fLoop, fOptions.allow_ctrlc);
-    fDisplay = host_display_create(fLoop);
+    fConsole = host_console_create(fLoop, run_control, fOptions.allow_ctrlc);
+    fDisplay = host_display_create(fDeviceLock, run_control);
 }
 
 
-HostPlatform::~HostPlatform() = default;
+HostPlatform::~HostPlatform()
+{
+    fLoop.Stop();
+}
+
+
+void HostPlatform::StartIo()
+{
+    fLoop.Start(fDeviceLock);
+}
+
+
+void HostPlatform::StopIo()
+{
+    fLoop.Stop();
+}
+
+
+void HostPlatform::RunGui()
+{
+    if (fDisplay != nullptr) {
+        fDisplay->Run();
+        return;
+    }
+    std::unique_lock<std::mutex> locker(fGuiMutex);
+    fGuiCond.wait(locker, [this]() {return fGuiQuit;});
+}
+
+
+void HostPlatform::QuitGui()
+{
+    if (fDisplay != nullptr) {
+        fDisplay->Quit();
+        return;
+    }
+    std::lock_guard<std::mutex> locker(fGuiMutex);
+    fGuiQuit = true;
+    fGuiCond.notify_all();
+}
 
 
 std::unique_ptr<HostBlockDevice> HostPlatform::OpenBlockDevice(const char *path)

@@ -609,6 +609,7 @@ void device_context_connect(DeviceContext *ctx)
     if (platform->Screen() != nullptr && ctx->fb_dev != nullptr) {
         platform->Screen()->SetSource(ctx->fb_dev, ctx->fb_dev->width,
                                       ctx->fb_dev->height);
+        ctx->machine->SetDisplay(platform->Screen(), ctx->fb_dev);
     }
     if (platform->Keyboard() != nullptr) {
         platform->Keyboard()->SetTarget(ctx->keyboard);

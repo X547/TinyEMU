@@ -523,8 +523,10 @@ void queue_notify(VIRTIODevice *s, int queue_idx)
     uint16_t avail_idx;
     int desc_idx, read_size, write_size;
 
-    if (qs->manual_recv)
+    if (qs->manual_recv) {
+        s->ManualQueueNotify(queue_idx);
         return;
+    }
 
     avail_idx = virtio_read16(s, qs->avail_addr + 2);
     while (qs->last_avail_idx != avail_idx) {

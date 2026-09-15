@@ -37,6 +37,11 @@ struct VIRTIOConsoleDevice: public VIRTIODevice, public ConsoleTarget {
 
     int RecvRequest(int queue_idx, int desc_idx, int read_size,
                     int write_size) override;
+    void ManualQueueNotify(int queue_idx) override
+    {
+        if (queue_idx == 0 && cs != nullptr)
+            cs->TargetReady();
+    }
 
     /* ConsoleTarget */
     int ReceiveRoom() override;

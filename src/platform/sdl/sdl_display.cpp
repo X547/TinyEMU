@@ -24,21 +24,57 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+#include <condition_variable>
+#include <mutex>
+
 #include <SDL/SDL.h>
 
+#include "cutils.h"
+#include "device_lock.h"
 #include "platform_backends.h"
+#include "run_control.h"
 #include "sdl_keymap.h"
-#include "wait_set.h"
 
 #define KEYCODE_MAX 127
 
+/* SDL_USEREVENT codes */
+enum {
+    USER_EVENT_UPDATE,
+    USER_EVENT_QUIT,
+};
 
-class SDLDisplay final: public HostDisplay, public PollSource {
+
+/* The frame buffer geometry and the area changed since the last blit, handed
+   from the refreshing thread to the window's. */
+struct PendingUpdate {
+    uint8_t *data = nullptr;
+    int width = 0;
+    int height = 0;
+    int stride = 0;
+    /* empty when x0 >= x1 */
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+};
+
+
+class SDLDisplay final: public HostDisplay {
 private:
-    EventLoop &fLoop;
+    DeviceLock &fDeviceLock;
+    RunControl &fRunControl;
+
+    /* Everything below the mutex is shared with the other threads; the rest
+       belongs to the thread in Run(). */
+    std::mutex fMutex;
+    std::condition_variable fCond;
     ScreenSource *fSource = nullptr;
+    int fSourceWidth = 0;
+    int fSourceHeight = 0;
     KeyboardTarget *fKeyboard = nullptr;
     PointerTarget *fPointer = nullptr;
+    PendingUpdate fPending;
+    /* an update event is queued and not yet handled */
+    bool fUpdatePosted = false;
+    bool fRunning = false;
+    bool fQuitRequested = false;
 
     SDL_Surface *fScreen = nullptr;
     SDL_Surface *fFbSurface = nullptr;
@@ -50,8 +86,10 @@ private:
     int fFbStride = 0;
     uint8_t fKeyPressed[KEYCODE_MAX + 1] {};
 
+    bool PostEvent(int code);
     void OpenWindow(int width, int height);
     void HideCursor();
+    void ApplyUpdate();
     void ResetKeys();
     void HandleKeyEvent(const SDL_KeyboardEvent *ev);
     void SendMouseEvent(int x1, int y1, int dz, int state, bool is_absolute);
@@ -59,7 +97,8 @@ private:
     void HandleMouseButtonEvent(const SDL_Event *ev);
 
 public:
-    SDLDisplay(EventLoop &loop): fLoop(loop) {fLoop.Add(this);}
+    SDLDisplay(DeviceLock &lock, RunControl &run_control):
+        fDeviceLock(lock), fRunControl(run_control) {}
     ~SDLDisplay() override;
 
     /* HostScreen */
@@ -69,18 +108,17 @@ public:
     void Update(int x, int y, int w, int h) override;
 
     /* HostKeyboard, HostPointer */
-    void SetTarget(KeyboardTarget *target) override {fKeyboard = target;}
-    void SetTarget(PointerTarget *target) override {fPointer = target;}
+    void SetTarget(KeyboardTarget *target) override;
+    void SetTarget(PointerTarget *target) override;
 
-    /* PollSource */
-    void Prepare(WaitSet &ws) override {(void)ws;}
-    void Dispatch(WaitSet &ws) override;
+    /* HostDisplay */
+    void Run() override;
+    void Quit() override;
 };
 
 
 SDLDisplay::~SDLDisplay()
 {
-    fLoop.Remove(this);
     if (fScreen != nullptr) {
         if (fFbSurface != nullptr)
             SDL_FreeSurface(fFbSurface);
@@ -91,40 +129,129 @@ SDLDisplay::~SDLDisplay()
 }
 
 
+/* With fMutex held, and only while Run() has SDL up. Fails when the queue
+   is full. */
+bool SDLDisplay::PostEvent(int code)
+{
+    SDL_Event ev;
+
+    ev.type = SDL_USEREVENT;
+    ev.user.code = code;
+    ev.user.data1 = nullptr;
+    ev.user.data2 = nullptr;
+    return SDL_PushEvent(&ev) == 0;
+}
+
+
+void SDLDisplay::SetTarget(KeyboardTarget *target)
+{
+    std::lock_guard<std::mutex> locker(fMutex);
+    fKeyboard = target;
+}
+
+
+void SDLDisplay::SetTarget(PointerTarget *target)
+{
+    std::lock_guard<std::mutex> locker(fMutex);
+    fPointer = target;
+}
+
+
+void SDLDisplay::SetSource(ScreenSource *source, int width, int height)
+{
+    std::lock_guard<std::mutex> locker(fMutex);
+    fSource = source;
+    fSourceWidth = width;
+    fSourceHeight = height;
+}
+
+
 void SDLDisplay::SetFramebuffer(uint8_t *data, int width, int height,
                                 int stride)
 {
-    if (fFbSurface != nullptr && fFbWidth == width && fFbHeight == height &&
-        fFbStride == stride && fFbSurface->pixels == data) {
-        return;
-    }
-    if (fFbSurface != nullptr)
-        SDL_FreeSurface(fFbSurface);
-    fFbWidth = width;
-    fFbHeight = height;
-    fFbStride = stride;
-    fFbSurface = SDL_CreateRGBSurfaceFrom(data, width, height, 32, stride,
-                                          0x00ff0000,
-                                          0x0000ff00,
-                                          0x000000ff,
-                                          0x00000000);
-    if (!fFbSurface) {
-        fprintf(stderr, "Could not create SDL framebuffer surface\n");
-        exit(1);
-    }
+    std::lock_guard<std::mutex> locker(fMutex);
+    fPending.data = data;
+    fPending.width = width;
+    fPending.height = height;
+    fPending.stride = stride;
 }
 
 
 void SDLDisplay::Update(int x, int y, int w, int h)
 {
-    SDL_Rect r;
-    //    printf("sdl_update: %d %d %d %d\n", x, y, w, h);
-    r.x = x;
-    r.y = y;
-    r.w = w;
-    r.h = h;
-    SDL_BlitSurface(fFbSurface, &r, fScreen, &r);
-    SDL_UpdateRect(fScreen, r.x, r.y, r.w, r.h);
+    std::lock_guard<std::mutex> locker(fMutex);
+    PendingUpdate &p = fPending;
+
+    if (p.x0 >= p.x1) {
+        p.x0 = x;
+        p.y0 = y;
+        p.x1 = x + w;
+        p.y1 = y + h;
+    } else {
+        p.x0 = min_int(p.x0, x);
+        p.y0 = min_int(p.y0, y);
+        p.x1 = max_int(p.x1, x + w);
+        p.y1 = max_int(p.y1, y + h);
+    }
+    if (fRunning && !fUpdatePosted)
+        fUpdatePosted = PostEvent(USER_EVENT_UPDATE);
+}
+
+
+void SDLDisplay::Quit()
+{
+    std::lock_guard<std::mutex> locker(fMutex);
+    fQuitRequested = true;
+    if (fRunning)
+        PostEvent(USER_EVENT_QUIT);
+    fCond.notify_all();
+}
+
+
+/* Blits what changed since the last time. */
+void SDLDisplay::ApplyUpdate()
+{
+    PendingUpdate p;
+
+    {
+        std::lock_guard<std::mutex> locker(fMutex);
+        p = fPending;
+        fPending.x0 = fPending.x1 = 0;
+        fUpdatePosted = false;
+    }
+    if (p.data == nullptr)
+        return;
+
+    if (fFbSurface == nullptr || fFbWidth != p.width ||
+        fFbHeight != p.height || fFbStride != p.stride ||
+        fFbSurface->pixels != p.data) {
+        if (fFbSurface != nullptr)
+            SDL_FreeSurface(fFbSurface);
+        fFbWidth = p.width;
+        fFbHeight = p.height;
+        fFbStride = p.stride;
+        fFbSurface = SDL_CreateRGBSurfaceFrom(p.data, p.width, p.height, 32,
+                                              p.stride,
+                                              0x00ff0000,
+                                              0x0000ff00,
+                                              0x000000ff,
+                                              0x00000000);
+        if (!fFbSurface) {
+            fprintf(stderr, "Could not create SDL framebuffer surface\n");
+            exit(1);
+        }
+    }
+
+    if (p.x0 < p.x1) {
+        SDL_Rect r;
+        //    printf("sdl_update: %d %d %d %d\n", x, y, w, h);
+        r.x = p.x0;
+        r.y = p.y0;
+        r.w = p.x1 - p.x0;
+        r.h = p.y1 - p.y0;
+        SDL_BlitSurface(fFbSurface, &r, fScreen, &r);
+        SDL_UpdateRect(fScreen, r.x, r.y, r.w, r.h);
+    }
 }
 
 
@@ -233,37 +360,6 @@ void SDLDisplay::HandleMouseButtonEvent(const SDL_Event *ev)
 }
 
 
-void SDLDisplay::Dispatch(WaitSet &ws)
-{
-    SDL_Event ev_s, *ev = &ev_s;
-
-    (void)ws;
-    if (fSource == nullptr)
-        return;
-
-    fSource->Refresh(this);
-
-    while (SDL_PollEvent(ev)) {
-        switch (ev->type) {
-        case SDL_KEYDOWN:
-        case SDL_KEYUP:
-            HandleKeyEvent(&ev->key);
-            break;
-        case SDL_MOUSEMOTION:
-            HandleMouseMotionEvent(ev);
-            break;
-        case SDL_MOUSEBUTTONDOWN:
-        case SDL_MOUSEBUTTONUP:
-            HandleMouseButtonEvent(ev);
-            break;
-        case SDL_QUIT:
-            fLoop.RequestQuit(0);
-            break;
-        }
-    }
-}
-
-
 void SDLDisplay::HideCursor()
 {
     uint8_t data = 0;
@@ -298,15 +394,78 @@ void SDLDisplay::OpenWindow(int width, int height)
 }
 
 
-void SDLDisplay::SetSource(ScreenSource *source, int width, int height)
+void SDLDisplay::Run()
 {
-    fSource = source;
-    if (source != nullptr && fScreen == nullptr)
-        OpenWindow(width, height);
+    SDL_Event ev_s, *ev = &ev_s;
+    int width, height;
+
+    {
+        std::unique_lock<std::mutex> locker(fMutex);
+        if (fSource == nullptr) {
+            /* nothing to show, so no window */
+            fCond.wait(locker, [this]() {return fQuitRequested;});
+            return;
+        }
+        if (fQuitRequested)
+            return;
+        width = fSourceWidth;
+        height = fSourceHeight;
+    }
+
+    OpenWindow(width, height);
+
+    {
+        std::lock_guard<std::mutex> locker(fMutex);
+        fRunning = true;
+        /* whatever arrived before SDL could take events */
+        fUpdatePosted = PostEvent(USER_EVENT_UPDATE);
+    }
+
+    for (;;) {
+        bool got_event = SDL_WaitEvent(ev);
+        {
+            /* also seen here in case the event did not fit in the queue */
+            std::lock_guard<std::mutex> locker(fMutex);
+            if (fQuitRequested) {
+                fRunning = false;
+                return;
+            }
+        }
+        if (!got_event)
+            continue;
+        switch (ev->type) {
+        case SDL_USEREVENT:
+            if (ev->user.code == USER_EVENT_UPDATE)
+                ApplyUpdate();
+            break;
+        case SDL_KEYDOWN:
+        case SDL_KEYUP: {
+            DeviceLocker locker(fDeviceLock);
+            HandleKeyEvent(&ev->key);
+            break;
+        }
+        case SDL_MOUSEMOTION: {
+            DeviceLocker locker(fDeviceLock);
+            HandleMouseMotionEvent(ev);
+            break;
+        }
+        case SDL_MOUSEBUTTONDOWN:
+        case SDL_MOUSEBUTTONUP: {
+            DeviceLocker locker(fDeviceLock);
+            HandleMouseButtonEvent(ev);
+            break;
+        }
+        case SDL_QUIT:
+            /* the machine's shutdown quits this loop */
+            fRunControl.RequestShutdown(0);
+            break;
+        }
+    }
 }
 
 
-std::unique_ptr<HostDisplay> host_display_create(EventLoop &loop)
+std::unique_ptr<HostDisplay> host_display_create(DeviceLock &lock,
+                                                 RunControl &run_control)
 {
-    return std::make_unique<SDLDisplay>(loop);
+    return std::make_unique<SDLDisplay>(lock, run_control);
 }

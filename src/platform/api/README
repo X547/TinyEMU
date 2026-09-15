@@ -1,3 +1,14 @@
 Interfaces between the emulated hardware and the host. Headers here must not
 include operating system headers; the implementations live in the sibling
 directories and are chosen by the build.
+
+Threads: the processors, the event loop and the window system each run on a
+thread of their own, and all of them reach the devices through one device
+lock (src/core/device_lock.h).
+
+- Every method of a host object here is called with the device lock held,
+  and possibly from any of those threads.
+- A host object calls a device (a target, a completion, a screen source)
+  only with the device lock held; a thread of its own takes the lock first.
+- A host object that must do work on a thread of its own, such as a window,
+  hands it over rather than doing it in the call.

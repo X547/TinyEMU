@@ -68,6 +68,9 @@ int BlockDeviceFile::ReadAsync(uint64_t sector_num, uint8_t *buf, int n,
 #endif
     if (!bf->f)
         return -1;
+    /* a guest probing past the last sector gets an error */
+    if (sector_num + n > (uint64_t)bf->nb_sectors)
+        return -1;
     if (bf->mode == BLOCK_MODE_SNAPSHOT) {
         int i;
         for(i = 0; i < n; i++) {

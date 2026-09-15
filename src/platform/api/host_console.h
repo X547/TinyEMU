@@ -45,4 +45,6 @@ public:
     virtual void WriteData(const uint8_t *buf, int len) = 0;
     /* Where input goes; nullptr discards it. */
     virtual void SetTarget(ConsoleTarget *target) = 0;
+    /* The target may have room again. */
+    virtual void TargetReady() {}
 };

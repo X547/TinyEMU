@@ -36,6 +36,8 @@ class SlirpEthernet final: public HostEthernet, public PollSource {
 public:
     EventLoop &fLoop;
     Slirp *state = nullptr;
+    /* slirp found no room in the target for a packet it holds */
+    bool blocked = false;
 
     SlirpEthernet(EventLoop &loop): fLoop(loop) {fLoop.Add(this);}
     ~SlirpEthernet() override;
@@ -44,12 +46,25 @@ public:
     void WritePacket(const uint8_t *buf, int len) override
     {
         slirp_input(state, buf, len);
+        /* the packet may have opened a socket to watch */
+        fLoop.Wake();
+    }
+
+    void TargetReady() override
+    {
+        if (blocked) {
+            blocked = false;
+            fLoop.Wake();
+        }
     }
 
     /* PollSource */
     void Prepare(WaitSet &ws) override
     {
         slirp_select_fill(state, &ws.fd_max, &ws.rfds, &ws.wfds, &ws.efds);
+        int timeout = slirp_poll_timeout(state);
+        if (timeout >= 0)
+            ws.LimitTimeout(timeout);
     }
 
     void Dispatch(WaitSet &ws) override
@@ -74,13 +89,16 @@ SlirpEthernet::~SlirpEthernet()
 /* Provided to slirp, which is compiled as C. */
 extern "C" int slirp_can_output(void *opaque)
 {
-    HostEthernet *net = static_cast<HostEthernet *>(opaque);
-    return net->target != nullptr && net->target->CanWritePacket();
+    SlirpEthernet *net = static_cast<SlirpEthernet *>(opaque);
+    if (net->target != nullptr && net->target->CanWritePacket())
+        return 1;
+    net->blocked = true;
+    return 0;
 }
 
 extern "C" void slirp_output(void *opaque, const uint8_t *pkt, int pkt_len)
 {
-    HostEthernet *net = static_cast<HostEthernet *>(opaque);
+    SlirpEthernet *net = static_cast<SlirpEthernet *>(opaque);
     if (net->target != nullptr)
         net->target->WritePacket(pkt, pkt_len);
 }

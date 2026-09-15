@@ -109,6 +109,7 @@ PhysMemoryRange *PhysMemoryMap::FindRange(uint64_t paddr)
 
 uint8_t *PhysMemoryMap::GetRamPtr(uint64_t paddr, bool is_rw)
 {
+    assert(DeviceLock::IsHeld());
     PhysMemoryRange *pr = FindRange(paddr);
     if (pr == nullptr || !pr->is_ram) {
         return nullptr;
@@ -248,6 +249,7 @@ PhysMemoryRange *PhysMemoryMap::RegisterDevice(uint64_t addr, uint64_t size,
 
 uint32_t PhysMemoryMap::IoRead(uint64_t addr, int size_log2)
 {
+    assert(DeviceLock::IsHeld());
     PhysMemoryRange *pr = FindRange(addr);
     if (pr == nullptr || pr->is_ram) {
         return -1;
@@ -270,6 +272,7 @@ uint32_t PhysMemoryMap::IoRead(uint64_t addr, int size_log2)
 
 void PhysMemoryMap::IoWrite(uint64_t addr, uint32_t val, int size_log2)
 {
+    assert(DeviceLock::IsHeld());
     PhysMemoryRange *pr = FindRange(addr);
     if (pr == nullptr || pr->is_ram) {
         return;

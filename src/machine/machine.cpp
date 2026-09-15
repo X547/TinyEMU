@@ -29,8 +29,10 @@
 #include <assert.h>
 
 #include "cutils.h"
+#include "device_lock.h"
 #include "host_time.h"
 #include "iomem.h"
+#include "run_control.h"
 #include "virtio.h"
 #include "machine.h"
 #ifdef CONFIG_FS_NET
@@ -689,6 +691,140 @@ void virt_machine_free_config(VirtMachineParams *p)
 std::unique_ptr<VirtMachine> virt_machine_init(VirtMachineParams *p)
 {
     return p->vmc->Init(p);
+}
+
+//#pragma mark - VirtMachine
+
+/* Instructions run between two looks at the timers. */
+#define MAX_EXEC_CYCLE 500000
+/* The longest the processor thread sleeps without looking at the timers,
+   for the devices that poll theirs. */
+#define MAX_SLEEP_US 10000
+#define SCREEN_REFRESH_US (1000000 / 60)
+
+VirtMachine::~VirtMachine()
+{
+    assert(!fThread.joinable());
+}
+
+
+void VirtMachine::SetHost(const VirtMachineParams *p)
+{
+    fDeviceLock = p->device_lock;
+    fRunControl = p->run_control;
+}
+
+
+void VirtMachine::SetDisplay(HostScreen *screen, ScreenSource *source)
+{
+    fScreen = screen;
+    fScreenSource = source;
+}
+
+
+void VirtMachine::RequestShutdown(int code)
+{
+    fRunControl->RequestShutdown(code);
+}
+
+
+bool VirtMachine::ShutdownRequested() const
+{
+    return fRunControl->ShutdownRequested();
+}
+
+
+bool VirtMachine::OnProcessorThread() const
+{
+    std::thread::id id = fThreadId.load();
+    return id == std::thread::id() || id == std::this_thread::get_id();
+}
+
+
+void VirtMachine::Start()
+{
+    assert(!fThread.joinable());
+    fStopRequested.store(false);
+    fThread = std::thread([this]() {ThreadLoop();});
+}
+
+
+void VirtMachine::Stop()
+{
+    if (!fThread.joinable())
+        return;
+    fStopRequested.store(true);
+    Kick();
+    InterruptExecution();
+    fThread.join();
+    fThreadId.store(std::thread::id());
+}
+
+
+/* fKicked is set before fSleeping is read here, and fSleeping before
+   fKicked is read in WaitForKick(), so one of the two sides always sees the
+   other. */
+void VirtMachine::Kick()
+{
+    fKicked.store(true);
+    if (fSleeping.load()) {
+        std::lock_guard<std::mutex> locker(fWaitMutex);
+        fWaitCond.notify_one();
+    }
+}
+
+
+void VirtMachine::WaitForKick(int64_t timeout_us)
+{
+    std::unique_lock<std::mutex> locker(fWaitMutex);
+
+    fSleeping.store(true);
+    if (!fKicked.load()) {
+        fWaitCond.wait_for(locker, std::chrono::microseconds(timeout_us),
+                           [this]() {return fKicked.load();});
+    }
+    fKicked.store(false);
+    fSleeping.store(false);
+}
+
+
+/* Returns the microseconds until the next refresh, or -1. */
+int64_t VirtMachine::RefreshScreen()
+{
+    if (fScreen == nullptr || fScreenSource == nullptr)
+        return -1;
+    uint64_t now = host_monotonic_us();
+    if (now >= fNextRefreshUs) {
+        fScreenSource->Refresh(fScreen);
+        fNextRefreshUs = now + SCREEN_REFRESH_US;
+    }
+    return fNextRefreshUs - now;
+}
+
+
+void VirtMachine::ThreadLoop()
+{
+    fThreadId.store(std::this_thread::get_id());
+    ProcessorThreadStarted();
+
+    while (!fStopRequested.load()) {
+        int64_t delay, refresh_delay;
+
+        {
+            DeviceLocker locker(*fDeviceLock);
+            delay = RunTimers();
+            refresh_delay = RefreshScreen();
+        }
+        if (!Idle()) {
+            Interp(MAX_EXEC_CYCLE);
+            continue;
+        }
+        if (delay < 0 || delay > MAX_SLEEP_US)
+            delay = MAX_SLEEP_US;
+        if (refresh_delay >= 0 && refresh_delay < delay)
+            delay = refresh_delay;
+        WaitForKick(delay);
+    }
 }
 
 void virt_machine_set_defaults(VirtMachineParams *p)

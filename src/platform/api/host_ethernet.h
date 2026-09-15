@@ -45,4 +45,6 @@ public:
     virtual ~HostEthernet() = default;
 
     virtual void WritePacket(const uint8_t *buf, int len) = 0;
+    /* The target may take packets again. */
+    virtual void TargetReady() {}
 };

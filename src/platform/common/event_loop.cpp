@@ -21,20 +21,25 @@
  */
 #include "event_loop.h"
 
+#include <assert.h>
 #include <algorithm>
 
 /* How long a wait for setup work may block before looking again. */
 #define RUN_UNTIL_TIMEOUT 10000 /* ms */
+/* How long the thread waits when no source asks for less. */
+#define IDLE_TIMEOUT 1000 /* ms */
 
 
 void EventLoop::Add(PollSource *source)
 {
+    assert(!fThread.joinable());
     fSources.push_back(source);
 }
 
 
 void EventLoop::Remove(PollSource *source)
 {
+    assert(!fThread.joinable());
     fSources.erase(std::remove(fSources.begin(), fSources.end(), source),
                    fSources.end());
 }
@@ -42,6 +47,7 @@ void EventLoop::Remove(PollSource *source)
 
 void EventLoop::RunUntil(const std::function<bool()> &done)
 {
+    assert(!fThread.joinable());
     while (!done()) {
         Wait(RUN_UNTIL_TIMEOUT);
     }
@@ -57,10 +63,29 @@ void EventLoop::RunUntilIdle()
 }
 
 
-void EventLoop::RequestQuit(int exit_code)
+void EventLoop::Start(DeviceLock &lock)
 {
-    if (!fQuitRequested) {
-        fQuitRequested = true;
-        fExitCode = exit_code;
+    assert(!fThread.joinable());
+    fDeviceLock = &lock;
+    fStopRequested.store(false);
+    fThread = std::thread([this]() {ThreadLoop();});
+}
+
+
+void EventLoop::Stop()
+{
+    if (!fThread.joinable())
+        return;
+    fStopRequested.store(true);
+    Wake();
+    fThread.join();
+    fDeviceLock = nullptr;
+}
+
+
+void EventLoop::ThreadLoop()
+{
+    while (!fStopRequested.load()) {
+        Wait(IDLE_TIMEOUT);
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Host screen
+ * The device lock
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -21,31 +21,45 @@
  */
 #pragma once
 
-#include <stdint.h>
+#include <assert.h>
+#include <mutex>
 
-class HostScreen;
+/* Serializes the device tree and the host back ends the devices call. A
+   thread takes it where it enters device code; device code never takes it,
+   so it is not reentrant. */
+class DeviceLock {
+private:
+    std::mutex fMutex;
+    static inline thread_local bool sHeld = false;
 
-/* Implemented by a display device. */
-class ScreenSource {
 public:
-    virtual ~ScreenSource() = default;
+    void Lock()
+    {
+        assert(!sHeld);
+        fMutex.lock();
+        sHeld = true;
+    }
 
-    /* Report the frame buffer with SetFramebuffer(), then each rectangle
-       that changed with Update(). Called periodically by the machine. */
-    virtual void Refresh(HostScreen *screen) = 0;
+    void Unlock()
+    {
+        assert(sHeld);
+        sHeld = false;
+        fMutex.unlock();
+    }
+
+    /* Whether the calling thread holds it. */
+    static bool IsHeld() {return sHeld;}
 };
 
 
-/* A window, or whatever else shows the guest's display. It is called from
-   whichever thread refreshes the source, and hands the work to its own. */
-class HostScreen {
-public:
-    virtual ~HostScreen() = default;
+class DeviceLocker {
+private:
+    DeviceLock &fLock;
 
-    /* Show 'source' in a width x height area. nullptr detaches it. */
-    virtual void SetSource(ScreenSource *source, int width, int height) = 0;
-    /* 32 bit xRGB pixels, 'stride' bytes per row. */
-    virtual void SetFramebuffer(uint8_t *data, int width, int height,
-                                int stride) = 0;
-    virtual void Update(int x, int y, int w, int h) = 0;
+public:
+    explicit DeviceLocker(DeviceLock &lock): fLock(lock) {fLock.Lock();}
+    ~DeviceLocker() {fLock.Unlock();}
+
+    DeviceLocker(const DeviceLocker &) = delete;
+    DeviceLocker &operator=(const DeviceLocker &) = delete;
 };

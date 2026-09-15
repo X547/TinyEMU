@@ -22,8 +22,10 @@
 #include "platform_backends.h"
 
 
-std::unique_ptr<HostDisplay> host_display_create(EventLoop &loop)
+std::unique_ptr<HostDisplay> host_display_create(DeviceLock &lock,
+                                                 RunControl &run_control)
 {
-    (void)loop;
+    (void)lock;
+    (void)run_control;
     return nullptr;
 }

@@ -34,7 +34,7 @@ public:
 
 /* A disk image in 512 byte sectors. A request either finishes at once and
    returns 0, or returns 1 and notifies its completion later, from the event
-   loop; a negative return is an error. The completion may be null when the
+   loop with the device lock held; a negative return is an error. The completion may be null when the
    caller does not care. */
 class HostBlockDevice {
 public:

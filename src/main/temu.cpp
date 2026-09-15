@@ -32,13 +32,12 @@
 #include <vector>
 
 #include "cutils.h"
+#include "device_lock.h"
 #include "iomem.h"
 #include "virtio.h"
 #include "machine.h"
 #include "host_platform.h"
-
-#define MAX_EXEC_CYCLE 500000
-#define MAX_SLEEP_TIME 10 /* in ms */
+#include "run_control.h"
 
 /*******************************************************/
 
@@ -128,13 +127,14 @@ int main(int argc, char **argv)
     path = argv[optind++];
 
     /* declared in this order so that the machine goes first */
-    EventLoop loop;
-    HostPlatform platform(loop, platform_options);
+    DeviceLock device_lock;
+    RunControl run_control;
+    HostPlatform platform(device_lock, run_control, platform_options);
     std::unique_ptr<VirtMachine> s;
 
     virt_machine_set_defaults(p);
     virt_machine_load_config_file(p, path, nullptr);
-    loop.RunUntilIdle();
+    platform.Loop().RunUntilIdle();
 
     /* override some config parameters */
 
@@ -148,20 +148,32 @@ int main(int argc, char **argv)
     }
 
     p->platform = &platform;
+    p->device_lock = &device_lock;
+    p->run_control = &run_control;
     p->rtc_real_time = true;
 
-    s = virt_machine_init(p);
+    {
+        /* nothing else runs yet, but devices expect the lock */
+        DeviceLocker locker(device_lock);
+        s = virt_machine_init(p);
+    }
     if (!s)
         exit(1);
 
     virt_machine_free_config(p);
 
-    while (!s->shutdown_requested) {
-        loop.Wait(s->GetSleepDuration(MAX_SLEEP_TIME));
-        if (loop.QuitRequested())
-            s->RequestShutdown(loop.ExitCode());
-        if (!s->shutdown_requested)
-            s->Interp(MAX_EXEC_CYCLE);
+    /* The processors and the host descriptors get threads of their own;
+       this one runs the window system until the machine is shut down. */
+    run_control.SetShutdownHandler([&platform]() {platform.QuitGui();});
+    platform.StartIo();
+    s->Start();
+    platform.RunGui();
+
+    s->Stop();
+    platform.StopIo();
+    {
+        DeviceLocker locker(device_lock);
+        s.reset();
     }
-    return s->exit_code;
+    return run_control.ExitCode();
 }

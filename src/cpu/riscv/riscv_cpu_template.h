@@ -244,6 +244,10 @@ static void no_inline glue(riscv_cpu_interp_x, XLEN)(RISCVCPUState *s,
                important to reduce the translated code size. */
             if (unlikely(s->n_cycles <= 0))
                 goto the_end;
+            /* interrupt lines posted by another thread are taken in by the
+               caller before mip is looked at */
+            if (unlikely(s->inbox_pending.load(std::memory_order_relaxed)))
+                goto the_end;
 
             /* check pending interrupts */
             if (unlikely((s->mip & s->mie) != 0)) {
@@ -1318,6 +1322,7 @@ static void no_inline glue(riscv_cpu_interp_x, XLEN)(RISCVCPUState *s,
                         goto illegal_insn;
                     /* go to power down if no enabled interrupts are
                        pending */
+                    process_inbox(s);
                     if ((s->mip & s->mie) == 0) {
                         s->power_down_flag = true;
                         s->pc = GET_PC() + 4;

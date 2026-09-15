@@ -21,15 +21,23 @@
  */
 #pragma once
 
+#include <atomic>
 #include <functional>
+#include <memory>
+#include <thread>
 #include <vector>
+
+class DeviceLock;
 
 /* What one wait watches. Defined per host in wait_set.h. */
 class WaitSet;
+/* How another thread interrupts a wait. Defined per host. */
+class LoopWaker;
 
 
-/* Something the event loop waits on: a descriptor, a window system's event
-   queue, a library with sockets of its own. */
+/* Something the event loop waits on: a descriptor, a library with sockets
+   of its own. Once the loop runs on its thread, Prepare() and Dispatch() are
+   called with the device lock held. */
 class PollSource {
 public:
     virtual ~PollSource() = default;
@@ -47,10 +55,21 @@ public:
 class EventLoop {
 private:
     std::vector<PollSource *> fSources;
-    bool fQuitRequested = false;
-    int fExitCode = 0;
+    std::unique_ptr<LoopWaker> fWaker;
+    std::atomic<bool> fWakePending {false};
+
+    std::thread fThread;
+    std::atomic<bool> fStopRequested {false};
+    /* held around the sources while the thread runs */
+    DeviceLock *fDeviceLock = nullptr;
+
+    void ThreadLoop();
 
 public:
+    EventLoop();
+    ~EventLoop();
+
+    /* Only while the thread is not running. */
     void Add(PollSource *source);
     void Remove(PollSource *source);
 
@@ -58,12 +77,16 @@ public:
        Implemented per host. */
     void Wait(int timeout_ms);
 
+    /* Only before Start(), on the thread that set things up. */
     void RunUntil(const std::function<bool()> &done);
     /* Until no source is busy. */
     void RunUntilIdle();
 
-    /* The first request decides the exit code. */
-    void RequestQuit(int exit_code);
-    bool QuitRequested() const {return fQuitRequested;}
-    int ExitCode() const {return fExitCode;}
+    /* Runs the sources on a thread of their own until Stop(). */
+    void Start(DeviceLock &lock);
+    void Stop();
+
+    /* Makes the current or next wait return at once, so that the sources
+       are prepared again. Any thread, and signal handlers. */
+    void Wake();
 };

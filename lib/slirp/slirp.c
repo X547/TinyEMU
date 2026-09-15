@@ -360,6 +360,18 @@ void slirp_select_fill(Slirp *slirp, int *pnfds,
         *pnfds = nfds;
 }
 
+/* After slirp_select_fill(): how long the TCP and IP timers can wait, in ms,
+   or -1 if none is running. */
+int slirp_poll_timeout(Slirp *slirp)
+{
+    (void)slirp;
+    if (time_fasttimo)
+        return 2;
+    if (do_slowtimo)
+        return 500;
+    return -1;
+}
+
 void slirp_select_poll(Slirp *slirp,
                        fd_set *readfds, fd_set *writefds, fd_set *xfds,
                        int select_error)

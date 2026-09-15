@@ -27,6 +27,7 @@
 #include <string.h>
 #include <inttypes.h>
 #include <assert.h>
+#include <atomic>
 
 #include "cutils.h"
 #include "host_time.h"
@@ -461,6 +462,7 @@ int target_read_slow(RISCVCPUState *s, mem_uint_t *pval,
                 abort();
             }
         } else {
+            DeviceLocker locker(*s->device_lock);
             offset = paddr - pr->addr;
             if (((pr->devio_flags >> size_log2) & 1) != 0) {
                 ret = pr->io->DeviceRead(offset, size_log2);
@@ -553,6 +555,7 @@ int target_write_slow(RISCVCPUState *s, target_ulong addr,
                 abort();
             }
         } else {
+            DeviceLocker locker(*s->device_lock);
             offset = paddr - pr->addr;
             if (((pr->devio_flags >> size_log2) & 1) != 0) {
                 pr->io->DeviceWrite(offset, val, size_log2);
@@ -905,6 +908,32 @@ static void imsic_claim(RISCVCPUState *s, int file)
     }
 }
 
+/* Take in the interrupt lines and messages other threads posted. */
+static void process_inbox(RISCVCPUState *s)
+{
+    if (likely(!s->inbox_pending.load(std::memory_order_relaxed)))
+        return;
+    /* cleared first, so that a post racing with this is seen next time */
+    s->inbox_pending.store(false);
+
+    s->mip = (s->mip & ~s->irq_line_mask) |
+        (s->irq_lines.load() & s->irq_line_mask);
+    if (s->intr_arch == RISCV_INTR_AIA_IMSIC) {
+        for (int file = 0; file < 2; file++) {
+            uint64_t posted = 0;
+            for (int w = 0; w < IMSIC_WORDS; w++) {
+                uint64_t bits = s->msi_pending[file][w].exchange(0);
+                s->imsic[file].eip[w] |= bits;
+                posted |= bits;
+            }
+            if (posted != 0)
+                imsic_update(s, file);
+        }
+    }
+    if (s->power_down_flag && (s->mip & s->mie) != 0)
+        s->power_down_flag = false;
+}
+
 /* The eip or eie register an *iselect value in 0x80-0xff names: a 32 bit half
    of a 64 bit word for RV32, a whole word otherwise. Returns false for the
    odd numbers, which do not exist for RV64. Registers past the implemented
@@ -1005,7 +1034,8 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
         return -1; /* read-only CSR */
     if (s->priv < ((csr >> 8) & 3))
         return -1; /* not enough priviledge */
-    
+    process_inbox(s);
+
     switch(csr) {
 #if FLEN > 0
     case 0x001: /* fflags */
@@ -1327,6 +1357,7 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
     print_target_ulong(val);
     printf("\n");
 #endif
+    process_inbox(s);
     switch(csr) {
 #if FLEN > 0
     case 0x001: /* fflags */
@@ -1826,8 +1857,11 @@ static void glue(riscv_cpu_interp, MAX_XLEN)(RISCVCPUState *s, int n_cycles)
     uint64_t timeout;
 
     timeout = s->insn_counter + n_cycles;
-    while (!s->power_down_flag &&
-           (int)(timeout - s->insn_counter) > 0) {
+    for (;;) {
+        /* the interpreter returns early when something is posted */
+        process_inbox(s);
+        if (s->power_down_flag || (int)(timeout - s->insn_counter) <= 0)
+            break;
         n_cycles = timeout - s->insn_counter;
         switch(s->cur_xlen) {
         case 32:
@@ -1859,23 +1893,9 @@ static uint64_t glue(riscv_cpu_get_cycles, MAX_XLEN)(RISCVCPUState *s)
     return s->insn_counter;
 }
 
-static void glue(riscv_cpu_set_mip, MAX_XLEN)(RISCVCPUState *s, uint32_t mask)
-{
-    set_mip(s, mask);
-}
-
-static void glue(riscv_cpu_reset_mip, MAX_XLEN)(RISCVCPUState *s, uint32_t mask)
-{
-    s->mip &= ~mask;
-}
-
-static uint32_t glue(riscv_cpu_get_mip, MAX_XLEN)(RISCVCPUState *s)
-{
-    return s->mip;
-}
-
 static bool glue(riscv_cpu_get_power_down, MAX_XLEN)(RISCVCPUState *s)
 {
+    process_inbox(s);
     return s->power_down_flag;
 }
 
@@ -1897,6 +1917,7 @@ static RISCVCPUState *glue(riscv_cpu_init, MAX_XLEN)(PhysMemoryMap *mem_map,
     /* the comparator starts beyond any reachable time so that enabling Sstc
        does not immediately post a timer interrupt */
     s->stimecmp = UINT64_MAX;
+    s->irq_line_mask = MIP_MSIP | MIP_MTIP | MIP_MEIP | MIP_SEIP;
     s->misa |= MCPUID_SUPER | MCPUID_USER | MCPUID_I | MCPUID_M | MCPUID_A;
 #if FLEN >= 32
     s->misa |= MCPUID_F;
@@ -1931,19 +1952,13 @@ uint64_t RISCVCPUState::Cycles()
     return glue(riscv_cpu_get_cycles, MAX_XLEN)(this);
 }
 
-void RISCVCPUState::SetMip(uint32_t mask)
+void RISCVCPUState::SetIrqLine(uint32_t mask, bool level)
 {
-    glue(riscv_cpu_set_mip, MAX_XLEN)(this, mask);
-}
-
-void RISCVCPUState::ResetMip(uint32_t mask)
-{
-    glue(riscv_cpu_reset_mip, MAX_XLEN)(this, mask);
-}
-
-uint32_t RISCVCPUState::Mip()
-{
-    return glue(riscv_cpu_get_mip, MAX_XLEN)(this);
+    if (level)
+        irq_lines.fetch_or(mask);
+    else
+        irq_lines.fetch_and(~mask);
+    inbox_pending.store(true);
 }
 
 uint64_t RISCVCPUState::UpdateSTimer()
@@ -1971,9 +1986,18 @@ void RISCVCPUState::FlushTlbWriteRangeRam(uint8_t *ram_ptr, size_t ram_size)
     glue(riscv_cpu_flush_tlb_write_range_ram, MAX_XLEN)(this, ram_ptr, ram_size);
 }
 
+void RISCVCPUState::SetDeviceLock(DeviceLock *lock)
+{
+    device_lock = lock;
+}
+
 void RISCVCPUState::SetInterruptArch(RISCVInterruptArch arch)
 {
     intr_arch = arch;
+    /* interrupt files drive the external interrupts by themselves */
+    irq_line_mask = MIP_MSIP | MIP_MTIP;
+    if (arch != RISCV_INTR_AIA_IMSIC)
+        irq_line_mask |= MIP_MEIP | MIP_SEIP;
 }
 
 void RISCVCPUState::ImsicSetPending(bool supervisor, uint32_t id)
@@ -1983,8 +2007,8 @@ void RISCVCPUState::ImsicSetPending(bool supervisor, uint32_t id)
     if (intr_arch != RISCV_INTR_AIA_IMSIC || id == 0 ||
         id > RISCV_IMSIC_NUM_IDS)
         return;
-    imsic[file].eip[id / 64] |= (uint64_t)1 << (id % 64);
-    imsic_update(this, file);
+    msi_pending[file][id / 64].fetch_or((uint64_t)1 << (id % 64));
+    inbox_pending.store(true);
 }
 
 } // anonymous namespace

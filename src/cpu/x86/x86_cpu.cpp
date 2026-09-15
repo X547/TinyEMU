@@ -128,6 +128,22 @@ static void device_write(PhysMemoryRange *pr, uint32_t offset, uint32_t val,
     /* narrower than anything the device decodes: dropped */
 }
 
+/* The entries into device code, which hold the device lock. Nothing in them
+   raises an exception, so no longjmp() leaves the lock held. */
+static uint32_t locked_device_read(X86CPUState *s, PhysMemoryRange *pr,
+                                   uint32_t offset, int size)
+{
+    DeviceLocker locker(*s->device_lock);
+    return device_read(pr, offset, size);
+}
+
+static void locked_device_write(X86CPUState *s, PhysMemoryRange *pr,
+                                uint32_t offset, uint32_t val, int size)
+{
+    DeviceLocker locker(*s->device_lock);
+    device_write(pr, offset, val, size);
+}
+
 static uint32_t phys_read(X86CPUState *s, uint32_t phys, int size)
 {
     PhysMemoryRange *pr = s->mem_map->FindRange(phys);
@@ -137,7 +153,7 @@ static uint32_t phys_read(X86CPUState *s, uint32_t phys, int size)
     if (pr->is_ram) {
         return host_load(pr->phys_mem + (phys - pr->addr), size);
     }
-    return device_read(pr, phys - pr->addr, size);
+    return locked_device_read(s, pr, phys - pr->addr, size);
 }
 
 static void phys_write(X86CPUState *s, uint32_t phys, uint32_t val, int size)
@@ -154,7 +170,7 @@ static void phys_write(X86CPUState *s, uint32_t phys, uint32_t val, int size)
         host_store(pr->phys_mem + (phys - pr->addr), val, size);
         return;
     }
-    device_write(pr, phys - pr->addr, val, size);
+    locked_device_write(s, pr, phys - pr->addr, val, size);
 }
 
 
@@ -314,7 +330,7 @@ uint32_t mem_read_slow(X86CPUState *s, uint32_t lin, int size, int mmu_idx)
     if (pr->is_ram) {
         return host_load(tlb_fill(s, lin, pr, phys, writable, mmu_idx), size);
     }
-    return device_read(pr, phys - pr->addr, size);
+    return locked_device_read(s, pr, phys - pr->addr, size);
 }
 
 /* Translate for writing and prepare the TLB, so that the write that follows
@@ -372,7 +388,7 @@ void mem_write_slow(X86CPUState *s, uint32_t lin, uint32_t val, int size,
         host_store(tlb_fill(s, lin, pr, phys, writable, mmu_idx), val, size);
         return;
     }
-    device_write(pr, phys - pr->addr, val, size);
+    locked_device_write(s, pr, phys - pr->addr, val, size);
 }
 
 uint8_t fetch_slow(X86CPUState *s, uint32_t lin)
@@ -387,7 +403,7 @@ uint8_t fetch_slow(X86CPUState *s, uint32_t lin)
             return 0xff;
         }
         if (!pr->is_ram) {
-            return device_read(pr, phys - pr->addr, SIZE8);
+            return locked_device_read(s, pr, phys - pr->addr, SIZE8);
         }
         tlb_fill(s, lin, pr, phys, writable, mmu_idx);
     }
@@ -656,7 +672,7 @@ void x86_cpu_interp(X86CPUState *s, int max_cycles)
 {
     s->cycles_end = s->cycles + max_cycles;
     if (s->power_down) {
-        if (!s->irq_level || !get_bit(s->eflags, EFLAGS_IF)) {
+        if (!s->irq_level.load() || !get_bit(s->eflags, EFLAGS_IF)) {
             return;
         }
         s->power_down = false;
@@ -668,7 +684,7 @@ void x86_cpu_interp(X86CPUState *s, int max_cycles)
 
 void x86_cpu_set_irq(X86CPUState *s, bool set)
 {
-    s->irq_level = set;
+    s->irq_level.store(set);
 }
 
 void x86_cpu_set_reg(X86CPUState *s, int reg, uint32_t val)
@@ -749,6 +765,11 @@ void x86_cpu_set_port_io(X86CPUState *s, DeviceIO *port_io)
     s->port_io = port_io;
 }
 
+void x86_cpu_set_device_lock(X86CPUState *s, DeviceLock *lock)
+{
+    s->device_lock = lock;
+}
+
 int64_t x86_cpu_get_cycles(X86CPUState *s)
 {
     return s->cycles;
@@ -756,7 +777,8 @@ int64_t x86_cpu_get_cycles(X86CPUState *s)
 
 bool x86_cpu_get_power_down(X86CPUState *s)
 {
-    return s->power_down;
+    return s->power_down &&
+        !(s->irq_level.load() && get_bit(s->eflags, EFLAGS_IF));
 }
 
 /* A RAM mapping moved or its dirty bits were reset: drop the entries that

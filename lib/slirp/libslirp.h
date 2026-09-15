@@ -26,6 +26,7 @@ void slirp_cleanup(Slirp *slirp);
 
 void slirp_select_fill(Slirp *slirp, int *pnfds,
                        fd_set *readfds, fd_set *writefds, fd_set *xfds);
+int slirp_poll_timeout(Slirp *slirp);
 
 void slirp_select_poll(Slirp *slirp,
                        fd_set *readfds, fd_set *writefds, fd_set *xfds,

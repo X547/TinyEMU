@@ -40,6 +40,8 @@ private:
     EventLoop &fLoop;
     int fFd;
     bool fWatching = false;
+    /* the target had no room at the last Prepare() */
+    bool fBlocked = false;
 
 public:
     TapEthernet(EventLoop &loop, int fd): fLoop(loop), fFd(fd)
@@ -55,6 +57,7 @@ public:
 
     /* HostEthernet */
     void WritePacket(const uint8_t *buf, int len) override;
+    void TargetReady() override;
 
     /* PollSource */
     void Prepare(WaitSet &ws) override;
@@ -70,9 +73,19 @@ void TapEthernet::WritePacket(const uint8_t *buf, int len)
 }
 
 
+void TapEthernet::TargetReady()
+{
+    if (fBlocked) {
+        fBlocked = false;
+        fLoop.Wake();
+    }
+}
+
+
 void TapEthernet::Prepare(WaitSet &ws)
 {
     fWatching = target != nullptr && target->CanWritePacket();
+    fBlocked = target != nullptr && !fWatching;
     if (fWatching)
         ws.WatchRead(fFd);
 }

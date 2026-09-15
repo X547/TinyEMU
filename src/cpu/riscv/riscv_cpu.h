@@ -66,24 +66,31 @@ enum RISCVInterruptArch {
 #define RISCV_IMSIC_NUM_IDS 255
 
 /* One implementation per supported XLEN; riscv_cpu.cpp is compiled once for
-   each and each build keeps its implementation class internal. */
+   each and each build keeps its implementation class internal.
+
+   The hart belongs to the processor thread. SetIrqLine() and
+   ImsicSetPending() may be called from any thread; the hart takes them in
+   before it next looks at its interrupts. */
 class RISCVCPU {
 public:
     virtual ~RISCVCPU() = default;
 
     virtual void Interp(int n_cycles) = 0;
     virtual uint64_t Cycles() = 0;
-    virtual void SetMip(uint32_t mask) = 0;
-    virtual void ResetMip(uint32_t mask) = 0;
-    virtual uint32_t Mip() = 0;
+    /* The level of the interrupt lines in 'mask' that a device drives: MSIP,
+       MTIP, and MEIP and SEIP unless an IMSIC drives those. */
+    virtual void SetIrqLine(uint32_t mask, bool level) = 0;
     /* Brings the Sstc supervisor timer interrupt up to date with the real time
        counter and returns when the next one falls due, or UINT64_MAX when the
        comparator is not driving it. */
     virtual uint64_t UpdateSTimer() = 0;
+    /* Whether the hart waits for an interrupt, after taking in the ones
+       posted to it. */
     virtual bool PowerDown() = 0;
     virtual uint32_t Misa() = 0;
     virtual void FlushTlbWriteRangeRam(uint8_t *ram_ptr, size_t ram_size) = 0;
     virtual void SetRtcTimeSource(RtcTimeSource *source) = 0;
+    virtual void SetDeviceLock(DeviceLock *lock) = 0;
     virtual void SetInterruptArch(RISCVInterruptArch arch) = 0;
     /* A write of 'id' to the seteipnum register of the hart's machine or
        supervisor level IMSIC interrupt file. */

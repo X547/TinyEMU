@@ -27,6 +27,8 @@
 #include <stdint.h>
 #include <memory>
 
+#include "device_lock.h"
+
 
 #define DEVIO_SIZE8  (1 << 0)
 #define DEVIO_SIZE16 (1 << 1)
@@ -87,7 +89,8 @@ public:
 
 
 /* Implemented by the CPU so the memory map can invalidate write TLB entries
-   when a RAM mapping moves or a dirty page is reclaimed. */
+   when a RAM mapping moves or a dirty page is reclaimed. Called on the
+   processor thread only. */
 class TlbFlushTarget {
 public:
     virtual ~TlbFlushTarget() = default;
@@ -125,7 +128,8 @@ struct PhysMemoryRange {
         }
         size_t page_index = offset >> DEVRAM_PAGE_SIZE_LOG2;
         uint32_t mask = 1 << (page_index & 0x1f);
-        dirty_bits[page_index >> 5] |= mask;
+        /* the processor and a device with the lock may set bits at once */
+        __sync_fetch_and_or(&dirty_bits[page_index >> 5], mask);
     }
 
     bool IsDirtyBit(size_t offset) const
@@ -141,7 +145,11 @@ struct PhysMemoryRange {
 
 /* The default implementation backs RAM with anonymous memory and keeps the
    dirty bitmap itself; the x86 KVM path overrides the virtual methods to let
-   the kernel own both. */
+   the kernel own both.
+
+   The map changes only on the processor thread, with the device lock held.
+   The processor looks up RAM without the lock; everything else uses the map
+   with the lock held. */
 class PhysMemoryMap {
 private:
     TlbFlushTarget *fTlbFlushTarget = nullptr;
@@ -215,5 +223,9 @@ public:
         fIrqNum = irq_num;
     }
 
-    void Set(int level) {fTarget->SetIRQ(fIrqNum, level);}
+    void Set(int level)
+    {
+        assert(DeviceLock::IsHeld());
+        fTarget->SetIRQ(fIrqNum, level);
+    }
 };

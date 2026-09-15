@@ -943,9 +943,9 @@ uint32_t PITState::SpeakerRead(uint32_t offset, int size_log2)
     return val;
 }
 
-/* set the IRQ if necessary and return the delay in ms until the next
+/* set the IRQ if necessary and return the delay in us until the next
    IRQ. Note: The code does not handle all the PIT configurations. */
-static int pit_update_irq(PITState *pit)
+static int64_t pit_update_irq(PITState *pit)
 {
     PITChannel *s;
     int64_t d, delay;
@@ -984,7 +984,7 @@ static int pit_update_irq(PITState *pit)
     if (delay <= 0)
         return 0;
     else
-        return delay / (PIT_FREQ / 1000);
+        return delay * 1000000 / PIT_FREQ;
 }
     
 
@@ -1060,6 +1060,8 @@ public:
     int kvm_run_size;
     struct kvm_run *kvm_run;
     KvmIRQTarget kvm_irq_target {*this};
+    /* the processor thread, for signalling it out of KVM_RUN */
+    pthread_t vcpu_thread;
 #endif
 
     /* fixed-function port stubs and the VMware backdoor port */
@@ -1088,6 +1090,8 @@ public:
 
     ~PCMachine() override;
 
+    DeviceLock &Lock() {return *fDeviceLock;}
+
     /* TlbFlushTarget */
     void FlushTlbWriteRange(uint8_t *ram_addr, size_t ram_size) override;
     /* CPUIRQTarget */
@@ -1100,8 +1104,11 @@ public:
     uint64_t Tsc() override;
 
     /* VirtMachine */
-    int GetSleepDuration(int delay) override;
+    void ProcessorThreadStarted() override;
+    int64_t RunTimers() override;
+    bool Idle() override;
     void Interp(int max_exec_cycle) override;
+    void InterruptExecution() override;
 };
 
 static void copy_kernel(PCMachine *s, const uint8_t *buf, int buf_len,
@@ -1223,6 +1230,7 @@ void PCMachine::VmPortWrite(uint32_t addr, uint32_t val, int size_log2)
 void PCMachine::SetCPUIRQ(int level)
 {
     x86_cpu_set_irq(cpu_state, level);
+    Kick();
 }
 
 int PCMachine::HardIntno()
@@ -1523,6 +1531,12 @@ static void kvm_init(PCMachine *s)
     sigemptyset(&act.sa_mask);
     act.sa_flags = 0;
     sigaction(SIGALRM, &act, NULL);
+    /* The timer signal is for the processor thread, which unblocks it. Every
+       thread started after this inherits the mask. */
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGALRM);
+    pthread_sigmask(SIG_BLOCK, &set, NULL);
 
     s->kvm_enabled = true;
 
@@ -1662,6 +1676,8 @@ static void kvm_exec(PCMachine *s)
     setitimer(ITIMER_REAL, &ival, NULL);
 
     ret = ioctl(s->vcpu_fd, KVM_RUN, 0);
+    /* a request to return that came in while running has done its job */
+    run->immediate_exit = 0;
     if (ret < 0) {
         if (errno == EINTR || errno == EAGAIN) {
             /* timeout */
@@ -1674,12 +1690,16 @@ static void kvm_exec(PCMachine *s)
     switch(run->exit_reason) {
     case KVM_EXIT_HLT:
         break;
-    case KVM_EXIT_IO:
+    case KVM_EXIT_IO: {
+        DeviceLocker locker(s->Lock());
         kvm_exit_io(s, run);
         break;
-    case KVM_EXIT_MMIO:
+    }
+    case KVM_EXIT_MMIO: {
+        DeviceLocker locker(s->Lock());
         kvm_exit_mmio(s, run);
         break;
+    }
     case KVM_EXIT_FAIL_ENTRY:
         fprintf(stderr, "KVM_EXIT_FAIL_ENTRY: reason=0x%" PRIx64 "\n",
                 (uint64_t)run->fail_entry.hardware_entry_failure_reason);
@@ -1716,6 +1736,7 @@ uint64_t PCMachine::Tsc()
 
 void PCMachine::FlushTlbWriteRange(uint8_t *ram_addr, size_t ram_size)
 {
+    assert(OnProcessorThread());
     x86_cpu_flush_tlb_write_range_ram(cpu_state, ram_addr, ram_size);
 }
 
@@ -1770,6 +1791,7 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
 
     owned = std::make_unique<PCMachine>();
     s = owned.get();
+    s->SetHost(p);
     s->vmc = p->vmc;
     s->ram_size = p->ram_size;
     
@@ -1789,6 +1811,7 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
         s->cpu_state = x86_cpu_init(s->mem_map);
         x86_cpu_set_tsc_source(s->cpu_state, s);
         x86_cpu_set_port_io(s->cpu_state, &s->fPortIo);
+        x86_cpu_set_device_lock(s->cpu_state, p->device_lock);
 
         /* needed to handle the RAM dirty bits */
         s->mem_map->SetTlbFlushTarget(s);
@@ -2235,25 +2258,40 @@ static void copy_kernel(PCMachine *s, const uint8_t *buf, int buf_len,
     }
 }
 
-/* in ms */
-int PCMachine::GetSleepDuration(int delay)
+void PCMachine::ProcessorThreadStarted()
+{
+#ifdef USE_KVM
+    if (kvm_enabled) {
+        sigset_t set;
+        vcpu_thread = pthread_self();
+        sigemptyset(&set);
+        sigaddset(&set, SIGALRM);
+        pthread_sigmask(SIG_UNBLOCK, &set, NULL);
+    }
+#endif
+}
+
+/* The CMOS periodic interrupt is polled, so it has no deadline. */
+int64_t PCMachine::RunTimers()
 {
     PCMachine *s = this;
 
+    cmos_update_irq(s->cmos_state.get());
 #ifdef USE_KVM
-    if (s->kvm_enabled) {
-        /* XXX: improve */
-        cmos_update_irq(s->cmos_state.get());
-        delay = 0;
-    } else
+    if (s->kvm_enabled)
+        return -1;
 #endif
-    {
-        cmos_update_irq(s->cmos_state.get());
-        delay = min_int(delay, pit_update_irq(s->pit_state.get()));
-        if (!x86_cpu_get_power_down(s->cpu_state))
-            delay = 0;
-    }
-    return delay;
+    return pit_update_irq(s->pit_state.get());
+}
+
+bool PCMachine::Idle()
+{
+#ifdef USE_KVM
+    /* the kernel waits for the interrupt inside KVM_RUN */
+    if (kvm_enabled)
+        return false;
+#endif
+    return x86_cpu_get_power_down(cpu_state);
 }
 
 void PCMachine::Interp(int max_exec_cycles)
@@ -2262,11 +2300,22 @@ void PCMachine::Interp(int max_exec_cycles)
 #ifdef USE_KVM
     if (s->kvm_enabled) {
         kvm_exec(s);
-    } else 
+    } else
 #endif
     {
         x86_cpu_interp(s->cpu_state, max_exec_cycles);
     }
+}
+
+void PCMachine::InterruptExecution()
+{
+#ifdef USE_KVM
+    if (kvm_enabled) {
+        /* immediate_exit covers a signal that lands before KVM_RUN */
+        kvm_run->immediate_exit = 1;
+        pthread_kill(vcpu_thread, SIGALRM);
+    }
+#endif
 }
 
 class PcMachineClass final: public VirtMachineClass {

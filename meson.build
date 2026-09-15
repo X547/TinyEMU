@@ -75,8 +75,9 @@ foreach libname : ['network', 'socket']
   endif
 endforeach
 
-# Dependencies needed by the emulator only.
-emu_deps = []
+# Dependencies needed by the emulator only. The processors, the host
+# descriptors and the window each run on a thread of their own.
+emu_deps = [dependency('threads')]
 
 # ----------------------------------------------------------------------------
 # options

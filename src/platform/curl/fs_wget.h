@@ -70,7 +70,9 @@ void fs_wget_free(XHRState *s);
 
 class EventLoop;
 
-/* Transfers progress from 'loop', which is busy while any is in flight. */
+/* Transfers progress from 'loop', which is busy while any is in flight.
+   Once the loop has a thread of its own, transfers are started and their
+   handlers run with the device lock held. */
 void fs_wget_init(EventLoop &loop);
 void fs_wget_end(void);
 

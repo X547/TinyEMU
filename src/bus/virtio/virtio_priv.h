@@ -97,6 +97,9 @@ struct VIRTIODevice: public PCIBarTarget {
        later), 0 if OK */
     virtual int RecvRequest(int queue_idx, int desc_idx, int read_size,
                             int write_size) = 0;
+    /* The driver notified a manual_recv queue, which it does after adding
+       buffers to it. */
+    virtual void ManualQueueNotify(int queue_idx) {(void)queue_idx;}
     /* called after the config is written */
     virtual void ConfigWrite() {}
 
