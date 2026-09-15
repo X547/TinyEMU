@@ -1240,6 +1240,10 @@ static void no_inline glue(riscv_cpu_interp_x, XLEN)(RISCVCPUState *s,
                 err = csr_write(s, imm, val);
                 if (err < 0)
                     goto illegal_insn;
+                /* an interrupt the write unmasked is taken before the next
+                   instruction, so leave the block for the loop to check */
+                if (err == 0 && get_pending_irq_mask(s) != 0)
+                    err = 2;
                 if (rd != 0)
                     s->reg[rd] = val2;
                 if (err > 0) {
@@ -1264,6 +1268,8 @@ static void no_inline glue(riscv_cpu_interp_x, XLEN)(RISCVCPUState *s,
                     err = csr_write(s, imm, val);
                     if (err < 0)
                         goto illegal_insn;
+                    if (err == 0 && get_pending_irq_mask(s) != 0)
+                        err = 2;
                 } else {
                     err = 0;
                 }
