@@ -24,11 +24,14 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <vector>
+
 #include "bits.h"
 #include "cutils.h"
 #include "hid.h"
 #include "machine.h"
 #include "usb.h"
+#include "usb_desc.h"
 
 /* HID specific descriptor types. */
 #define USB_DT_HID      0x21
@@ -49,27 +52,26 @@
 #define HID_PROTOCOL_KEYBOARD 0x01
 #define HID_PROTOCOL_MOUSE    0x02
 
-/* Each function takes an interface descriptor, a HID descriptor and one
-   endpoint descriptor. */
-#define HID_IFACE_DESC_SIZE (9 + 9 + 7)
-#define HID_CONFIG_DESC_SIZE (9 + HID_MAX_FUNCTIONS * HID_IFACE_DESC_SIZE)
-
 /* The largest control transfer this answers is a report descriptor. */
 #define HID_CONTROL_BUF_SIZE 256
 
+/* HID 1.11, as the version field of a HID descriptor spells it. */
+#define HID_VERSION 0x0111
 
-static const uint8_t kDeviceDesc[] = {
-    18, USB_DT_DEVICE,
-    0x00, 0x02,             /* USB 2.00 */
-    0x00,                   /* class is declared per interface */
-    0x00, 0x00,
-    0x40,                   /* 64 byte default control endpoint */
-    0xf4, 0x46,             /* vendor: not one any driver carries a quirk for */
-    0x03, 0x00,             /* product */
-    0x00, 0x01,             /* device release 1.00 */
-    0x01, 0x02, 0x00,       /* manufacturer and product strings */
-    0x01,                   /* one configuration */
-};
+
+static std::vector<uint8_t> hid_device_desc()
+{
+    USBDescBuilder b;
+
+    b.Device({
+        .device_class = 0, /* it is declared per interface */
+        .vendor_id = 0x46f4, /* not one any driver carries a quirk for */
+        .product_id = 0x0003,
+        .manufacturer_str = 1,
+        .product_str = 2,
+    });
+    return b.Take();
+}
 
 
 //#pragma mark - USBHID
@@ -84,12 +86,16 @@ private:
            give. */
         URB *parked_urb = nullptr;
         uint8_t idle = 0; /* the idle rate the host set, in 4 ms units */
+        /* Where this function's HID descriptor sits in the configuration,
+           which is the copy a request for it is answered from. */
+        int hid_desc_offset = 0;
     };
 
     Function fFunctions[HID_MAX_FUNCTIONS] {};
     int fFunctionCount = 0;
 
-    uint8_t fConfigDesc[HID_CONFIG_DESC_SIZE] {};
+    std::vector<uint8_t> fDeviceDesc = hid_device_desc();
+    std::vector<uint8_t> fConfigDesc;
 
     void BuildConfigDescriptor();
     Function *FunctionForInterface(int index);
@@ -122,7 +128,6 @@ public:
 
 USBHID::USBHID(): USBDevice("usb-hid", USB_SPEED_FULL)
 {
-    SetDescriptors(kDeviceDesc, fConfigDesc);
     SetStringDescriptor(1, "TinyEMU");
     SetStringDescriptor(2, "USB HID");
     BuildConfigDescriptor();
@@ -133,19 +138,12 @@ USBHID::USBHID(): USBDevice("usb-hid", USB_SPEED_FULL)
    being a table. */
 void USBHID::BuildConfigDescriptor()
 {
-    uint8_t *d = fConfigDesc;
-    int total = 9 + fFunctionCount * HID_IFACE_DESC_SIZE;
+    USBDescBuilder b;
 
-    /* configuration */
-    *d++ = 9;
-    *d++ = USB_DT_CONFIG;
-    *d++ = get_bits(total, 0, 8);
-    *d++ = total >> 8;
-    *d++ = fFunctionCount;
-    *d++ = 1;    /* configuration value */
-    *d++ = 0;
-    *d++ = 0xa0; /* bus powered, remote wakeup */
-    *d++ = 50;   /* 100 mA */
+    b.BeginConfig({
+        .attributes = USB_CONFIG_ATTR_ONE | USB_CONFIG_ATTR_REMOTE_WAKEUP,
+        .max_power_ma = 100,
+    });
 
     for (int i = 0; i < fFunctionCount; i++) {
         HIDDevice *dev = fFunctions[i].dev;
@@ -167,38 +165,32 @@ void USBHID::BuildConfigDescriptor()
             break;
         }
 
-        /* interface */
-        *d++ = 9;
-        *d++ = USB_DT_INTERFACE;
-        *d++ = i;    /* interface number */
-        *d++ = 0;    /* alternate setting */
-        *d++ = 1;    /* one endpoint */
-        *d++ = USB_CLASS_HID;
-        *d++ = subclass;
-        *d++ = protocol;
-        *d++ = 0;
+        b.BeginInterface({
+            .number = (uint8_t)i,
+            .iface_class = USB_CLASS_HID,
+            .iface_subclass = subclass,
+            .iface_protocol = protocol,
+        });
 
-        /* HID */
-        *d++ = 9;
-        *d++ = USB_DT_HID;
-        *d++ = 0x11; /* HID 1.11 */
-        *d++ = 0x01;
-        *d++ = dev->CountryCode();
-        *d++ = 1;    /* one subordinate descriptor */
-        *d++ = USB_DT_REPORT;
-        *d++ = get_bits(desc_len, 0, 8);
-        *d++ = desc_len >> 8;
+        b.BeginDescriptor(USB_DT_HID);
+        b.Word(HID_VERSION);
+        b.Byte(dev->CountryCode());
+        b.Byte(1); /* one subordinate descriptor */
+        b.Byte(USB_DT_REPORT);
+        b.Word(desc_len);
+        b.EndDescriptor();
+        fFunctions[i].hid_desc_offset = b.DescriptorOffset();
 
-        /* the input report endpoint */
-        *d++ = 7;
-        *d++ = USB_DT_ENDPOINT;
-        *d++ = 0x80 | (i + 1);
-        *d++ = 0x03; /* interrupt */
-        *d++ = dev->InputReportSize();
-        *d++ = 0;
-        /* At full speed the interval is in frames, so in milliseconds. */
-        *d++ = dev->PollInterval();
+        /* the input report endpoint. At full speed the interval is in
+           frames, so in milliseconds. */
+        b.Endpoint(USB_DIR_IN | (i + 1), USB_ENDPOINT_ATTR_INTERRUPT,
+                   dev->InputReportSize(), dev->PollInterval());
     }
+
+    b.EndConfig();
+    fConfigDesc = b.Take();
+    /* The bytes moved, so the device has to be pointed at them again. */
+    SetDescriptors(fDeviceDesc.data(), fConfigDesc.data());
 }
 
 
@@ -288,8 +280,7 @@ USBStatusEnum USBHID::HIDDescriptor(URB *urb, Function *fn)
 {
     /* The HID descriptor is part of the configuration, so it is answered from
        the copy already there. */
-    int index = (int)(fn - fFunctions);
-    const uint8_t *desc = fConfigDesc + 9 + index * HID_IFACE_DESC_SIZE + 9;
+    const uint8_t *desc = fConfigDesc.data() + fn->hid_desc_offset;
     uint32_t len = desc[0];
 
     if (len > urb->setup.length) {

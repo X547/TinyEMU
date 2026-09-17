@@ -23,9 +23,12 @@
  */
 #include <string.h>
 
+#include <vector>
+
 #include "cutils.h"
 #include "devices.h"
 #include "hid.h"
+#include "hid_report.h"
 #include "machine.h"
 
 /* One button byte, two sixteen bit axes and a wheel byte. */
@@ -41,58 +44,55 @@
 /* An absolute pointer, declared as a mouse whose axes are absolute: a mouse
    driver reads the axes as declared, where a digitiser usage would need a
    driver that knows about pens and contacts. */
-static const uint8_t kReportDesc[] = {
-    0x05, 0x01,             /* Usage Page (Generic Desktop) */
-    0x09, 0x02,             /* Usage (Mouse) */
-    0xa1, 0x01,             /* Collection (Application) */
-    0x09, 0x01,             /*   Usage (Pointer) */
-    0xa1, 0x00,             /*   Collection (Physical) */
+static std::vector<uint8_t> tablet_report_desc()
+{
+    HIDReportBuilder r;
+
+    r.UsagePage(HID_PAGE_GENERIC_DESKTOP);
+    r.Usage(HID_USAGE_MOUSE);
+    r.BeginCollection(HID_COLLECTION_APPLICATION);
+    r.Usage(HID_USAGE_POINTER);
+    r.BeginCollection(HID_COLLECTION_PHYSICAL);
 
     /* the three buttons, one bit each, padded to a byte */
-    0x05, 0x09,             /*     Usage Page (Button) */
-    0x19, 0x01,             /*     Usage Minimum (Button 1) */
-    0x29, 0x03,             /*     Usage Maximum (Button 3) */
-    0x15, 0x00,             /*     Logical Minimum (0) */
-    0x25, 0x01,             /*     Logical Maximum (1) */
-    0x95, 0x03,             /*     Report Count (3) */
-    0x75, 0x01,             /*     Report Size (1) */
-    0x81, 0x02,             /*     Input (Data, Variable, Absolute) */
-    0x95, 0x01,             /*     Report Count (1) */
-    0x75, 0x05,             /*     Report Size (5) */
-    0x81, 0x01,             /*     Input (Constant) */
+    r.UsagePage(HID_PAGE_BUTTON);
+    r.UsageRange(1, TABLET_BUTTON_COUNT);
+    r.LogicalRange(0, 1);
+    r.ReportCount(TABLET_BUTTON_COUNT);
+    r.ReportSize(1);
+    r.Input(HID_DATA | HID_VARIABLE | HID_ABSOLUTE);
+    r.InputPadding(8 - TABLET_BUTTON_COUNT);
 
     /* the two absolute axes, over the whole declared range */
-    0x05, 0x01,             /*     Usage Page (Generic Desktop) */
-    0x09, 0x30,             /*     Usage (X) */
-    0x09, 0x31,             /*     Usage (Y) */
-    0x15, 0x00,             /*     Logical Minimum (0) */
-    0x26, 0xff, 0x7f,       /*     Logical Maximum (32767) */
-    0x35, 0x00,             /*     Physical Minimum (0) */
-    0x46, 0xff, 0x7f,       /*     Physical Maximum (32767) */
-    0x75, 0x10,             /*     Report Size (16) */
-    0x95, 0x02,             /*     Report Count (2) */
-    0x81, 0x02,             /*     Input (Data, Variable, Absolute) */
+    r.UsagePage(HID_PAGE_GENERIC_DESKTOP);
+    r.Usage(HID_USAGE_X);
+    r.Usage(HID_USAGE_Y);
+    r.LogicalRange(0, TABLET_AXIS_MAX);
+    r.PhysicalRange(0, TABLET_AXIS_MAX);
+    r.ReportSize(16);
+    r.ReportCount(2);
+    r.Input(HID_DATA | HID_VARIABLE | HID_ABSOLUTE);
 
     /* the wheel, which is a displacement and not a position */
-    0x05, 0x01,             /*     Usage Page (Generic Desktop) */
-    0x09, 0x38,             /*     Usage (Wheel) */
-    0x15, 0x81,             /*     Logical Minimum (-127) */
-    0x25, 0x7f,             /*     Logical Maximum (127) */
-    0x35, 0x00,             /*     Physical Minimum (0) */
-    0x45, 0x00,             /*     Physical Maximum (0) */
-    0x75, 0x08,             /*     Report Size (8) */
-    0x95, 0x01,             /*     Report Count (1) */
-    0x81, 0x06,             /*     Input (Data, Variable, Relative) */
+    r.UsagePage(HID_PAGE_GENERIC_DESKTOP);
+    r.Usage(HID_USAGE_WHEEL);
+    r.LogicalRange(-127, 127);
+    r.PhysicalRange(0, 0);
+    r.ReportSize(8);
+    r.ReportCount(1);
+    r.Input(HID_DATA | HID_VARIABLE | HID_RELATIVE);
 
-    0xc0,                   /*   End Collection */
-    0xc0,                   /* End Collection */
-};
+    r.EndCollection();
+    r.EndCollection();
+    return r.Take();
+}
 
 
 //#pragma mark - HIDTablet
 
 class HIDTablet final: public HIDDevice, public PointerTarget {
 private:
+    std::vector<uint8_t> fReportDesc = tablet_report_desc();
     uint16_t fX = 0;
     uint16_t fY = 0;
     uint8_t fButtons = 0;
@@ -107,7 +107,7 @@ public:
     HIDTablet(): HIDDevice("hid-tablet") {}
 
     const uint8_t *ReportDescriptor(int *len) const override
-        {*len = sizeof(kReportDesc); return kReportDesc;}
+        {*len = fReportDesc.size(); return fReportDesc.data();}
 
     int InputReportSize() const override {return TABLET_REPORT_SIZE;}
     void Reset() override;

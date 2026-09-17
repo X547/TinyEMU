@@ -24,10 +24,13 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <vector>
+
 #include "bits.h"
 #include "cutils.h"
 #include "machine.h"
 #include "usb.h"
+#include "usb_desc.h"
 
 /* Hub class requests use the standard request codes with a class request
    type; only the descriptor type and the features are its own. */
@@ -65,19 +68,20 @@
 #define PORT_CHG_RESET       bit_at(4)
 
 
-static const uint8_t kHubDeviceDesc[] = {
-    18, USB_DT_DEVICE,
-    0x00, 0x02,             /* USB 2.00 */
-    USB_CLASS_HUB,
-    0x00,
-    0x01,                   /* single transaction translator */
-    0x40,                   /* 64 byte default control endpoint */
-    0xf4, 0x46,             /* vendor */
-    0x02, 0x00,             /* product */
-    0x00, 0x01,
-    0x01, 0x02, 0x00,       /* manufacturer and product strings */
-    0x01,
-};
+static std::vector<uint8_t> hub_device_desc()
+{
+    USBDescBuilder b;
+
+    b.Device({
+        .device_class = USB_CLASS_HUB,
+        .device_protocol = 0x01, /* single transaction translator */
+        .vendor_id = 0x46f4,
+        .product_id = 0x0002,
+        .manufacturer_str = 1,
+        .product_str = 2,
+    });
+    return b.Take();
+}
 
 
 //#pragma mark - USBHub
@@ -100,7 +104,8 @@ private:
     /* The status change endpoint's bitmap is one bit per port plus one for
        the hub itself. */
     int fBitmapSize;
-    uint8_t fConfigDesc[25] {};
+    std::vector<uint8_t> fDeviceDesc = hub_device_desc();
+    std::vector<uint8_t> fConfigDesc;
 
     /* The host's interrupt transfer waits here until something changes.
        Nothing is ever unplugged in this model, so it is only ever completed
@@ -139,37 +144,21 @@ USBHub::USBHub(int port_count):
         fPorts[i].status = PORT_STAT_POWER;
     }
 
-    uint8_t *d = fConfigDesc;
-    /* configuration */
-    *d++ = 9;
-    *d++ = USB_DT_CONFIG;
-    *d++ = 25;
-    *d++ = 0;
-    *d++ = 1;    /* one interface */
-    *d++ = 1;    /* configuration value */
-    *d++ = 0;
-    *d++ = 0xe0; /* self powered, remote wakeup */
-    *d++ = 0;    /* draws no bus power */
-    /* interface */
-    *d++ = 9;
-    *d++ = USB_DT_INTERFACE;
-    *d++ = 0;
-    *d++ = 0;
-    *d++ = 1;    /* one endpoint */
-    *d++ = USB_CLASS_HUB;
-    *d++ = 0;
-    *d++ = 0;
-    *d++ = 0;
-    /* status change endpoint */
-    *d++ = 7;
-    *d++ = USB_DT_ENDPOINT;
-    *d++ = 0x80 | HUB_EP_IN;
-    *d++ = 0x03; /* interrupt */
-    *d++ = fBitmapSize;
-    *d++ = 0;
-    *d++ = 12;   /* 2^11 microframes, the usual hub polling interval */
+    USBDescBuilder b;
+    b.BeginConfig({
+        .attributes = USB_CONFIG_ATTR_ONE | USB_CONFIG_ATTR_SELF_POWERED |
+            USB_CONFIG_ATTR_REMOTE_WAKEUP,
+        .max_power_ma = 0, /* it draws no bus power */
+    });
+    b.BeginInterface({.iface_class = USB_CLASS_HUB});
+    /* the status change endpoint, polled every 2^11 microframes as a hub
+       usually is */
+    b.Endpoint(USB_DIR_IN | HUB_EP_IN, USB_ENDPOINT_ATTR_INTERRUPT,
+               fBitmapSize, 12);
+    b.EndConfig();
+    fConfigDesc = b.Take();
 
-    SetDescriptors(kHubDeviceDesc, fConfigDesc);
+    SetDescriptors(fDeviceDesc.data(), fConfigDesc.data());
     SetStringDescriptor(1, "TinyEMU");
     SetStringDescriptor(2, "USB Hub");
 }
@@ -288,29 +277,30 @@ void USBHub::NotifyChange()
 
 USBStatusEnum USBHub::HubDescriptor(URB *urb)
 {
-    uint8_t buf[16];
-    int mask_len = fBitmapSize;
-    int len = 7 + 2 * mask_len;
+    USBDescBuilder b;
 
-    memset(buf, 0, sizeof(buf));
-    buf[0] = len;
-    buf[1] = USB_DT_HUB;
-    buf[2] = fPortCount;
+    b.BeginDescriptor(USB_DT_HUB);
+    b.Byte(fPortCount);
     /* Per port power switching and per port over-current reporting. */
-    put_le16(buf + 3, 0x0009);
-    buf[5] = 50; /* 100 ms until power is good, in 2 ms units */
-    buf[6] = 0;  /* the hub controller draws no bus current */
+    b.Word(0x0009);
+    b.Byte(50); /* 100 ms until power is good, in 2 ms units */
+    b.Byte(0);  /* the hub controller draws no bus current */
     /* DeviceRemovable: every port is removable, so the bits stay clear. The
        PortPwrCtrlMask that follows is all ones for historical reasons. */
-    for (int i = 0; i < mask_len; i++) {
-        buf[7 + mask_len + i] = 0xff;
+    for (int i = 0; i < fBitmapSize; i++) {
+        b.Byte(0);
     }
+    for (int i = 0; i < fBitmapSize; i++) {
+        b.Byte(0xff);
+    }
+    b.EndDescriptor();
 
+    uint32_t len = b.Length();
     if (len > urb->setup.length) {
         len = urb->setup.length;
     }
     urb->actual_length =
-        urb->buffer != nullptr ? urb->buffer->Write(0, buf, len) : 0;
+        urb->buffer != nullptr ? urb->buffer->Write(0, b.Data(), len) : 0;
     return USB_STATUS_OK;
 }
 

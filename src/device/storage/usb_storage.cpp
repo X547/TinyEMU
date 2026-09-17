@@ -25,10 +25,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <vector>
+
 #include "cutils.h"
 #include "machine.h"
 #include "scsi.h"
 #include "usb.h"
+#include "usb_desc.h"
 
 /* Command and status wrappers, as they go over the bulk endpoints. */
 #define CBW_SIGNATURE 0x43425355 /* "USBC" */
@@ -60,48 +63,43 @@ typedef enum {
 } MSCStateEnum;
 
 
-static const uint8_t kDeviceDesc[] = {
-    18, USB_DT_DEVICE,
-    0x00, 0x02,             /* USB 2.00 */
-    0x00,                   /* class is declared per interface */
-    0x00, 0x00,
-    0x40,                   /* 64 byte default control endpoint */
-    0xf4, 0x46,             /* vendor: not one any driver carries a quirk for */
-    0x01, 0x00,             /* product */
-    0x00, 0x01,             /* device release 1.00 */
-    0x01, 0x02, 0x03,       /* manufacturer, product, serial number strings */
-    0x01,                   /* one configuration */
-};
+/* The bulk endpoints carry the 512 byte packets high speed requires. */
+#define MSC_MAX_PACKET 512
 
-static const uint8_t kConfigDesc[] = {
-    9, USB_DT_CONFIG,
-    32, 0x00,               /* total length of the whole tree */
-    0x01,                   /* one interface */
-    0x01,                   /* configuration value */
-    0x00,
-    0xc0,                   /* self powered */
-    50,                     /* 100 mA */
+static std::vector<uint8_t> msc_device_desc()
+{
+    USBDescBuilder b;
 
-    9, USB_DT_INTERFACE,
-    0x00, 0x00,
-    0x02,                   /* two endpoints */
-    USB_CLASS_MASS_STORAGE,
-    0x06,                   /* SCSI transparent command set */
-    0x50,                   /* bulk-only transport */
-    0x00,
+    b.Device({
+        .device_class = 0, /* it is declared per interface */
+        .vendor_id = 0x46f4, /* not one any driver carries a quirk for */
+        .product_id = 0x0001,
+        .manufacturer_str = 1,
+        .product_str = 2,
+        .serial_str = 3,
+    });
+    return b.Take();
+}
 
-    7, USB_DT_ENDPOINT,
-    0x80 | MSC_EP_IN,
-    0x02,                   /* bulk */
-    0x00, 0x02,             /* 512 bytes, as high speed requires */
-    0x00,
+static std::vector<uint8_t> msc_config_desc()
+{
+    USBDescBuilder b;
 
-    7, USB_DT_ENDPOINT,
-    MSC_EP_OUT,
-    0x02,
-    0x00, 0x02,
-    0x00,
-};
+    b.BeginConfig({
+        .attributes = USB_CONFIG_ATTR_ONE | USB_CONFIG_ATTR_SELF_POWERED,
+        .max_power_ma = 100,
+    });
+    b.BeginInterface({
+        .iface_class = USB_CLASS_MASS_STORAGE,
+        .iface_subclass = 0x06, /* SCSI transparent command set */
+        .iface_protocol = 0x50, /* bulk-only transport */
+    });
+    b.Endpoint(USB_DIR_IN | MSC_EP_IN, USB_ENDPOINT_ATTR_BULK,
+               MSC_MAX_PACKET, 0);
+    b.Endpoint(MSC_EP_OUT, USB_ENDPOINT_ATTR_BULK, MSC_MAX_PACKET, 0);
+    b.EndConfig();
+    return b.Take();
+}
 
 
 //#pragma mark - USBStorage
@@ -109,6 +107,9 @@ static const uint8_t kConfigDesc[] = {
 class USBStorage final: public USBDevice, public SCSIBusTarget,
                         public SCSICompletion {
 private:
+    std::vector<uint8_t> fDeviceDesc = msc_device_desc();
+    std::vector<uint8_t> fConfigDesc = msc_config_desc();
+
     SCSIDevice *fUnits[SCSI_MAX_LUN] {};
     int fMaxLun = -1;
 
@@ -164,7 +165,7 @@ public:
 
 USBStorage::USBStorage(): USBDevice("usb-storage", USB_SPEED_HIGH)
 {
-    SetDescriptors(kDeviceDesc, kConfigDesc);
+    SetDescriptors(fDeviceDesc.data(), fConfigDesc.data());
     SetStringDescriptor(1, "TinyEMU");
     SetStringDescriptor(2, "USB Mass Storage");
     SetStringDescriptor(3, "TEMU00000001");

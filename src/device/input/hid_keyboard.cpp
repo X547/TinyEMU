@@ -23,9 +23,12 @@
  */
 #include <string.h>
 
+#include <vector>
+
 #include "bits.h"
 #include "devices.h"
 #include "hid.h"
+#include "hid_report.h"
 #include "machine.h"
 
 /* One modifier byte, one reserved byte, six key usages. Both protocols use
@@ -50,49 +53,48 @@
 
 /* Six key usages plus the eight modifiers, with the LEDs coming back. This is
    the shape a boot keyboard's report protocol is expected to have. */
-static const uint8_t kReportDesc[] = {
-    0x05, 0x01,             /* Usage Page (Generic Desktop) */
-    0x09, 0x06,             /* Usage (Keyboard) */
-    0xa1, 0x01,             /* Collection (Application) */
+static std::vector<uint8_t> kbd_report_desc()
+{
+    HIDReportBuilder r;
+
+    r.UsagePage(HID_PAGE_GENERIC_DESKTOP);
+    r.Usage(HID_USAGE_KEYBOARD);
+    r.BeginCollection(HID_COLLECTION_APPLICATION);
 
     /* the eight modifier keys, one bit each */
-    0x05, 0x07,             /*   Usage Page (Keyboard/Keypad) */
-    0x19, 0xe0,             /*   Usage Minimum (Left Control) */
-    0x29, 0xe7,             /*   Usage Maximum (Right GUI) */
-    0x15, 0x00,             /*   Logical Minimum (0) */
-    0x25, 0x01,             /*   Logical Maximum (1) */
-    0x75, 0x01,             /*   Report Size (1) */
-    0x95, 0x08,             /*   Report Count (8) */
-    0x81, 0x02,             /*   Input (Data, Variable, Absolute) */
+    r.UsagePage(HID_PAGE_KEYBOARD);
+    r.UsageRange(KBD_USAGE_MODIFIER_FIRST, KBD_USAGE_MODIFIER_LAST);
+    r.LogicalRange(0, 1);
+    r.ReportSize(1);
+    r.ReportCount(8);
+    r.Input(HID_DATA | HID_VARIABLE | HID_ABSOLUTE);
 
     /* the reserved byte */
-    0x95, 0x01,             /*   Report Count (1) */
-    0x75, 0x08,             /*   Report Size (8) */
-    0x81, 0x03,             /*   Input (Constant, Variable, Absolute) */
+    r.ReportCount(1);
+    r.ReportSize(8);
+    r.Input(HID_CONSTANT | HID_VARIABLE | HID_ABSOLUTE);
 
     /* the five LEDs, and three bits of padding to the byte */
-    0x95, 0x05,             /*   Report Count (5) */
-    0x75, 0x01,             /*   Report Size (1) */
-    0x05, 0x08,             /*   Usage Page (LEDs) */
-    0x19, 0x01,             /*   Usage Minimum (Num Lock) */
-    0x29, 0x05,             /*   Usage Maximum (Kana) */
-    0x91, 0x02,             /*   Output (Data, Variable, Absolute) */
-    0x95, 0x01,             /*   Report Count (1) */
-    0x75, 0x03,             /*   Report Size (3) */
-    0x91, 0x03,             /*   Output (Constant, Variable, Absolute) */
+    r.ReportCount(5);
+    r.ReportSize(1);
+    r.UsagePage(HID_PAGE_LED);
+    r.UsageRange(1, 5); /* Num Lock to Kana */
+    r.Output(HID_DATA | HID_VARIABLE | HID_ABSOLUTE);
+    r.ReportCount(1);
+    r.ReportSize(3);
+    r.Output(HID_CONSTANT | HID_VARIABLE | HID_ABSOLUTE);
 
     /* the six key slots */
-    0x95, 0x06,             /*   Report Count (6) */
-    0x75, 0x08,             /*   Report Size (8) */
-    0x15, 0x00,             /*   Logical Minimum (0) */
-    0x25, 0xff,             /*   Logical Maximum (255) */
-    0x05, 0x07,             /*   Usage Page (Keyboard/Keypad) */
-    0x19, 0x00,             /*   Usage Minimum (0) */
-    0x29, 0xff,             /*   Usage Maximum (255) */
-    0x81, 0x00,             /*   Input (Data, Array) */
+    r.ReportCount(KBD_KEYS_IN_REPORT);
+    r.ReportSize(8);
+    r.LogicalRange(0, 0xff);
+    r.UsagePage(HID_PAGE_KEYBOARD);
+    r.UsageRange(0, 0xff);
+    r.Input(HID_DATA | HID_ARRAY);
 
-    0xc0,                   /* End Collection */
-};
+    r.EndCollection();
+    return r.Take();
+}
 
 
 /* Linux evdev key code to HID keyboard usage; zero for a key with none. */
@@ -136,6 +138,7 @@ static const uint8_t kKeyUsage[KBD_EVDEV_KEY_COUNT] = {
 
 class HIDKeyboard final: public HIDDevice, public KeyboardTarget {
 private:
+    std::vector<uint8_t> fReportDesc = kbd_report_desc();
     uint8_t fModifiers = 0;
     uint8_t fPressed[KBD_MAX_PRESSED] {}; /* held usages, in press order */
     int fPressedCount = 0;
@@ -151,7 +154,7 @@ public:
     HIDKeyboard(): HIDDevice("hid-keyboard") {}
 
     const uint8_t *ReportDescriptor(int *len) const override
-        {*len = sizeof(kReportDesc); return kReportDesc;}
+        {*len = fReportDesc.size(); return fReportDesc.data();}
 
     int InputReportSize() const override {return KBD_REPORT_SIZE;}
     HIDBootProtocolEnum BootProtocol() const override
