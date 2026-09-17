@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "bits.h"
 #include "cutils.h"
 #include "machine.h"
 
@@ -130,7 +131,7 @@ USBStatusEnum USBDevice::HandleStandardControl(URB *urb)
         case USB_REQ_SET_ADDRESS:
             /* Under xHCI the controller issues this on the guest's behalf as
                part of Address Device; the device just records it. */
-            fAddress = setup.value & 0x7f;
+            fAddress = get_bits(setup.value, 0, 7);
             urb->actual_length = 0;
             return USB_STATUS_OK;
 
@@ -143,7 +144,8 @@ USBStatusEnum USBDevice::HandleStandardControl(URB *urb)
                 return usb_control_reply(urb, fDeviceDesc, fDeviceDesc[0]);
 
             case USB_DT_CONFIG:
-                if (fConfigDesc == nullptr || (setup.value & 0xff) != 0) {
+                if (fConfigDesc == nullptr ||
+                    get_bits(setup.value, 0, 8) != 0) {
                     break;
                 }
                 /* wTotalLength, not bLength: the whole tree is returned when
@@ -152,7 +154,7 @@ USBStatusEnum USBDevice::HandleStandardControl(URB *urb)
                                          get_le16(fConfigDesc + 2));
 
             case USB_DT_STRING: {
-                int index = setup.value & 0xff;
+                int index = get_bits(setup.value, 0, 8);
                 if (index >= USB_MAX_STRINGS) {
                     break;
                 }
@@ -174,7 +176,7 @@ USBStatusEnum USBDevice::HandleStandardControl(URB *urb)
             return usb_control_reply(urb, buf, 1);
 
         case USB_REQ_SET_CONFIGURATION:
-            fConfigValue = setup.value & 0xff;
+            fConfigValue = get_bits(setup.value, 0, 8);
             urb->actual_length = 0;
             return USB_STATUS_OK;
 

@@ -27,6 +27,7 @@
 #include <inttypes.h>
 #include <assert.h>
 
+#include "bits.h"
 #include "cutils.h"
 #include "iomem.h"
 #include "vmmouse.h"
@@ -115,7 +116,7 @@ void vmmouse_handler(VMMouseState *s, uint32_t *regs)
 {
     uint32_t cmd;
     
-    cmd = regs[REG_ECX] & 0xff;
+    cmd = get_bits(regs[REG_ECX], 0, 8);
     switch(cmd) {
     case 10: /* get version */
         regs[REG_EBX] = VMPORT_MAGIC;

@@ -25,6 +25,7 @@
 
 #include <string.h>
 
+#include "bits.h"
 #include "machine.h"
 
 
@@ -32,10 +33,10 @@ void scsi_set_sense(SCSIRequest *req, uint8_t sense_key, uint16_t asc_ascq)
 {
     memset(req->sense, 0, sizeof(req->sense));
     req->sense[0] = 0x70;              /* current error, fixed format */
-    req->sense[2] = sense_key & 0x0f;
+    req->sense[2] = get_bits(sense_key, 0, 4);
     req->sense[7] = SCSI_SENSE_LEN - 8; /* additional sense length */
     req->sense[12] = asc_ascq >> 8;
-    req->sense[13] = asc_ascq & 0xff;
+    req->sense[13] = get_bits(asc_ascq, 0, 8);
     req->sense_len = SCSI_SENSE_LEN;
     req->status = SCSI_STATUS_CHECK_CONDITION;
     req->actual_length = 0;

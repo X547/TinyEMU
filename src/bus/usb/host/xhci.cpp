@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "bits.h"
 #include "cutils.h"
 #include "host_time.h"
 #include "machine.h"
@@ -84,27 +85,27 @@
 #define XHCI_DCBAAP_HI  0x34
 #define XHCI_CONFIG     0x38
 
-#define USBCMD_RS       (1 << 0)
-#define USBCMD_HCRST    (1 << 1)
-#define USBCMD_INTE     (1 << 2)
-#define USBCMD_HSEE     (1 << 3)
-#define USBCMD_LHCRST   (1 << 7)
-#define USBCMD_CSS      (1 << 8)
-#define USBCMD_CRS      (1 << 9)
-#define USBCMD_EWE      (1 << 10)
-#define USBCMD_EU3S     (1 << 11)
-#define USBCMD_CME      (1 << 13)
+#define USBCMD_RS       bit_at(0)
+#define USBCMD_HCRST    bit_at(1)
+#define USBCMD_INTE     bit_at(2)
+#define USBCMD_HSEE     bit_at(3)
+#define USBCMD_LHCRST   bit_at(7)
+#define USBCMD_CSS      bit_at(8)
+#define USBCMD_CRS      bit_at(9)
+#define USBCMD_EWE      bit_at(10)
+#define USBCMD_EU3S     bit_at(11)
+#define USBCMD_CME      bit_at(13)
 
-#define USBSTS_HCH      (1 << 0)
-#define USBSTS_HSE      (1 << 2)
-#define USBSTS_EINT     (1 << 3)
-#define USBSTS_PCD      (1 << 4)
-#define USBSTS_CNR      (1 << 11)
+#define USBSTS_HCH      bit_at(0)
+#define USBSTS_HSE      bit_at(2)
+#define USBSTS_EINT     bit_at(3)
+#define USBSTS_PCD      bit_at(4)
+#define USBSTS_CNR      bit_at(11)
 
-#define CRCR_RCS        (1 << 0)
-#define CRCR_CS         (1 << 1)
-#define CRCR_CA         (1 << 2)
-#define CRCR_CRR        (1 << 3)
+#define CRCR_RCS        bit_at(0)
+#define CRCR_CS         bit_at(1)
+#define CRCR_CA         bit_at(2)
+#define CRCR_CRR        bit_at(3)
 
 /* Interrupter registers, relative to XHCI_INTR_OFFSET. */
 #define XHCI_IMAN       0x00
@@ -115,34 +116,34 @@
 #define XHCI_ERDP_LO    0x18
 #define XHCI_ERDP_HI    0x1c
 
-#define IMAN_IP         (1 << 0)
-#define IMAN_IE         (1 << 1)
-#define ERDP_EHB        (1 << 3)
+#define IMAN_IP         bit_at(0)
+#define IMAN_IE         bit_at(1)
+#define ERDP_EHB        bit_at(3)
 
 /* Port status and control. The change bits are all write-one-to-clear; the
    reset bits are write-one-to-set and read back as zero because a reset here
    completes inside the write that started it. */
-#define PORTSC_CCS      (1 << 0)
-#define PORTSC_PED      (1 << 1)
-#define PORTSC_OCA      (1 << 3)
-#define PORTSC_PR       (1 << 4)
+#define PORTSC_CCS      bit_at(0)
+#define PORTSC_PED      bit_at(1)
+#define PORTSC_OCA      bit_at(3)
+#define PORTSC_PR       bit_at(4)
 #define PORTSC_PLS_SHIFT 5
-#define PORTSC_PLS_MASK (0xf << 5)
-#define PORTSC_PP       (1 << 9)
+#define PORTSC_PLS_MASK field_mask(PORTSC_PLS_SHIFT, 4)
+#define PORTSC_PP       bit_at(9)
 #define PORTSC_SPEED_SHIFT 10
-#define PORTSC_SPEED_MASK (0xf << 10)
-#define PORTSC_LWS      (1 << 16)
-#define PORTSC_CSC      (1 << 17)
-#define PORTSC_PEC      (1 << 18)
-#define PORTSC_WRC      (1 << 19)
-#define PORTSC_OCC      (1 << 20)
-#define PORTSC_PRC      (1 << 21)
-#define PORTSC_PLC      (1 << 22)
-#define PORTSC_CEC      (1 << 23)
-#define PORTSC_WCE      (1 << 25)
-#define PORTSC_WDE      (1 << 26)
-#define PORTSC_WOE      (1 << 27)
-#define PORTSC_WPR      (1u << 31)
+#define PORTSC_SPEED_MASK field_mask(PORTSC_SPEED_SHIFT, 4)
+#define PORTSC_LWS      bit_at(16)
+#define PORTSC_CSC      bit_at(17)
+#define PORTSC_PEC      bit_at(18)
+#define PORTSC_WRC      bit_at(19)
+#define PORTSC_OCC      bit_at(20)
+#define PORTSC_PRC      bit_at(21)
+#define PORTSC_PLC      bit_at(22)
+#define PORTSC_CEC      bit_at(23)
+#define PORTSC_WCE      bit_at(25)
+#define PORTSC_WDE      bit_at(26)
+#define PORTSC_WOE      bit_at(27)
+#define PORTSC_WPR      bit_at(31)
 
 #define PORTSC_CHANGE_MASK (PORTSC_CSC | PORTSC_PEC | PORTSC_WRC | \
                             PORTSC_OCC | PORTSC_PRC | PORTSC_PLC | PORTSC_CEC)
@@ -184,19 +185,19 @@
 #define ER_PORT_STATUS_CHANGE 34
 
 /* TRB control field. */
-#define TRB_C           (1 << 0)
-#define TRB_TR_ENT      (1 << 1)
-#define TRB_TR_ISP      (1 << 2)
-#define TRB_TR_CH       (1 << 4)
-#define TRB_TR_IOC      (1 << 5)
-#define TRB_TR_IDT      (1 << 6)
-#define TRB_TR_BEI      (1 << 9)
-#define TRB_LK_TC       (1 << 1)
-#define TRB_EV_ED       (1 << 2)
-#define TRB_CR_BSR      (1 << 9)
-#define TRB_CR_DC       (1 << 9)
+#define TRB_C           bit_at(0)
+#define TRB_TR_ENT      bit_at(1)
+#define TRB_TR_ISP      bit_at(2)
+#define TRB_TR_CH       bit_at(4)
+#define TRB_TR_IOC      bit_at(5)
+#define TRB_TR_IDT      bit_at(6)
+#define TRB_TR_BEI      bit_at(9)
+#define TRB_LK_TC       bit_at(1)
+#define TRB_EV_ED       bit_at(2)
+#define TRB_CR_BSR      bit_at(9)
+#define TRB_CR_DC       bit_at(9)
 #define TRB_TYPE_SHIFT  10
-#define TRB_TYPE(c)     (((c) >> TRB_TYPE_SHIFT) & 0x3f)
+#define TRB_TYPE(c)     get_bits(c, TRB_TYPE_SHIFT, 6)
 
 #define TRB_LEN_MASK    0x1ffff
 
@@ -708,7 +709,7 @@ void XHCIDevice::LoadErSegment(int index)
     }
     /* The table is re-read on every segment load rather than cached, so a
        guest that rewrites it in place is followed for free. */
-    fErSegStart = ((uint64_t)get_le32(entry + 4) << 32) | get_le32(entry);
+    fErSegStart = concat_bits(get_le32(entry + 4), get_le32(entry), 32);
     fErSegStart &= ~0x3fULL;
     fErSegSize = get_le16(entry + 8);
     if (fErSegSize > 4096) {
@@ -760,7 +761,7 @@ bool XHCIDevice::EventRingFull() const
     } else {
         next_addr = fErSegStart + (uint64_t)next * 16;
     }
-    uint64_t erdp = ((uint64_t)fErdpHi << 32) | (fErdpLo & ~0xfULL);
+    uint64_t erdp = concat_bits(fErdpHi, fErdpLo & ~0xfu, 32);
     return next_addr == erdp;
 }
 
@@ -839,7 +840,7 @@ int XHCIDevice::RingFetch(XHCIRing *ring, XHCITRB *trb)
             fUsbSts |= USBSTS_HSE;
             return 0;
         }
-        trb->parameter = ((uint64_t)get_le32(buf + 4) << 32) | get_le32(buf);
+        trb->parameter = concat_bits(get_le32(buf + 4), get_le32(buf), 32);
         trb->status = get_le32(buf + 8);
         trb->control = get_le32(buf + 12);
         trb->addr = ring->deq;
@@ -875,7 +876,7 @@ uint64_t XHCIDevice::SlotCtxAddr(int slot_id)
     if (fDcbaap == 0 || !DmaRead(fDcbaap + (uint64_t)slot_id * 8, buf, 8)) {
         return 0;
     }
-    return (((uint64_t)get_le32(buf + 4) << 32) | get_le32(buf)) & ~0x3fULL;
+    return concat_bits(get_le32(buf + 4), get_le32(buf), 32) & ~0x3fULL;
 }
 
 
@@ -916,7 +917,7 @@ void XHCIDevice::SetSlotState(int slot_id, int state)
 {
     uint64_t addr = SlotCtxAddr(slot_id);
     uint32_t dw3 = CtxRead(addr, 3);
-    CtxWrite(addr, 3, (dw3 & 0x07ffffff) | ((uint32_t)state << 27));
+    CtxWrite(addr, 3, set_bits(dw3, 27, 5, state));
 }
 
 
@@ -981,7 +982,7 @@ USBDevice *XHCIDevice::ResolveDevice(int port, uint32_t route)
     }
     USBDevice *dev = fPorts[port - 1].port.dev;
     for (int tier = 0; tier < 5 && dev != nullptr; tier++) {
-        int p = (route >> (tier * 4)) & 0xf;
+        int p = get_bits(route, tier * 4, 4);
         if (p == 0) {
             break;
         }
@@ -1226,10 +1227,10 @@ void XHCIDevice::XferReport(XHCIEndpoint *ep)
                    address, and the length is cumulative. */
                 ev.parameter = trb.parameter;
                 control |= TRB_EV_ED;
-                length = edtla & 0xffffff;
+                length = get_bits(edtla, 0, 24);
                 edtla = 0;
             }
-            ev.status = (length & 0xffffff) | (cc << 24);
+            ev.status = set_bits(length, 24, 8, cc);
             ev.control = control;
             PostEvent(ev, (trb.control & TRB_TR_BEI) != 0);
             reported = true;
@@ -1251,8 +1252,7 @@ void XHCIDevice::HaltEndpoint(XHCIEndpoint *ep)
     ep->state = EP_HALTED;
     SetEpState(ep->slot_id, ep->dci, EP_HALTED);
     uint64_t addr = EpCtxAddr(ep->slot_id, ep->dci);
-    CtxWrite(addr, 2, (uint32_t)(ep->ring.deq & 0xfffffff0) |
-                          (ep->ring.ccs ? 1 : 0));
+    CtxWrite(addr, 2, set_bits((uint32_t)ep->ring.deq, 0, 4, ep->ring.ccs));
     CtxWrite(addr, 3, (uint32_t)(ep->ring.deq >> 32));
 }
 
@@ -1391,7 +1391,7 @@ void XHCIEndpoint::Complete(URB *urb)
 
 int XHCIDevice::CmdEnableSlot(int *pslot_id)
 {
-    int max = fConfig & 0xff;
+    int max = get_bits(fConfig, 0, 8);
     if (max == 0 || max > XHCI_MAX_SLOTS) {
         max = XHCI_MAX_SLOTS;
     }
@@ -1453,7 +1453,7 @@ int XHCIDevice::CmdAddressDevice(int slot_id, const XHCITRB &trb)
 
     uint64_t in_ctx = trb.parameter & ~0xfULL;
     uint32_t add_flags = CtxRead(in_ctx, 1);
-    if ((add_flags & 0x3) != 0x3) {
+    if (get_bits(add_flags, 0, 2) != 0x3) {
         /* The slot context and the default control endpoint are the two the
            command exists to install. */
         return CC_PARAMETER_ERROR;
@@ -1468,8 +1468,8 @@ int XHCIDevice::CmdAddressDevice(int slot_id, const XHCITRB &trb)
 
     uint32_t slot_dw0 = CtxRead(in_slot, 0);
     uint32_t slot_dw1 = CtxRead(in_slot, 1);
-    uint32_t route = slot_dw0 & 0xfffff;
-    int port = (slot_dw1 >> 16) & 0xff;
+    uint32_t route = get_bits(slot_dw0, 0, 20);
+    int port = get_bits(slot_dw1, 16, 8);
 
     USBDevice *dev = ResolveDevice(port, route);
     if (dev == nullptr) {
@@ -1486,7 +1486,7 @@ int XHCIDevice::CmdAddressDevice(int slot_id, const XHCITRB &trb)
     ep->type = EP_TYPE_CONTROL;
     ep->max_packet = CtxRead(in_ep0, 1) >> 16;
     uint32_t deq_lo = CtxRead(in_ep0, 2);
-    ep->ring.deq = (((uint64_t)CtxRead(in_ep0, 3) << 32) | deq_lo) & ~0xfULL;
+    ep->ring.deq = concat_bits(CtxRead(in_ep0, 3), deq_lo, 32) & ~0xfULL;
     ep->ring.ccs = (deq_lo & 1) != 0;
     ep->state = EP_RUNNING;
 
@@ -1510,10 +1510,9 @@ int XHCIDevice::CmdAddressDevice(int slot_id, const XHCITRB &trb)
 
     uint32_t out_dw3 = CtxRead(out_slot, 3);
     CtxWrite(out_slot, 3,
-             (out_dw3 & 0x07ffff00) | (uint32_t)address |
-                 ((uint32_t)slot_state << 27));
+             set_bits(set_bits(out_dw3, 0, 8, address), 27, 5, slot_state));
     uint32_t out_dw0 = CtxRead(out_slot, 0);
-    CtxWrite(out_slot, 0, (out_dw0 & 0x07ffffff) | (1u << 27));
+    CtxWrite(out_slot, 0, set_bits(out_dw0, 27, 5, 1));
     SetEpState(slot_id, 1, EP_RUNNING);
     return CC_SUCCESS;
 }
@@ -1538,7 +1537,7 @@ int XHCIDevice::CmdConfigureEndpoint(int slot_id, const XHCITRB &trb)
             SetEpState(slot_id, dci, EP_DISABLED);
         }
         uint32_t dw0 = CtxRead(out_slot, 0);
-        CtxWrite(out_slot, 0, (dw0 & 0x07ffffff) | (1u << 27));
+        CtxWrite(out_slot, 0, set_bits(dw0, 27, 5, 1));
         SetSlotState(slot_id, SLOT_ADDRESSED);
         return CC_SUCCESS;
     }
@@ -1549,19 +1548,19 @@ int XHCIDevice::CmdConfigureEndpoint(int slot_id, const XHCITRB &trb)
 
     /* The first two flags address the slot context and the default control
        endpoint, neither of which this command is allowed to drop. */
-    if ((drop_flags & 0x3) != 0) {
+    if (get_bits(drop_flags, 0, 2) != 0) {
         return CC_PARAMETER_ERROR;
     }
 
     for (int dci = 2; dci < XHCI_DCI_COUNT; dci++) {
-        if ((drop_flags & (1u << dci)) != 0) {
+        if (get_bit(drop_flags, dci)) {
             DisableEndpoint(slot_id, dci);
             SetEpState(slot_id, dci, EP_DISABLED);
         }
     }
 
     for (int dci = 1; dci < XHCI_DCI_COUNT; dci++) {
-        if ((add_flags & (1u << dci)) == 0) {
+        if (!get_bit(add_flags, dci)) {
             continue;
         }
         uint64_t in_ep = in_ctx + (uint64_t)(dci + 1) * XHCI_CTX_SIZE;
@@ -1570,17 +1569,17 @@ int XHCIDevice::CmdConfigureEndpoint(int slot_id, const XHCITRB &trb)
 
         XHCIEndpoint *ep = EnableEndpoint(slot_id, dci);
         uint32_t dw1 = CtxRead(in_ep, 1);
-        ep->type = (dw1 >> 3) & 0x7;
+        ep->type = get_bits(dw1, 3, 3);
         ep->max_packet = dw1 >> 16;
         uint32_t deq_lo = CtxRead(in_ep, 2);
         ep->ring.deq =
-            (((uint64_t)CtxRead(in_ep, 3) << 32) | deq_lo) & ~0xfULL;
+            concat_bits(CtxRead(in_ep, 3), deq_lo, 32) & ~0xfULL;
         ep->ring.ccs = (deq_lo & 1) != 0;
         ep->state = EP_RUNNING;
         SetEpState(slot_id, dci, EP_RUNNING);
     }
 
-    if ((add_flags & 0x1) != 0) {
+    if (get_bit(add_flags, 0)) {
         /* The slot context carries the hub flag and the transaction
            translator fields, which a host sets when it enumerates a hub. */
         uint64_t in_slot = in_ctx + XHCI_CTX_SIZE;
@@ -1591,7 +1590,7 @@ int XHCIDevice::CmdConfigureEndpoint(int slot_id, const XHCITRB &trb)
         /* Keep the route string; take the speed, the hub flag and the
            context entry count from the input context. */
         CtxWrite(out_slot, 0,
-                 (out_dw0 & 0x000fffff) | (in_dw0 & 0xfff00000));
+                 set_bits(out_dw0, 20, 12, get_bits(in_dw0, 20, 12)));
         CtxWrite(out_slot, 1, in_dw1);
         CtxWrite(out_slot, 2, in_dw2);
     }
@@ -1615,21 +1614,23 @@ int XHCIDevice::CmdEvaluateContext(int slot_id, const XHCITRB &trb)
        in the slot context, and the maximum packet size on the default control
        endpoint. A host uses the latter once it has read the real descriptor
        and found the value it guessed was wrong. */
-    if ((add_flags & 0x1) != 0) {
+    if (get_bit(add_flags, 0)) {
         uint64_t in_slot = in_ctx + XHCI_CTX_SIZE;
         uint32_t in_dw1 = CtxRead(in_slot, 1);
         uint32_t in_dw2 = CtxRead(in_slot, 2);
         uint32_t out_dw1 = CtxRead(out_slot, 1);
         uint32_t out_dw2 = CtxRead(out_slot, 2);
-        CtxWrite(out_slot, 1, (out_dw1 & 0xffff0000) | (in_dw1 & 0xffff));
-        CtxWrite(out_slot, 2, (out_dw2 & 0x003fffff) | (in_dw2 & 0xffc00000));
+        CtxWrite(out_slot, 1, set_bits(out_dw1, 0, 16, in_dw1));
+        CtxWrite(out_slot, 2,
+                 set_bits(out_dw2, 22, 10, get_bits(in_dw2, 22, 10)));
     }
-    if ((add_flags & 0x2) != 0) {
+    if (get_bit(add_flags, 1)) {
         uint64_t in_ep0 = in_ctx + 2 * XHCI_CTX_SIZE;
         uint64_t out_ep0 = EpCtxAddr(slot_id, 1);
         uint32_t in_dw1 = CtxRead(in_ep0, 1);
         uint32_t out_dw1 = CtxRead(out_ep0, 1);
-        CtxWrite(out_ep0, 1, (out_dw1 & 0xffff) | (in_dw1 & 0xffff0000));
+        CtxWrite(out_ep0, 1,
+                 set_bits(out_dw1, 16, 16, get_bits(in_dw1, 16, 16)));
         XHCIEndpoint *ep = GetEndpoint(slot_id, 1);
         if (ep != nullptr) {
             ep->max_packet = in_dw1 >> 16;
@@ -1679,7 +1680,7 @@ int XHCIDevice::CmdStopEndpoint(int slot_id, int dci)
     SetEpState(slot_id, dci, EP_STOPPED);
     uint64_t addr = EpCtxAddr(slot_id, dci);
     CtxWrite(addr, 2,
-             (uint32_t)(ep->ring.deq & 0xfffffff0) | (ep->ring.ccs ? 1 : 0));
+             set_bits((uint32_t)ep->ring.deq, 0, 4, ep->ring.ccs));
     CtxWrite(addr, 3, (uint32_t)(ep->ring.deq >> 32));
     return CC_SUCCESS;
 }
@@ -1699,7 +1700,7 @@ int XHCIDevice::CmdSetTrDequeue(int slot_id, int dci, const XHCITRB &trb)
     ep->ring.ccs = (trb.parameter & 1) != 0;
     uint64_t addr = EpCtxAddr(slot_id, dci);
     CtxWrite(addr, 2,
-             (uint32_t)(ep->ring.deq & 0xfffffff0) | (ep->ring.ccs ? 1 : 0));
+             set_bits((uint32_t)ep->ring.deq, 0, 4, ep->ring.ccs));
     CtxWrite(addr, 3, (uint32_t)(ep->ring.deq >> 32));
     return CC_SUCCESS;
 }
@@ -1722,9 +1723,9 @@ int XHCIDevice::CmdResetDevice(int slot_id)
     }
     uint32_t dw3 = CtxRead(out_slot, 3);
     CtxWrite(out_slot, 3,
-             (dw3 & 0x07ffff00) | ((uint32_t)SLOT_DEFAULT << 27));
+             set_bits(dw3, 27, 5, SLOT_DEFAULT));
     uint32_t dw0 = CtxRead(out_slot, 0);
-    CtxWrite(out_slot, 0, (dw0 & 0x07ffffff) | (1u << 27));
+    CtxWrite(out_slot, 0, set_bits(dw0, 27, 5, 1));
     return CC_SUCCESS;
 }
 
@@ -1732,8 +1733,8 @@ int XHCIDevice::CmdResetDevice(int slot_id)
 void XHCIDevice::ExecuteCommand(uint64_t addr, const XHCITRB &trb)
 {
     int type = TRB_TYPE(trb.control);
-    int slot_id = (trb.control >> 24) & 0xff;
-    int dci = (trb.control >> 16) & 0x1f;
+    int slot_id = get_bits(trb.control, 24, 8);
+    int dci = get_bits(trb.control, 16, 5);
     int cc;
 
     switch (type) {
@@ -1820,7 +1821,7 @@ void XHCIDevice::RunCommandRing()
 uint32_t XHCIDevice::MfIndex() const
 {
     uint64_t us = host_monotonic_us();
-    return (uint32_t)(((us - fStartUs) / 125) & 0x3fff);
+    return get_bits((us - fStartUs) / 125, 0, 14);
 }
 
 
@@ -2031,7 +2032,7 @@ void XHCIDevice::OperWrite(uint32_t offset, uint32_t val)
         return;
 
     case XHCI_DNCTRL:
-        fDnCtrl = val & 0xffff;
+        fDnCtrl = get_bits(val, 0, 16);
         return;
 
     case XHCI_CRCR_LO:
@@ -2047,7 +2048,7 @@ void XHCIDevice::OperWrite(uint32_t offset, uint32_t val)
             PostCommandComplete(fCmdRing.deq, CC_COMMAND_RING_STOPPED, 0);
         } else {
             fCmdRing.deq =
-                (((uint64_t)fCrcrHi << 32) | (fCrcrLo & ~0x3fu));
+                concat_bits(fCrcrHi, fCrcrLo & ~0x3fu, 32);
             fCmdRing.ccs = (fCrcrLo & CRCR_RCS) != 0;
         }
         return;
@@ -2057,11 +2058,11 @@ void XHCIDevice::OperWrite(uint32_t offset, uint32_t val)
         return;
 
     case XHCI_DCBAAP_HI:
-        fDcbaap = (((uint64_t)val << 32) | fDcbaapLo) & ~0x3fULL;
+        fDcbaap = concat_bits(val, fDcbaapLo, 32) & ~0x3fULL;
         return;
 
     case XHCI_CONFIG:
-        fConfig = val & 0xff;
+        fConfig = get_bits(val, 0, 8);
         return;
     }
 }
@@ -2183,7 +2184,7 @@ void XHCIDevice::RuntimeWrite(uint32_t offset, uint32_t val)
         return;
 
     case XHCI_ERSTSZ:
-        fErstSz = val & 0xffff;
+        fErstSz = get_bits(val, 0, 16);
         if (fErstSz == 0) {
             fErSegSize = 0;
         } else if ((uint32_t)fErSegIndex >= fErstSz) {
@@ -2196,7 +2197,7 @@ void XHCIDevice::RuntimeWrite(uint32_t offset, uint32_t val)
         return;
 
     case XHCI_ERSTBA_HI: {
-        uint64_t base = (((uint64_t)val << 32) | fErstBaLo) & ~0x3fULL;
+        uint64_t base = concat_bits(val, fErstBaLo, 32) & ~0x3fULL;
         if (base != fErstBa) {
             fErstBa = base;
             ResetEventRing();
@@ -2213,7 +2214,7 @@ void XHCIDevice::RuntimeWrite(uint32_t offset, uint32_t val)
             /* Space has been freed: anything that had to wait goes out now,
                and an event ring that is still not empty interrupts again. */
             DrainEventFifo();
-            uint64_t erdp = ((uint64_t)fErdpHi << 32) | (fErdpLo & ~0xfULL);
+            uint64_t erdp = concat_bits(fErdpHi, fErdpLo & ~0xfu, 32);
             if (fErSegSize != 0 && erdp >= fErSegStart &&
                 erdp < fErSegStart + (uint64_t)fErSegSize * 16 &&
                 erdp != fErEnqueue) {
@@ -2232,7 +2233,7 @@ void XHCIDevice::RuntimeWrite(uint32_t offset, uint32_t val)
 void XHCIDevice::DoorbellWrite(uint32_t offset, uint32_t val)
 {
     int index = offset / 4;
-    int target = val & 0xff;
+    int target = get_bits(val, 0, 8);
 
     if (index == 0) {
         if (target == 0) {

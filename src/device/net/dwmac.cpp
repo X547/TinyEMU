@@ -25,6 +25,7 @@
 
 #include <string.h>
 
+#include "bits.h"
 #include "cutils.h"
 #include "fdt.h"
 
@@ -47,26 +48,26 @@
 #define GMAC_MMC_BASE             0x0700
 #define GMAC_MMC_END              0x0900
 
-#define GMAC_CONFIG_RE (1u << 0)
-#define GMAC_CONFIG_TE (1u << 1)
+#define GMAC_CONFIG_RE bit_at(0)
+#define GMAC_CONFIG_TE bit_at(1)
 
-#define GMAC_PACKET_FILTER_PR  (1u << 0)  /* promiscuous */
-#define GMAC_PACKET_FILTER_PM  (1u << 4)  /* pass all multicast */
-#define GMAC_PACKET_FILTER_DBF (1u << 5)  /* disable broadcast */
-#define GMAC_PACKET_FILTER_RA  (1u << 31) /* receive all */
+#define GMAC_PACKET_FILTER_PR  bit_at(0)  /* promiscuous */
+#define GMAC_PACKET_FILTER_PM  bit_at(4)  /* pass all multicast */
+#define GMAC_PACKET_FILTER_DBF bit_at(5)  /* disable broadcast */
+#define GMAC_PACKET_FILTER_RA  bit_at(31) /* receive all */
 
-#define GMAC_ADDR_HIGH_AE (1u << 31)
+#define GMAC_ADDR_HIGH_AE bit_at(31)
 
 /* Link status change on the media independent interface. Latched here and
    cleared when the status register below is read. */
-#define GMAC_INT_RGSMIIIS (1u << 0)
+#define GMAC_INT_RGSMIIIS bit_at(0)
 
-#define GMAC_PHYIF_LNKMOD (1u << 16) /* full duplex */
+#define GMAC_PHYIF_LNKMOD bit_at(16) /* full duplex */
 #define GMAC_PHYIF_SPEED_SHIFT 17
-#define GMAC_PHYIF_LNKSTS (1u << 19)
+#define GMAC_PHYIF_LNKSTS bit_at(19)
 
-#define GMAC_MDIO_ADDR_GB   (1u << 0)
-#define GMAC_MDIO_ADDR_C45E (1u << 1)
+#define GMAC_MDIO_ADDR_GB   bit_at(0)
+#define GMAC_MDIO_ADDR_C45E bit_at(1)
 #define GMAC_MDIO_GOC_WRITE 1
 #define GMAC_MDIO_GOC_READ  3
 
@@ -82,8 +83,8 @@
 #define DMA_SYS_BUS_MODE 0x1004
 #define DMA_STATUS       0x1008
 
-#define DMA_BUS_MODE_SWR      (1u << 0)
-#define DMA_SYS_BUS_MODE_EAME (1u << 11)
+#define DMA_BUS_MODE_SWR      bit_at(0)
+#define DMA_SYS_BUS_MODE_EAME bit_at(11)
 
 #define DMA_CHAN_BASE 0x1100
 #define DMA_CHAN_SIZE 0x0080
@@ -107,20 +108,20 @@
 #define DMA_CHAN_STATUS           0x60
 
 #define DMA_CHAN_CONTROL_DSL_SHIFT 18
-#define DMA_CHAN_CONTROL_DSL_MASK  0x7
+#define DMA_CHAN_CONTROL_DSL_BITS  3
 
-#define DMA_CHAN_TX_CONTROL_ST (1u << 0)
-#define DMA_CHAN_RX_CONTROL_SR (1u << 0)
+#define DMA_CHAN_TX_CONTROL_ST bit_at(0)
+#define DMA_CHAN_RX_CONTROL_SR bit_at(0)
 #define DMA_CHAN_RX_CONTROL_RBSZ_SHIFT 1
 #define DMA_CHAN_RX_CONTROL_RBSZ_MASK  0x3fff
 
-#define DMA_CHAN_STATUS_TI  (1u << 0)
-#define DMA_CHAN_STATUS_TBU (1u << 2)
-#define DMA_CHAN_STATUS_RI  (1u << 6)
-#define DMA_CHAN_STATUS_RBU (1u << 7)
-#define DMA_CHAN_STATUS_FBE (1u << 12)
-#define DMA_CHAN_STATUS_AIS (1u << 14)
-#define DMA_CHAN_STATUS_NIS (1u << 15)
+#define DMA_CHAN_STATUS_TI  bit_at(0)
+#define DMA_CHAN_STATUS_TBU bit_at(2)
+#define DMA_CHAN_STATUS_RI  bit_at(6)
+#define DMA_CHAN_STATUS_RBU bit_at(7)
+#define DMA_CHAN_STATUS_FBE bit_at(12)
+#define DMA_CHAN_STATUS_AIS bit_at(14)
+#define DMA_CHAN_STATUS_NIS bit_at(15)
 
 /* Which summary bit a condition rolls up into. */
 #define DMA_CHAN_STATUS_NORMAL \
@@ -132,16 +133,16 @@
    back format on the way out. */
 #define TDES2_BUFFER1_SIZE_MASK 0x00003fff
 #define TDES3_PACKET_SIZE_MASK  0x00007fff
-#define TDES3_ERROR_SUMMARY     (1u << 15)
-#define TDES3_LAST_DESCRIPTOR   (1u << 28)
-#define TDES3_FIRST_DESCRIPTOR  (1u << 29)
-#define TDES3_CONTEXT_TYPE      (1u << 30)
-#define TDES3_OWN               (1u << 31)
+#define TDES3_ERROR_SUMMARY     bit_at(15)
+#define TDES3_LAST_DESCRIPTOR   bit_at(28)
+#define TDES3_FIRST_DESCRIPTOR  bit_at(29)
+#define TDES3_CONTEXT_TYPE      bit_at(30)
+#define TDES3_OWN               bit_at(31)
 
 #define RDES3_PACKET_SIZE_MASK  0x00007fff
-#define RDES3_LAST_DESCRIPTOR   (1u << 28)
-#define RDES3_FIRST_DESCRIPTOR  (1u << 29)
-#define RDES3_OWN               (1u << 31)
+#define RDES3_LAST_DESCRIPTOR   bit_at(28)
+#define RDES3_FIRST_DESCRIPTOR  bit_at(29)
+#define RDES3_OWN               bit_at(31)
 
 /* The transmit and receive FIFO sizes are reported as log2(bytes / 128), and
    the drivers derive their queue sizes from them as (bytes / 256) - 1 without
@@ -152,10 +153,10 @@
    timestamping, no counters and no filters beyond the perfect ones. Each
    count field is encoded as the count minus one, so a zero field means one. */
 #define DWMAC_HW_FEATURE0 \
-    ((1u << 0) |  /* 10/100 supported */ \
-     (1u << 1) |  /* 1000 supported */ \
-     (1u << 2) |  /* half duplex supported */ \
-     (1u << 5) |  /* MDIO present */ \
+    (bit_at(0) |  /* 10/100 supported */ \
+     bit_at(1) |  /* 1000 supported */ \
+     bit_at(2) |  /* half duplex supported */ \
+     bit_at(5) |  /* MDIO present */ \
      ((uint32_t)(DWMAC_ADDR_COUNT - 1) << 18))
 #define DWMAC_HW_FEATURE1 \
     ((DWMAC_FIFO_SIZE_LOG2 << 6) | DWMAC_FIFO_SIZE_LOG2)
@@ -376,9 +377,9 @@ uint32_t DwmacDevice::PhyIfStatus() const
 
 void DwmacDevice::MdioTransfer(uint32_t val)
 {
-    int phy_addr = (val >> 21) & 0x1f;
-    int reg = (val >> 16) & 0x1f;
-    int op = (val >> 2) & 3;
+    int phy_addr = get_bits(val, 21, 5);
+    int reg = get_bits(val, 16, 5);
+    int op = get_bits(val, 2, 2);
     MDIODevice *dev = fMdioBus->DeviceAtAddress(phy_addr);
 
     /* Clause 45 is not modelled, and neither is an empty address: both have
@@ -390,7 +391,7 @@ void DwmacDevice::MdioTransfer(uint32_t val)
     } else if (op == GMAC_MDIO_GOC_READ) {
         Reg(GMAC_MDIO_DATA) = dev->MdioRead(reg);
     } else if (op == GMAC_MDIO_GOC_WRITE) {
-        dev->MdioWrite(reg, Reg(GMAC_MDIO_DATA) & 0xffff);
+        dev->MdioWrite(reg, get_bits(Reg(GMAC_MDIO_DATA), 0, 16));
     }
 
     /* The transfer completes within the write, so the busy bit a driver
@@ -484,8 +485,9 @@ uint64_t DwmacDevice::BufferAddress(uint32_t lo, uint32_t hi) const
    how many bus words to step over between them. */
 uint32_t DwmacDevice::DescStride() const
 {
-    uint32_t dsl = (ChanReg(DMA_CHAN_CONTROL) >> DMA_CHAN_CONTROL_DSL_SHIFT) &
-        DMA_CHAN_CONTROL_DSL_MASK;
+    uint32_t dsl = get_bits(ChanReg(DMA_CHAN_CONTROL),
+                            DMA_CHAN_CONTROL_DSL_SHIFT,
+                            DMA_CHAN_CONTROL_DSL_BITS);
     return 16 + dsl * 8;
 }
 
@@ -493,7 +495,7 @@ uint32_t DwmacDevice::DescStride() const
 uint32_t DwmacDevice::RingLength(bool tx) const
 {
     uint32_t reg = tx ? DMA_CHAN_TXDESC_RING_LEN : DMA_CHAN_RXDESC_RING_LEN;
-    return (ChanReg(reg) & 0x3ff) + 1;
+    return get_bits(ChanReg(reg), 0, 10) + 1;
 }
 
 
@@ -761,7 +763,7 @@ uint32_t DwmacDevice::Read(uint32_t offset, int size_log2)
     }
     uint32_t base = offset & ~3u;
     uint32_t shift = (offset - base) * 8;
-    return (ReadWord(base) >> shift) & ((1u << (size * 8)) - 1);
+    return get_bits(ReadWord(base), shift, size * 8);
 }
 
 
@@ -783,8 +785,7 @@ void DwmacDevice::Write(uint32_t offset, uint32_t val, int size_log2)
        not do that. */
     uint32_t base = offset & ~3u;
     uint32_t shift = (offset - base) * 8;
-    uint32_t mask = ((1u << (size * 8)) - 1) << shift;
-    WriteWord(base, (Reg(base) & ~mask) | ((val << shift) & mask));
+    WriteWord(base, set_bits(Reg(base), shift, size * 8, val));
 }
 
 

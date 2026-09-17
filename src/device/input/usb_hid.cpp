@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "bits.h"
 #include "cutils.h"
 #include "hid.h"
 #include "machine.h"
@@ -138,7 +139,7 @@ void USBHID::BuildConfigDescriptor()
     /* configuration */
     *d++ = 9;
     *d++ = USB_DT_CONFIG;
-    *d++ = total & 0xff;
+    *d++ = get_bits(total, 0, 8);
     *d++ = total >> 8;
     *d++ = fFunctionCount;
     *d++ = 1;    /* configuration value */
@@ -185,7 +186,7 @@ void USBHID::BuildConfigDescriptor()
         *d++ = dev->CountryCode();
         *d++ = 1;    /* one subordinate descriptor */
         *d++ = USB_DT_REPORT;
-        *d++ = desc_len & 0xff;
+        *d++ = get_bits(desc_len, 0, 8);
         *d++ = desc_len >> 8;
 
         /* the input report endpoint */
@@ -367,7 +368,8 @@ USBStatusEnum USBHID::HandleControl(URB *urb)
             int type = setup.value >> 8;
             if (type == USB_DT_HID || type == USB_DT_REPORT ||
                 type == USB_DT_PHYSICAL) {
-                Function *fn = FunctionForInterface(setup.index & 0xff);
+                Function *fn =
+                    FunctionForInterface(get_bits(setup.index, 0, 8));
                 if (fn == nullptr) {
                     return USB_STATUS_STALL;
                 }
@@ -389,7 +391,7 @@ USBStatusEnum USBHID::HandleControl(URB *urb)
         return USB_STATUS_STALL;
     }
 
-    Function *fn = FunctionForInterface(setup.index & 0xff);
+    Function *fn = FunctionForInterface(get_bits(setup.index, 0, 8));
     if (fn == nullptr) {
         return USB_STATUS_STALL;
     }

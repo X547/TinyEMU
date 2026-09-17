@@ -30,6 +30,7 @@
 #include <inttypes.h>
 #include <assert.h>
 
+#include "bits.h"
 #include "cutils.h"
 #include "devices.h"
 #include "fdt.h"
@@ -71,9 +72,9 @@ void simplefb_refresh(FBDevice *fb_dev, HostScreen *screen,
         if (dirty_val != 0) {
             bit_pos = 0;
             while (dirty_val != 0) {
-                while (((dirty_val >> bit_pos) & 1) == 0)
+                while (!get_bit(dirty_val, bit_pos))
                     bit_pos++;
-                dirty_val &= ~(1 << bit_pos);
+                dirty_val = set_bit(dirty_val, bit_pos, false);
 
                 byte_pos = (page_index + bit_pos) * DEVRAM_PAGE_SIZE;
                 page_y0 = byte_pos / fb_dev->stride;

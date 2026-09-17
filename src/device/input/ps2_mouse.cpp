@@ -24,6 +24,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "bits.h"
 #include "ps2.h"
 
 /* debug PS/2 mouse */
@@ -120,10 +121,11 @@ void PS2MouseDevice::SendPacket()
         dy1 = 127;
     else if (dy1 < -127)
         dy1 = -127;
-    b = 0x08 | ((dx1 < 0) << 4) | ((dy1 < 0) << 5) | (fButtons & 0x07);
+    b = 0x08 | ((dx1 < 0) << 4) | ((dy1 < 0) << 5) |
+        get_bits(fButtons, 0, 3);
     Queue(b);
-    Queue(dx1 & 0xff);
-    Queue(dy1 & 0xff);
+    Queue(get_bits(dx1, 0, 8));
+    Queue(get_bits(dy1, 0, 8));
     /* extra byte for IMPS/2 or IMEX */
     switch (fType) {
     default:
@@ -133,14 +135,15 @@ void PS2MouseDevice::SendPacket()
             dz1 = 127;
         else if (dz1 < -127)
             dz1 = -127;
-        Queue(dz1 & 0xff);
+        Queue(get_bits(dz1, 0, 8));
         break;
     case MOUSE_TYPE_IMEX:
         if (dz1 > 7)
             dz1 = 7;
         else if (dz1 < -7)
             dz1 = -7;
-        b = (dz1 & 0x0f) | ((fButtons & 0x18) << 1);
+        b = set_bits(get_bits(dz1, 0, 4), 4, 2,
+                     get_bits(fButtons, 3, 2));
         Queue(b);
         break;
     }

@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "bits.h"
 #include "ata.h"
 #include "cutils.h"
 #include "virtio.h"
@@ -174,14 +175,14 @@ int64_t ATADiskDevice::CurrentLba() const
 void ATADiskDevice::SetCurrentLba(int64_t lba)
 {
     if (fSelect & 0x40) {
-        fSelect = (fSelect & 0xf0) | ((lba >> 24) & 0x0f);
-        fHcyl = (lba >> 16) & 0xff;
-        fLcyl = (lba >> 8) & 0xff;
+        fSelect = set_bits(fSelect, 0, 4, lba >> 24);
+        fHcyl = get_bits(lba, 16, 8);
+        fLcyl = get_bits(lba, 8, 8);
         fSector = lba & 0xff;
     } else {
         int64_t cyl = lba / (ATA_DISK_HEADS * ATA_DISK_SECTORS);
         int64_t r = lba % (ATA_DISK_HEADS * ATA_DISK_SECTORS);
-        fHcyl = (cyl >> 8) & 0xff;
+        fHcyl = get_bits(cyl, 8, 8);
         fLcyl = cyl & 0xff;
         fSelect = (fSelect & 0xf0) | ((r / ATA_DISK_SECTORS) & 0x0f);
         fSector = (r % ATA_DISK_SECTORS) + 1;
@@ -559,8 +560,8 @@ void ATADiskDevice::SetFeatures()
         switch (cls) {
         case ATA_XFER_PIO_SLOW: ok = index <= 1; break;
         case ATA_XFER_PIO:      ok = index <= 4; break;
-        case ATA_XFER_MWDMA:    ok = (ATA_MWDMA_MODES >> index) & 1; break;
-        case ATA_XFER_UDMA:     ok = (ATA_UDMA_MODES >> index) & 1; break;
+        case ATA_XFER_MWDMA:    ok = get_bit(ATA_MWDMA_MODES, index); break;
+        case ATA_XFER_UDMA:     ok = get_bit(ATA_UDMA_MODES, index); break;
         default:                ok = false; break;
         }
         if (!ok) {

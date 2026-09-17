@@ -29,6 +29,7 @@
 #include <assert.h>
 #include <atomic>
 
+#include "bits.h"
 #include "cutils.h"
 #include "host_time.h"
 #include "iomem.h"
@@ -203,16 +204,16 @@ PHYS_MEM_READ_WRITE(8, uint8_t)
 PHYS_MEM_READ_WRITE(32, uint32_t)
 PHYS_MEM_READ_WRITE(64, uint64_t)
 
-#define PTE_V_MASK (1 << 0)
-#define PTE_U_MASK (1 << 4)
-#define PTE_A_MASK (1 << 6)
-#define PTE_D_MASK (1 << 7)
+#define PTE_V_MASK bit_at(0)
+#define PTE_U_MASK bit_at(4)
+#define PTE_A_MASK bit_at(6)
+#define PTE_D_MASK bit_at(7)
 
 /* Bits 63:54 of a 64 bit PTE are claimed by Svnapot (63), Svpbmt (62:61) and
    future standard use (60:54). None of them are implemented here, so a PTE
    that sets any of them is malformed and must fault. */
 #if MAX_XLEN >= 64
-#define PTE_RESERVED_MASK (((target_ulong)0x3ff) << 54)
+#define PTE_RESERVED_MASK field_mask<target_ulong>(54, 10)
 #else
 #define PTE_RESERVED_MASK 0
 #endif
@@ -227,13 +228,13 @@ static int get_phys_addr(RISCVCPUState *s,
                          target_ulong *ppaddr, target_ulong vaddr,
                          int access)
 {
-    int mode, levels, pte_bits, pte_idx, pte_mask, pte_size_log2, xwr, priv;
+    int mode, levels, pte_bits, pte_idx, pte_size_log2, xwr, priv;
     int vaddr_shift, i, pte_addr_bits;
     target_ulong pte_addr, pte, vaddr_mask, paddr;
 
     if ((s->mstatus & MSTATUS_MPRV) && access != ACCESS_CODE) {
         /* use previous priviledge */
-        priv = (s->mstatus >> MSTATUS_MPP_SHIFT) & 3;
+        priv = get_bits(s->mstatus, MSTATUS_MPP_SHIFT, 2);
     } else {
         priv = s->priv;
     }
@@ -241,7 +242,7 @@ static int get_phys_addr(RISCVCPUState *s,
     if (priv == PRV_M) {
         if (s->cur_xlen < MAX_XLEN) {
             /* truncate virtual address */
-            *ppaddr = vaddr & (((target_ulong)1 << s->cur_xlen) - 1);
+            *ppaddr = get_bits(vaddr, 0, s->cur_xlen);
         } else {
             *ppaddr = vaddr;
         }
@@ -249,7 +250,7 @@ static int get_phys_addr(RISCVCPUState *s,
     }
 #if MAX_XLEN == 32
     /* 32 bits */
-    mode = s->satp >> 31;
+    mode = get_bit(s->satp, 31);
     if (mode == 0) {
         /* bare: no translation */
         *ppaddr = vaddr;
@@ -261,7 +262,7 @@ static int get_phys_addr(RISCVCPUState *s,
         pte_addr_bits = 22;
     }
 #else
-    mode = (s->satp >> 60) & 0xf;
+    mode = get_bits(s->satp, 60, 4);
     if (mode == 0) {
         /* bare: no translation */
         *ppaddr = vaddr;
@@ -271,17 +272,16 @@ static int get_phys_addr(RISCVCPUState *s,
         levels = mode - 8 + 3;
         pte_size_log2 = 3;
         vaddr_shift = MAX_XLEN - (PG_SHIFT + levels * 9);
-        if ((((target_long)vaddr << vaddr_shift) >> vaddr_shift) != vaddr)
+        if ((target_ulong)sign_extend(vaddr, MAX_XLEN - vaddr_shift) != vaddr)
             return -1;
         pte_addr_bits = 44;
     }
 #endif
-    pte_addr = (s->satp & (((target_ulong)1 << pte_addr_bits) - 1)) << PG_SHIFT;
+    pte_addr = (target_ulong)get_bits(s->satp, 0, pte_addr_bits) << PG_SHIFT;
     pte_bits = 12 - pte_size_log2;
-    pte_mask = (1 << pte_bits) - 1;
     for(i = 0; i < levels; i++) {
         vaddr_shift = PG_SHIFT + pte_bits * (levels - 1 - i);
-        pte_idx = (vaddr >> vaddr_shift) & pte_mask;
+        pte_idx = get_bits(vaddr, vaddr_shift, pte_bits);
         pte_addr += pte_idx << pte_size_log2;
         if (pte_size_log2 == 2)
             pte = phys_read_u32(s, pte_addr);
@@ -293,7 +293,7 @@ static int get_phys_addr(RISCVCPUState *s,
         if (!(pte & PTE_V_MASK))
             return -1; /* invalid PTE */
         paddr = (pte >> 10) << PG_SHIFT;
-        xwr = (pte >> 1) & 7;
+        xwr = get_bits(pte, 1, 3);
         if (xwr == 0) {
             /* pointer to the next level; D, A and U are reserved there */
             if (pte & (PTE_D_MASK | PTE_A_MASK | PTE_U_MASK))
@@ -316,10 +316,10 @@ static int get_phys_addr(RISCVCPUState *s,
         if (s->mstatus & MSTATUS_MXR)
             xwr |= (xwr >> 2);
 
-        if (((xwr >> access) & 1) == 0)
+        if (!get_bit(xwr, access))
             return -1;
         /* a superpage must be aligned to its own size */
-        vaddr_mask = ((target_ulong)1 << vaddr_shift) - 1;
+        vaddr_mask = bit_mask<target_ulong>(vaddr_shift);
         if ((paddr & vaddr_mask) != 0)
             return -1;
         /* Svadu updates the A and D bits in place; without it the access
@@ -434,7 +434,7 @@ int target_read_slow(RISCVCPUState *s, mem_uint_t *pval,
             s->pending_exception = CAUSE_FAULT_LOAD;
             return -1;
         } else if (pr->is_ram) {
-            tlb_idx = (addr >> PG_SHIFT) & (TLB_SIZE - 1);
+            tlb_idx = get_bits(addr, PG_SHIFT, TLB_BITS);
             ptr = pr->phys_mem + (uintptr_t)(paddr - pr->addr);
             s->tlb_read[tlb_idx].vaddr = addr & ~PG_MASK;
             s->tlb_read[tlb_idx].mem_addend = (uintptr_t)ptr - addr;
@@ -464,7 +464,7 @@ int target_read_slow(RISCVCPUState *s, mem_uint_t *pval,
         } else {
             DeviceLocker locker(*s->device_lock);
             offset = paddr - pr->addr;
-            if (((pr->devio_flags >> size_log2) & 1) != 0) {
+            if (get_bit(pr->devio_flags, size_log2)) {
                 ret = pr->io->DeviceRead(offset, size_log2);
             }
 #if MLEN >= 64
@@ -503,7 +503,7 @@ int target_write_slow(RISCVCPUState *s, target_ulong addr,
     if ((addr & (size - 1)) != 0) {
         /* XXX: should avoid modifying the memory in case of exception */
         for(i = 0; i < size; i++) {
-            err = target_write_u8(s, addr + i, (val >> (8 * i)) & 0xff);
+            err = target_write_u8(s, addr + i, get_bits(val, 8 * i, 8));
             if (err)
                 return err;
         }
@@ -527,7 +527,7 @@ int target_write_slow(RISCVCPUState *s, target_ulong addr,
             return -1;
         } else if (pr->is_ram) {
             pr->SetDirtyBit(paddr - pr->addr);
-            tlb_idx = (addr >> PG_SHIFT) & (TLB_SIZE - 1);
+            tlb_idx = get_bits(addr, PG_SHIFT, TLB_BITS);
             ptr = pr->phys_mem + (uintptr_t)(paddr - pr->addr);
             s->tlb_write[tlb_idx].vaddr = addr & ~PG_MASK;
             s->tlb_write[tlb_idx].mem_addend = (uintptr_t)ptr - addr;
@@ -557,16 +557,16 @@ int target_write_slow(RISCVCPUState *s, target_ulong addr,
         } else {
             DeviceLocker locker(*s->device_lock);
             offset = paddr - pr->addr;
-            if (((pr->devio_flags >> size_log2) & 1) != 0) {
+            if (get_bit(pr->devio_flags, size_log2)) {
                 pr->io->DeviceWrite(offset, val, size_log2);
             }
 #if MLEN >= 64
             else if ((pr->devio_flags & DEVIO_SIZE32) && size_log2 == 3) {
                 /* emulate 64 bit access */
                 pr->io->DeviceWrite(offset,
-                               val & 0xffffffff, 2);
+                               get_bits(val, 0, 32), 2);
                 pr->io->DeviceWrite(offset + 4,
-                               (val >> 32) & 0xffffffff, 2);
+                               get_bits(val, 32, 32), 2);
             }
 #endif
             else {
@@ -613,7 +613,7 @@ static no_inline __exception int target_read_insn_slow(RISCVCPUState *s,
         s->pending_exception = CAUSE_FAULT_FETCH;
         return -1;
     }
-    tlb_idx = (addr >> PG_SHIFT) & (TLB_SIZE - 1);
+    tlb_idx = get_bits(addr, PG_SHIFT, TLB_BITS);
     ptr = pr->phys_mem + (uintptr_t)(paddr - pr->addr);
     s->tlb_code[tlb_idx].vaddr = addr & ~PG_MASK;
     s->tlb_code[tlb_idx].mem_addend = (uintptr_t)ptr - addr;
@@ -628,7 +628,7 @@ static inline __exception int target_read_insn_u16(RISCVCPUState *s, uint16_t *p
     uint32_t tlb_idx;
     uint8_t *ptr;
     
-    tlb_idx = (addr >> PG_SHIFT) & (TLB_SIZE - 1);
+    tlb_idx = get_bits(addr, PG_SHIFT, TLB_BITS);
     if (likely(s->tlb_code[tlb_idx].vaddr == (addr & ~PG_MASK))) {
         ptr = (uint8_t *)(s->tlb_code[tlb_idx].mem_addend +
                           (uintptr_t)addr);
@@ -704,12 +704,12 @@ static void glue(riscv_cpu_flush_tlb_write_range_ram,
                       MSTATUS_TVM | MSTATUS_TW | MSTATUS_TSR)
 
 /* cycle, time and insn counters */
-#define COUNTEREN_MASK ((1 << 0) | (1 << 1) | (1 << 2))
+#define COUNTEREN_MASK bit_mask(3)
 
 /* the time counter cannot be inhibited, and the event counters are hardwired
    to zero, so only mcycle and minstret answer to mcountinhibit */
-#define MCOUNTINHIBIT_CY (1 << 0)
-#define MCOUNTINHIBIT_IR (1 << 2)
+#define MCOUNTINHIBIT_CY bit_at(0)
+#define MCOUNTINHIBIT_IR bit_at(2)
 #define MCOUNTINHIBIT_MASK (MCOUNTINHIBIT_CY | MCOUNTINHIBIT_IR)
 
 /* every synchronous cause that can be taken in a mode below M. Machine ECALL
@@ -727,12 +727,12 @@ static target_ulong get_mstatus(RISCVCPUState *s, target_ulong mask)
 {
     target_ulong val;
     bool sd;
-    val = s->mstatus | (s->fs << MSTATUS_FS_SHIFT);
+    val = set_bits(s->mstatus, MSTATUS_FS_SHIFT, 2, s->fs);
     val &= mask;
     sd = ((val & MSTATUS_FS) == MSTATUS_FS) |
         ((val & MSTATUS_XS) == MSTATUS_XS);
     if (sd)
-        val |= (target_ulong)1 << (s->cur_xlen - 1);
+        val |= bit_at<target_ulong>(s->cur_xlen - 1);
     return val;
 }
                               
@@ -751,8 +751,10 @@ static void set_mstatus(RISCVCPUState *s, target_ulong val)
     target_ulong mod, mask;
 
     /* MPP is WARL and 2 is not a supported mode */
-    if (((val >> MSTATUS_MPP_SHIFT) & 3) == PRV_H)
-        val = (val & ~(target_ulong)MSTATUS_MPP) | (s->mstatus & MSTATUS_MPP);
+    if (get_bits(val, MSTATUS_MPP_SHIFT, 2) == PRV_H) {
+        val = set_bits(val, MSTATUS_MPP_SHIFT, 2,
+                       get_bits(s->mstatus, MSTATUS_MPP_SHIFT, 2));
+    }
 
     /* flush the TLBs if change of MMU config */
     mod = s->mstatus ^ val;
@@ -760,16 +762,16 @@ static void set_mstatus(RISCVCPUState *s, target_ulong val)
         ((s->mstatus & MSTATUS_MPRV) && (mod & MSTATUS_MPP) != 0)) {
         tlb_flush_all(s);
     }
-    s->fs = (val >> MSTATUS_FS_SHIFT) & 3;
+    s->fs = get_bits(val, MSTATUS_FS_SHIFT, 2);
 
     mask = MSTATUS_MASK & ~MSTATUS_FS;
 #if MAX_XLEN >= 64
     {
         int uxl, sxl;
-        uxl = (val >> MSTATUS_UXL_SHIFT) & 3;
+        uxl = get_bits(val, MSTATUS_UXL_SHIFT, 2);
         if (uxl >= 1 && uxl <= get_base_from_xlen(MAX_XLEN))
             mask |= MSTATUS_UXL_MASK;
-        sxl = (val >> MSTATUS_SXL_SHIFT) & 3;
+        sxl = get_bits(val, MSTATUS_SXL_SHIFT, 2);
         if (sxl >= 1 && sxl <= get_base_from_xlen(MAX_XLEN))
             mask |= MSTATUS_SXL_MASK;
     }
@@ -788,7 +790,7 @@ static bool counter_accessible(RISCVCPUState *s, int counter)
     counteren = s->mcounteren;
     if (s->priv < PRV_S)
         counteren &= s->scounteren;
-    return ((counteren >> counter) & 1) != 0;
+    return get_bit(counteren, counter);
 }
 
 static uint64_t get_mcycle(RISCVCPUState *s)
@@ -834,9 +836,7 @@ static uint64_t csr64_written(RISCVCPUState *s, uint64_t old_val,
 {
     if (s->cur_xlen != 32)
         return val;
-    if (high)
-        return (old_val & 0xffffffff) | ((uint64_t)(uint32_t)val << 32);
-    return (old_val & ~(uint64_t)0xffffffff) | (uint32_t)val;
+    return set_bits(old_val, high ? 32 : 0, 32, val);
 }
 
 /* the order the privileged spec requires simultaneous interrupts to be taken
@@ -856,7 +856,7 @@ static target_ulong top_interrupt(RISCVCPUState *s, bool supervisor)
         return 0;
     irq = ctz32(pending);
     for(i = 0; i < countof(irq_priority); i++) {
-        if ((pending >> irq_priority[i]) & 1) {
+        if (get_bit(pending, irq_priority[i])) {
             irq = irq_priority[i];
             break;
         }
@@ -903,7 +903,7 @@ static void imsic_claim(RISCVCPUState *s, int file)
     uint32_t id = imsic_top(&s->imsic[file]);
 
     if (id != 0) {
-        s->imsic[file].eip[id / 64] &= ~((uint64_t)1 << (id % 64));
+        s->imsic[file].eip[id / 64] &= ~bit_at<uint64_t>(id % 64);
         imsic_update(s, file);
     }
 }
@@ -939,19 +939,19 @@ static void process_inbox(RISCVCPUState *s)
    odd numbers, which do not exist for RV64. Registers past the implemented
    identities give a null word. */
 static bool imsic_array_reg(RISCVCPUState *s, ImsicFile *f, target_ulong sel,
-                            uint64_t **pword, int *pshift, uint64_t *pmask)
+                            uint64_t **pword, int *pshift, int *plen)
 {
     uint64_t *array = sel >= 0xc0 ? f->eie : f->eip;
-    unsigned int k = sel & 0x3f;
+    unsigned int k = get_bits(sel, 0, 6);
 
     if (s->cur_xlen == 32) {
-        *pshift = (k & 1) ? 32 : 0;
-        *pmask = 0xffffffff;
+        *pshift = get_bit(k, 0) ? 32 : 0;
+        *plen = 32;
     } else {
-        if (k & 1)
+        if (get_bit(k, 0))
             return false;
         *pshift = 0;
-        *pmask = UINT64_MAX;
+        *plen = 64;
     }
     *pword = (k / 2) < IMSIC_WORDS ? &array[k / 2] : nullptr;
     return true;
@@ -970,17 +970,17 @@ static int ireg_read(RISCVCPUState *s, int file, target_ulong sel,
     }
     if (sel >= 0x70 && sel <= 0xff && s->intr_arch == RISCV_INTR_AIA_IMSIC) {
         ImsicFile *f = &s->imsic[file];
-        uint64_t *word, mask;
-        int shift;
+        uint64_t *word;
+        int shift, len;
 
         if (sel == 0x70) {
             *pval = f->eidelivery;
         } else if (sel == 0x72) {
             *pval = f->eithreshold;
         } else if (sel >= 0x80) {
-            if (!imsic_array_reg(s, f, sel, &word, &shift, &mask))
+            if (!imsic_array_reg(s, f, sel, &word, &shift, &len))
                 return -1;
-            *pval = word != nullptr ? (*word >> shift) & mask : 0;
+            *pval = word != nullptr ? get_bits(*word, shift, len) : 0;
         } else {
             *pval = 0; /* reserved */
         }
@@ -999,22 +999,22 @@ static int ireg_write(RISCVCPUState *s, int file, target_ulong sel,
     }
     if (sel >= 0x70 && sel <= 0xff && s->intr_arch == RISCV_INTR_AIA_IMSIC) {
         ImsicFile *f = &s->imsic[file];
-        uint64_t *word, mask;
-        int shift;
+        uint64_t *word;
+        int shift, len;
 
         if (sel == 0x70) {
-            f->eidelivery = val & 1;
+            f->eidelivery = get_bit(val, 0);
         } else if (sel == 0x72) {
             f->eithreshold = val <= RISCV_IMSIC_NUM_IDS ? val :
                 RISCV_IMSIC_NUM_IDS;
         } else if (sel >= 0x80) {
-            if (!imsic_array_reg(s, f, sel, &word, &shift, &mask))
+            if (!imsic_array_reg(s, f, sel, &word, &shift, &len))
                 return -1;
             if (word != nullptr) {
-                *word = (*word & ~(mask << shift)) |
-                    (((uint64_t)val & mask) << shift);
-                f->eip[0] &= ~(uint64_t)1; /* identity 0 does not exist */
-                f->eie[0] &= ~(uint64_t)1;
+                *word = set_bits(*word, shift, len, val);
+                /* identity 0 does not exist */
+                f->eip[0] = set_bit(f->eip[0], 0, false);
+                f->eie[0] = set_bit(f->eie[0], 0, false);
             }
         }
         imsic_update(s, file);
@@ -1030,9 +1030,9 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
 {
     target_ulong val;
 
-    if (((csr & 0xc00) == 0xc00) && will_write)
+    if (get_bits(csr, 10, 2) == 3 && will_write)
         return -1; /* read-only CSR */
-    if (s->priv < ((csr >> 8) & 3))
+    if (s->priv < get_bits(csr, 8, 2))
         return -1; /* not enough priviledge */
     process_inbox(s);
 
@@ -1051,7 +1051,7 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
     case 0x003:
         if (s->fs == 0)
             return -1;
-        val = s->fflags | (s->frm << 5);
+        val = set_bits(s->fflags, 5, 3, s->frm);
         break;
 #endif
     case 0xc00: /* cycle */
@@ -1070,7 +1070,7 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
         val = get_minstret(s);
         break;
     case 0xc03 ... 0xc1f: /* hpmcounter3..31 */
-        if (!counter_accessible(s, csr & 0x1f))
+        if (!counter_accessible(s, get_bits(csr, 0, 5)))
             goto invalid_csr;
         val = 0;
         break;
@@ -1091,7 +1091,7 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
         val = get_minstret(s) >> 32;
         break;
     case 0xc83 ... 0xc9f: /* hpmcounter3..31h */
-        if (s->cur_xlen != 32 || !counter_accessible(s, csr & 0x1f))
+        if (s->cur_xlen != 32 || !counter_accessible(s, get_bits(csr, 0, 5)))
             goto invalid_csr;
         val = 0;
         break;
@@ -1215,8 +1215,7 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
         val = get_mstatus(s, (target_ulong)-1);
         break;
     case 0x301:
-        val = s->misa;
-        val |= (target_ulong)s->mxl << (s->cur_xlen - 2);
+        val = set_bits((target_ulong)s->misa, s->cur_xlen - 2, 2, s->mxl);
         break;
     case 0x302:
         val = s->medeleg;
@@ -1361,16 +1360,16 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
     switch(csr) {
 #if FLEN > 0
     case 0x001: /* fflags */
-        s->fflags = val & 0x1f;
+        s->fflags = get_bits(val, 0, 5);
         s->fs = 3;
         break;
     case 0x002: /* frm */
-        set_frm(s, val & 7);
+        set_frm(s, get_bits(val, 0, 3));
         s->fs = 3;
         break;
     case 0x003: /* fcsr */
-        set_frm(s, (val >> 5) & 7);
-        s->fflags = val & 0x1f;
+        set_frm(s, get_bits(val, 5, 3));
+        s->fflags = get_bits(val, 0, 5);
         s->fs = 3;
         break;
 #endif
@@ -1382,7 +1381,7 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
         s->mie = (s->mie & ~mask) | (val & mask);
         break;
     case 0x105:
-        s->stvec = val & ~3;
+        s->stvec = set_bits(val, 0, 2, 0);
         break;
     case 0x106:
         s->scounteren = val & COUNTEREN_MASK;
@@ -1391,7 +1390,7 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
         s->sscratch = val;
         break;
     case 0x141:
-        s->sepc = val & ~1;
+        s->sepc = set_bit(val, 0, false);
         break;
     case 0x142:
         s->scause = val;
@@ -1425,22 +1424,16 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
             return -1;
         /* no ASID implemented */
 #if MAX_XLEN == 32
-        {
-            int new_mode;
-            new_mode = (val >> 31) & 1;
-            s->satp = (val & (((target_ulong)1 << 22) - 1)) |
-                (new_mode << 31);
-        }
+        s->satp = set_bit(get_bits(val, 0, 22), 31, get_bit(val, 31));
 #else
         {
             int mode, new_mode;
-            mode = s->satp >> 60;
-            new_mode = (val >> 60) & 0xf;
+            mode = get_bits(s->satp, 60, 4);
+            new_mode = get_bits(val, 60, 4);
             /* bare, or Sv39 through Sv57 */
             if (new_mode == 0 || (new_mode >= 8 && new_mode <= 10))
                 mode = new_mode;
-            s->satp = (val & (((uint64_t)1 << 44) - 1)) |
-                ((uint64_t)mode << 60);
+            s->satp = set_bits(get_bits(val, 0, 44), 60, 4, mode);
         }
 #endif
         tlb_flush_all(s);
@@ -1450,7 +1443,7 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
     case 0x150: /* siselect */
         if (s->intr_arch == RISCV_INTR_BASE)
             return -1;
-        s->siselect = val & 0x1ff;
+        s->siselect = get_bits(val, 0, 9);
         break;
     case 0x151: /* sireg */
         if (s->intr_arch == RISCV_INTR_BASE)
@@ -1490,7 +1483,8 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
         if (s->intr_arch == RISCV_INTR_BASE)
             return -1;
         /* WARL: the range the implemented registers need */
-        s->miselect = val & (s->intr_arch == RISCV_INTR_AIA_IMSIC ? 0xff : 0x3f);
+        s->miselect = get_bits(val, 0,
+            s->intr_arch == RISCV_INTR_AIA_IMSIC ? 8 : 6);
         break;
     case 0x351: /* mireg */
         if (s->intr_arch == RISCV_INTR_BASE)
@@ -1509,7 +1503,7 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
 #if MAX_XLEN >= 64
         {
             int new_mxl;
-            new_mxl = (val >> (s->cur_xlen - 2)) & 3;
+            new_mxl = get_bits(val, s->cur_xlen - 2, 2);
             if (new_mxl >= 1 && new_mxl <= get_base_from_xlen(MAX_XLEN)) {
                 /* Note: misa is only modified in M level, so cur_xlen
                    = 2^(mxl + 4) */
@@ -1536,7 +1530,7 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
         s->mie = (s->mie & ~mask) | (val & mask);
         break;
     case 0x305:
-        s->mtvec = val & ~3;
+        s->mtvec = set_bits(val, 0, 2, 0);
         break;
     case 0x306:
         s->mcounteren = val & COUNTEREN_MASK;
@@ -1555,7 +1549,7 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
         s->mscratch = val;
         break;
     case 0x341:
-        s->mepc = val & ~1;
+        s->mepc = set_bit(val, 0, false);
         break;
     case 0x342:
         s->mcause = val;
@@ -1635,9 +1629,9 @@ static void set_priv(RISCVCPUState *s, int priv)
         {
             int mxl;
             if (priv == PRV_S)
-                mxl = (s->mstatus >> MSTATUS_SXL_SHIFT) & 3;
+                mxl = get_bits(s->mstatus, MSTATUS_SXL_SHIFT, 2);
             else if (priv == PRV_U)
-                mxl = (s->mstatus >> MSTATUS_UXL_SHIFT) & 3;
+                mxl = get_bits(s->mstatus, MSTATUS_UXL_SHIFT, 2);
             else
                 mxl = s->mxl;
             s->cur_xlen = 1 << (4 + mxl);
@@ -1691,25 +1685,24 @@ static void raise_exception2(RISCVCPUState *s, uint32_t cause,
     if (s->priv <= PRV_S) {
         /* delegate the exception to the supervisor priviledge */
         if (cause & CAUSE_INTERRUPT)
-            deleg = (s->mideleg >> (cause & (MAX_XLEN - 1))) & 1;
+            deleg = get_bit(s->mideleg, cause & (MAX_XLEN - 1));
         else
-            deleg = (s->medeleg >> cause) & 1;
+            deleg = get_bit(s->medeleg, cause);
     } else {
         deleg = 0;
     }
-    
-    causel = cause & 0x7fffffff;
+
+    causel = get_bits(cause, 0, 31);
     if (cause & CAUSE_INTERRUPT)
-        causel |= (target_ulong)1 << (s->cur_xlen - 1);
+        causel |= bit_at<target_ulong>(s->cur_xlen - 1);
     
     if (deleg) {
         s->scause = causel;
         s->sepc = s->pc;
         s->stval = tval;
-        s->mstatus = (s->mstatus & ~MSTATUS_SPIE) |
-            (((s->mstatus >> MSTATUS_SIE_SHIFT) & 1) << MSTATUS_SPIE_SHIFT);
-        s->mstatus = (s->mstatus & ~MSTATUS_SPP) |
-            ((target_ulong)s->priv << MSTATUS_SPP_SHIFT);
+        s->mstatus = set_bit(s->mstatus, MSTATUS_SPIE_SHIFT,
+                             get_bit(s->mstatus, MSTATUS_SIE_SHIFT));
+        s->mstatus = set_bits(s->mstatus, MSTATUS_SPP_SHIFT, 1, s->priv);
         s->mstatus &= ~MSTATUS_SIE;
         set_priv(s, PRV_S);
         s->pc = s->stvec;
@@ -1717,10 +1710,9 @@ static void raise_exception2(RISCVCPUState *s, uint32_t cause,
         s->mcause = causel;
         s->mepc = s->pc;
         s->mtval = tval;
-        s->mstatus = (s->mstatus & ~MSTATUS_MPIE) |
-            (((s->mstatus >> MSTATUS_MIE_SHIFT) & 1) << MSTATUS_MPIE_SHIFT);
-        s->mstatus = (s->mstatus & ~MSTATUS_MPP) |
-            ((target_ulong)s->priv << MSTATUS_MPP_SHIFT);
+        s->mstatus = set_bit(s->mstatus, MSTATUS_MPIE_SHIFT,
+                             get_bit(s->mstatus, MSTATUS_MIE_SHIFT));
+        s->mstatus = set_bits(s->mstatus, MSTATUS_MPP_SHIFT, 2, s->priv);
         s->mstatus &= ~MSTATUS_MIE;
         set_priv(s, PRV_M);
         s->pc = s->mtvec;
@@ -1743,12 +1735,12 @@ static void clear_mprv_on_return(RISCVCPUState *s, int new_priv)
 
 static void handle_sret(RISCVCPUState *s)
 {
-    int spp, spie;
-    spp = (s->mstatus >> MSTATUS_SPP_SHIFT) & 1;
+    int spp;
+    bool spie;
+    spp = get_bit(s->mstatus, MSTATUS_SPP_SHIFT);
     /* set the IE state to previous IE state */
-    spie = (s->mstatus >> MSTATUS_SPIE_SHIFT) & 1;
-    s->mstatus = (s->mstatus & ~MSTATUS_SIE) |
-        ((target_ulong)spie << MSTATUS_SIE_SHIFT);
+    spie = get_bit(s->mstatus, MSTATUS_SPIE_SHIFT);
+    s->mstatus = set_bit(s->mstatus, MSTATUS_SIE_SHIFT, spie);
     /* set SPIE to 1 */
     s->mstatus |= MSTATUS_SPIE;
     /* set SPP to U */
@@ -1760,12 +1752,12 @@ static void handle_sret(RISCVCPUState *s)
 
 static void handle_mret(RISCVCPUState *s)
 {
-    int mpp, mpie;
-    mpp = (s->mstatus >> MSTATUS_MPP_SHIFT) & 3;
+    int mpp;
+    bool mpie;
+    mpp = get_bits(s->mstatus, MSTATUS_MPP_SHIFT, 2);
     /* set the IE state to previous IE state */
-    mpie = (s->mstatus >> MSTATUS_MPIE_SHIFT) & 1;
-    s->mstatus = (s->mstatus & ~MSTATUS_MIE) |
-        ((target_ulong)mpie << MSTATUS_MIE_SHIFT);
+    mpie = get_bit(s->mstatus, MSTATUS_MPIE_SHIFT);
+    s->mstatus = set_bit(s->mstatus, MSTATUS_MIE_SHIFT, mpie);
     /* set MPIE to 1 */
     s->mstatus |= MSTATUS_MPIE;
     /* set MPP to U */
@@ -1813,7 +1805,7 @@ static __exception int raise_interrupt(RISCVCPUState *s)
         return 0;
     irq_num = ctz32(mask);
     for(i = 0; i < countof(irq_priority); i++) {
-        if ((mask >> irq_priority[i]) & 1) {
+        if (get_bit(mask, irq_priority[i])) {
             irq_num = irq_priority[i];
             break;
         }
@@ -1822,21 +1814,13 @@ static __exception int raise_interrupt(RISCVCPUState *s)
     return -1;
 }
 
-static inline int32_t sext(int32_t val, int n)
-{
-    return (val << (32 - n)) >> (32 - n);
-}
-
-static inline uint32_t get_field1(uint32_t val, int src_pos, 
+/* The bits of 'val' from 'src_pos' up, moved to 'dst_pos' through
+   'dst_pos_max'. */
+static inline uint32_t get_field1(uint32_t val, int src_pos,
                                   int dst_pos, int dst_pos_max)
 {
-    int mask;
     assert(dst_pos_max >= dst_pos);
-    mask = ((1 << (dst_pos_max - dst_pos + 1)) - 1) << dst_pos;
-    if (dst_pos >= src_pos)
-        return (val << (dst_pos - src_pos)) & mask;
-    else
-        return (val >> (src_pos - dst_pos)) & mask;
+    return get_bits(val, src_pos, dst_pos_max - dst_pos + 1) << dst_pos;
 }
 
 #define XLEN 32

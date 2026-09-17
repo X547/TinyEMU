@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "bits.h"
 #include "cutils.h"
 #include "machine.h"
 #include "usb.h"
@@ -48,20 +49,20 @@
 #define PORT_INDICATOR      22
 
 /* wPortStatus and wPortChange bits. */
-#define PORT_STAT_CONNECTION (1 << 0)
-#define PORT_STAT_ENABLE     (1 << 1)
-#define PORT_STAT_SUSPEND    (1 << 2)
-#define PORT_STAT_OVERCURRENT (1 << 3)
-#define PORT_STAT_RESET      (1 << 4)
-#define PORT_STAT_POWER      (1 << 8)
-#define PORT_STAT_LOW_SPEED  (1 << 9)
-#define PORT_STAT_HIGH_SPEED (1 << 10)
+#define PORT_STAT_CONNECTION bit_at(0)
+#define PORT_STAT_ENABLE     bit_at(1)
+#define PORT_STAT_SUSPEND    bit_at(2)
+#define PORT_STAT_OVERCURRENT bit_at(3)
+#define PORT_STAT_RESET      bit_at(4)
+#define PORT_STAT_POWER      bit_at(8)
+#define PORT_STAT_LOW_SPEED  bit_at(9)
+#define PORT_STAT_HIGH_SPEED bit_at(10)
 
-#define PORT_CHG_CONNECTION  (1 << 0)
-#define PORT_CHG_ENABLE      (1 << 1)
-#define PORT_CHG_SUSPEND     (1 << 2)
-#define PORT_CHG_OVERCURRENT (1 << 3)
-#define PORT_CHG_RESET       (1 << 4)
+#define PORT_CHG_CONNECTION  bit_at(0)
+#define PORT_CHG_ENABLE      bit_at(1)
+#define PORT_CHG_SUSPEND     bit_at(2)
+#define PORT_CHG_OVERCURRENT bit_at(3)
+#define PORT_CHG_RESET       bit_at(4)
 
 
 static const uint8_t kHubDeviceDesc[] = {
@@ -432,7 +433,7 @@ USBStatusEnum USBHub::Submit(URB *urb)
 
         case USB_REQ_GET_STATUS:
             if (recipient == USB_RECIP_OTHER) {
-                return PortStatus(urb, setup.index & 0xff);
+                return PortStatus(urb, get_bits(setup.index, 0, 8));
             }
             if (recipient == USB_RECIP_DEVICE) {
                 /* Hub status: local power good, no over-current, nothing
@@ -448,7 +449,8 @@ USBStatusEnum USBHub::Submit(URB *urb)
         case USB_REQ_SET_FEATURE:
             if (recipient == USB_RECIP_OTHER) {
                 urb->actual_length = 0;
-                return SetPortFeature(setup.index & 0xff, setup.value);
+                return SetPortFeature(get_bits(setup.index, 0, 8),
+                                      setup.value);
             }
             urb->actual_length = 0;
             return USB_STATUS_OK;
@@ -456,7 +458,8 @@ USBStatusEnum USBHub::Submit(URB *urb)
         case USB_REQ_CLEAR_FEATURE:
             if (recipient == USB_RECIP_OTHER) {
                 urb->actual_length = 0;
-                return ClearPortFeature(setup.index & 0xff, setup.value);
+                return ClearPortFeature(get_bits(setup.index, 0, 8),
+                                        setup.value);
             }
             urb->actual_length = 0;
             return USB_STATUS_OK;

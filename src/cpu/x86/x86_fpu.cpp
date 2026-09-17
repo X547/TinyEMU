@@ -160,7 +160,7 @@ static long double fx80_to_ld(uint64_t mant, uint16_t sexp)
     int exp = get_bits(sexp, 0, 15);
     long double v;
     if (exp == 0x7fff) {
-        v = get_bits64(mant, 0, 63) == 0 ? HUGE_VALL : NAN;
+        v = get_bits(mant, 0, 63) == 0 ? HUGE_VALL : NAN;
     } else if (mant == 0) {
         v = 0;
     } else {
@@ -349,7 +349,7 @@ static int64_t fpu_to_int(X87State *f, long double v, int bits, bool truncate)
     long double limit = ldexpl(1, bits - 1);
     if (std::isnan(r) || r < -limit || r >= limit) {
         fpu_raise(f, bit_at(FPUS_IE));
-        return sign_extend64(UINT64_C(1) << (bits - 1), bits);
+        return sign_extend(UINT64_C(1) << (bits - 1), bits);
     }
     return (int64_t)r;
 }
@@ -564,8 +564,8 @@ static uint64_t read64(X86CPUState *s, uint32_t lin)
 static void write64(X86CPUState *s, uint32_t lin, uint64_t val)
 {
     mem_probe_write(s, lin + 4, SIZE32);
-    mem_write(s, lin, get_bits64(val, 0, 32), SIZE32);
-    mem_write(s, lin + 4, get_bits64(val, 32, 32), SIZE32);
+    mem_write(s, lin, get_bits(val, 0, 32), SIZE32);
+    mem_write(s, lin + 4, get_bits(val, 32, 32), SIZE32);
 }
 
 static long double fpu_load(X86CPUState *s, uint32_t lin, int fmt)

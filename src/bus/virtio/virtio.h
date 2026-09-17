@@ -53,8 +53,8 @@ typedef struct {
 
 typedef struct VIRTIODevice VIRTIODevice; 
 
-#define VIRTIO_DEBUG_IO (1 << 0)
-#define VIRTIO_DEBUG_9P (1 << 1)
+#define VIRTIO_DEBUG_IO bit_at(0)
+#define VIRTIO_DEBUG_9P bit_at(1)
 
 void virtio_set_debug(VIRTIODevice *s, int debug_flags);
 

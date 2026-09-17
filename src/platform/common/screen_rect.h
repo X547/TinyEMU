@@ -25,6 +25,8 @@
 
 #include <algorithm>
 
+#include "bits.h"
+
 
 /* A rectangle in pixels, right and bottom edges excluded. */
 struct ScreenRect {
@@ -89,12 +91,12 @@ static inline int screen_rect_outside(const ScreenRect &r, int width,
 /* An ARGB cursor pixel over an xRGB one. */
 static inline uint32_t cursor_blend(uint32_t dst, uint32_t src)
 {
-    uint32_t a = src >> 24;
+    uint32_t a = get_bits(src, 24, 8);
     uint32_t out = 0;
 
     for (int shift = 0; shift < 24; shift += 8) {
-        uint32_t s = (src >> shift) & 0xff;
-        uint32_t d = (dst >> shift) & 0xff;
+        uint32_t s = get_bits(src, shift, 8);
+        uint32_t d = get_bits(dst, shift, 8);
         out |= ((s * a + d * (255 - a) + 127) / 255) << shift;
     }
     return out;

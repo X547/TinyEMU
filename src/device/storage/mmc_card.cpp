@@ -23,6 +23,7 @@
  */
 #include <string.h>
 
+#include "bits.h"
 #include "cutils.h"
 #include "machine.h"
 #include "sd.h"
@@ -76,8 +77,8 @@
 #define MMC_EXT_CSD_S_CMD_SET        504
 
 /* Card types the device reports it can be clocked at. */
-#define MMC_CARD_TYPE_26MHZ (1 << 0)
-#define MMC_CARD_TYPE_52MHZ (1 << 1)
+#define MMC_CARD_TYPE_26MHZ bit_at(0)
+#define MMC_CARD_TYPE_52MHZ bit_at(1)
 
 /* SWITCH argument. */
 #define MMC_SWITCH_ACCESS_SHIFT 24
@@ -266,8 +267,8 @@ int MMCCard::Illegal(uint8_t *response)
 
 int MMCCard::Switch(const SDCommand &cmd, uint8_t *response)
 {
-    uint32_t access = (cmd.arg >> MMC_SWITCH_ACCESS_SHIFT) & 3;
-    uint32_t index = (cmd.arg >> MMC_SWITCH_INDEX_SHIFT) & 0xff;
+    uint32_t access = get_bits(cmd.arg, MMC_SWITCH_ACCESS_SHIFT, 2);
+    uint32_t index = get_bits(cmd.arg, MMC_SWITCH_INDEX_SHIFT, 8);
     uint8_t value = (uint8_t)(cmd.arg >> MMC_SWITCH_VALUE_SHIFT);
 
     if (fState != SD_STATE_TRAN) {

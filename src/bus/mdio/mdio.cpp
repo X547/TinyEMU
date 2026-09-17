@@ -23,6 +23,7 @@
  */
 #include "mdio.h"
 
+#include "bits.h"
 #include "fdt.h"
 #include "machine.h"
 
@@ -125,10 +126,10 @@ int PHYDevice::Speed() const
     if ((fBmcr & MII_BMCR_ANEG_ENABLE) != 0) {
         /* The link partner is modelled as advertising everything, so the
            result is the fastest thing this PHY advertises. */
-        if ((fGtcr & 0x0300) != 0) {
+        if (get_bits(fGtcr, 8, 2) != 0) {
             return 1000;
         }
-        if ((fAnar & 0x0180) != 0) {
+        if (get_bits(fAnar, 7, 2) != 0) {
             return 100;
         }
         return 10;
@@ -145,11 +146,11 @@ bool PHYDevice::FullDuplex() const
     if ((fBmcr & MII_BMCR_ANEG_ENABLE) != 0) {
         switch (Speed()) {
         case 1000:
-            return (fGtcr & 0x0200) != 0;
+            return get_bit(fGtcr, 9);
         case 100:
-            return (fAnar & 0x0100) != 0;
+            return get_bit(fAnar, 8);
         default:
-            return (fAnar & 0x0040) != 0;
+            return get_bit(fAnar, 6);
         }
     }
     return (fBmcr & MII_BMCR_FULLDUPLEX) != 0;
@@ -169,7 +170,7 @@ uint16_t PHYDevice::MdioRead(int reg)
     case MII_PHYID1:
         return fPhyId >> 16;
     case MII_PHYID2:
-        return fPhyId & 0xffff;
+        return get_bits(fPhyId, 0, 16);
     case MII_ANAR:
         return fAnar;
     case MII_ANLPAR:

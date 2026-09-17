@@ -706,12 +706,12 @@ uint32_t VIRTIOMMIOTransport::DeviceRead(uint32_t offset, int size_log2)
 #if VIRTIO_ADDR_BITS == 64
 static void set_low32(virtio_phys_addr_t *paddr, uint32_t val)
 {
-    *paddr = (*paddr & ~(virtio_phys_addr_t)0xffffffff) | val;
+    *paddr = set_bits(*paddr, 0, 32, val);
 }
 
 static void set_high32(virtio_phys_addr_t *paddr, uint32_t val)
 {
-    *paddr = (*paddr & 0xffffffff) | ((virtio_phys_addr_t)val << 32);
+    *paddr = set_bits(*paddr, 32, 32, val);
 }
 #else
 static void set_low32(virtio_phys_addr_t *paddr, uint32_t val)
@@ -802,7 +802,7 @@ uint32_t VIRTIOPCITransport::DeviceRead(uint32_t offset1, int size_log2)
     uint32_t offset;
     uint32_t val = 0;
 
-    offset = offset1 & 0xfff;
+    offset = get_bits(offset1, 0, 12);
     switch(offset1 >> 12) {
     case VIRTIO_PCI_CFG_OFFSET >> 12:
         if (size_log2 == 2) {
@@ -913,7 +913,7 @@ void VIRTIOPCITransport::DeviceWrite(uint32_t offset1, uint32_t val, int size_lo
                offset1, val, 1 << size_log2);
     }
 #endif
-    offset = offset1 & 0xfff;
+    offset = get_bits(offset1, 0, 12);
     switch(offset1 >> 12) {
     case VIRTIO_PCI_CFG_OFFSET >> 12:
         if (size_log2 == 2) {

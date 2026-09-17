@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "bits.h"
 #include "cutils.h"
 #include "machine.h"
 #include "pci.h"
@@ -63,19 +64,19 @@
 #define NVME_MSIX_PBA_OFFSET   0x3000
 #define NVME_BAR_SIZE          0x4000
 
-#define CC_EN           (1 << 0)
+#define CC_EN           bit_at(0)
 #define CC_CSS_SHIFT    4
 #define CC_MPS_SHIFT    7
-#define CC_MPS_MASK     0xf
+#define CC_MPS_BITS     4
 #define CC_SHN_SHIFT    14
-#define CC_SHN_MASK     0x3
+#define CC_SHN_BITS     2
 #define CC_IOSQES_SHIFT 16
 #define CC_IOCQES_SHIFT 20
 
-#define CSTS_RDY        (1 << 0)
-#define CSTS_CFS        (1 << 1)
+#define CSTS_RDY        bit_at(0)
+#define CSTS_CFS        bit_at(1)
 #define CSTS_SHST_SHIFT 2
-#define CSTS_SHST_MASK  (0x3 << 2)
+#define CSTS_SHST_MASK  field_mask(CSTS_SHST_SHIFT, 2)
 
 /* How many entries a queue may have, and how many pairs the controller
    offers. MQES in CAP is reported one less, as the specification asks. */
@@ -165,8 +166,8 @@ struct NVMeCommand {
     uint32_t cdw14;
     uint32_t cdw15;
 
-    uint8_t Opcode() const {return cdw0 & 0xff;}
-    uint16_t CommandId() const {return cdw0 >> 16;}
+    uint8_t Opcode() const {return get_bits(cdw0, 0, 8);}
+    uint16_t CommandId() const {return get_bits(cdw0, 16, 16);}
 };
 
 
@@ -347,7 +348,7 @@ private:
 
     uint32_t PageSize() const
     {
-        return 1u << (12 + ((fCc >> CC_MPS_SHIFT) & CC_MPS_MASK));
+        return 1u << (12 + get_bits(fCc, CC_MPS_SHIFT, CC_MPS_BITS));
     }
 
     /* True when the admin queue may be served. The specification says this
@@ -609,14 +610,14 @@ bool NVMeDevice::AttachNamespace(NVMeNamespace *ns, uint32_t nsid)
 void NVMeDevice::ArmAdminQueue()
 {
     fSq[0].base = fAsq;
-    fSq[0].size = (fAqa & 0xfff) + 1;
+    fSq[0].size = get_bits(fAqa, 0, 12) + 1;
     fSq[0].head = 0;
     fSq[0].tail = 0;
     fSq[0].cqid = 0;
     fSq[0].enabled = true;
 
     fCq[0].base = fAcq;
-    fCq[0].size = ((fAqa >> 16) & 0xfff) + 1;
+    fCq[0].size = get_bits(fAqa, 16, 12) + 1;
     fCq[0].head = 0;
     fCq[0].tail = 0;
     fCq[0].phase = true;
@@ -651,11 +652,11 @@ void NVMeDevice::PostCompletion(uint16_t sqid, uint16_t cqid, uint16_t cid,
 
     put_le32(entry, dw0);
     put_le32(entry + 4, 0);
-    put_le32(entry + 8, fSq[sqid].head | ((uint32_t)sqid << 16));
+    put_le32(entry + 8, concat_bits<uint32_t>(sqid, fSq[sqid].head, 16));
     /* The phase bit is what publishes the entry, so the dword carrying it is
        written last. */
     uint32_t status = ((uint32_t)sc << 17) | ((uint32_t)sct << 25);
-    put_le32(entry + 12, cid | (cq->phase ? (1u << 16) : 0) | status);
+    put_le32(entry + 12, set_bit(cid | status, 16, cq->phase));
 
     if (!DmaWrite(cq->base + (uint64_t)cq->tail * NVME_CQE_SIZE, entry, 12) ||
         !DmaWrite(cq->base + (uint64_t)cq->tail * NVME_CQE_SIZE + 12,
@@ -760,8 +761,8 @@ void NVMeDevice::ProcessSq(int sqid)
 
 int NVMeDevice::CmdCreateCq(const NVMeCommand &cmd)
 {
-    uint16_t qid = cmd.cdw10 & 0xffff;
-    uint32_t size = ((cmd.cdw10 >> 16) & 0xffff) + 1;
+    uint16_t qid = get_bits(cmd.cdw10, 0, 16);
+    uint32_t size = get_bits(cmd.cdw10, 16, 16) + 1;
     bool contiguous = (cmd.cdw11 & 1) != 0;
 
     if (qid == 0 || qid >= NVME_MAX_QUEUES) {
@@ -773,7 +774,7 @@ int NVMeDevice::CmdCreateCq(const NVMeCommand &cmd)
     if (!contiguous && (fQuirks & NVME_QUIRK_LOOSE_QUEUE_CREATE) == 0) {
         return (NVME_SCT_GENERIC << 8) | NVME_SC_INVALID_FIELD;
     }
-    uint16_t vector = cmd.cdw11 >> 16;
+    uint16_t vector = get_bits(cmd.cdw11, 16, 16);
     if (fMsix.Present() && vector >= fMsix.VectorCount()) {
         return (NVME_SCT_SPECIFIC << 8) | NVME_SC_INVALID_VECTOR;
     }
@@ -793,10 +794,10 @@ int NVMeDevice::CmdCreateCq(const NVMeCommand &cmd)
 
 int NVMeDevice::CmdCreateSq(const NVMeCommand &cmd)
 {
-    uint16_t qid = cmd.cdw10 & 0xffff;
-    uint32_t size = ((cmd.cdw10 >> 16) & 0xffff) + 1;
+    uint16_t qid = get_bits(cmd.cdw10, 0, 16);
+    uint32_t size = get_bits(cmd.cdw10, 16, 16) + 1;
     bool contiguous = (cmd.cdw11 & 1) != 0;
-    uint16_t cqid = cmd.cdw11 >> 16;
+    uint16_t cqid = get_bits(cmd.cdw11, 16, 16);
 
     if (qid == 0 || qid >= NVME_MAX_QUEUES) {
         return (NVME_SCT_SPECIFIC << 8) | NVME_SC_QID_INVALID;
@@ -903,7 +904,7 @@ void NVMeDevice::IdentifyNamespace(uint8_t *buf, NVMeNamespace *ns)
 int NVMeDevice::CmdIdentify(const NVMeCommand &cmd)
 {
     uint8_t buf[4096];
-    uint8_t cns = cmd.cdw10 & 0xff;
+    uint8_t cns = get_bits(cmd.cdw10, 0, 8);
 
     switch (cns) {
     case NVME_CNS_CONTROLLER:
@@ -971,7 +972,7 @@ int NVMeDevice::CmdGetLogPage(const NVMeCommand &cmd)
 {
     /* No log page here has anything to report, but a driver that asks for one
        during probe must get the bytes it asked for rather than an error. */
-    uint32_t dwords = ((cmd.cdw10 >> 16) & 0xffff) + 1;
+    uint32_t dwords = get_bits(cmd.cdw10, 16, 16) + 1;
     uint32_t len = dwords * 4;
 
     if (len > NVME_MAX_TRANSFER) {
@@ -990,15 +991,15 @@ int NVMeDevice::CmdGetLogPage(const NVMeCommand &cmd)
 
 int NVMeDevice::CmdSetFeatures(const NVMeCommand &cmd, uint32_t *dw0)
 {
-    uint8_t fid = cmd.cdw10 & 0xff;
+    uint8_t fid = get_bits(cmd.cdw10, 0, 8);
 
     switch (fid) {
     case NVME_FEAT_NUM_QUEUES: {
         /* Both fields are zero based. A controller may allocate fewer than
            were asked for but never more, and once answered the count holds
            until the next reset. */
-        uint32_t want_sq = (cmd.cdw11 & 0xffff) + 1;
-        uint32_t want_cq = ((cmd.cdw11 >> 16) & 0xffff) + 1;
+        uint32_t want_sq = get_bits(cmd.cdw11, 0, 16) + 1;
+        uint32_t want_cq = get_bits(cmd.cdw11, 16, 16) + 1;
         if (want_sq > NVME_MAX_IO_QUEUES) {
             want_sq = NVME_MAX_IO_QUEUES;
         }
@@ -1027,7 +1028,7 @@ int NVMeDevice::CmdSetFeatures(const NVMeCommand &cmd, uint32_t *dw0)
 
 int NVMeDevice::CmdGetFeatures(const NVMeCommand &cmd, uint32_t *dw0)
 {
-    uint8_t fid = cmd.cdw10 & 0xff;
+    uint8_t fid = get_bits(cmd.cdw10, 0, 8);
 
     switch (fid) {
     case NVME_FEAT_NUM_QUEUES:
@@ -1057,7 +1058,7 @@ void NVMeDevice::ExecuteAdmin(const NVMeCommand &cmd)
         break;
 
     case NVME_ADM_DELETE_CQ: {
-        uint16_t qid = cmd.cdw10 & 0xffff;
+        uint16_t qid = get_bits(cmd.cdw10, 0, 16);
         if (qid == 0 || qid >= NVME_MAX_QUEUES || !fCq[qid].enabled) {
             status = (NVME_SCT_SPECIFIC << 8) | NVME_SC_QID_INVALID;
             break;
@@ -1078,7 +1079,7 @@ void NVMeDevice::ExecuteAdmin(const NVMeCommand &cmd)
     }
 
     case NVME_ADM_DELETE_SQ: {
-        uint16_t qid = cmd.cdw10 & 0xffff;
+        uint16_t qid = get_bits(cmd.cdw10, 0, 16);
         if (qid == 0 || qid >= NVME_MAX_QUEUES || !fSq[qid].enabled) {
             status = (NVME_SCT_SPECIFIC << 8) | NVME_SC_QID_INVALID;
             break;
@@ -1129,10 +1130,10 @@ void NVMeDevice::ExecuteAdmin(const NVMeCommand &cmd)
     }
 
     nvme_debug("admin op %#x nsid %u cdw10 %#x -> sct %d sc %#x\n",
-               cmd.Opcode(), cmd.nsid, cmd.cdw10, (status >> 8) & 0x7,
-               status & 0xff);
-    PostCompletion(0, 0, cmd.CommandId(), dw0, (status >> 8) & 0x7,
-                   status & 0xff);
+               cmd.Opcode(), cmd.nsid, cmd.cdw10, get_bits(status, 8, 3),
+               get_bits(status, 0, 8));
+    PostCompletion(0, 0, cmd.CommandId(), dw0, get_bits(status, 8, 3),
+                   get_bits(status, 0, 8));
 }
 
 
@@ -1163,9 +1164,9 @@ void NVMeDevice::ExecuteIo(int sqid, const NVMeCommand &cmd)
     case NVME_IO_READ:
     case NVME_IO_WRITE: {
         bool is_read = cmd.Opcode() == NVME_IO_READ;
-        uint64_t slba = ((uint64_t)cmd.cdw11 << 32) | cmd.cdw10;
+        uint64_t slba = concat_bits(cmd.cdw11, cmd.cdw10, 32);
         /* The block count in the command is zero based. */
-        uint32_t blocks = (cmd.cdw12 & 0xffff) + 1;
+        uint32_t blocks = get_bits(cmd.cdw12, 0, 16) + 1;
         uint32_t length = blocks * NVMeNamespace::BlockSize();
 
         uint32_t tail_pad = 0;
@@ -1243,14 +1244,14 @@ void NVMeDevice::ExecuteIo(int sqid, const NVMeCommand &cmd)
            would bury everything else. */
         nvme_debug("io sq %d op %#x nsid %u slba %llu nlb %u prp %#llx/%#llx "
                    "-> sct %d sc %#x\n", sqid, cmd.Opcode(), cmd.nsid,
-                   (unsigned long long)(((uint64_t)cmd.cdw11 << 32)
-                                        | cmd.cdw10),
-                   (cmd.cdw12 & 0xffff) + 1, (unsigned long long)cmd.prp1,
-                   (unsigned long long)cmd.prp2, (status >> 8) & 0x7,
-                   status & 0xff);
+                   (unsigned long long)concat_bits(cmd.cdw11, cmd.cdw10, 32),
+                   get_bits(cmd.cdw12, 0, 16) + 1,
+                   (unsigned long long)cmd.prp1,
+                   (unsigned long long)cmd.prp2, get_bits(status, 8, 3),
+                   get_bits(status, 0, 8));
     }
-    PostCompletion(sqid, cqid, cmd.CommandId(), 0, (status >> 8) & 0x7,
-                   status & 0xff);
+    PostCompletion(sqid, cqid, cmd.CommandId(), 0, get_bits(status, 8, 3),
+                   get_bits(status, 0, 8));
 }
 
 
@@ -1281,7 +1282,7 @@ void NVMeDevice::BlockDone(int ret)
     }
 
     PostCompletion(fPendingSqid, fPendingCqid, fPendingCid, 0,
-                   (status >> 8) & 0x7, status & 0xff);
+                   get_bits(status, 8, 3), get_bits(status, 0, 8));
 
     /* Whatever arrived while the back end had the command. */
     for (int i = 0; i < NVME_MAX_QUEUES; i++) {
@@ -1297,10 +1298,10 @@ void NVMeDevice::ControllerEnable()
     /* A configuration this cannot honour is reported as a controller failure
        rather than acted on: the alternative is reading queues at the wrong
        stride and scribbling over guest memory. */
-    uint32_t mps = (fCc >> CC_MPS_SHIFT) & CC_MPS_MASK;
-    uint32_t css = (fCc >> CC_CSS_SHIFT) & 0x7;
-    uint32_t iosqes = (fCc >> CC_IOSQES_SHIFT) & 0xf;
-    uint32_t iocqes = (fCc >> CC_IOCQES_SHIFT) & 0xf;
+    uint32_t mps = get_bits(fCc, CC_MPS_SHIFT, CC_MPS_BITS);
+    uint32_t css = get_bits(fCc, CC_CSS_SHIFT, 3);
+    uint32_t iosqes = get_bits(fCc, CC_IOSQES_SHIFT, 4);
+    uint32_t iocqes = get_bits(fCc, CC_IOCQES_SHIFT, 4);
 
     if (mps > 4 || css != 0 || iosqes != 6 || iocqes != 4) {
         vm_error("nvme: unsupported controller configuration %#x\n", fCc);
@@ -1454,8 +1455,8 @@ void NVMeDevice::WriteDword(uint32_t offset, uint32_t val)
         }
         /* A shutdown request completes at once; there is nothing here whose
            state has to reach media first. */
-        if (((val >> CC_SHN_SHIFT) & CC_SHN_MASK) != 0) {
-            fCsts = (fCsts & ~CSTS_SHST_MASK) | (2u << CSTS_SHST_SHIFT);
+        if (get_bits(val, CC_SHN_SHIFT, CC_SHN_BITS) != 0) {
+            fCsts = set_bits(fCsts, CSTS_SHST_SHIFT, 2, 2);
         }
         return;
     }

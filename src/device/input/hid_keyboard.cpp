@@ -23,6 +23,7 @@
  */
 #include <string.h>
 
+#include "bits.h"
 #include "devices.h"
 #include "hid.h"
 #include "machine.h"
@@ -239,12 +240,9 @@ void HIDKeyboard::SendKeyEvent(bool is_down, uint16_t key_code)
     }
 
     if (usage >= KBD_USAGE_MODIFIER_FIRST && usage <= KBD_USAGE_MODIFIER_LAST) {
-        uint8_t bit = 1 << (usage - KBD_USAGE_MODIFIER_FIRST);
-        if (is_down) {
-            fModifiers |= bit;
-        } else {
-            fModifiers &= ~bit;
-        }
+        fModifiers = set_bit(fModifiers,
+                             usage - KBD_USAGE_MODIFIER_FIRST,
+                             is_down);
     } else if (is_down) {
         PressUsage(usage);
     } else {

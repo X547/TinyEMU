@@ -28,72 +28,10 @@
 #include <string.h>
 #include <atomic>
 
+#include "bits.h"
 #include "cutils.h"
 #include "iomem.h"
 #include "x86_cpu.h"
-
-
-//#pragma mark - bit helpers
-
-static inline uint32_t bit_mask(int len)
-{
-    return len >= 32 ? UINT32_MAX : (UINT32_C(1) << len) - 1;
-}
-
-static inline uint32_t bit_at(int pos)
-{
-    return UINT32_C(1) << pos;
-}
-
-static inline uint32_t get_bits(uint32_t val, int pos, int len)
-{
-    return (val >> pos) & bit_mask(len);
-}
-
-static inline bool get_bit(uint32_t val, int pos)
-{
-    return (val >> pos) & 1;
-}
-
-static inline uint32_t field_mask(int pos, int len)
-{
-    return bit_mask(len) << pos;
-}
-
-static inline uint32_t set_bits(uint32_t val, int pos, int len, uint32_t field)
-{
-    uint32_t mask = field_mask(pos, len);
-    return (val & ~mask) | ((field << pos) & mask);
-}
-
-static inline uint64_t get_bits64(uint64_t val, int pos, int len)
-{
-    uint64_t mask = len >= 64 ? UINT64_MAX : (UINT64_C(1) << len) - 1;
-    return (val >> pos) & mask;
-}
-
-/* 'high' placed above the low 'low_len' bits of 'low'. */
-static inline uint64_t concat_bits(uint64_t high, uint64_t low, int low_len)
-{
-    return (high << low_len) | get_bits64(low, 0, low_len);
-}
-
-static inline uint32_t set_bit(uint32_t val, int pos, bool on)
-{
-    return set_bits(val, pos, 1, on);
-}
-
-static inline int32_t sign_extend(uint32_t val, int len)
-{
-    int shift = 32 - len;
-    return (int32_t)(val << shift) >> shift;
-}
-
-static inline int64_t sign_extend64(uint64_t val, int len)
-{
-    int shift = 64 - len;
-    return (int64_t)(val << shift) >> shift;
-}
 
 
 //#pragma mark - operand sizes
@@ -117,8 +55,7 @@ static inline int size_bits(int size)
 
 static inline uint32_t size_mask(int size)
 {
-    static const uint32_t masks[3] = {0xff, 0xffff, 0xffffffff};
-    return masks[size];
+    return bit_mask(size_bits(size));
 }
 
 static inline uint32_t trunc_size(uint32_t val, int size)
@@ -433,8 +370,8 @@ static inline uint64_t get_edx_eax(X86CPUState *s)
 
 static inline void set_edx_eax(X86CPUState *s, uint64_t val)
 {
-    s->regs[REG_EAX] = get_bits64(val, 0, 32);
-    s->regs[REG_EDX] = get_bits64(val, 32, 32);
+    s->regs[REG_EAX] = get_bits(val, 0, 32);
+    s->regs[REG_EDX] = get_bits(val, 32, 32);
 }
 
 

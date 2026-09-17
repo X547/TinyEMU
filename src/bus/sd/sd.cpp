@@ -25,6 +25,7 @@
 
 #include <string.h>
 
+#include "bits.h"
 #include "machine.h"
 #include "virtio.h"
 
@@ -42,7 +43,7 @@ uint8_t sd_crc7(const uint8_t *data, int len)
     for (int i = 0; i < len; i++) {
         crc ^= data[i];
         for (int bit = 0; bit < 8; bit++) {
-            if ((crc & 0x80) != 0) {
+            if (get_bit(crc, 7)) {
                 crc = (uint8_t)((crc << 1) ^ 0x12);
             } else {
                 crc = (uint8_t)(crc << 1);
@@ -58,7 +59,7 @@ void sd_reg_set_bits(uint8_t *reg, int size, int hi, int lo, uint64_t value)
     for (int bit = lo; bit <= hi; bit++) {
         int byte = size - 1 - bit / 8;
         uint8_t mask = (uint8_t)(1u << (bit % 8));
-        if (((value >> (bit - lo)) & 1) != 0) {
+        if (get_bit(value, bit - lo)) {
             reg[byte] |= mask;
         } else {
             reg[byte] &= (uint8_t)~mask;

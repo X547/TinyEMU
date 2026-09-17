@@ -28,6 +28,7 @@
 #include <string.h>
 #include <assert.h>
 
+#include "bits.h"
 #include "cutils.h"
 #include "fdt.h"
 #include "machine.h"
@@ -285,7 +286,7 @@ void PCIHostDWDevice::MsiUpdate()
 
 void PCIHostDWDevice::SendMsi(uint64_t addr, uint32_t data)
 {
-    uint64_t doorbell = ((uint64_t)fMsiAddrHi << 32) | fMsiAddrLo;
+    uint64_t doorbell = concat_bits(fMsiAddrHi, fMsiAddrLo, 32);
 
     if (addr != doorbell) {
         /* Not aimed at this receiver, so it is an ordinary posted write and
@@ -315,12 +316,12 @@ PCIeDWAtuRegion *PCIHostDWDevice::AtuAt(uint32_t offset, uint32_t *reg_out)
 {
     uint32_t rel = offset - PCIE_DW_ATU_OFFSET;
     uint32_t index = rel >> 9;
-    uint32_t inbound = (rel >> 8) & 1;
+    uint32_t inbound = get_bit(rel, 8);
 
     if (index >= PCIE_DW_ATU_REGION_COUNT) {
         return nullptr;
     }
-    *reg_out = rel & 0xff;
+    *reg_out = get_bits(rel, 0, 8);
     return inbound ? &fAtuIn[index] : &fAtuOut[index];
 }
 
@@ -475,7 +476,7 @@ bool PCIHostDWDevice::ConfigTarget(uint32_t offset, uint32_t *addr_out)
             continue;
         }
 
-        uint64_t base = ((uint64_t)atu->base_hi << 32) | atu->base_lo;
+        uint64_t base = concat_bits(atu->base_hi, atu->base_lo, 32);
         /* Drivers commonly leave the high half of the limit alone, so it is
            taken from the base. Every window this machine hands out lives
            below 4 GB, so the two always share a high half anyway. */
@@ -484,7 +485,8 @@ bool PCIHostDWDevice::ConfigTarget(uint32_t offset, uint32_t *addr_out)
             continue;
         }
 
-        uint64_t target = ((uint64_t)atu->target_hi << 32) | atu->target_lo;
+        uint64_t target = concat_bits(atu->target_hi,
+                                      atu->target_lo, 32);
         *addr_out = (uint32_t)(target + (cpu_addr - base));
         return true;
     }
@@ -501,9 +503,9 @@ bool PCIHostDWDevice::ConfigDecode(uint32_t offset, uint32_t *bus_addr_out)
         return false;
     }
 
-    uint32_t bus = (addr >> 24) & 0xff;
-    uint32_t devfn = (addr >> 16) & 0xff;
-    uint32_t reg = addr & 0xfff;
+    uint32_t bus = get_bits(addr, 24, 8);
+    uint32_t devfn = get_bits(addr, 16, 8);
+    uint32_t reg = get_bits(addr, 0, 12);
 
     /* This window reaches what is behind the root port. The root port itself
        is the bottom of the DBI window instead, so letting a cycle for bus 0

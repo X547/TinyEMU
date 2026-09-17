@@ -26,6 +26,7 @@
 
 /* included inside a namespace, so <atomic> comes from the includer */
 #include "riscv_cpu.h"
+#include "bits.h"
 #include "cutils.h"
 
 #define __exception __attribute__((warn_unused_result))
@@ -98,7 +99,8 @@ typedef uint128_t mem_uint_t;
 #unsupported MLEN
 #endif
 
-#define TLB_SIZE 256
+#define TLB_BITS 8
+#define TLB_SIZE (1 << TLB_BITS)
 
 #define CAUSE_MISALIGNED_FETCH    0x0
 #define CAUSE_FAULT_FETCH         0x1
@@ -117,7 +119,7 @@ typedef uint128_t mem_uint_t;
 #define CAUSE_STORE_PAGE_FAULT    0xf
 
 /* Note: converted to correct bit position at runtime */
-#define CAUSE_INTERRUPT  ((uint32_t)1 << 31) 
+#define CAUSE_INTERRUPT  bit_at(31)
 
 #define PRV_U 0
 #define PRV_S 1
@@ -125,15 +127,15 @@ typedef uint128_t mem_uint_t;
 #define PRV_M 3
 
 /* misa CSR */
-#define MCPUID_SUPER   (1 << ('S' - 'A'))
-#define MCPUID_USER    (1 << ('U' - 'A'))
-#define MCPUID_I       (1 << ('I' - 'A'))
-#define MCPUID_M       (1 << ('M' - 'A'))
-#define MCPUID_A       (1 << ('A' - 'A'))
-#define MCPUID_F       (1 << ('F' - 'A'))
-#define MCPUID_D       (1 << ('D' - 'A'))
-#define MCPUID_Q       (1 << ('Q' - 'A'))
-#define MCPUID_C       (1 << ('C' - 'A'))
+#define MCPUID_SUPER   bit_at('S' - 'A')
+#define MCPUID_USER    bit_at('U' - 'A')
+#define MCPUID_I       bit_at('I' - 'A')
+#define MCPUID_M       bit_at('M' - 'A')
+#define MCPUID_A       bit_at('A' - 'A')
+#define MCPUID_F       bit_at('F' - 'A')
+#define MCPUID_D       bit_at('D' - 'A')
+#define MCPUID_Q       bit_at('Q' - 'A')
+#define MCPUID_C       bit_at('C' - 'A')
 
 /* mstatus CSR */
 
@@ -147,30 +149,32 @@ typedef uint128_t mem_uint_t;
 #define MSTATUS_UXL_SHIFT 32
 #define MSTATUS_SXL_SHIFT 34
 
-#define MSTATUS_SIE (1 << MSTATUS_SIE_SHIFT)
-#define MSTATUS_MIE (1 << MSTATUS_MIE_SHIFT)
-#define MSTATUS_SPIE (1 << MSTATUS_SPIE_SHIFT)
-#define MSTATUS_MPIE (1 << MSTATUS_MPIE_SHIFT)
-#define MSTATUS_SPP (1 << MSTATUS_SPP_SHIFT)
-#define MSTATUS_MPP (3 << MSTATUS_MPP_SHIFT)
-#define MSTATUS_FS (3 << MSTATUS_FS_SHIFT)
-#define MSTATUS_XS (3 << 15)
-#define MSTATUS_MPRV (1 << 17)
-#define MSTATUS_SUM (1 << 18)
-#define MSTATUS_MXR (1 << 19)
-#define MSTATUS_TVM (1 << 20)
-#define MSTATUS_TW (1 << 21)
-#define MSTATUS_TSR (1 << 22)
-#define MSTATUS_UXL_MASK ((uint64_t)3 << MSTATUS_UXL_SHIFT)
-#define MSTATUS_SXL_MASK ((uint64_t)3 << MSTATUS_SXL_SHIFT)
+/* masks of the register's own width, so that complementing one keeps the
+   fields above bit 31 of a 64 bit mstatus */
+#define MSTATUS_SIE bit_at<target_ulong>(MSTATUS_SIE_SHIFT)
+#define MSTATUS_MIE bit_at<target_ulong>(MSTATUS_MIE_SHIFT)
+#define MSTATUS_SPIE bit_at<target_ulong>(MSTATUS_SPIE_SHIFT)
+#define MSTATUS_MPIE bit_at<target_ulong>(MSTATUS_MPIE_SHIFT)
+#define MSTATUS_SPP bit_at<target_ulong>(MSTATUS_SPP_SHIFT)
+#define MSTATUS_MPP field_mask<target_ulong>(MSTATUS_MPP_SHIFT, 2)
+#define MSTATUS_FS field_mask<target_ulong>(MSTATUS_FS_SHIFT, 2)
+#define MSTATUS_XS field_mask<target_ulong>(15, 2)
+#define MSTATUS_MPRV bit_at<target_ulong>(17)
+#define MSTATUS_SUM bit_at<target_ulong>(18)
+#define MSTATUS_MXR bit_at<target_ulong>(19)
+#define MSTATUS_TVM bit_at<target_ulong>(20)
+#define MSTATUS_TW bit_at<target_ulong>(21)
+#define MSTATUS_TSR bit_at<target_ulong>(22)
+#define MSTATUS_UXL_MASK field_mask<uint64_t>(MSTATUS_UXL_SHIFT, 2)
+#define MSTATUS_SXL_MASK field_mask<uint64_t>(MSTATUS_SXL_SHIFT, 2)
 
 /* menvcfg and senvcfg CSRs. Both are 64 bit whatever XLEN is */
-#define ENVCFG_FIOM  ((uint64_t)1 << 0)
-#define MENVCFG_ADUE ((uint64_t)1 << 61)
-#define MENVCFG_STCE ((uint64_t)1 << 63)
+#define ENVCFG_FIOM  bit_at<uint64_t>(0)
+#define MENVCFG_ADUE bit_at<uint64_t>(61)
+#define MENVCFG_STCE bit_at<uint64_t>(63)
 
 #define PG_SHIFT 12
-#define PG_MASK ((1 << PG_SHIFT) - 1)
+#define PG_MASK bit_mask<target_ulong>(PG_SHIFT)
 
 typedef struct {
     target_ulong vaddr;
@@ -297,7 +301,7 @@ DLL_PUBLIC int target_write_slow(RISCVCPUState *s, target_ulong addr,
 static inline __exception int target_read_u ## size(RISCVCPUState *s, uint_type *pval, target_ulong addr)                              \
 {\
     uint32_t tlb_idx;\
-    tlb_idx = (addr >> PG_SHIFT) & (TLB_SIZE - 1);\
+    tlb_idx = get_bits(addr, PG_SHIFT, TLB_BITS);\
     if (likely(s->tlb_read[tlb_idx].vaddr == (addr & ~(PG_MASK & ~((size / 8) - 1))))) { \
         *pval = *(uint_type *)(s->tlb_read[tlb_idx].mem_addend + (uintptr_t)addr);\
     } else {\
@@ -315,7 +319,7 @@ static inline __exception int target_write_u ## size(RISCVCPUState *s, target_ul
                                           uint_type val)                \
 {\
     uint32_t tlb_idx;\
-    tlb_idx = (addr >> PG_SHIFT) & (TLB_SIZE - 1);\
+    tlb_idx = get_bits(addr, PG_SHIFT, TLB_BITS);\
     if (likely(s->tlb_write[tlb_idx].vaddr == (addr & ~(PG_MASK & ~((size / 8) - 1))))) { \
         *(uint_type *)(s->tlb_write[tlb_idx].mem_addend + (uintptr_t)addr) = val;\
         return 0;\

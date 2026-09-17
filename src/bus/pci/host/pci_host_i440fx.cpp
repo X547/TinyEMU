@@ -28,6 +28,7 @@
 #include <string.h>
 #include <assert.h>
 
+#include "bits.h"
 #include "cutils.h"
 #include "machine.h"
 #include "pci_bridge.h"
@@ -77,15 +78,16 @@ uint32_t I440FXState::ReadAddr(uint32_t offset, int size_log2)
    it is on the hardware this models. */
 static uint32_t i440fx_config_addr(uint32_t config_reg, uint32_t offset)
 {
-    return PCI_CONFIG_ADDR((config_reg >> 16) & 0xff,
-                           (config_reg >> 8) & 0xff,
-                           (config_reg & 0xfc) | (offset & 3));
+    return PCI_CONFIG_ADDR(get_bits(config_reg, 16, 8),
+                           get_bits(config_reg, 8, 8),
+                           set_bits(get_bits(config_reg, 0, 8),
+                                    0, 2, offset));
 }
 
 void I440FXState::WriteData(uint32_t offset, uint32_t data, int size_log2)
 {
     I440FXState *s = this;
-    if (s->config_reg & 0x80000000) {
+    if (get_bit(s->config_reg, 31)) {
         if (size_log2 == 2) {
             /* it is simpler to assume 32 bit config accesses are
                always aligned */
@@ -100,7 +102,7 @@ void I440FXState::WriteData(uint32_t offset, uint32_t data, int size_log2)
 uint32_t I440FXState::ReadData(uint32_t offset, int size_log2)
 {
     I440FXState *s = this;
-    if (!(s->config_reg & 0x80000000))
+    if (!get_bit(s->config_reg, 31))
         return val_ones[size_log2];
     if (size_log2 == 2) {
         /* it is simpler to assume 32 bit config accesses are
@@ -124,10 +126,8 @@ void I440FXState::SetIRQ(int irq_num, int irq_level)
     pic_irq = pci_device_get_config(hd, route, 0) & ~0x80;
     pci_device_set_config8(hd, route, pic_irq);
     if (pic_irq < 16) {
-        if (irq_level)
-            s->pic_irq_state[pic_irq] |= 1 << irq_num;
-        else
-            s->pic_irq_state[pic_irq] &= ~(1 << irq_num);
+        s->pic_irq_state[pic_irq] =
+            set_bit(s->pic_irq_state[pic_irq], irq_num, irq_level);
         s->pic_irqs[pic_irq].Set((s->pic_irq_state[pic_irq] != 0));
     }
 }

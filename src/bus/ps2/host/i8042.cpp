@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+#include "bits.h"
 #include "devices.h"
 #include "machine.h"
 #include "vmmouse.h"
@@ -151,11 +152,7 @@ bool I8042Controller::AttachDevice(PS2Device *dev, int port)
 
 void I8042Controller::Port::PS2DataAvailable(bool available)
 {
-    if (available) {
-        owner->fPending |= 1 << index;
-    } else {
-        owner->fPending &= ~(1 << index);
-    }
+    owner->fPending = set_bit(owner->fPending, index, available);
     owner->UpdateIRQ();
 }
 
@@ -392,7 +389,7 @@ void I8042Controller::DataWrite(uint32_t addr, uint32_t val, int size_log2)
         QueueFromController(val, I8042_PORT_AUX);
         break;
     case KBD_CCMD_WRITE_OUTPORT:
-        ioport_set_a20((val >> 1) & 1);
+        ioport_set_a20(get_bit(val, 1));
         if (!(val & 1)) {
             qemu_system_reset_request();
         }

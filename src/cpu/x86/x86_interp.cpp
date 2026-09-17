@@ -538,10 +538,10 @@ static uint32_t shift(X86CPUState *s, int op, uint32_t val, unsigned count,
         if (op == SHIFT_RCR) {
             count = bits + 1 - count;
         }
-        wide = get_bits64((wide << count) | (wide >> (bits + 1 - count)), 0,
+        wide = get_bits((wide << count) | (wide >> (bits + 1 - count)), 0,
                           bits + 1);
         r = trunc_size(wide, size);
-        cf = get_bits64(wide, bits, 1);
+        cf = get_bits(wide, bits, 1);
         break;
     }
     case SHIFT_SHR:
@@ -576,8 +576,8 @@ static uint32_t shift_double(X86CPUState *s, bool left, uint32_t dst,
     }
     if (left) {
         uint64_t wide = concat_bits(dst, src, bits);
-        uint32_t r = get_bits64(wide << count, bits, bits);
-        set_cc(s, CC_OP_SHL, size, get_bits64(wide << (count - 1), bits, bits),
+        uint32_t r = get_bits(wide << count, bits, bits);
+        set_cc(s, CC_OP_SHL, size, get_bits(wide << (count - 1), bits, bits),
                r);
         return r;
     }
@@ -608,15 +608,15 @@ static void mul_div(X86CPUState *s, int op, uint32_t val, int size)
     switch (op) {
     case 4: {
         uint64_t r = low * val;
-        res_low = get_bits64(r, 0, bits);
-        res_high = get_bits64(r, bits, bits);
+        res_low = get_bits(r, 0, bits);
+        res_high = get_bits(r, bits, bits);
         set_cc(s, CC_OP_MUL, size, res_high != 0, res_low);
         break;
     }
     case 5: {
         int64_t r = (int64_t)sext_size(low, size) * sext_size(val, size);
-        res_low = get_bits64(r, 0, bits);
-        res_high = get_bits64(r, bits, bits);
+        res_low = get_bits(r, 0, bits);
+        res_high = get_bits(r, bits, bits);
         set_cc(s, CC_OP_MUL, size, r != sext_size(res_low, size), res_low);
         break;
     }
@@ -630,7 +630,7 @@ static void mul_div(X86CPUState *s, int op, uint32_t val, int size)
         break;
     }
     default: {
-        int64_t n = sign_extend64(concat_bits(high, low, bits), 2 * bits);
+        int64_t n = sign_extend(concat_bits(high, low, bits), 2 * bits);
         int64_t v = sext_size(val, size);
         if (v == 0 || (n == INT64_MIN && v == -1)) {
             raise_exception(s, EXCP_DE);

@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "bits.h"
 #include "cutils.h"
 #include "fdt.h"
 #include "plic.h"
@@ -119,7 +120,7 @@ uint32_t PLIC::DeviceRead(uint32_t offset, int size_log2)
             /* claim */
             val = BestIrq(ctx);
             if (val != 0) {
-                fServed |= 1u << val;
+                fServed = set_bit(fServed, val, true);
                 Update();
             }
         }
@@ -146,7 +147,7 @@ void PLIC::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
         uint32_t reg = (offset - PLIC_ENABLE_BASE) % PLIC_ENABLE_SIZE;
         if (ctx >= context_count || reg != 0)
             return;
-        fEnable[ctx] = val & ~1u; /* source 0 does not exist */
+        fEnable[ctx] = set_bit(val, 0, false); /* source 0 does not exist */
     } else {
         uint32_t ctx = (offset - PLIC_CONTEXT_BASE) / PLIC_CONTEXT_SIZE;
         uint32_t reg = (offset - PLIC_CONTEXT_BASE) % PLIC_CONTEXT_SIZE;
@@ -159,7 +160,7 @@ void PLIC::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
                this context does not matter */
             if (val == 0 || val >= PLIC_NUM_SOURCES)
                 return;
-            fServed &= ~(1u << val);
+            fServed = set_bit(fServed, val, false);
         } else {
             return;
         }
@@ -170,12 +171,7 @@ void PLIC::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
 
 void PLIC::SetIRQ(int irq_num, int level)
 {
-    uint32_t mask = 1u << irq_num;
-    if (level) {
-        fLevel |= mask;
-    } else {
-        fLevel &= ~mask;
-    }
+    fLevel = set_bit(fLevel, irq_num, level);
     Update();
 }
 

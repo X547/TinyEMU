@@ -25,6 +25,7 @@
 
 #include <string.h>
 
+#include "bits.h"
 #include "machine.h"
 
 
@@ -93,7 +94,7 @@ uint8_t ATADevice::ReadReg(int reg)
 {
     switch (reg) {
     case ATA_REG_ERROR:   return fError;
-    case ATA_REG_NSECTOR: return fNsector & 0xff;
+    case ATA_REG_NSECTOR: return get_bits(fNsector, 0, 8);
     case ATA_REG_SECTOR:  return fSector;
     case ATA_REG_LCYL:    return fLcyl;
     case ATA_REG_HCYL:    return fHcyl;
@@ -140,8 +141,8 @@ void ATADevice::WriteData(uint16_t val)
     if (fBufferPos + 2 > fBufferEnd) {
         return;
     }
-    fBuffer[fBufferPos] = val & 0xff;
-    fBuffer[fBufferPos + 1] = (val >> 8) & 0xff;
+    fBuffer[fBufferPos] = get_bits(val, 0, 8);
+    fBuffer[fBufferPos + 1] = get_bits(val, 8, 8);
     fBufferPos += 2;
     if (fBufferPos >= fBufferEnd) {
         BufferComplete();
@@ -261,9 +262,9 @@ void ATAChannel::CommandWrite(uint32_t offset, uint32_t val, int size_log2)
         if (dev == nullptr) {
             return;
         }
-        dev->WriteData(val & 0xffff);
+        dev->WriteData(get_bits(val, 0, 16));
         if (size_log2 >= 2) {
-            dev->WriteData((val >> 16) & 0xffff);
+            dev->WriteData(get_bits(val, 16, 16));
         }
         return;
     }
@@ -271,7 +272,7 @@ void ATAChannel::CommandWrite(uint32_t offset, uint32_t val, int size_log2)
     if (offset == ATA_REG_SELECT) {
         /* Bit 4 chooses the device, and both of them latch the write so
            that the one not selected still knows which it is. */
-        fSelected = (val >> 4) & 1;
+        fSelected = get_bit(val, 4);
         for (int i = 0; i < ATA_MAX_DEVICES; i++) {
             if (fDevices[i] != nullptr) {
                 fDevices[i]->WriteReg(ATA_REG_SELECT, val);
@@ -286,10 +287,10 @@ void ATAChannel::CommandWrite(uint32_t offset, uint32_t val, int size_log2)
     if (offset == ATA_REG_COMMAND) {
         /* Issuing a command clears the previous one's interrupt. */
         LowerIrq();
-        dev->ExecCommand(val & 0xff);
+        dev->ExecCommand(get_bits(val, 0, 8));
         return;
     }
-    dev->WriteReg(offset, val & 0xff);
+    dev->WriteReg(offset, get_bits(val, 0, 8));
 }
 
 
@@ -314,7 +315,7 @@ void ATAChannel::ControlWrite(uint32_t offset, uint32_t val, int size_log2)
     (void)size_log2;
     uint8_t old = fControl;
 
-    fControl = val & 0xff;
+    fControl = get_bits(val, 0, 8);
 
     if ((old & ATA_CTRL_SRST) == 0 && (fControl & ATA_CTRL_SRST) != 0) {
         /* Reset asserted: every device goes busy until it is released. */

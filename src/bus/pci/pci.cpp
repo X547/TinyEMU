@@ -29,6 +29,7 @@
 #include <stdarg.h>
 #include <string>
 
+#include "bits.h"
 #include "cutils.h"
 #include "pci.h"
 
@@ -80,7 +81,8 @@ void PCIBusDeleter::operator()(PCIBus *b) const
 
 static bool pci_is_bridge(const PCIDevice *d)
 {
-    return (d->config[PCI_HEADER_TYPE] & 0x7f) == PCI_HEADER_TYPE_BRIDGE;
+    return get_bits(d->config[PCI_HEADER_TYPE], 0, 7) ==
+        PCI_HEADER_TYPE_BRIDGE;
 }
 
 int pci_bus_map_irq(int devfn, int irq_num)
@@ -113,14 +115,12 @@ void PCIDevice::SetIRQ(int irq_num, int level)
     PCIBus *b = d->bus;
     uint32_t mask;
     int i, irq_level;
+    uint32_t *state;
 
     //    printf("%s: pci_device_seq_irq: %d %d\n", d->name, irq_num, level);
     irq_num = bus_map_irq(d, irq_num);
-    mask = 1 << (d->devfn & 0x1f);
-    if (level)
-        b->irq_state[irq_num][d->devfn >> 5] |= mask;
-    else
-        b->irq_state[irq_num][d->devfn >> 5] &= ~mask;
+    state = &b->irq_state[irq_num][d->devfn >> 5];
+    *state = set_bit(*state, get_bits(d->devfn, 0, 5), level);
 
     /* compute the IRQ state */
     mask = 0;
@@ -326,14 +326,15 @@ static void pci_update_mappings(PCIDevice *d)
         offset = pci_bar_offset(d, i);
         new_addr = get_le32(&d->config[offset]);
         if (r->is64)
-            new_addr |= (uint64_t)get_le32(&d->config[offset + 4]) << 32;
+            new_addr = concat_bits(get_le32(&d->config[offset + 4]),
+                                   new_addr, 32);
 
         new_enabled = false;
         if (r->type & PCI_ADDRESS_SPACE_IO) {
             new_enabled = (cmd & PCI_COMMAND_IO) != 0;
         } else if (cmd & PCI_COMMAND_MEMORY) {
             /* The expansion ROM has an enable bit of its own. */
-            new_enabled = i != PCI_ROM_SLOT || (new_addr & 1) != 0;
+            new_enabled = i != PCI_ROM_SLOT || get_bit(new_addr, 0);
         }
         if (new_enabled) {
             r->bar_target->SetBar(i, new_addr & ~(r->size - 1), true);
@@ -477,7 +478,7 @@ static void pci_device_config_write(PCIDevice *d, uint32_t addr,
     for(i = 0; i < size; i++) {
         addr1 = addr + i;
         if (addr1 < PCI_EXT_CONFIG_SIZE) {
-            pci_device_config_write8(d, addr1, (data >> (i * 8)) & 0xff);
+            pci_device_config_write8(d, addr1, get_bits(data, i * 8, 8));
         }
     }
     if (PCI_COMMAND >= addr && PCI_COMMAND < addr + size) {
@@ -514,7 +515,7 @@ static void pci_data_write(PCIBus *s, uint32_t addr,
 {
     PCIDevice *d;
 
-    d = pci_find_device(s, (addr >> 20) & 0xff, (addr >> 12) & 0xff);
+    d = pci_find_device(s, get_bits(addr, 20, 8), get_bits(addr, 12, 8));
     if (!d)
         return;
     pci_device_config_write(d, addr & (PCI_EXT_CONFIG_SIZE - 1), data,
@@ -527,7 +528,7 @@ static uint32_t pci_data_read(PCIBus *s, uint32_t addr, int size_log2)
 {
     PCIDevice *d;
 
-    d = pci_find_device(s, (addr >> 20) & 0xff, (addr >> 12) & 0xff);
+    d = pci_find_device(s, get_bits(addr, 20, 8), get_bits(addr, 12, 8));
     if (!d)
         return val_ones[size_log2];
     return pci_device_config_read(d, addr & (PCI_EXT_CONFIG_SIZE - 1),
@@ -786,14 +787,14 @@ int pci_add_ext_capability(PCIDevice *d, uint16_t cap_id, int version,
     if (offset > PCI_EXT_CAP_START) {
         uint32_t hdr;
         for(prev = PCI_EXT_CAP_START;;) {
-            int next = (get_le32(&d->config[prev]) >> 20) & 0xffc;
+            int next = get_bits(get_le32(&d->config[prev]), 20, 12) & ~3;
             if (next == 0)
                 break;
             prev = next;
         }
         hdr = get_le32(&d->config[prev]);
         put_le32(&d->config[prev],
-                 (hdr & 0x000fffff) | ((uint32_t)offset << 20));
+                 set_bits(hdr, 20, 12, offset));
     }
 
     d->next_ext_cap_offset = offset + size;
@@ -815,10 +816,10 @@ int pci_add_pcie_capability(PCIDevice *d, int port_type)
     put_le16(cap + 2, (2 << 0) | (port_type << 4));
     /* Role based error reporting, which is what tells a guest this is not a
        function from before the 1.1 revision of the specification. */
-    put_le32(cap + 0x04, 1 << 15);
+    put_le32(cap + 0x04, bit_at(15));
     /* link capabilities and status: one lane at 2.5 GT/s, link up */
-    put_le32(cap + 0x0c, (1 << 0) | (1 << 4));
-    put_le16(cap + 0x12, (1 << 0) | (1 << 4));
+    put_le32(cap + 0x0c, bit_at(0) | bit_at(4));
+    put_le16(cap + 0x12, bit_at(0) | bit_at(4));
     offset = pci_add_capability(d, cap, sizeof(cap));
     if (offset < 0)
         return -1;
@@ -834,14 +835,6 @@ int pci_add_pcie_capability(PCIDevice *d, int port_type)
 }
 
 //#pragma mark - PCIMsixState
-
-/* All the bits an access of this size covers. */
-static uint32_t size_mask(int size_log2)
-{
-    if (size_log2 >= 2)
-        return 0xffffffff;
-    return (1u << (8 << size_log2)) - 1;
-}
 
 bool PCIMsixState::Init(PCIDevice *dev, int bar_num, int vector_count,
                         uint32_t table_offset, uint32_t pba_offset)
@@ -901,11 +894,11 @@ void PCIMsixState::Send(int vector)
 
     PCIMsixEntry *e = &fTable[vector];
     if (MaskedAll() || (e->vector_ctrl & PCI_MSIX_ENTRY_CTRL_MASKBIT) != 0) {
-        fPba[vector >> 5] |= 1u << (vector & 31);
+        fPba[vector / 32] = set_bit(fPba[vector / 32], vector % 32, true);
         return;
     }
-    fPba[vector >> 5] &= ~(1u << (vector & 31));
-    pci_device_send_msi(fDev, ((uint64_t)e->addr_hi << 32) | e->addr_lo,
+    fPba[vector / 32] = set_bit(fPba[vector / 32], vector % 32, false);
+    pci_device_send_msi(fDev, concat_bits(e->addr_hi, e->addr_lo, 32),
                         e->data);
 }
 
@@ -935,7 +928,7 @@ uint32_t PCIMsixState::TableRead(uint32_t offset, int size_log2)
     const uint32_t *slot = TableSlot(offset);
     if (slot == nullptr)
         return 0;
-    return (*slot >> ((offset & 3) * 8)) & size_mask(size_log2);
+    return get_bits(*slot, (offset % 4) * 8, 8 << size_log2);
 }
 
 void PCIMsixState::TableWrite(uint32_t offset, uint32_t val, int size_log2)
@@ -944,17 +937,15 @@ void PCIMsixState::TableWrite(uint32_t offset, uint32_t val, int size_log2)
     if (slot == nullptr)
         return;
 
-    int shift = (offset & 3) * 8;
-    uint32_t mask = size_mask(size_log2) << shift;
     uint32_t old = *slot;
-    *slot = (old & ~mask) | ((val << shift) & mask);
+    *slot = set_bits(old, (offset % 4) * 8, 8 << size_log2, val);
 
     /* Lifting a vector's mask delivers whatever arrived while it was set. */
     uint32_t index = offset / sizeof(PCIMsixEntry);
     if (slot == &fTable[index].vector_ctrl &&
         (old & PCI_MSIX_ENTRY_CTRL_MASKBIT) != 0 &&
         (*slot & PCI_MSIX_ENTRY_CTRL_MASKBIT) == 0 &&
-        (fPba[index >> 5] & (1u << (index & 31))) != 0) {
+        get_bit(fPba[index / 32], index % 32)) {
         Send(index);
     }
 }
@@ -964,5 +955,5 @@ uint32_t PCIMsixState::PbaRead(uint32_t offset, int size_log2)
     uint32_t index = offset / 4;
     if (fCapOffset < 0 || index >= (uint32_t)((fVectorCount + 31) / 32))
         return 0;
-    return (fPba[index] >> ((offset & 3) * 8)) & size_mask(size_log2);
+    return get_bits(fPba[index], (offset % 4) * 8, 8 << size_log2);
 }

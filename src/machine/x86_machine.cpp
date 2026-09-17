@@ -28,6 +28,7 @@
 #include <inttypes.h>
 #include <assert.h>
 
+#include "bits.h"
 #include "cutils.h"
 #include "host_time.h"
 #include "iomem.h"
@@ -104,10 +105,10 @@ struct CMOSState {
 
 static int to_bcd(CMOSState *s, unsigned int a)
 {
-    if (s->cmos_data[RTC_REG_B] & 0x04) {
+    if (get_bit(s->cmos_data[RTC_REG_B], 2)) {
         return a;
     } else {
-        return ((a / 10) << 4) | (a % 10);
+        return set_bits(a % 10, 4, 4, a / 10);
     }
 }
 
@@ -120,7 +121,7 @@ static void cmos_update_time(CMOSState *s, bool set_century)
 
     s->cmos_data[RTC_SECONDS] = to_bcd(s, dt.second);
     s->cmos_data[RTC_MINUTES] = to_bcd(s, dt.minute);
-    if (s->cmos_data[RTC_REG_B] & 0x02) {
+    if (get_bit(s->cmos_data[RTC_REG_B], 1)) {
         s->cmos_data[RTC_HOURS] = to_bcd(s, dt.hour);
     } else {
         s->cmos_data[RTC_HOURS] = to_bcd(s, dt.hour % 12);
@@ -184,7 +185,7 @@ static void cmos_update_timer(CMOSState *s)
 {
     int period_code;
 
-    period_code = s->cmos_data[RTC_REG_A] & 0x0f;
+    period_code = get_bits(s->cmos_data[RTC_REG_A], 0, 4);
     if ((s->cmos_data[RTC_REG_B] & REG_B_PIE) &&
         period_code != 0) {
         if (period_code <= 2)
@@ -218,7 +219,7 @@ void CMOSState::Write(uint32_t offset, uint32_t data, int size_log2)
     CMOSState *s = this;
 
     if (offset == 0) {
-        s->cmos_index = data & 0x7f;
+        s->cmos_index = get_bits(data, 0, 7);
     } else {
 #ifdef DEBUG_CMOS
         printf("cmos_write: reg=0x%02x val=0x%02x\n", s->cmos_index, data);
@@ -354,7 +355,7 @@ static void pic_reset(PICState *s)
 static void pic_set_irq1(PICState *s, int irq, int level)
 {
     int mask;
-    mask = 1 << irq;
+    mask = bit_at(irq);
     if (s->elcr & mask) {
         /* level triggered */
         if (level) {
@@ -416,11 +417,11 @@ static void pic_intack(PICState *s, int irq)
         if (s->rotate_on_autoeoi)
             s->priority_add = (irq + 1) & 7;
     } else {
-        s->isr |= (1 << irq);
+        s->isr = set_bit(s->isr, irq, true);
     }
     /* We don't clear a level sensitive interrupt here */
-    if (!(s->elcr & (1 << irq)))
-        s->irr &= ~(1 << irq);
+    if (!get_bit(s->elcr, irq))
+        s->irr = set_bit(s->irr, irq, false);
 }
 
 void PICState::Write(uint32_t offset, uint32_t val, int size_log2)
@@ -428,30 +429,30 @@ void PICState::Write(uint32_t offset, uint32_t val, int size_log2)
     PICState *s = this;
     int priority, addr;
     
-    addr = offset & 1;
+    addr = get_bit(offset, 0);
 #ifdef DEBUG_PIC
     console.log("pic_write: addr=" + toHex2(addr) + " val=" + toHex2(val));
 #endif
     if (addr == 0) {
-        if (val & 0x10) {
+        if (get_bit(val, 4)) {
             /* init */
             pic_reset(s);
             s->init_state = 1;
-            s->init4 = val & 1;
-            if (val & 0x02)
+            s->init4 = get_bit(val, 0);
+            if (get_bit(val, 1))
                 abort(); /* "single mode not supported" */
-            if (val & 0x08)
+            if (get_bit(val, 3))
                 abort(); /* "level sensitive irq not supported" */
-        } else if (val & 0x08) {
-            if (val & 0x02)
-                s->read_reg_select = val & 1;
-            if (val & 0x40)
-                s->special_mask = (val >> 5) & 1;
+        } else if (get_bit(val, 3)) {
+            if (get_bit(val, 1))
+                s->read_reg_select = get_bit(val, 0);
+            if (get_bit(val, 6))
+                s->special_mask = get_bit(val, 5);
         } else {
             switch(val) {
             case 0x00:
             case 0x80:
-                s->rotate_on_autoeoi = val >> 7;
+                s->rotate_on_autoeoi = get_bit(val, 7);
                 break;
             case 0x20: /* end of interrupt */
             case 0xa0:
@@ -471,7 +472,7 @@ void PICState::Write(uint32_t offset, uint32_t val, int size_log2)
             case 0x66:
             case 0x67:
                 priority = val & 7;
-                s->isr &= ~(1 << priority);
+                s->isr = set_bit(s->isr, priority, false);
                 break;
             case 0xc0:
             case 0xc1:
@@ -492,7 +493,7 @@ void PICState::Write(uint32_t offset, uint32_t val, int size_log2)
             case 0xe6:
             case 0xe7:
                 priority = val & 7;
-                s->isr &= ~(1 << priority);
+                s->isr = set_bit(s->isr, priority, false);
                 s->priority_add = (priority + 1) & 7;
                 break;
             }
@@ -505,7 +506,7 @@ void PICState::Write(uint32_t offset, uint32_t val, int size_log2)
             s->update_target->UpdatePICIRQ();
             break;
         case 1:
-            s->irq_base = val & 0xf8;
+            s->irq_base = set_bits(val, 0, 3, 0);
             s->init_state = 2;
             break;
         case 2:
@@ -516,7 +517,7 @@ void PICState::Write(uint32_t offset, uint32_t val, int size_log2)
             }
             break;
         case 3:
-            s->auto_eoi = (val >> 1) & 1;
+            s->auto_eoi = get_bit(val, 1);
             s->init_state = 0;
             break;
         }
@@ -528,7 +529,7 @@ uint32_t PICState::Read(uint32_t offset, int size_log2)
     PICState *s = this;
     int addr, ret;
 
-    addr = offset & 1;
+    addr = get_bit(offset, 0);
     if (addr == 0) {
         if (s->read_reg_select)
             ret = s->isr;
@@ -781,7 +782,7 @@ static uint32_t pit_get_count(PITChannel *pc)
     case 1:
     case 4:
     case 5:
-        counter = (pc->count - d) & 0xffff;
+        counter = get_bits(pc->count - d, 0, 16);
         break;
     default:
         counter = pc->count - (d % pc->count);
@@ -847,14 +848,14 @@ void PITState::Write(uint32_t offset, uint32_t val, int size_log2)
         if (channel == 3)
             return;
         s = &pit->pit_channels[channel];
-        access = (val >> 4) & 3;
+        access = get_bits(val, 4, 2);
         switch(access) {
         case 0:
             s->latched_count = pit_get_count(s);
             s->rw_state = RW_STATE_LATCHED_WORD0;
             break;
         default:
-            s->mode = (val >> 1) & 7;
+            s->mode = get_bits(val, 1, 3);
             s->bcd = val & 1;
             s->rw_state = access - 1 +  RW_STATE_LSB;
             break;
@@ -871,7 +872,8 @@ void PITState::Write(uint32_t offset, uint32_t val, int size_log2)
         case RW_STATE_WORD0:
         case RW_STATE_WORD1:
             if (s->rw_state & 1) {
-                pit_load_count(s, (s->latched_count & 0xff) | (val << 8));
+                pit_load_count(s,
+                               concat_bits<uint32_t>(val, s->latched_count, 8));
             } else {
                 s->latched_count = val;
             }
@@ -899,9 +901,9 @@ uint32_t PITState::Read(uint32_t offset, int size_log2)
     case RW_STATE_WORD1:
         count = pit_get_count(s);
         if (s->rw_state & 1)
-            ret = (count >> 8) & 0xff;
+            ret = get_bits(count, 8, 8);
         else
-            ret = count & 0xff;
+            ret = get_bits(count, 0, 8);
         if (s->rw_state & 2)
             s->rw_state ^= 1;
         break;
@@ -911,7 +913,7 @@ uint32_t PITState::Read(uint32_t offset, int size_log2)
         if (s->rw_state & 1)
             ret = s->latched_count >> 8;
         else
-            ret = s->latched_count & 0xff;
+            ret = get_bits(s->latched_count, 0, 8);
         s->rw_state ^= 1;
         break;
     }
@@ -924,7 +926,7 @@ uint32_t PITState::Read(uint32_t offset, int size_log2)
 void PITState::SpeakerWrite(uint32_t offset, uint32_t val, int size_log2)
 {
     PITState *pit = this;
-    pit->speaker_data_on = (val >> 1) & 1;
+    pit->speaker_data_on = get_bit(val, 1);
     pit->pit_channels[2].gate = val & 1;
 }
 
@@ -1118,7 +1120,7 @@ void PCMachine::BiosDebugWrite(uint32_t offset, uint32_t val, int size_log2)
 {
     (void)offset;
     (void)size_log2;
-    putchar(val & 0xff);
+    putchar(get_bits(val, 0, 8));
 }
 
 uint32_t PCMachine::BiosDebugRead(uint32_t offset, int size_log2)
@@ -1300,8 +1302,8 @@ static void sigalrm_handler(int sig)
 {
 }
 
-#define CPUID_APIC (1 << 9)
-#define CPUID_ACPI (1 << 22)
+#define CPUID_APIC bit_at(9)
+#define CPUID_ACPI bit_at(22)
 
 static void kvm_set_cpuid(PCMachine *s)
 {

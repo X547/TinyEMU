@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "bits.h"
 #include "cutils.h"
 #include "fdt.h"
 #include "machine.h"
@@ -78,13 +79,13 @@
 #define SDHCI_REG_FILE_SIZE     0x100
 
 /* Transfer mode. */
-#define SDHCI_TRNS_DMA          (1 << 0)
-#define SDHCI_TRNS_BLK_CNT_EN   (1 << 1)
+#define SDHCI_TRNS_DMA          bit_at(0)
+#define SDHCI_TRNS_BLK_CNT_EN   bit_at(1)
 #define SDHCI_TRNS_AUTO_MASK    (3 << 2)
-#define SDHCI_TRNS_AUTO_CMD12   (1 << 2)
+#define SDHCI_TRNS_AUTO_CMD12   bit_at(2)
 #define SDHCI_TRNS_AUTO_CMD23   (2 << 2)
-#define SDHCI_TRNS_READ         (1 << 4)
-#define SDHCI_TRNS_MULTI        (1 << 5)
+#define SDHCI_TRNS_READ         bit_at(4)
+#define SDHCI_TRNS_MULTI        bit_at(5)
 
 /* Command. */
 #define SDHCI_CMD_RESP_MASK     0x0003
@@ -100,73 +101,73 @@
 #define SDHCI_CMD_INDEX_SHIFT   8
 
 /* Present state. */
-#define SDHCI_PRESENT_CMD_INHIBIT    (1u << 0)
-#define SDHCI_PRESENT_DAT_INHIBIT    (1u << 1)
-#define SDHCI_PRESENT_DAT_ACTIVE     (1u << 2)
-#define SDHCI_PRESENT_WRITE_ACTIVE   (1u << 8)
-#define SDHCI_PRESENT_READ_ACTIVE    (1u << 9)
-#define SDHCI_PRESENT_BUF_WR_ENABLE  (1u << 10)
-#define SDHCI_PRESENT_BUF_RD_ENABLE  (1u << 11)
-#define SDHCI_PRESENT_CARD_INSERTED  (1u << 16)
-#define SDHCI_PRESENT_CARD_STABLE    (1u << 17)
-#define SDHCI_PRESENT_CARD_DETECT    (1u << 18)
-#define SDHCI_PRESENT_WRITE_ENABLED  (1u << 19) /* the switch is not set */
+#define SDHCI_PRESENT_CMD_INHIBIT    bit_at(0)
+#define SDHCI_PRESENT_DAT_INHIBIT    bit_at(1)
+#define SDHCI_PRESENT_DAT_ACTIVE     bit_at(2)
+#define SDHCI_PRESENT_WRITE_ACTIVE   bit_at(8)
+#define SDHCI_PRESENT_READ_ACTIVE    bit_at(9)
+#define SDHCI_PRESENT_BUF_WR_ENABLE  bit_at(10)
+#define SDHCI_PRESENT_BUF_RD_ENABLE  bit_at(11)
+#define SDHCI_PRESENT_CARD_INSERTED  bit_at(16)
+#define SDHCI_PRESENT_CARD_STABLE    bit_at(17)
+#define SDHCI_PRESENT_CARD_DETECT    bit_at(18)
+#define SDHCI_PRESENT_WRITE_ENABLED  bit_at(19) /* the switch is not set */
 #define SDHCI_PRESENT_DAT_LEVEL      (0xfu << 20)
-#define SDHCI_PRESENT_CMD_LEVEL      (1u << 24)
+#define SDHCI_PRESENT_CMD_LEVEL      bit_at(24)
 
 /* Host control 1. */
-#define SDHCI_CTRL_4BIT         (1 << 1)
-#define SDHCI_CTRL_HIGH_SPEED   (1 << 2)
+#define SDHCI_CTRL_4BIT         bit_at(1)
+#define SDHCI_CTRL_HIGH_SPEED   bit_at(2)
 #define SDHCI_CTRL_DMA_MASK     0x18
 #define  SDHCI_CTRL_SDMA        0x00
 #define  SDHCI_CTRL_ADMA32      0x10
 #define  SDHCI_CTRL_ADMA64      0x18
-#define SDHCI_CTRL_8BIT         (1 << 5)
+#define SDHCI_CTRL_8BIT         bit_at(5)
 
 /* Clock control. */
-#define SDHCI_CLOCK_INT_EN      (1 << 0)
-#define SDHCI_CLOCK_INT_STABLE  (1 << 1)
+#define SDHCI_CLOCK_INT_EN      bit_at(0)
+#define SDHCI_CLOCK_INT_STABLE  bit_at(1)
 
 /* Software reset. */
-#define SDHCI_RESET_ALL         (1 << 0)
-#define SDHCI_RESET_CMD         (1 << 1)
-#define SDHCI_RESET_DATA        (1 << 2)
+#define SDHCI_RESET_ALL         bit_at(0)
+#define SDHCI_RESET_CMD         bit_at(1)
+#define SDHCI_RESET_DATA        bit_at(2)
 
 /* Normal interrupt status. */
-#define SDHCI_INT_CMD_COMPLETE  (1 << 0)
-#define SDHCI_INT_XFER_COMPLETE (1 << 1)
-#define SDHCI_INT_BLOCK_GAP     (1 << 2)
-#define SDHCI_INT_DMA_END       (1 << 3)
-#define SDHCI_INT_BUF_WR_READY  (1 << 4)
-#define SDHCI_INT_BUF_RD_READY  (1 << 5)
-#define SDHCI_INT_CARD_INSERT   (1 << 6)
-#define SDHCI_INT_CARD_REMOVE   (1 << 7)
-#define SDHCI_INT_CARD_INT      (1 << 8)
-#define SDHCI_INT_ERROR         (1 << 15)
+#define SDHCI_INT_CMD_COMPLETE  bit_at(0)
+#define SDHCI_INT_XFER_COMPLETE bit_at(1)
+#define SDHCI_INT_BLOCK_GAP     bit_at(2)
+#define SDHCI_INT_DMA_END       bit_at(3)
+#define SDHCI_INT_BUF_WR_READY  bit_at(4)
+#define SDHCI_INT_BUF_RD_READY  bit_at(5)
+#define SDHCI_INT_CARD_INSERT   bit_at(6)
+#define SDHCI_INT_CARD_REMOVE   bit_at(7)
+#define SDHCI_INT_CARD_INT      bit_at(8)
+#define SDHCI_INT_ERROR         bit_at(15)
 
 /* Error interrupt status. */
-#define SDHCI_ERR_CMD_TIMEOUT   (1 << 0)
-#define SDHCI_ERR_CMD_CRC       (1 << 1)
-#define SDHCI_ERR_CMD_END_BIT   (1 << 2)
-#define SDHCI_ERR_CMD_INDEX     (1 << 3)
-#define SDHCI_ERR_DATA_TIMEOUT  (1 << 4)
-#define SDHCI_ERR_DATA_CRC      (1 << 5)
-#define SDHCI_ERR_DATA_END_BIT  (1 << 6)
-#define SDHCI_ERR_CURRENT_LIMIT (1 << 7)
-#define SDHCI_ERR_AUTO_CMD      (1 << 8)
-#define SDHCI_ERR_ADMA          (1 << 9)
+#define SDHCI_ERR_CMD_TIMEOUT   bit_at(0)
+#define SDHCI_ERR_CMD_CRC       bit_at(1)
+#define SDHCI_ERR_CMD_END_BIT   bit_at(2)
+#define SDHCI_ERR_CMD_INDEX     bit_at(3)
+#define SDHCI_ERR_DATA_TIMEOUT  bit_at(4)
+#define SDHCI_ERR_DATA_CRC      bit_at(5)
+#define SDHCI_ERR_DATA_END_BIT  bit_at(6)
+#define SDHCI_ERR_CURRENT_LIMIT bit_at(7)
+#define SDHCI_ERR_AUTO_CMD      bit_at(8)
+#define SDHCI_ERR_ADMA          bit_at(9)
 
 /* Auto CMD error status. */
-#define SDHCI_AUTOCMD_NOT_EXECUTED (1 << 0)
-#define SDHCI_AUTOCMD_TIMEOUT      (1 << 1)
+#define SDHCI_AUTOCMD_NOT_EXECUTED bit_at(0)
+#define SDHCI_AUTOCMD_TIMEOUT      bit_at(1)
 
 /* Capabilities. */
-#define SDHCI_CAN_8BIT_EMBEDDED (1u << 18)
-#define SDHCI_CAN_ADMA2         (1u << 19)
-#define SDHCI_CAN_HIGH_SPEED    (1u << 21)
-#define SDHCI_CAN_SDMA          (1u << 22)
-#define SDHCI_CAN_VDD_330       (1u << 24)
-#define SDHCI_CAN_64BIT         (1u << 28)
+#define SDHCI_CAN_8BIT_EMBEDDED bit_at(18)
+#define SDHCI_CAN_ADMA2         bit_at(19)
+#define SDHCI_CAN_HIGH_SPEED    bit_at(21)
+#define SDHCI_CAN_SDMA          bit_at(22)
+#define SDHCI_CAN_VDD_330       bit_at(24)
+#define SDHCI_CAN_64BIT         bit_at(28)
 #define SDHCI_SLOT_TYPE_SHIFT   30
 #define  SDHCI_SLOT_REMOVABLE   0
 #define  SDHCI_SLOT_EMBEDDED    1
@@ -178,12 +179,12 @@
 /* Host control 2. Version 4 mode is a 4.00 feature, and reporting 3.00 above
    is what makes it unavailable; the bit is masked off so that a driver
    reading it back is told so. */
-#define SDHCI_CTRL2_V4_MODE     (1 << 12)
+#define SDHCI_CTRL2_V4_MODE     bit_at(12)
 
 /* An ADMA2 descriptor's attribute word. */
-#define SDHCI_ADMA_VALID        (1 << 0)
-#define SDHCI_ADMA_END          (1 << 1)
-#define SDHCI_ADMA_INT          (1 << 2)
+#define SDHCI_ADMA_VALID        bit_at(0)
+#define SDHCI_ADMA_END          bit_at(1)
+#define SDHCI_ADMA_INT          bit_at(2)
 #define SDHCI_ADMA_ACT_SHIFT    4
 #define  SDHCI_ADMA_ACT_NOP     0
 #define  SDHCI_ADMA_ACT_TRAN    2
@@ -193,7 +194,7 @@
    bit that says the length in the descriptor was wrong. */
 #define SDHCI_ADMA_ERR_STATE_ST_FDS 0
 #define SDHCI_ADMA_ERR_STATE_ST_TFR 3
-#define SDHCI_ADMA_ERR_LENGTH   (1 << 2)
+#define SDHCI_ADMA_ERR_LENGTH   bit_at(2)
 
 /* A descriptor list that is nothing but links and no-ops is a guest mistake
    rather than something to walk forever. */
@@ -865,17 +866,12 @@ void SDHCIDevice::StoreResponse(const uint8_t *resp, int len)
     if (len == SD_RESPONSE_LONG) {
         /* The register the host keeps is the card's own 128 bits without the
            CRC byte that ends them, so everything shifts down by one byte. */
-        fResponse[0] = ((uint32_t)resp[11] << 24) | ((uint32_t)resp[12] << 16) |
-                       ((uint32_t)resp[13] << 8) | resp[14];
-        fResponse[1] = ((uint32_t)resp[7] << 24) | ((uint32_t)resp[8] << 16) |
-                       ((uint32_t)resp[9] << 8) | resp[10];
-        fResponse[2] = ((uint32_t)resp[3] << 24) | ((uint32_t)resp[4] << 16) |
-                       ((uint32_t)resp[5] << 8) | resp[6];
-        fResponse[3] = ((uint32_t)resp[0] << 16) | ((uint32_t)resp[1] << 8) |
-                       resp[2];
+        fResponse[0] = get_be32(resp + 11);
+        fResponse[1] = get_be32(resp + 7);
+        fResponse[2] = get_be32(resp + 3);
+        fResponse[3] = get_bits(get_be32(resp), 8, 24);
     } else if (len == SD_RESPONSE_SHORT) {
-        fResponse[0] = ((uint32_t)resp[0] << 24) | ((uint32_t)resp[1] << 16) |
-                       ((uint32_t)resp[2] << 8) | resp[3];
+        fResponse[0] = get_be32(resp);
     }
 }
 
@@ -915,8 +911,7 @@ void SDHCIDevice::SendAutoCmd12()
     /* The response to a command the controller issued by itself goes in the
        last response register, which is where a driver looks for it. */
     if (len == SD_RESPONSE_SHORT) {
-        fResponse[3] = ((uint32_t)resp[0] << 24) | ((uint32_t)resp[1] << 16) |
-                       ((uint32_t)resp[2] << 8) | resp[3];
+        fResponse[3] = get_be32(resp);
     }
 }
 
@@ -926,7 +921,7 @@ void SDHCIDevice::SendCommand()
     SDCommand cmd;
     uint8_t resp[SD_RESPONSE_LONG];
 
-    uint8_t index = (fCommand >> SDHCI_CMD_INDEX_SHIFT) & 0x3f;
+    uint8_t index = get_bits(fCommand, SDHCI_CMD_INDEX_SHIFT, 6);
     bool data_present = (fCommand & SDHCI_CMD_DATA) != 0;
     bool is_abort = (fCommand & SDHCI_CMD_TYPE_MASK) == SDHCI_CMD_TYPE_ABORT ||
                     index == SD_CMD_STOP_TRANSMISSION;
@@ -977,7 +972,7 @@ void SDHCIDevice::SendCommand()
 
 void SDHCIDevice::TransferStart()
 {
-    uint32_t block_len = fBlockSize & 0x0fff;
+    uint32_t block_len = get_bits(fBlockSize, 0, 12);
 
     if (block_len == 0 || block_len > SD_BLOCK_SIZE) {
         /* The capabilities say 512 bytes is the longest block, so anything
@@ -1205,7 +1200,7 @@ uint32_t SDHCIDevice::SdmaBoundary() const
 {
     /* The block size register carries the boundary the SDMA engine breaks a
        transfer at, as a power of two from 4 KB up. */
-    return 4096u << ((fBlockSize >> 12) & 7);
+    return 4096u << get_bits(fBlockSize, 12, 3);
 }
 
 
@@ -1248,7 +1243,7 @@ bool SDHCIDevice::AdmaFetch()
         length = 65536;
     }
 
-    switch ((attr >> SDHCI_ADMA_ACT_SHIFT) & 3) {
+    switch (get_bits(attr, SDHCI_ADMA_ACT_SHIFT, 2)) {
     case SDHCI_ADMA_ACT_NOP:
         break;
     case SDHCI_ADMA_ACT_TRAN:
@@ -1383,7 +1378,8 @@ uint32_t SDHCIDevice::DeviceRead(uint32_t offset, int size_log2)
         uint32_t byte_offset = offset + i;
         uint32_t width = sdhci_reg_width(byte_offset);
         uint32_t base = byte_offset & ~(width - 1);
-        uint32_t byte = (ReadReg(base) >> ((byte_offset - base) * 8)) & 0xff;
+        uint32_t byte = get_bits(ReadReg(base),
+                                 (byte_offset - base) * 8, 8);
         val |= byte << (i * 8);
     }
     return val;

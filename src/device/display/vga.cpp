@@ -28,6 +28,7 @@
 #include <inttypes.h>
 #include <assert.h>
 
+#include "bits.h"
 #include "cutils.h"
 #include "devices.h"
 #include "iomem.h"
@@ -173,15 +174,10 @@ static void vga_draw_glyph8(uint8_t *d, int linesize,
 
     xorcol = bgcol ^ fgcol;
     do {
+        uint32_t *p = (uint32_t *)d;
         font_data = font_ptr[0];
-        ((uint32_t *)d)[0] = (-((font_data >> 7)) & xorcol) ^ bgcol;
-        ((uint32_t *)d)[1] = (-((font_data >> 6) & 1) & xorcol) ^ bgcol;
-        ((uint32_t *)d)[2] = (-((font_data >> 5) & 1) & xorcol) ^ bgcol;
-        ((uint32_t *)d)[3] = (-((font_data >> 4) & 1) & xorcol) ^ bgcol;
-        ((uint32_t *)d)[4] = (-((font_data >> 3) & 1) & xorcol) ^ bgcol;
-        ((uint32_t *)d)[5] = (-((font_data >> 2) & 1) & xorcol) ^ bgcol;
-        ((uint32_t *)d)[6] = (-((font_data >> 1) & 1) & xorcol) ^ bgcol;
-        ((uint32_t *)d)[7] = (-((font_data >> 0) & 1) & xorcol) ^ bgcol;
+        for (int i = 0; i < 8; i++)
+            p[i] = (-(uint32_t)get_bit(font_data, 7 - i) & xorcol) ^ bgcol;
         font_ptr++;
         d += linesize;
     } while (--h);
@@ -196,20 +192,14 @@ static void vga_draw_glyph9(uint8_t *d, int linesize,
 
     xorcol = bgcol ^ fgcol;
     do {
+        uint32_t *p = (uint32_t *)d;
         font_data = font_ptr[0];
-        ((uint32_t *)d)[0] = (-((font_data >> 7)) & xorcol) ^ bgcol;
-        ((uint32_t *)d)[1] = (-((font_data >> 6) & 1) & xorcol) ^ bgcol;
-        ((uint32_t *)d)[2] = (-((font_data >> 5) & 1) & xorcol) ^ bgcol;
-        ((uint32_t *)d)[3] = (-((font_data >> 4) & 1) & xorcol) ^ bgcol;
-        ((uint32_t *)d)[4] = (-((font_data >> 3) & 1) & xorcol) ^ bgcol;
-        ((uint32_t *)d)[5] = (-((font_data >> 2) & 1) & xorcol) ^ bgcol;
-        ((uint32_t *)d)[6] = (-((font_data >> 1) & 1) & xorcol) ^ bgcol;
-        v = (-((font_data >> 0) & 1) & xorcol) ^ bgcol;
-        ((uint32_t *)d)[7] = v;
-        if (dup9)
-            ((uint32_t *)d)[8] = v;
-        else
-            ((uint32_t *)d)[8] = bgcol;
+        for (int i = 0; i < 8; i++)
+            p[i] = (-(uint32_t)get_bit(font_data, 7 - i) & xorcol) ^ bgcol;
+        v = p[7];
+        /* the ninth column repeats the eighth one for the box drawing
+           characters and is background otherwise */
+        p[8] = dup9 ? v : bgcol;
         font_ptr++;
         d += linesize;
     } while (--h);
@@ -225,8 +215,8 @@ static const uint8_t cursor_glyph[32] = {
 static inline int c6_to_8(int v)
 {
     int b;
-    v &= 0x3f;
-    b = v & 1;
+    v = get_bits(v, 0, 6);
+    b = get_bit(v, 0);
     return (v << 2) | (b << 1) | b;
 }
 
@@ -238,10 +228,10 @@ static int update_palette16(VGAState *s, uint32_t *palette)
     full_update = 0;
     for(i = 0; i < 16; i++) {
         v = s->ar[i];
-        if (s->ar[0x10] & 0x80)
-            v = ((s->ar[0x14] & 0xf) << 4) | (v & 0xf);
+        if (get_bit(s->ar[0x10], 7))
+            v = set_bits(get_bits(v, 0, 4), 4, 4, s->ar[0x14]);
         else
-            v = ((s->ar[0x14] & 0xc) << 4) | (v & 0x3f);
+            v = set_bits(get_bits(v, 0, 6), 6, 2, s->ar[0x14] >> 2);
         v = v * 3;
         col = (c6_to_8(s->palette[v]) << 16) |
             (c6_to_8(s->palette[v + 1]) << 8) |
@@ -274,17 +264,17 @@ static void vga_text_refresh(VGAState *s, HostScreen *screen)
     line_offset <<= 3;
     line_offset >>= 1;
 
-    start_addr = s->cr[0x0d] | (s->cr[0x0c] << 8);
+    start_addr = concat_bits<uint32_t>(s->cr[0x0c], s->cr[0x0d], 8);
     
-    cheight = (s->cr[9] & 0x1f) + 1;
+    cheight = get_bits(s->cr[9], 0, 5) + 1;
     cwidth = 8;
-    if (!(s->sr[1] & 0x01))
+    if (!get_bit(s->sr[1], 0))
         cwidth++;
     
     width = (s->cr[0x01] + 1);
     height = s->cr[0x12] |
-        ((s->cr[0x07] & 0x02) << 7) |
-        ((s->cr[0x07] & 0x40) << 3);
+        (get_bit(s->cr[0x07], 1) << 8) |
+        (get_bit(s->cr[0x07], 6) << 9);
     height = (height + 1) / cheight;
     
     width1 = width * cwidth;
@@ -304,7 +294,8 @@ static void vga_text_refresh(VGAState *s, HostScreen *screen)
     }
        
     /* update cursor position */
-    cursor_offset = ((s->cr[0x0e] << 8) | s->cr[0x0f]) - start_addr;
+    cursor_offset = concat_bits<uint32_t>(s->cr[0x0e], s->cr[0x0f], 8) -
+        start_addr;
     cursor_start = s->cr[0xa];
     cursor_end = s->cr[0xb];
     if (cursor_offset != s->last_cursor_offset ||
@@ -340,27 +331,28 @@ static void vga_text_refresh(VGAState *s, HostScreen *screen)
                 s->last_ch_attr[cy * width + cx] = ch_attr;
                 cx_min = min_int(cx_min, cx);
                 cx_max = max_int(cx_max, cx);
-                ch = ch_attr & 0xff;
-                cattr = ch_attr >> 8;
+                ch = get_bits(ch_attr, 0, 8);
+                cattr = get_bits(ch_attr, 8, 8);
                 font_ptr = vga_ram + 32 * ch;
-                bgcol = s->last_palette[cattr >> 4];
-                fgcol = s->last_palette[cattr & 0x0f];
+                bgcol = s->last_palette[get_bits(cattr, 4, 4)];
+                fgcol = s->last_palette[get_bits(cattr, 0, 4)];
                 if (cwidth == 8) {
                     vga_draw_glyph8(dst, fb_dev->stride, font_ptr, cheight,
                                     fgcol, bgcol);
                 } else {
                     dup9 = 0;
-                    if (ch >= 0xb0 && ch <= 0xdf && (s->ar[0x10] & 0x04))
+                    if (ch >= 0xb0 && ch <= 0xdf && get_bit(s->ar[0x10], 2))
                         dup9 = 1;
                     vga_draw_glyph9(dst, fb_dev->stride, font_ptr, cheight,
                                     fgcol, bgcol, dup9);
                 }
                 /* cursor display */
-                if (cursor_offset == ch_addr && !(cursor_start & 0x20)) {
+                if (cursor_offset == ch_addr && !get_bit(cursor_start, 5)) {
                     int line_start, line_last, h;
                     uint8_t *dst1;
-                    line_start = cursor_start & 0x1f;
-                    line_last = min_int(cursor_end & 0x1f, cheight - 1);
+                    line_start = get_bits(cursor_start, 0, 5);
+                    line_last = min_int(get_bits(cursor_end, 0, 5),
+                                        cheight - 1);
 
                     if (line_last >= line_start && line_start < cheight) {
                         h = line_last - line_start + 1;
@@ -395,9 +387,9 @@ void VGAState::Refresh(HostScreen *screen)
     FBDevice *fb_dev = this;
 
     screen->SetFramebuffer(fb_data, width, height, stride);
-    if (!(s->ar_index & 0x20)) {
+    if (!get_bit(s->ar_index, 5)) {
         /* blank */
-    } else if (s->gr[0x06] & 1) {
+    } else if (get_bit(s->gr[0x06], 0)) {
         /* graphic mode (VBE) */
         simplefb_refresh(fb_dev, screen, s->mem_range, s->fb_page_count);
     } else {
@@ -455,7 +447,7 @@ static uint32_t vga_ioport_read(VGAState *s, uint32_t addr)
             }
             break;
         case 0x3c1:
-            index = s->ar_index & 0x1f;
+            index = get_bits(s->ar_index, 0, 5);
             if (index < 21)
                 val = s->ar[index];
             else
@@ -549,10 +541,10 @@ static void vga_ioport_write(VGAState *s, uint32_t addr, uint32_t val)
             val &= 0x3f;
             s->ar_index = val;
         } else {
-            index = s->ar_index & 0x1f;
+            index = get_bits(s->ar_index, 0, 5);
             switch(index) {
             case 0x00 ... 0x0f:
-                s->ar[index] = val & 0x3f;
+                s->ar[index] = get_bits(val, 0, 6);
                 break;
             case 0x10:
                 s->ar[index] = val & ~0x10;
@@ -606,7 +598,7 @@ static void vga_ioport_write(VGAState *s, uint32_t addr, uint32_t val)
         }
         break;
     case 0x3ce:
-        s->gr_index = val & 0x0f;
+        s->gr_index = get_bits(val, 0, 4);
         break;
     case 0x3cf:
 #ifdef DEBUG_VGA_REG
@@ -624,10 +616,10 @@ static void vga_ioport_write(VGAState *s, uint32_t addr, uint32_t val)
         printf("vga: write CR%x = 0x%02x\n", s->cr_index, val);
 #endif
         /* handle CR0-7 protection */
-        if ((s->cr[0x11] & 0x80) && s->cr_index <= 7) {
+        if (get_bit(s->cr[0x11], 7) && s->cr_index <= 7) {
             /* can always write bit 4 of CR7 */
             if (s->cr_index == 7)
-                s->cr[7] = (s->cr[7] & ~0x10) | (val & 0x10);
+                s->cr[7] = set_bit(s->cr[7], 4, get_bit(val, 4));
             return;
         }
         switch(s->cr_index) {

@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "bits.h"
 #include "cutils.h"
 #include "machine.h"
 
@@ -488,17 +489,17 @@ void ATAPCIController::WindowWrite(int channel, ATAPCIWindow::KindEnum kind,
                    it. The low two bits are always zero. */
                 c.bm_prd = val & ~3u;
             } else {
-                c.bm_prd = (c.bm_prd & 0xffffff00) | (val & 0xfc);
+                c.bm_prd = set_bits(c.bm_prd, 0, 8, val & ~3u);
             }
             return;
         case ATA_BM_PRD + 1:
-            c.bm_prd = (c.bm_prd & 0xffff00ff) | ((val & 0xff) << 8);
+            c.bm_prd = set_bits(c.bm_prd, 8, 8, val);
             return;
         case ATA_BM_PRD + 2:
-            c.bm_prd = (c.bm_prd & 0xff00ffff) | ((val & 0xff) << 16);
+            c.bm_prd = set_bits(c.bm_prd, 16, 8, val);
             return;
         case ATA_BM_PRD + 3:
-            c.bm_prd = (c.bm_prd & 0x00ffffff) | ((val & 0xff) << 24);
+            c.bm_prd = set_bits(c.bm_prd, 24, 8, val);
             return;
         default:
             return;

@@ -23,6 +23,7 @@
  */
 #pragma once
 
+#include "bits.h"
 #include "device.h"
 
 /* Clause 22 addresses five bits of PHY address. */
@@ -45,22 +46,22 @@
 #define MII_GTSR     0x0a /* 1000BASE-T status */
 #define MII_EXTSR    0x0f /* extended status */
 
-#define MII_BMCR_RESET       (1 << 15)
-#define MII_BMCR_LOOPBACK    (1 << 14)
-#define MII_BMCR_SPEED100    (1 << 13)
-#define MII_BMCR_ANEG_ENABLE (1 << 12)
-#define MII_BMCR_POWERDOWN   (1 << 11)
-#define MII_BMCR_ISOLATE     (1 << 10)
-#define MII_BMCR_ANEG_RESTART (1 << 9)
-#define MII_BMCR_FULLDUPLEX  (1 << 8)
-#define MII_BMCR_SPEED1000   (1 << 6)
+#define MII_BMCR_RESET       bit_at(15)
+#define MII_BMCR_LOOPBACK    bit_at(14)
+#define MII_BMCR_SPEED100    bit_at(13)
+#define MII_BMCR_ANEG_ENABLE bit_at(12)
+#define MII_BMCR_POWERDOWN   bit_at(11)
+#define MII_BMCR_ISOLATE     bit_at(10)
+#define MII_BMCR_ANEG_RESTART bit_at(9)
+#define MII_BMCR_FULLDUPLEX  bit_at(8)
+#define MII_BMCR_SPEED1000   bit_at(6)
 
 /* Everything but the link and the negotiation result, which follow the
    carrier: 100BASE-TX full and half, 10 Mb/s full and half, extended status,
    preamble suppression, auto negotiation ability, extended capability. */
 #define MII_BMSR_STATIC      0x7949
-#define MII_BMSR_ANEG_DONE   (1 << 5)
-#define MII_BMSR_LINK        (1 << 2)
+#define MII_BMSR_ANEG_DONE   bit_at(5)
+#define MII_BMSR_LINK        bit_at(2)
 
 /* A synthetic identifier: no real vendor owns it, so Linux binds its generic
    PHY driver, which is the behaviour a model with no vendor quirks wants. It

@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "bits.h"
 #include "devices.h"
 #include "fdt.h"
 
@@ -121,7 +122,7 @@ uint32_t SerialState::Read(uint32_t offset, int size_log2)
             break;
         case 1:
             if (fLcr & UART_LCR_DLAB) {
-                ret = (fDivider >> 8) & 0xff;
+                ret = get_bits(fDivider, 8, 8);
             } else {
                 ret = fIer;
             }

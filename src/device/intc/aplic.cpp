@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "bits.h"
 #include "cutils.h"
 #include "fdt.h"
 #include "aplic.h"
@@ -61,11 +62,11 @@
 #define APLIC_IDC_CLAIMI      0x1c
 
 #define APLIC_DOMAINCFG_RO    0x80000000
-#define APLIC_DOMAINCFG_IE    (1u << 8)
-#define APLIC_DOMAINCFG_DM    (1u << 2)
+#define APLIC_DOMAINCFG_IE    bit_at(8)
+#define APLIC_DOMAINCFG_DM    bit_at(2)
 
-#define APLIC_SOURCECFG_D     (1u << 10)
-#define APLIC_SOURCECFG_SM    0x7
+#define APLIC_SOURCECFG_D     bit_at(10)
+#define APLIC_SOURCECFG_SM    bit_mask(3)
 
 /* source modes */
 #define APLIC_SM_INACTIVE     0
@@ -76,15 +77,15 @@
 #define APLIC_SM_LEVEL0       7
 
 #define APLIC_TARGET_HART_SHIFT 18
-#define APLIC_TARGET_HART_MASK  0x3fff
-#define APLIC_TARGET_IPRIO_MASK 0xff
-#define APLIC_TARGET_EIID_MASK  0x7ff
+#define APLIC_TARGET_HART_BITS  14
+#define APLIC_TARGET_IPRIO_BITS 8
+#define APLIC_TARGET_EIID_BITS  11
 
 #define APLIC_GENMSI_MASK \
-    ((APLIC_TARGET_HART_MASK << APLIC_TARGET_HART_SHIFT) | \
-     APLIC_TARGET_EIID_MASK)
+    (field_mask(APLIC_TARGET_HART_SHIFT, APLIC_TARGET_HART_BITS) | \
+     bit_mask(APLIC_TARGET_EIID_BITS))
 
-#define APLIC_MSIADDRCFGH_L          (1u << 31)
+#define APLIC_MSIADDRCFGH_L          bit_at(31)
 #define APLIC_MSIADDRCFGH_LHXW_SHIFT 12
 
 /* external interrupt causes at the harts' interrupt controllers */
@@ -94,16 +95,12 @@
 
 static inline bool bitmap_get(const uint32_t *map, uint32_t n)
 {
-    return (map[n / 32] >> (n % 32)) & 1;
+    return get_bit(map[n / 32], n % 32);
 }
 
 static inline void bitmap_put(uint32_t *map, uint32_t n, bool val)
 {
-    if (val) {
-        map[n / 32] |= 1u << (n % 32);
-    } else {
-        map[n / 32] &= ~(1u << (n % 32));
-    }
+    map[n / 32] = set_bit(map[n / 32], n % 32, val);
 }
 
 static bool mode_is_level(uint32_t mode)
@@ -217,7 +214,8 @@ void APLIC::WriteSourcecfg(Domain &d, uint32_t irq, uint32_t val)
     mode = Mode(d, irq);
     if (mode == APLIC_SM_INACTIVE) {
         Deactivate(d, irq);
-    } else if (!fMsiMode && (d.target[irq] & APLIC_TARGET_IPRIO_MASK) == 0) {
+    } else if (!fMsiMode &&
+               get_bits(d.target[irq], 0, APLIC_TARGET_IPRIO_BITS) == 0) {
         d.target[irq] = 1; /* priority 0 is not a legal value */
     }
 
@@ -236,16 +234,17 @@ void APLIC::WriteSourcecfg(Domain &d, uint32_t irq, uint32_t val)
 
 void APLIC::WriteTarget(Domain &d, uint32_t irq, uint32_t val)
 {
-    uint32_t hart = (val >> APLIC_TARGET_HART_SHIFT) & APLIC_TARGET_HART_MASK;
+    uint32_t hart = get_bits(val, APLIC_TARGET_HART_SHIFT,
+                             APLIC_TARGET_HART_BITS);
 
     if (Mode(d, irq) == APLIC_SM_INACTIVE)
         return;
     if (fMsiMode) {
         /* no guest interrupt files, so the guest index is read-only zero */
         d.target[irq] = (hart << APLIC_TARGET_HART_SHIFT) |
-            (val & APLIC_TARGET_EIID_MASK);
+            get_bits(val, 0, APLIC_TARGET_EIID_BITS);
     } else {
-        uint32_t prio = val & APLIC_TARGET_IPRIO_MASK;
+        uint32_t prio = get_bits(val, 0, APLIC_TARGET_IPRIO_BITS);
         d.target[irq] = (hart << APLIC_TARGET_HART_SHIFT) | (prio ? prio : 1);
     }
 }
@@ -296,12 +295,12 @@ uint32_t APLIC::Topi(const Domain &d, int hart) const
 
     for (uint32_t irq = 1; irq <= (uint32_t)fNumSources; irq++) {
         uint32_t target = d.target[irq];
-        uint32_t prio = target & APLIC_TARGET_IPRIO_MASK;
+        uint32_t prio = get_bits(target, 0, APLIC_TARGET_IPRIO_BITS);
 
         if (!bitmap_get(d.pending, irq) || !bitmap_get(d.enable, irq))
             continue;
-        if (((target >> APLIC_TARGET_HART_SHIFT) & APLIC_TARGET_HART_MASK) !=
-            (uint32_t)hart)
+        if (get_bits(target, APLIC_TARGET_HART_SHIFT,
+                     APLIC_TARGET_HART_BITS) != (uint32_t)hart)
             continue;
         if (threshold != 0 && prio >= threshold)
             continue;
@@ -327,11 +326,11 @@ uint32_t APLIC::MsiAddrCfg(uint32_t offset) const
     case APLIC_MMSIADDRCFGH:
         return APLIC_MSIADDRCFGH_L |
             (fMsi.hart_index_bits << APLIC_MSIADDRCFGH_LHXW_SHIFT) |
-            ((m_ppn >> 32) & 0xfff);
+            get_bits(m_ppn, 32, 12);
     case APLIC_SMSIADDRCFG:
         return s_ppn;
     case APLIC_SMSIADDRCFGH:
-        return (s_ppn >> 32) & 0xfff;
+        return get_bits(s_ppn, 32, 12);
     default:
         return 0;
     }
@@ -344,7 +343,7 @@ uint32_t APLIC::MsiAddrCfg(uint32_t offset) const
 void APLIC::SendMsi(const Domain &d, uint32_t hart, uint32_t eiid)
 {
     uint64_t base = d.supervisor ? fMsi.s_base : fMsi.m_base;
-    uint32_t h = hart & ((1u << fMsi.hart_index_bits) - 1);
+    uint32_t h = get_bits(hart, 0, fMsi.hart_index_bits);
 
     fMemMap->IoWrite(base | ((uint64_t)h << 12), eiid, 2);
 }
@@ -361,7 +360,7 @@ void APLIC::Update()
                     continue;
                 bitmap_put(d.pending, irq, false);
                 SendMsi(d, d.target[irq] >> APLIC_TARGET_HART_SHIFT,
-                        d.target[irq] & APLIC_TARGET_EIID_MASK);
+                        get_bits(d.target[irq], 0, APLIC_TARGET_EIID_BITS));
             }
         } else {
             for (int hart = 0; hart < fHartCount; hart++) {
@@ -401,7 +400,7 @@ uint32_t APLIC::Read(Domain &d, uint32_t offset)
         k = (offset - APLIC_IN_CLRIP_BASE) / 4;
         for (int bit = 0; bit < 32; bit++) {
             if (Rectified(d, k * 32 + bit))
-                val |= 1u << bit;
+                val = set_bit(val, bit, true);
         }
         return val;
     }
@@ -465,7 +464,7 @@ void APLIC::Write(Domain &d, uint32_t offset, uint32_t val)
                offset < APLIC_SETIP_BASE + APLIC_BITMAP_WORDS * 4) {
         k = (offset - APLIC_SETIP_BASE) / 4;
         for (int bit = 0; bit < 32; bit++) {
-            if ((val >> bit) & 1)
+            if (get_bit(val, bit))
                 SetPendingByWrite(d, k * 32 + bit);
         }
     } else if (offset == APLIC_SETIPNUM || offset == APLIC_SETIPNUM_LE) {
@@ -474,7 +473,7 @@ void APLIC::Write(Domain &d, uint32_t offset, uint32_t val)
                offset < APLIC_IN_CLRIP_BASE + APLIC_BITMAP_WORDS * 4) {
         k = (offset - APLIC_IN_CLRIP_BASE) / 4;
         for (int bit = 0; bit < 32; bit++) {
-            if ((val >> bit) & 1)
+            if (get_bit(val, bit))
                 ClearPendingByWrite(d, k * 32 + bit);
         }
     } else if (offset == APLIC_CLRIPNUM) {
@@ -483,7 +482,7 @@ void APLIC::Write(Domain &d, uint32_t offset, uint32_t val)
                offset < APLIC_SETIE_BASE + APLIC_BITMAP_WORDS * 4) {
         k = (offset - APLIC_SETIE_BASE) / 4;
         for (int bit = 0; bit < 32; bit++) {
-            if ((val >> bit) & 1)
+            if (get_bit(val, bit))
                 SetEnable(d, k * 32 + bit, true);
         }
     } else if (offset == APLIC_SETIENUM) {
@@ -492,7 +491,7 @@ void APLIC::Write(Domain &d, uint32_t offset, uint32_t val)
                offset < APLIC_CLRIE_BASE + APLIC_BITMAP_WORDS * 4) {
         k = (offset - APLIC_CLRIE_BASE) / 4;
         for (int bit = 0; bit < 32; bit++) {
-            if ((val >> bit) & 1)
+            if (get_bit(val, bit))
                 SetEnable(d, k * 32 + bit, false);
         }
     } else if (offset == APLIC_CLRIENUM) {
@@ -503,7 +502,7 @@ void APLIC::Write(Domain &d, uint32_t offset, uint32_t val)
         /* sent at once, so it is never busy; IE does not apply */
         d.genmsi = val & APLIC_GENMSI_MASK;
         SendMsi(d, d.genmsi >> APLIC_TARGET_HART_SHIFT,
-                d.genmsi & APLIC_TARGET_EIID_MASK);
+                get_bits(d.genmsi, 0, APLIC_TARGET_EIID_BITS));
         return;
     } else if (offset > APLIC_TARGET_BASE && offset < APLIC_IDC_BASE) {
         WriteTarget(d, (offset - APLIC_TARGET_BASE) / 4, val);
@@ -514,13 +513,13 @@ void APLIC::Write(Domain &d, uint32_t offset, uint32_t val)
         Idc *idc = &d.idc[hart];
         switch ((offset - APLIC_IDC_BASE) % APLIC_IDC_SIZE) {
         case APLIC_IDC_IDELIVERY:
-            idc->idelivery = val & 1;
+            idc->idelivery = get_bit(val, 0);
             break;
         case APLIC_IDC_IFORCE:
-            idc->iforce = val & 1;
+            idc->iforce = get_bit(val, 0);
             break;
         case APLIC_IDC_ITHRESHOLD:
-            idc->ithreshold = val & APLIC_TARGET_IPRIO_MASK;
+            idc->ithreshold = get_bits(val, 0, APLIC_TARGET_IPRIO_BITS);
             break;
         default:
             return;

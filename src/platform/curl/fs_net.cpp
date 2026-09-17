@@ -30,6 +30,7 @@
 #include <sys/time.h>
 #include <ctype.h>
 
+#include "bits.h"
 #include "cutils.h"
 #include "list.h"
 #include "fs_net.h"
@@ -474,7 +475,7 @@ static FSINode *inode_new(HostFileSystem *fs1, FSINodeTypeEnum type,
     n->inode_num = fs->inode_num_alloc;
     fs->inode_num_alloc++;
     n->type = type;
-    n->mode = mode & 0xfff;
+    n->mode = get_bits(mode, 0, 12);
     n->uid = uid;
     n->gid = gid;
 

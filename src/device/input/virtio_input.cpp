@@ -27,6 +27,7 @@
 #include <inttypes.h>
 #include <assert.h>
 
+#include "bits.h"
 #include "cutils.h"
 #include "virtio.h"
 #include "virtio_priv.h"
@@ -166,8 +167,8 @@ int virtio_input_send_mouse_event(VIRTIODevice *s, int dx, int dy, int dz,
 
     if (buttons != s1->buttons_state) {
         for(i = 0; i < countof(buttons_list); i++) {
-            b = (buttons >> i) & 1;
-            last_b = (s1->buttons_state >> i) & 1;
+            b = get_bit(buttons, i);
+            last_b = get_bit(s1->buttons_state, i);
             if (b != last_b) {
                 ret = virtio_input_queue_event(s, VIRTIO_INPUT_EV_KEY,
                                                buttons_list[i], b);
@@ -181,9 +182,9 @@ int virtio_input_send_mouse_event(VIRTIODevice *s, int dx, int dy, int dz,
     return virtio_input_queue_event(s, VIRTIO_INPUT_EV_SYN, 0, 0);
 }
 
-static void set_bit(uint8_t *tab, int k)
+static void bitmap_set(uint8_t *tab, int k)
 {
-    tab[k >> 3] |= 1 << (k & 7);
+    tab[k / 8] = set_bit(tab[k / 8], k % 8, true);
 }
 
 void VIRTIOInputDevice::ConfigWrite()
@@ -247,15 +248,15 @@ void VIRTIOInputDevice::ConfigWrite()
                 config[2] = 512 / 8;
                 memset(config + 8, 0, 512 / 8); /* bitmap */
                 for(i = 0; i < countof(buttons_list); i++)
-                    set_bit(config + 8, buttons_list[i]);
+                    bitmap_set(config + 8, buttons_list[i]);
                 break;
             case VIRTIO_INPUT_EV_REL:
                 config[2] = 2;
                 config[8] = 0;
                 config[9] = 0;
-                set_bit(config + 8, REL_X);
-                set_bit(config + 8, REL_Y);
-                set_bit(config + 8, REL_WHEEL);
+                bitmap_set(config + 8, REL_X);
+                bitmap_set(config + 8, REL_Y);
+                bitmap_set(config + 8, REL_WHEEL);
                 break;
             default:
                 break;
@@ -267,19 +268,19 @@ void VIRTIOInputDevice::ConfigWrite()
                 config[2] = 512 / 8;
                 memset(config + 8, 0, 512 / 8); /* bitmap */
                 for(i = 0; i < countof(buttons_list); i++)
-                    set_bit(config + 8, buttons_list[i]);
+                    bitmap_set(config + 8, buttons_list[i]);
                 break;
             case VIRTIO_INPUT_EV_REL:
                 config[2] = 2;
                 config[8] = 0;
                 config[9] = 0;
-                set_bit(config + 8, REL_WHEEL);
+                bitmap_set(config + 8, REL_WHEEL);
                 break;
             case VIRTIO_INPUT_EV_ABS:
                 config[2] = 1;
                 config[8] = 0;
-                set_bit(config + 8, ABS_X);
-                set_bit(config + 8, ABS_Y);
+                bitmap_set(config + 8, ABS_X);
+                bitmap_set(config + 8, ABS_Y);
                 break;
             default:
                 break;

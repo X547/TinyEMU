@@ -23,6 +23,7 @@
  */
 #include <string.h>
 
+#include "bits.h"
 #include "machine.h"
 #include "sd.h"
 #include "virtio.h"
@@ -145,7 +146,7 @@ void SDCard::BuildCid()
     cid[12] = (uint8_t)SD_CARD_SERIAL;
     /* The manufacturing date is twelve bits: eight of year counted from 2000
        and four of month, ending one byte short of the CRC. */
-    cid[13] = (SD_CARD_YEAR >> 4) & 0x0f;
+    cid[13] = get_bits(SD_CARD_YEAR, 4, 4);
     cid[14] = (uint8_t)((SD_CARD_YEAR << 4) | SD_CARD_MONTH);
 }
 
@@ -291,7 +292,7 @@ void SDCard::BuildSwitchStatus(uint32_t arg, bool set)
     sd_reg_set_bits(status, SD_SWITCH_SIZE, 379, 376, chosen);
     for (int group = 2; group <= 6; group++) {
         int hi = 379 + (group - 1) * 4;
-        uint32_t sel = (arg >> ((group - 1) * 4)) & 0xf;
+        uint32_t sel = get_bits(arg, (group - 1) * 4, 4);
         /* Those groups offer only their own default, so asking for it or for
            no change reads back as the default and anything else reads back
            as the refusal it is. */
@@ -391,9 +392,10 @@ int SDCard::NormalCommand(const SDCommand &cmd, uint8_t *response)
         ClearStatus();
         /* The status the address response carries is only the three error
            bits and the low thirteen. */
-        uint32_t bits = (((status >> 23) & 1) << 15) |
-                        (((status >> 22) & 1) << 14) |
-                        (((status >> 19) & 1) << 13) | (status & 0x1fff);
+        uint32_t bits = (get_bit(status, 23) << 15) |
+                        (get_bit(status, 22) << 14) |
+                        (get_bit(status, 19) << 13) |
+                        get_bits(status, 0, 13);
         BuildShort(response, (fRca << 16) | bits);
         return SD_RESPONSE_SHORT;
     }
@@ -433,7 +435,7 @@ int SDCard::NormalCommand(const SDCommand &cmd, uint8_t *response)
     case SD_CMD_SEND_IF_COND:
         /* The host names the voltage it can supply and a pattern to echo;
            a card that cannot work at that voltage answers nothing. */
-        if (((cmd.arg >> 8) & 0xf) != 1) {
+        if (get_bits(cmd.arg, 8, 4) != 1) {
             return -1;
         }
         fIfCondSeen = true;

@@ -27,19 +27,20 @@
 #include <stdint.h>
 #include <memory>
 
+#include "bits.h"
 #include "device_lock.h"
 
 
-#define DEVIO_SIZE8  (1 << 0)
-#define DEVIO_SIZE16 (1 << 1)
-#define DEVIO_SIZE32 (1 << 2)
+#define DEVIO_SIZE8  bit_at(0)
+#define DEVIO_SIZE16 bit_at(1)
+#define DEVIO_SIZE32 bit_at(2)
 /* not supported, could add specific 64 bit callbacks when needed */
 //#define DEVIO_SIZE64 (1 << 3)
-#define DEVIO_DISABLED (1 << 4)
+#define DEVIO_DISABLED bit_at(4)
 
-#define DEVRAM_FLAG_ROM        (1 << 0) /* not writable */
-#define DEVRAM_FLAG_DIRTY_BITS (1 << 1) /* maintain dirty bits */
-#define DEVRAM_FLAG_DISABLED   (1 << 2) /* allocated but not mapped */
+#define DEVRAM_FLAG_ROM        bit_at(0) /* not writable */
+#define DEVRAM_FLAG_DIRTY_BITS bit_at(1) /* maintain dirty bits */
+#define DEVRAM_FLAG_DISABLED   bit_at(2) /* allocated but not mapped */
 #define DEVRAM_PAGE_SIZE_LOG2 12
 #define DEVRAM_PAGE_SIZE (1 << DEVRAM_PAGE_SIZE_LOG2)
 
@@ -127,7 +128,7 @@ struct PhysMemoryRange {
             return;
         }
         size_t page_index = offset >> DEVRAM_PAGE_SIZE_LOG2;
-        uint32_t mask = 1 << (page_index & 0x1f);
+        uint32_t mask = bit_at(page_index % 32);
         /* the processor and a device with the lock may set bits at once */
         __sync_fetch_and_or(&dirty_bits[page_index >> 5], mask);
     }
@@ -138,7 +139,7 @@ struct PhysMemoryRange {
             return true;
         }
         size_t page_index = offset >> DEVRAM_PAGE_SIZE_LOG2;
-        return (dirty_bits[page_index >> 5] >> (page_index & 0x1f)) & 1;
+        return get_bit(dirty_bits[page_index / 32], page_index % 32);
     }
 };
 

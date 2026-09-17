@@ -28,6 +28,7 @@
 #include <inttypes.h>
 #include <assert.h>
 
+#include "bits.h"
 #include "cutils.h"
 #include "host_time.h"
 #include "iomem.h"
@@ -233,14 +234,14 @@ static void htif_handle_cmd(RISCVMachine *s)
     if (s->ShutdownRequested())
         return;
 
-    device = s->htif_tohost >> 56;
-    cmd = (s->htif_tohost >> 48) & 0xff;
-    if (device == 0 && cmd == 0 && (s->htif_tohost & 1)) {
+    device = get_bits(s->htif_tohost, 56, 8);
+    cmd = get_bits(s->htif_tohost, 48, 8);
+    if (device == 0 && cmd == 0 && get_bit(s->htif_tohost, 0)) {
         /* Power off, using the spike/riscv-tests convention: the guest writes
            (code << 1) | 1, so a plain 1 is a success exit. The exit status is
            what makes a guest usable as an automated test: it reports pass/fail
            without the harness having to grep the console log. */
-        uint64_t code = (s->htif_tohost & 0xffffffffffff) >> 1;
+        uint64_t code = get_bits(s->htif_tohost, 1, 47);
         if (code == 0) {
             printf("\nPower off.\n");
         } else {
@@ -251,11 +252,12 @@ static void htif_handle_cmd(RISCVMachine *s)
         s->RequestShutdown(code < 256 ? (int)code : 255);
     } else if (device == 1 && cmd == 1) {
         uint8_t buf[1];
-        buf[0] = s->htif_tohost & 0xff;
+        buf[0] = get_bits(s->htif_tohost, 0, 8);
         if (s->console != nullptr)
             s->console->WriteData(buf, 1);
         s->htif_tohost = 0;
-        s->htif_fromhost = ((uint64_t)device << 56) | ((uint64_t)cmd << 48);
+        s->htif_fromhost = set_bits(concat_bits<uint64_t>(device, 0, 56),
+                                    48, 8, cmd);
     } else if (device == 1 && cmd == 0) {
         /* request keyboard interrupt */
         s->htif_tohost = 0;
@@ -274,18 +276,17 @@ void RISCVMachine::HtifWrite(uint32_t offset, uint32_t val, int size_log2)
     assert(size_log2 == 2);
     switch(offset) {
     case 0:
-        s->htif_tohost = (s->htif_tohost & ~0xffffffff) | val;
+        s->htif_tohost = set_bits(s->htif_tohost, 0, 32, val);
         break;
     case 4:
-        s->htif_tohost = (s->htif_tohost & 0xffffffff) | ((uint64_t)val << 32);
+        s->htif_tohost = set_bits(s->htif_tohost, 32, 32, val);
         htif_handle_cmd(s);
         break;
     case 8:
-        s->htif_fromhost = (s->htif_fromhost & ~0xffffffff) | val;
+        s->htif_fromhost = set_bits(s->htif_fromhost, 0, 32, val);
         break;
     case 12:
-        s->htif_fromhost = (s->htif_fromhost & 0xffffffff) |
-            (uint64_t)val << 32;
+        s->htif_fromhost = set_bits(s->htif_fromhost, 32, 32, val);
         break;
     default:
         break;
@@ -342,9 +343,9 @@ void RISCVMachine::ClintWrite(uint32_t offset, uint32_t val, int size_log2)
             return;
         uint64_t &cmp = m->timecmp[hart];
         if ((offset - CLINT_MTIMECMP_BASE) % 8 == 0)
-            cmp = (cmp & ~0xffffffffull) | val;
+            cmp = set_bits(cmp, 0, 32, val);
         else
-            cmp = (cmp & 0xffffffff) | ((uint64_t)val << 32);
+            cmp = set_bits(cmp, 32, 32, val);
         m->SetClintLine(hart, MIP_MTIP, false);
     }
 }
@@ -507,7 +508,7 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
             }
         }
         for(i = 0; i < 26; i++) {
-            if ((misa & (1 << i)) && !(emitted & (1 << i)))
+            if (get_bit(misa, i) && !get_bit(emitted, i))
                 *q++ = 'a' + i;
         }
     }

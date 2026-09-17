@@ -26,6 +26,7 @@
 
 #include <memory>
 
+#include "bits.h"
 #include "iomem.h"
 
 typedef struct PCIBus PCIBus;
@@ -67,7 +68,7 @@ typedef std::unique_ptr<PCIBus, PCIBusDeleter> PCIBusPtr;
 #define PCI_COMMAND_IO		(1 << 0)
 #define PCI_COMMAND_MEMORY	(1 << 1)
 /* Set by a driver that intends to poll rather than take INTx. */
-#define PCI_COMMAND_INTX_DISABLE (1 << 10)
+#define PCI_COMMAND_INTX_DISABLE bit_at(10)
 #define PCI_STATUS		0x06	/* 16 bits */
 #define  PCI_STATUS_CAP_LIST	(1 << 4)
 #define PCI_CLASS_PROG		0x09

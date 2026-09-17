@@ -25,21 +25,22 @@
 #define RISCV_CPU_H
 
 #include <stdlib.h>
+#include "bits.h"
 #include "cutils.h"
 #include "iomem.h"
 
-#define MIP_USIP (1 << 0)
-#define MIP_SSIP (1 << 1)
-#define MIP_HSIP (1 << 2)
-#define MIP_MSIP (1 << 3)
-#define MIP_UTIP (1 << 4)
-#define MIP_STIP (1 << 5)
-#define MIP_HTIP (1 << 6)
-#define MIP_MTIP (1 << 7)
-#define MIP_UEIP (1 << 8)
-#define MIP_SEIP (1 << 9)
-#define MIP_HEIP (1 << 10)
-#define MIP_MEIP (1 << 11)
+#define MIP_USIP bit_at(0)
+#define MIP_SSIP bit_at(1)
+#define MIP_HSIP bit_at(2)
+#define MIP_MSIP bit_at(3)
+#define MIP_UTIP bit_at(4)
+#define MIP_STIP bit_at(5)
+#define MIP_HTIP bit_at(6)
+#define MIP_MTIP bit_at(7)
+#define MIP_UEIP bit_at(8)
+#define MIP_SEIP bit_at(9)
+#define MIP_HEIP bit_at(10)
+#define MIP_MEIP bit_at(11)
 
 /* Supplies the machine's real time counter. The 'time' CSR and the timer
    device the firmware programs must read the same counter: firmware computes

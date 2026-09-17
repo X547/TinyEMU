@@ -25,6 +25,7 @@
 
 #include <stdint.h>
 
+#include "bits.h"
 #include "device.h"
 
 class HostBlockDevice;
@@ -107,28 +108,28 @@ class BlockCompletion;
 
 /* Card status, as a short response carries it and as SEND_STATUS reports it.
    The error bits are sticky: they are cleared when they are read. */
-#define SD_STATUS_OUT_OF_RANGE      (1u << 31)
-#define SD_STATUS_ADDRESS_ERROR     (1u << 30)
-#define SD_STATUS_BLOCK_LEN_ERROR   (1u << 29)
-#define SD_STATUS_ERASE_SEQ_ERROR   (1u << 28)
-#define SD_STATUS_ERASE_PARAM       (1u << 27)
-#define SD_STATUS_WP_VIOLATION      (1u << 26)
-#define SD_STATUS_CARD_IS_LOCKED    (1u << 25)
-#define SD_STATUS_LOCK_UNLOCK_FAILED (1u << 24)
-#define SD_STATUS_COM_CRC_ERROR     (1u << 23)
-#define SD_STATUS_ILLEGAL_COMMAND   (1u << 22)
-#define SD_STATUS_CARD_ECC_FAILED   (1u << 21)
-#define SD_STATUS_CC_ERROR          (1u << 20)
-#define SD_STATUS_ERROR             (1u << 19)
-#define SD_STATUS_CSD_OVERWRITE     (1u << 16)
-#define SD_STATUS_WP_ERASE_SKIP     (1u << 15)
-#define SD_STATUS_ERASE_RESET       (1u << 13)
+#define SD_STATUS_OUT_OF_RANGE      bit_at(31)
+#define SD_STATUS_ADDRESS_ERROR     bit_at(30)
+#define SD_STATUS_BLOCK_LEN_ERROR   bit_at(29)
+#define SD_STATUS_ERASE_SEQ_ERROR   bit_at(28)
+#define SD_STATUS_ERASE_PARAM       bit_at(27)
+#define SD_STATUS_WP_VIOLATION      bit_at(26)
+#define SD_STATUS_CARD_IS_LOCKED    bit_at(25)
+#define SD_STATUS_LOCK_UNLOCK_FAILED bit_at(24)
+#define SD_STATUS_COM_CRC_ERROR     bit_at(23)
+#define SD_STATUS_ILLEGAL_COMMAND   bit_at(22)
+#define SD_STATUS_CARD_ECC_FAILED   bit_at(21)
+#define SD_STATUS_CC_ERROR          bit_at(20)
+#define SD_STATUS_ERROR             bit_at(19)
+#define SD_STATUS_CSD_OVERWRITE     bit_at(16)
+#define SD_STATUS_WP_ERASE_SKIP     bit_at(15)
+#define SD_STATUS_ERASE_RESET       bit_at(13)
 #define SD_STATUS_CURRENT_STATE_SHIFT 9
 #define SD_STATUS_CURRENT_STATE_MASK  (0xfu << SD_STATUS_CURRENT_STATE_SHIFT)
-#define SD_STATUS_READY_FOR_DATA    (1u << 8)
-#define MMC_STATUS_SWITCH_ERROR     (1u << 7)
-#define SD_STATUS_APP_CMD           (1u << 5)
-#define SD_STATUS_AKE_SEQ_ERROR     (1u << 3)
+#define SD_STATUS_READY_FOR_DATA    bit_at(8)
+#define MMC_STATUS_SWITCH_ERROR     bit_at(7)
+#define SD_STATUS_APP_CMD           bit_at(5)
+#define SD_STATUS_AKE_SEQ_ERROR     bit_at(3)
 
 /* Every bit that says something went wrong, so that one mask decides whether
    a response reports an error at all. */
@@ -146,11 +147,11 @@ class BlockCompletion;
 /* The operation conditions register, which is what an initialisation command
    answers with. */
 #define SD_OCR_VOLTAGE_WINDOW   0x00ff8000u /* 2.7 V to 3.6 V */
-#define SD_OCR_S18A             (1u << 24)  /* 1.8 V signalling accepted */
-#define SD_OCR_CCS              (1u << 30)  /* SD: high capacity */
+#define SD_OCR_S18A             bit_at(24)  /* 1.8 V signalling accepted */
+#define SD_OCR_CCS              bit_at(30)  /* SD: high capacity */
 #define MMC_OCR_SECTOR_MODE     (2u << 29)  /* MMC: sector addressing */
 #define MMC_OCR_ACCESS_MASK     (3u << 29)
-#define SD_OCR_POWER_UP_DONE    (1u << 31)  /* clear while still busy */
+#define SD_OCR_POWER_UP_DONE    bit_at(31)  /* clear while still busy */
 
 
 /* The card state machine, as the current state field of a response reports
