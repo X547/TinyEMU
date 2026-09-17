@@ -379,8 +379,9 @@ private:
     PCIDevice *fPciDev = nullptr;
     PhysMemoryRange *fMemRange = nullptr;
     IRQSignal *fIrq = nullptr;
-    PCIMsixState fMsix {};
-    bool fMsixSent = false;
+    PCIMessageIrq fMsgIrq {};
+    /* whether a message has already gone out for the assertion standing */
+    bool fMsgSent = false;
 
     USBBus *fChildBus = nullptr;
 
@@ -675,14 +676,14 @@ void XHCIDevice::IntrUpdate()
     bool level = (fUsbCmd & USBCMD_INTE) != 0 && (fIman & IMAN_IE) != 0 &&
                  (fIman & IMAN_IP) != 0;
 
-    if (fMsix.Enabled()) {
+    if (fMsgIrq.Enabled()) {
         /* A message is an edge, so it is sent once per assertion and rearmed
            when the guest drops the condition. */
-        if (level && !fMsixSent) {
-            fMsix.Send(0);
-            fMsixSent = true;
+        if (level && !fMsgSent) {
+            fMsgIrq.Send(0);
+            fMsgSent = true;
         } else if (!level) {
-            fMsixSent = false;
+            fMsgSent = false;
         }
         if (fIrq != nullptr) {
             fIrq->Set(0);
@@ -1860,7 +1861,7 @@ void XHCIDevice::Reset()
     fErSegOffset = 0;
     fErPcs = true;
     fEventFifoCount = 0;
-    fMsixSent = false;
+    fMsgSent = false;
 
     /* A host controller reset resets the ports too, which leaves an attached
        device reported as newly connected. */
@@ -2266,9 +2267,9 @@ uint32_t XHCIDevice::ReadDword(uint32_t offset)
         return 0; /* the doorbell array reads as zero */
     }
     if (offset < XHCI_MSIX_PBA_OFFSET) {
-        return fMsix.TableRead(offset - XHCI_MSIX_TABLE_OFFSET, 2);
+        return fMsgIrq.TableRead(offset - XHCI_MSIX_TABLE_OFFSET, 2);
     }
-    return fMsix.PbaRead(offset - XHCI_MSIX_PBA_OFFSET, 2);
+    return fMsgIrq.PbaRead(offset - XHCI_MSIX_PBA_OFFSET, 2);
 }
 
 
@@ -2294,7 +2295,7 @@ void XHCIDevice::WriteDword(uint32_t offset, uint32_t val)
         return;
     }
     if (offset < XHCI_MSIX_PBA_OFFSET) {
-        fMsix.TableWrite(offset - XHCI_MSIX_TABLE_OFFSET, val, 2);
+        fMsgIrq.TableWrite(offset - XHCI_MSIX_TABLE_OFFSET, val, 2);
         return;
     }
     /* The pending bit array is read only. */
@@ -2369,7 +2370,8 @@ bool XHCIDevice::Realize()
     pci_device_set_config8(fPciDev, PCI_CLASS_PROG, 0x30);
     pci_device_set_config8(fPciDev, PCI_INTERRUPT_PIN, 1);
 
-    fMsix.Init(fPciDev, 0, 1, XHCI_MSIX_TABLE_OFFSET, XHCI_MSIX_PBA_OFFSET);
+    fMsgIrq.Init(fPciDev, 1, 0, XHCI_MSIX_TABLE_OFFSET,
+                 XHCI_MSIX_PBA_OFFSET);
 
     fIrq = pci_device_get_irq(fPciDev, 0);
     PhysMemoryMap *mem_map = pci_device_get_mem_map(fPciDev);

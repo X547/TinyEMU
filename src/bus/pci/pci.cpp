@@ -957,3 +957,112 @@ uint32_t PCIMsixState::PbaRead(uint32_t offset, int size_log2)
         return 0;
     return get_bits(fPba[index], (offset % 4) * 8, 8 << size_log2);
 }
+
+//#pragma mark - PCIMsiState
+
+bool PCIMsiState::Init(PCIDevice *dev, int vector_count)
+{
+    uint8_t cap[PCI_MSI_CAP_LEN];
+    int log2_count = 0;
+
+    assert(vector_count > 0);
+
+    if (!pci_bus_has_msi(dev->bus))
+        return false;
+
+    /* The field holds a logarithm, so a function offering a count that is not
+       a power of two offers the power of two below it. */
+    while ((2 << log2_count) <= vector_count &&
+           (2 << log2_count) <= PCI_MSI_MAX_VECTORS) {
+        log2_count++;
+    }
+
+    memset(cap, 0, sizeof(cap));
+    cap[0] = PCI_CAP_ID_MSI;
+    put_le16(cap + PCI_MSI_FLAGS,
+             set_bits(PCI_MSI_FLAGS_64BIT, PCI_MSI_QMASK_SHIFT, 3,
+                      log2_count));
+
+    int offset = pci_add_capability(dev, cap, sizeof(cap));
+    if (offset < 0)
+        return false;
+
+    fDev = dev;
+    fCapOffset = offset;
+    fVectorCount = 1 << log2_count;
+    return true;
+}
+
+uint32_t PCIMsiState::Control() const
+{
+    return pci_device_get_config(fDev, fCapOffset + PCI_MSI_FLAGS, 1);
+}
+
+bool PCIMsiState::Enabled() const
+{
+    if (fCapOffset < 0)
+        return false;
+    return (Control() & PCI_MSI_FLAGS_ENABLE) != 0;
+}
+
+int PCIMsiState::VectorCount() const
+{
+    if (fCapOffset < 0)
+        return 0;
+    if (!Enabled())
+        return fVectorCount; /* all of them are still on offer */
+
+    /* What the guest took, which it may not raise above the offer. */
+    int count = 1 << get_bits(Control(), PCI_MSI_QSIZE_SHIFT, 3);
+    return count < fVectorCount ? count : fVectorCount;
+}
+
+void PCIMsiState::Send(int vector)
+{
+    int count = VectorCount();
+    int vector_bits = 0;
+
+    if (!Enabled() || vector < 0 || vector >= count)
+        return;
+
+    uint64_t addr = concat_bits(
+        pci_device_get_config(fDev, fCapOffset + PCI_MSI_ADDRESS_HI, 2),
+        pci_device_get_config(fDev, fCapOffset + PCI_MSI_ADDRESS_LO, 2), 32);
+    /* One data word serves every vector: the number goes in as many low bits
+       as the count needs, which the guest leaves clear for it. */
+    while ((1 << vector_bits) < count) {
+        vector_bits++;
+    }
+    uint32_t data = pci_device_get_config(fDev, fCapOffset + PCI_MSI_DATA, 1);
+    pci_device_send_msi(fDev, addr, set_bits(data, 0, vector_bits, vector));
+}
+
+//#pragma mark - PCIMessageIrq
+
+void PCIMessageIrq::Init(PCIDevice *dev, int vector_count, int bar_num,
+                         uint32_t table_offset, uint32_t pba_offset)
+{
+    /* MSI-X first, because a guest that sees both takes it and leaves the
+       other one alone. Each declines by itself where it may not be
+       offered. */
+    fMsix.Init(dev, vector_count, bar_num, table_offset, pba_offset);
+    fMsi.Init(dev, vector_count);
+}
+
+int PCIMessageIrq::VectorCount() const
+{
+    if (fMsi.Enabled() && !fMsix.Enabled())
+        return fMsi.VectorCount();
+    return fMsix.Present() ? fMsix.VectorCount() : fMsi.VectorCount();
+}
+
+void PCIMessageIrq::Send(int vector)
+{
+    if (fMsix.Enabled()) {
+        fMsix.Send(vector);
+        return;
+    }
+    if (fMsi.Enabled()) {
+        fMsi.Send(vector);
+    }
+}

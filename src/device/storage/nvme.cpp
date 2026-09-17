@@ -84,7 +84,8 @@
 #define NVME_MAX_IO_QUEUES 8
 #define NVME_MAX_QUEUES (NVME_MAX_IO_QUEUES + 1) /* queue 0 is the admin pair */
 
-#define NVME_MSIX_VECTORS 16
+/* How many vectors the controller offers, over MSI-X or MSI. */
+#define NVME_IRQ_VECTORS 16
 
 #define NVME_SQE_SIZE 64
 #define NVME_CQE_SIZE 16
@@ -308,7 +309,7 @@ private:
     PCIDevice *fPciDev = nullptr;
     PhysMemoryRange *fMemRange = nullptr;
     IRQSignal *fIrq = nullptr;
-    PCIMsixState fMsix {};
+    PCIMessageIrq fMsgIrq {};
     bool fIrqLevel = false;
 
     std::unique_ptr<NVMeBus> fChildBus;
@@ -672,9 +673,10 @@ void NVMeDevice::PostCompletion(uint16_t sqid, uint16_t cqid, uint16_t cid,
     }
 
     if (cq->ien) {
-        if (fMsix.Enabled()) {
-            fMsix.Send(cq->vector);
-        }
+        /* Nothing is sent while neither message capability is on, and the
+           mask registers below hold the pin only: a driver that took a
+           message masks it at its own interrupt controller. */
+        fMsgIrq.Send(cq->vector);
     }
     UpdateIrq();
 }
@@ -685,9 +687,9 @@ void NVMeDevice::UpdateIrq()
     if (fIrq == nullptr) {
         return;
     }
-    if (fMsix.Enabled()) {
+    if (fMsgIrq.Enabled()) {
         /* A message is an edge, sent when the entry is posted; the pin must
-           stay low while MSI-X is in use. */
+           stay low while a message mechanism is in use. */
         fIrq->Set(0);
         fIrqLevel = false;
         return;
@@ -775,7 +777,7 @@ int NVMeDevice::CmdCreateCq(const NVMeCommand &cmd)
         return (NVME_SCT_GENERIC << 8) | NVME_SC_INVALID_FIELD;
     }
     uint16_t vector = get_bits(cmd.cdw11, 16, 16);
-    if (fMsix.Present() && vector >= fMsix.VectorCount()) {
+    if (fMsgIrq.Present() && vector >= fMsgIrq.VectorCount()) {
         return (NVME_SCT_SPECIFIC << 8) | NVME_SC_INVALID_VECTOR;
     }
 
@@ -1340,9 +1342,9 @@ uint32_t NVMeDevice::ReadDword(uint32_t offset)
 {
     if (offset >= NVME_MSIX_TABLE_OFFSET) {
         if (offset < NVME_MSIX_PBA_OFFSET) {
-            return fMsix.TableRead(offset - NVME_MSIX_TABLE_OFFSET, 2);
+            return fMsgIrq.TableRead(offset - NVME_MSIX_TABLE_OFFSET, 2);
         }
-        return fMsix.PbaRead(offset - NVME_MSIX_PBA_OFFSET, 2);
+        return fMsgIrq.PbaRead(offset - NVME_MSIX_PBA_OFFSET, 2);
     }
     if (offset >= NVME_DOORBELL_OFFSET) {
         return 0; /* the doorbells read as zero */
@@ -1424,7 +1426,7 @@ void NVMeDevice::WriteDword(uint32_t offset, uint32_t val)
 {
     if (offset >= NVME_MSIX_TABLE_OFFSET) {
         if (offset < NVME_MSIX_PBA_OFFSET) {
-            fMsix.TableWrite(offset - NVME_MSIX_TABLE_OFFSET, val, 2);
+            fMsgIrq.TableWrite(offset - NVME_MSIX_TABLE_OFFSET, val, 2);
         }
         return;
     }
@@ -1554,8 +1556,8 @@ bool NVMeDevice::Realize()
     pci_device_set_config8(fPciDev, PCI_CLASS_PROG, 0x02);
     pci_device_set_config8(fPciDev, PCI_INTERRUPT_PIN, 1);
 
-    fMsix.Init(fPciDev, 0, NVME_MSIX_VECTORS, NVME_MSIX_TABLE_OFFSET,
-               NVME_MSIX_PBA_OFFSET);
+    fMsgIrq.Init(fPciDev, NVME_IRQ_VECTORS, 0, NVME_MSIX_TABLE_OFFSET,
+                 NVME_MSIX_PBA_OFFSET);
 
     fIrq = pci_device_get_irq(fPciDev, 0);
     PhysMemoryMap *mem_map = pci_device_get_mem_map(fPciDev);

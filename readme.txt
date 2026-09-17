@@ -360,10 +360,10 @@ device on that bus -- the command set, the responses and the card interrupt
 line it needs are modelled, but no SDIO peripheral is.
 
 The controller implements programmed I/O, SDMA and ADMA2 with 32 or 64 bit
-descriptors, Auto CMD12 and Auto CMD23, and offers MSI-X on a PCI bus that
-has a receiver for it. Cards move data one block at a time and may answer
-later, so a block back end that does not complete at once -- the HTTP one --
-stalls the controller rather than the emulator.
+descriptors, Auto CMD12 and Auto CMD23, and offers MSI-X and MSI on a PCI
+bus that has a receiver for them. Cards move data one block at a time and may
+answer later, so a block back end that does not complete at once -- the HTTP
+one -- stalls the controller rather than the emulator.
 
 Both card types report 512 byte blocks and do not offer partial ones, so
 SET_BLOCKLEN takes 512 and nothing else. Neither claims the erase command
@@ -430,9 +430,13 @@ The two PCI host bridges differ in more than their register layout. The ECAM
 one is a bare bus: devices sit on bus 0 and interrupt over INTx. The
 DesignWare one models a real root complex, so it has a root port of its own on
 bus 0 and devices are enumerated behind it, and it carries a message signalled
-interrupt receiver. Devices on a bus that has one advertise MSI-X and use it
-in preference to INTx; on a bus without one they do not offer it at all,
-because a guest that chose it would have nothing to collect the message.
+interrupt receiver. Devices on a bus that has one advertise MSI-X and plain
+MSI, and a guest uses one of them in preference to INTx; on a bus without one
+they offer neither, because a guest that chose either would have nothing to
+collect the message. Which of the two a guest takes is its own choice, and it
+takes MSI-X wherever it is offered. A virtio device offers MSI-X alone: its
+per queue vector registers are part of that capability, and a driver without
+it uses the ISR register and the INTx line instead.
 
 Which driver binds to the DesignWare bridge is decided by "compatible". The
 default names the SiFive FU740, which is what Haiku's DesignWare bus driver

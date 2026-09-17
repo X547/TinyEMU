@@ -222,6 +222,110 @@ public:
     uint32_t PbaRead(uint32_t offset, int size_log2);
 };
 
+/* MSI capability, as it sits in configuration space. The layout is the one a
+   64 bit capable function without per vector masking has. */
+#define PCI_CAP_ID_MSI           0x05
+#define PCI_MSI_FLAGS            0x02 /* 16 bits */
+#define  PCI_MSI_FLAGS_ENABLE    0x0001
+#define  PCI_MSI_FLAGS_QMASK     0x000e /* vectors the function can use */
+#define  PCI_MSI_FLAGS_QSIZE     0x0070 /* vectors the guest gave it */
+#define  PCI_MSI_FLAGS_64BIT     0x0080
+#define PCI_MSI_ADDRESS_LO       0x04
+#define PCI_MSI_ADDRESS_HI       0x08
+#define PCI_MSI_DATA             0x0c
+/* Two bytes of that are reserved; the capability is padded to a multiple of
+   four so that the next one in the list stays aligned. */
+#define PCI_MSI_CAP_LEN          16
+
+/* The shifts of the two vector count fields, which hold a count as its
+   logarithm: 0 is one vector, 5 is the thirty two a function may have. */
+#define PCI_MSI_QMASK_SHIFT      1
+#define PCI_MSI_QSIZE_SHIFT      4
+#define PCI_MSI_MAX_VECTORS      32
+
+
+/* A device's MSI capability.
+ *
+ * Where MSI-X keeps a vector table in a BAR, MSI has one address and one data
+ * word in configuration space, and derives a vector's message by putting the
+ * vector number in the low bits of that data. The guest says how many of the
+ * offered vectors it took, and the device may use only those.
+ *
+ * Per vector masking is deliberately not offered. It would need a message
+ * held back while its vector is masked and delivered when the mask is lifted,
+ * which nothing here would notice: a mask bit lives in configuration space,
+ * and a write there reaches no device code. Without the capability bit a
+ * guest masks at its interrupt controller instead, where no message is lost.
+ */
+class PCIMsiState {
+private:
+    PCIDevice *fDev = nullptr;
+    int fCapOffset = -1;
+    int fVectorCount = 0; /* what the function offered */
+
+    uint32_t Control() const;
+
+public:
+    /* Add the capability. 'vector_count' is rounded down to a power of two,
+       which is the only shape the message control field can describe.
+       Returns whether the capability was offered. */
+    bool Init(PCIDevice *dev, int vector_count);
+
+    bool Present() const {return fCapOffset >= 0;}
+
+    /* True once the guest has turned the capability on. While it is on, the
+       device's INTx line must stay low. */
+    bool Enabled() const;
+
+    /* How many vectors the device may send: what the guest took once it has
+       enabled the capability, and the whole offer until then. */
+    int VectorCount() const;
+
+    void Send(int vector);
+};
+
+
+/* The message signalled interrupt of a device that offers both.
+ *
+ * A guest takes MSI-X when a device offers it, so MSI is what is left for a
+ * driver that does not use MSI-X and for a machine whose configuration turned
+ * MSI-X off. Which of the two is in use is the guest's choice, made by
+ * enabling one of them, and this hands the message to whichever that is.
+ *
+ * The INTx line stays the device's own business: it drives the pin while
+ * Enabled() is false, and holds it low while a message mechanism is on. */
+class PCIMessageIrq {
+private:
+    PCIMsixState fMsix;
+    PCIMsiState fMsi;
+
+public:
+    /* Offer both, with the MSI-X table and pending bit array at those offsets
+       of BAR 'bar_num', which the device maps itself. Neither is offered on a
+       bus where nothing would collect the message. */
+    void Init(PCIDevice *dev, int vector_count, int bar_num,
+              uint32_t table_offset, uint32_t pba_offset);
+
+    bool Present() const {return fMsix.Present() || fMsi.Present();}
+    bool Enabled() const {return fMsix.Enabled() || fMsi.Enabled();}
+
+    /* How many vectors the guest may name right now. */
+    int VectorCount() const;
+
+    /* Post one vector over whichever mechanism the guest turned on. */
+    void Send(int vector);
+
+    /* The MSI-X table and pending bit array windows, which the device
+       forwards from its BAR. */
+    uint32_t TableRead(uint32_t offset, int size_log2)
+        {return fMsix.TableRead(offset, size_log2);}
+    void TableWrite(uint32_t offset, uint32_t val, int size_log2)
+        {fMsix.TableWrite(offset, val, size_log2);}
+    uint32_t PbaRead(uint32_t offset, int size_log2)
+        {return fMsix.PbaRead(offset, size_log2);}
+};
+
+
 /* The CPU side of a host bridge's I/O aperture, on a machine whose processor
    has no port instructions. Such a machine reaches port space through a
    memory window instead, so the bridge maps one of these over the window it

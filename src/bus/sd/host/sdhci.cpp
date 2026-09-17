@@ -278,7 +278,7 @@ private:
 
     /* transport */
     PCIDevice *fPciDev = nullptr;
-    PCIMsixState fMsix {};
+    PCIMessageIrq fMsgIrq {};
     PhysMemoryMap *fMemMap = nullptr;
     PhysMemoryRange *fMemRange = nullptr;
     IRQSignal *fIrq = nullptr;
@@ -486,12 +486,12 @@ void SDHCIDevice::UpdateIrq()
     bool level = (NormalIntStatus() & fNormalSignalEnable) != 0 ||
                  (fErrorIntStatus & fErrorSignalEnable) != 0;
 
-    if (fMsix.Present() && fMsix.Enabled()) {
+    if (fMsgIrq.Enabled()) {
         /* A message is an edge, sent as the condition appears; the pin must
-           stay low while MSI-X is in use. */
+           stay low while a message mechanism is in use. */
         fIrq->Set(0);
         if (level && !fIrqLevel) {
-            fMsix.Send(0);
+            fMsgIrq.Send(0);
         }
         fIrqLevel = level;
         return;
@@ -1358,9 +1358,9 @@ uint32_t SDHCIDevice::DeviceRead(uint32_t offset, int size_log2)
             return 0;
         }
         if (offset < SDHCI_MSIX_PBA_OFFSET) {
-            return fMsix.TableRead(offset - SDHCI_MSIX_TABLE_OFFSET, 2);
+            return fMsgIrq.TableRead(offset - SDHCI_MSIX_TABLE_OFFSET, 2);
         }
-        return fMsix.PbaRead(offset - SDHCI_MSIX_PBA_OFFSET, 2);
+        return fMsgIrq.PbaRead(offset - SDHCI_MSIX_PBA_OFFSET, 2);
     }
 
     /* The data port is a window on the block buffer rather than a register:
@@ -1397,7 +1397,7 @@ void SDHCIDevice::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
             offset >= SDHCI_MSIX_PBA_OFFSET) {
             return;
         }
-        fMsix.TableWrite(offset - SDHCI_MSIX_TABLE_OFFSET, val, 2);
+        fMsgIrq.TableWrite(offset - SDHCI_MSIX_TABLE_OFFSET, val, 2);
         return;
     }
 
@@ -1500,8 +1500,8 @@ bool SDHCIDevice::Realize()
            zero means. */
         pci_device_set_config8(fPciDev, SDHCI_PCI_SLOT_INFO, 0x00);
 
-        fMsix.Init(fPciDev, 0, 1, SDHCI_MSIX_TABLE_OFFSET,
-                   SDHCI_MSIX_PBA_OFFSET);
+        fMsgIrq.Init(fPciDev, 1, 0, SDHCI_MSIX_TABLE_OFFSET,
+                     SDHCI_MSIX_PBA_OFFSET);
 
         fIrq = pci_device_get_irq(fPciDev, 0);
         fMemMap = pci_device_get_mem_map(fPciDev);
