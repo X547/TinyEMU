@@ -380,8 +380,6 @@ private:
     PhysMemoryRange *fMemRange = nullptr;
     IRQSignal *fIrq = nullptr;
     PCIMessageIrq fMsgIrq {};
-    /* whether a message has already gone out for the assertion standing */
-    bool fMsgSent = false;
 
     USBBus *fChildBus = nullptr;
 
@@ -677,13 +675,12 @@ void XHCIDevice::IntrUpdate()
                  (fIman & IMAN_IP) != 0;
 
     if (fMsgIrq.Enabled()) {
-        /* A message is an edge, so it is sent once per assertion and rearmed
-           when the guest drops the condition. */
-        if (level && !fMsgSent) {
+        /* With a message the pending bit clears itself as the message goes
+           out (xHCI 4.17.5), so a driver using one never writes it back, and
+           every assertion is a message of its own. */
+        if (level) {
             fMsgIrq.Send(0);
-            fMsgSent = true;
-        } else if (!level) {
-            fMsgSent = false;
+            fIman &= ~IMAN_IP;
         }
         if (fIrq != nullptr) {
             fIrq->Set(0);
@@ -1861,7 +1858,6 @@ void XHCIDevice::Reset()
     fErSegOffset = 0;
     fErPcs = true;
     fEventFifoCount = 0;
-    fMsgSent = false;
 
     /* A host controller reset resets the ports too, which leaves an attached
        device reported as newly connected. */
