@@ -458,7 +458,8 @@ void PCIHostDWDevice::DbiWrite(uint32_t offset, uint32_t val, int size_log2)
    configuration TLP type are considered: memory regions, and every inbound
    region, are stored so they read back but are not applied, because the
    aperture and DMA are both identity mapped. */
-bool PCIHostDWDevice::ConfigTarget(uint32_t offset, uint32_t *addr_out)
+bool PCIHostDWDevice::ConfigTarget(uint32_t offset, uint32_t *addr_out,
+                                   uint32_t *type_out)
 {
     uint64_t cpu_addr = fConfigRes->base + offset;
 
@@ -484,6 +485,7 @@ bool PCIHostDWDevice::ConfigTarget(uint32_t offset, uint32_t *addr_out)
         uint64_t target = concat_bits(atu->target_hi,
                                       atu->target_lo, 32);
         *addr_out = (uint32_t)(target + (cpu_addr - base));
+        *type_out = type;
         return true;
     }
     return false;
@@ -494,8 +496,8 @@ bool PCIHostDWDevice::ConfigTarget(uint32_t offset, uint32_t *addr_out)
    PCI bus understands, or report that nothing answers there. */
 bool PCIHostDWDevice::ConfigDecode(uint32_t offset, uint32_t *bus_addr_out)
 {
-    uint32_t addr;
-    if (!ConfigTarget(offset, &addr)) {
+    uint32_t addr, type;
+    if (!ConfigTarget(offset, &addr, &type)) {
         return false;
     }
 
@@ -509,6 +511,17 @@ bool PCIHostDWDevice::ConfigDecode(uint32_t offset, uint32_t *bus_addr_out)
        to the bus, which follows the numbers the guest programmed into the
        bridges it found. */
     if (bus == (uint32_t)pci_bus_get_bus_num(fRootBus.get())) {
+        return false;
+    }
+
+    /* The two configuration types are not interchangeable. A type 0 cycle is
+       addressed to a device on the link itself, which is the bus the root
+       port's secondary bus register names; a type 1 cycle carries a bus
+       number for a bridge further down to claim, so the link's own bus is not
+       one of its targets. A driver that points a region at the wrong kind is
+       asking for a cycle the port would never emit, and gets no answer. */
+    bool on_link = bus == (uint32_t)pci_bus_get_bus_num(fDevBus);
+    if ((type == DW_ATU_TYPE_CFG0) != on_link) {
         return false;
     }
 

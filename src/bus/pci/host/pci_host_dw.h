@@ -137,7 +137,7 @@ private:
 
     void MsiUpdate();
     PCIeDWAtuRegion *AtuAt(uint32_t offset, uint32_t *reg_out);
-    bool ConfigTarget(uint32_t offset, uint32_t *addr_out);
+    bool ConfigTarget(uint32_t offset, uint32_t *addr_out, uint32_t *type_out);
     bool ConfigDecode(uint32_t offset, uint32_t *bus_addr_out);
 
     uint32_t DbiRead(uint32_t offset, int size_log2);
