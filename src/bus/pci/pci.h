@@ -85,9 +85,9 @@ typedef std::unique_ptr<PCIBus, PCIBusDeleter> PCIBusPtr;
 #define PCI_INTERRUPT_LINE	0x3c    /* 8 bits */
 #define PCI_INTERRUPT_PIN	0x3d    /* 8 bits */
 
-/* Type 1 (PCI to PCI bridge) header. The window registers are here so that a
-   guest can program them and read them back; the address decoding this
-   emulator performs is flat, so nothing is gated on them. */
+/* Type 1 (PCI to PCI bridge) header. A bridge decodes what falls in one of
+   its forwarding windows and nothing else, so a base address register behind
+   one is reachable only while these say it is. */
 #define PCI_PRIMARY_BUS		0x18	/* 8 bits */
 #define PCI_SECONDARY_BUS	0x19	/* 8 bits */
 #define PCI_SUBORDINATE_BUS	0x1a	/* 8 bits */

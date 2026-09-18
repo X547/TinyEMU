@@ -309,6 +309,98 @@ void pci_register_bar(PCIDevice *d, unsigned int bar_num,
              bar_num == PCI_ROM_SLOT ? 0 : (uint32_t)r->type);
 }
 
+/* One forwarding window of a bridge. The registers hold only the top bits of
+   each end; what they leave out is zero in the base and one in the limit, so
+   a window is aligned to its granularity and the limit names its last byte. A
+   base above the limit is a closed window, which is what a bridge with
+   nothing behind it yet reads as. */
+struct PCIBridgeWindow {
+    uint64_t base;
+    uint64_t limit;
+};
+
+static bool pci_window_contains(const PCIBridgeWindow &w, uint64_t addr,
+                                uint64_t size)
+{
+    return w.base <= w.limit && addr >= w.base && addr + size - 1 <= w.limit;
+}
+
+static PCIBridgeWindow pci_bridge_io_window(const PCIDevice *br)
+{
+    PCIBridgeWindow w;
+    uint8_t base8 = br->config[PCI_IO_BASE];
+    uint8_t limit8 = br->config[PCI_IO_LIMIT];
+
+    w.base = (uint64_t)get_bits(base8, 4, 4) << 12;
+    w.limit = ((uint64_t)get_bits(limit8, 4, 4) << 12) | 0xfff;
+    /* A bridge reporting the wide form takes the rest of each end from the
+       registers that form adds. */
+    if (get_bits(base8, 0, 4) == PCI_IO_RANGE_TYPE_32) {
+        w.base |= (uint64_t)get_le16(&br->config[PCI_IO_BASE_UPPER16]) << 16;
+        w.limit |= (uint64_t)get_le16(&br->config[PCI_IO_LIMIT_UPPER16]) << 16;
+    }
+    return w;
+}
+
+static PCIBridgeWindow pci_bridge_mem_window(const PCIDevice *br)
+{
+    PCIBridgeWindow w;
+    uint16_t base16 = get_le16(&br->config[PCI_MEMORY_BASE]);
+    uint16_t limit16 = get_le16(&br->config[PCI_MEMORY_LIMIT]);
+
+    w.base = (uint64_t)get_bits(base16, 4, 12) << 20;
+    w.limit = ((uint64_t)get_bits(limit16, 4, 12) << 20) | 0xfffff;
+    return w;
+}
+
+static PCIBridgeWindow pci_bridge_pref_window(const PCIDevice *br)
+{
+    PCIBridgeWindow w;
+    uint16_t base16 = get_le16(&br->config[PCI_PREF_MEMORY_BASE]);
+    uint16_t limit16 = get_le16(&br->config[PCI_PREF_MEMORY_LIMIT]);
+
+    w.base = (uint64_t)get_bits(base16, 4, 12) << 20;
+    w.limit = ((uint64_t)get_bits(limit16, 4, 12) << 20) | 0xfffff;
+    if (get_bits(base16, 0, 4) == PCI_PREF_RANGE_TYPE_64) {
+        w.base |= (uint64_t)get_le32(&br->config[PCI_PREF_BASE_UPPER32])
+            << 32;
+        w.limit |= (uint64_t)get_le32(&br->config[PCI_PREF_LIMIT_UPPER32])
+            << 32;
+    }
+    return w;
+}
+
+/* Whether every bridge between this function and the top of the hierarchy
+   forwards a region of 'size' at 'addr'. A bridge decodes what falls in one
+   of its windows and nothing else, so a base address register placed outside
+   them is simply not reachable. Letting it answer anyway would hide from a
+   guest that it put the register somewhere its own bridges do not carry. */
+static bool pci_bridges_forward(const PCIDevice *d, uint64_t addr,
+                                uint64_t size, bool is_io)
+{
+    for (PCIBus *b = d->bus; b->parent_bridge != NULL;
+         b = b->parent_bridge->bus) {
+        const PCIDevice *br = b->parent_bridge;
+        bool forwarded;
+
+        if (is_io) {
+            forwarded = pci_window_contains(pci_bridge_io_window(br), addr,
+                                            size);
+        } else {
+            /* Either memory window carries it; which one a guest chose is
+               its business. */
+            forwarded =
+                pci_window_contains(pci_bridge_mem_window(br), addr, size) ||
+                pci_window_contains(pci_bridge_pref_window(br), addr, size);
+        }
+        if (!forwarded) {
+            return false;
+        }
+    }
+    return true;
+}
+
+
 static void pci_update_mappings(PCIDevice *d)
 {
     int cmd, i;
@@ -336,6 +428,12 @@ static void pci_update_mappings(PCIDevice *d)
             /* The expansion ROM has an enable bit of its own. */
             new_enabled = i != PCI_ROM_SLOT || get_bit(new_addr, 0);
         }
+        /* ...and only where the bridges above carry it. */
+        if (new_enabled) {
+            new_enabled = pci_bridges_forward(
+                d, new_addr & ~(r->size - 1), r->size,
+                (r->type & PCI_ADDRESS_SPACE_IO) != 0);
+        }
         if (new_enabled) {
             r->bar_target->SetBar(i, new_addr & ~(r->size - 1), true);
             r->enabled = true;
@@ -343,6 +441,20 @@ static void pci_update_mappings(PCIDevice *d)
             r->bar_target->SetBar(i, 0, false);
             r->enabled = false;
         }
+    }
+}
+
+/* Everything on this bus and below it, after a bridge's windows moved. */
+static void pci_update_mappings_below(PCIBus *b)
+{
+    if (b == NULL)
+        return;
+    for (int i = 0; i < 256; i++) {
+        PCIDevice *d = b->device[i].get();
+        if (d == NULL)
+            continue;
+        pci_update_mappings(d);
+        pci_update_mappings_below(d->secondary_bus.get());
     }
 }
 
@@ -483,6 +595,14 @@ static void pci_device_config_write(PCIDevice *d, uint32_t addr,
     }
     if (PCI_COMMAND >= addr && PCI_COMMAND < addr + size) {
         pci_update_mappings(d);
+    }
+    /* Moving a forwarding window changes what everything behind this bridge
+       can decode, so the whole subtree is looked at again. The registers of
+       the three windows are contiguous save for the secondary status in the
+       middle, which is cheaper to include than to skip. */
+    if (pci_is_bridge(d) && addr < PCI_IO_LIMIT_UPPER16 + 2 &&
+        addr + size > PCI_IO_BASE) {
+        pci_update_mappings_below(d->secondary_bus.get());
     }
 }
 

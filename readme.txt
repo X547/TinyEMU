@@ -467,6 +467,14 @@ and asked for the switch that has to sit between them. That switch is
 each device nested in it. It is written out rather than inserted silently,
 because it is part of the machine the guest will enumerate.
 
+A bridge forwards what falls in one of its windows and nothing else, so a
+base address register behind one is reachable only while the memory or I/O
+window of every bridge above it covers the place the guest put it. Moving a
+window remaps what is behind it. A guest that programmed the windows and the
+registers to agree, which is what firmware and every kernel do, sees no
+difference; one that did not finds the register silent rather than answering
+from an address its own bridges do not carry.
+
 INTx is swizzled at every tier the way a guest expects: a device's pin is
 swizzled by its slot at each bridge it passes, and the host bridge's device
 tree "interrupt-map" describes only the last step, so the table and the
