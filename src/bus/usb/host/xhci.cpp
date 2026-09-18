@@ -2241,7 +2241,16 @@ void XHCIDevice::DoorbellWrite(uint32_t offset, uint32_t val)
     if (index > XHCI_MAX_SLOTS || target < 1 || target >= XHCI_DCI_COUNT) {
         return;
     }
-    KickEndpoint(GetEndpoint(index, target));
+
+    /* Ringing a stopped endpoint restarts it (xHCI 4.8.3): that is how a
+       driver resumes after Reset Endpoint or Stop Endpoint. A halted one
+       stays halted until it is reset. */
+    XHCIEndpoint *ep = GetEndpoint(index, target);
+    if (ep != nullptr && ep->state == EP_STOPPED) {
+        ep->state = EP_RUNNING;
+        SetEpState(index, target, EP_RUNNING);
+    }
+    KickEndpoint(ep);
 }
 
 
