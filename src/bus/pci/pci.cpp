@@ -1165,7 +1165,7 @@ void PCIMessageIrq::Init(PCIDevice *dev, int vector_count, int bar_num,
     /* MSI-X first, because a guest that sees both takes it and leaves the
        other one alone. Each declines by itself where it may not be
        offered. */
-    fMsix.Init(dev, vector_count, bar_num, table_offset, pba_offset);
+    fMsix.Init(dev, bar_num, vector_count, table_offset, pba_offset);
     fMsi.Init(dev, vector_count);
 }
 
