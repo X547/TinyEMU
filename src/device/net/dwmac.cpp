@@ -972,11 +972,10 @@ void DwmacDevice::BuildFDT(FDTContext &ctx)
            any of them finds it. They are all the one fixed clock: nothing
            here is clocked, and what a driver does with the rate is divide it
            down for a bus it cannot observe either. */
-        uint32_t clocks[7];
         for (int i = 0; i < 7; i++) {
-            clocks[i] = clock_phandle;
+            fdt->AddCellU32(clock_phandle);
         }
-        fdt->PropTabU32("clocks", clocks, 7);
+        fdt->PropCells("clocks");
         fdt->PropStrList("clock-names", "gtx", "tx", "ptp_ref", "stmmaceth",
                          "pclk", "gtxc", "rmii_rtx", nullptr);
     }

@@ -423,17 +423,16 @@ static uint32_t riscv_build_imsic_fdt(RISCVMachine *m, FDTBuilder &fdt,
                                       const uint32_t *intc_phandle,
                                       bool supervisor)
 {
-    uint32_t tab[2 * RISCV_MAX_HARTS];
     uint32_t phandle = fdt.AllocPhandle();
 
     fdt.BeginNodeNum("interrupt-controller", base);
     fdt.PropStr("compatible", "riscv,imsics");
     fdt.PropU64Range("reg", base, imsic_region_size(m));
     for (int hart = 0; hart < m->hart_count; hart++) {
-        tab[2 * hart] = intc_phandle[hart];
-        tab[2 * hart + 1] = supervisor ? 9 : 11; /* S or M ext irq */
+        fdt.AddCellU32(intc_phandle[hart]);
+        fdt.AddCellU32(supervisor ? 9 : 11); /* S or M ext irq */
     }
-    fdt.PropTabU32("interrupts-extended", tab, 2 * m->hart_count);
+    fdt.PropCells("interrupts-extended");
     fdt.PropEmpty("interrupt-controller");
     fdt.PropU32("#interrupt-cells", 0);
     fdt.PropEmpty("msi-controller");
@@ -457,7 +456,6 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
     char ext_list[256], *ext_end;
     uint32_t misa;
     uint32_t intc_phandle[RISCV_MAX_HARTS];
-    uint32_t tab[4 * RISCV_MAX_HARTS];
 
     ctx.fdt = &fdt;
 
@@ -599,12 +597,12 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
     fdt.PropStr("compatible", "riscv,clint0");
 
     for (int hart = 0; hart < m->hart_count; hart++) {
-        tab[4 * hart] = intc_phandle[hart];
-        tab[4 * hart + 1] = 3; /* M IPI irq */
-        tab[4 * hart + 2] = intc_phandle[hart];
-        tab[4 * hart + 3] = 7; /* M timer irq */
+        fdt.AddCellU32(intc_phandle[hart]);
+        fdt.AddCellU32(3); /* M IPI irq */
+        fdt.AddCellU32(intc_phandle[hart]);
+        fdt.AddCellU32(7); /* M timer irq */
     }
-    fdt.PropTabU32("interrupts-extended", tab, 4 * m->hart_count);
+    fdt.PropCells("interrupts-extended");
 
     fdt.PropU64Range("reg", CLINT_BASE_ADDR, CLINT_SIZE);
 

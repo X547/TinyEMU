@@ -1551,8 +1551,9 @@ void SDHCIDevice::BuildFDT(FDTContext &ctx)
     fdt_prop_irq(ctx, fIrqRes->base);
 
     /* Both the register clock and the card clock are that one fixed clock. */
-    uint32_t tab[2] = {clock_phandle, clock_phandle};
-    ctx.fdt->PropTabU32("clocks", tab, 2);
+    ctx.fdt->AddCellU32(clock_phandle);
+    ctx.fdt->AddCellU32(clock_phandle);
+    ctx.fdt->PropCells("clocks");
     ctx.fdt->PropStrList("clock-names", "clk_xin", "clk_ahb", NULL);
     ctx.fdt->PropU32("max-frequency", fClockHz);
 

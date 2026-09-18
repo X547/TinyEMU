@@ -59,12 +59,9 @@ struct FDTContext {
 };
 
 
-/* Interrupt specifiers can be up to this many cells. */
-#define FDT_IRQ_SPEC_MAX 2
-
-/* Store the specifier for 'line', without the phandle, in 'tab'; returns the
-   number of cells written. */
-int fdt_irq_spec(const FDTContext &ctx, uint32_t *tab, uint64_t line);
+/* Add the specifier for 'line', without the phandle, to the property value
+   being assembled. */
+void fdt_add_irq_spec(const FDTContext &ctx, uint64_t line);
 
 /* Emit the "interrupts-extended" property naming the line a resource was
    assigned. Kept in one place so that every device describes the line it

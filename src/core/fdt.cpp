@@ -65,6 +65,7 @@ FDTBuilder::~FDTBuilder()
 {
     free(fTab);
     free(fStringTable);
+    free(fCells);
 }
 
 
@@ -168,42 +169,66 @@ void FDTBuilder::Prop(const char *prop_name, const void *data, int data_len)
 }
 
 
-void FDTBuilder::PropTabU32(const char *prop_name, const uint32_t *tab,
-                            int tab_len)
+void FDTBuilder::AddCellData(const void *data, int len)
 {
-    Put32(FDT_PROP);
-    Put32(tab_len * sizeof(uint32_t));
-    Put32(StringOffset(prop_name));
-    for (int i = 0; i < tab_len; i++) {
-        Put32(tab[i]);
+    int new_len = fCellsLen + len;
+    if (unlikely(new_len > fCellsSize)) {
+        int new_size = max_int(new_len, fCellsSize * 3 / 2);
+        fCells = static_cast<uint8_t *>(realloc(fCells, new_size));
+        fCellsSize = new_size;
     }
+    memcpy(fCells + fCellsLen, data, len);
+    fCellsLen = new_len;
+}
+
+
+void FDTBuilder::AddCellU32(uint32_t val)
+{
+    uint32_t v = cpu_to_be32(val);
+    AddCellData(&v, sizeof(v));
+}
+
+
+void FDTBuilder::AddCellU64(uint64_t val)
+{
+    uint64_t v = cpu_to_be64(val);
+    AddCellData(&v, sizeof(v));
+}
+
+
+void FDTBuilder::AddCellString(const char *str)
+{
+    AddCellData(str, strlen(str) + 1);
+}
+
+
+void FDTBuilder::PropCells(const char *prop_name)
+{
+    Prop(prop_name, fCells, fCellsLen);
+    fCellsLen = 0;
 }
 
 
 void FDTBuilder::PropU32(const char *prop_name, uint32_t val)
 {
-    PropTabU32(prop_name, &val, 1);
+    AddCellU32(val);
+    PropCells(prop_name);
 }
 
 
 void FDTBuilder::PropU64(const char *prop_name, uint64_t v0)
 {
-    uint32_t tab[2];
-    tab[0] = v0 >> 32;
-    tab[1] = v0;
-    PropTabU32(prop_name, tab, 2);
+    AddCellU64(v0);
+    PropCells(prop_name);
 }
 
 
 void FDTBuilder::PropU64Range(const char *prop_name, uint64_t addr,
                               uint64_t size)
 {
-    uint32_t tab[4];
-    tab[0] = addr >> 32;
-    tab[1] = addr;
-    tab[2] = size >> 32;
-    tab[3] = size;
-    PropTabU32(prop_name, tab, 4);
+    AddCellU64(addr);
+    AddCellU64(size);
+    PropCells(prop_name);
 }
 
 
@@ -216,36 +241,18 @@ void FDTBuilder::PropStr(const char *prop_name, const char *str)
 void FDTBuilder::PropStrList(const char *prop_name, ...)
 {
     va_list ap;
-    int size, str_size;
-    char *ptr, *tab;
 
     va_start(ap, prop_name);
-    size = 0;
     for (;;) {
-        ptr = va_arg(ap, char *);
+        const char *ptr = va_arg(ap, const char *);
         if (ptr == nullptr) {
             break;
         }
-        size += strlen(ptr) + 1;
+        AddCellString(ptr);
     }
     va_end(ap);
 
-    tab = static_cast<char *>(malloc(size));
-    va_start(ap, prop_name);
-    size = 0;
-    for (;;) {
-        ptr = va_arg(ap, char *);
-        if (ptr == nullptr) {
-            break;
-        }
-        str_size = strlen(ptr) + 1;
-        memcpy(tab + size, ptr, str_size);
-        size += str_size;
-    }
-    va_end(ap);
-
-    Prop(prop_name, tab, size);
-    free(tab);
+    PropCells(prop_name);
 }
 
 

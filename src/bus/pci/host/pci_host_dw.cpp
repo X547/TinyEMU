@@ -26,7 +26,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <assert.h>
 
 #include "bits.h"
 #include "cutils.h"
@@ -546,8 +545,6 @@ void PCIHostDWDevice::ConfigWrite(uint32_t offset, uint32_t val, int size_log2)
 void PCIHostDWDevice::BuildFDT(FDTContext &ctx)
 {
     FDTBuilder *fdt = ctx.fdt;
-    uint32_t tab[32];
-    int n;
 
     fdt->BeginNodeNum("pcie", fDbiRes->base);
     /* The first entry is what a driver matching on a single string sees, so
@@ -563,16 +560,11 @@ void PCIHostDWDevice::BuildFDT(FDTContext &ctx)
     fdt->PropU32("#interrupt-cells", 1);
 
     /* The order is load bearing: drivers read these by index, not by name. */
-    n = 0;
-    tab[n++] = fDbiRes->base >> 32;
-    tab[n++] = fDbiRes->base;
-    tab[n++] = fDbiRes->size >> 32;
-    tab[n++] = fDbiRes->size;
-    tab[n++] = fConfigRes->base >> 32;
-    tab[n++] = fConfigRes->base;
-    tab[n++] = fConfigRes->size >> 32;
-    tab[n++] = fConfigRes->size;
-    fdt->PropTabU32("reg", tab, n);
+    fdt->AddCellU64(fDbiRes->base);
+    fdt->AddCellU64(fDbiRes->size);
+    fdt->AddCellU64(fConfigRes->base);
+    fdt->AddCellU64(fConfigRes->size);
+    fdt->PropCells("reg");
     fdt->PropStrList("reg-names", "dbi", "config", nullptr);
 
     /* Each host bridge is a segment of its own, so that a machine with more
@@ -580,10 +572,9 @@ void PCIHostDWDevice::BuildFDT(FDTContext &ctx)
     fdt->PropU32("linux,pci-domain", ctx.pci_domain++);
 
     /* Bus 0 carries the root port and the rest are behind it. */
-    n = 0;
-    tab[n++] = 0;
-    tab[n++] = fBusCount - 1;
-    fdt->PropTabU32("bus-range", tab, n);
+    fdt->AddCellU32(0);
+    fdt->AddCellU32(fBusCount - 1);
+    fdt->PropCells("bus-range");
 
     fdt->PropU32("num-lanes", 1);
     fdt->PropEmpty("dma-coherent");
@@ -592,66 +583,53 @@ void PCIHostDWDevice::BuildFDT(FDTContext &ctx)
        here that is not identity mapped, because a port number is not a CPU
        address -- then one non-prefetchable 32 bit memory window, and a 64 bit
        one after that when one was asked for. */
-    n = 0;
     if (fIoRes != nullptr) {
-        tab[n++] = PCI_RANGE_IO;
-        tab[n++] = fIoRes->base >> 32;
-        tab[n++] = fIoRes->base;
-        tab[n++] = fIoWindowRes->base >> 32;
-        tab[n++] = fIoWindowRes->base;
-        tab[n++] = fIoRes->size >> 32;
-        tab[n++] = fIoRes->size;
+        fdt->AddCellU32(PCI_RANGE_IO);
+        fdt->AddCellU64(fIoRes->base);
+        fdt->AddCellU64(fIoWindowRes->base);
+        fdt->AddCellU64(fIoRes->size);
     }
-    tab[n++] = PCI_RANGE_MMIO;       /* child phys.hi */
-    tab[n++] = fMmioRes->base >> 32; /* child phys.mid */
-    tab[n++] = fMmioRes->base;       /* child phys.lo */
-    tab[n++] = fMmioRes->base >> 32; /* parent address */
-    tab[n++] = fMmioRes->base;
-    tab[n++] = fMmioRes->size >> 32; /* size */
-    tab[n++] = fMmioRes->size;
+    fdt->AddCellU32(PCI_RANGE_MMIO);    /* child phys.hi */
+    fdt->AddCellU64(fMmioRes->base);    /* child phys.mid, phys.lo */
+    fdt->AddCellU64(fMmioRes->base);    /* parent address */
+    fdt->AddCellU64(fMmioRes->size);    /* size */
     if (fMmio64Res != nullptr) {
-        tab[n++] = PCI_RANGE_MMIO_64BIT;
-        tab[n++] = fMmio64Res->base >> 32;
-        tab[n++] = fMmio64Res->base;
-        tab[n++] = fMmio64Res->base >> 32;
-        tab[n++] = fMmio64Res->base;
-        tab[n++] = fMmio64Res->size >> 32;
-        tab[n++] = fMmio64Res->size;
+        fdt->AddCellU32(PCI_RANGE_MMIO_64BIT);
+        fdt->AddCellU64(fMmio64Res->base);
+        fdt->AddCellU64(fMmio64Res->base);
+        fdt->AddCellU64(fMmio64Res->size);
     }
-    fdt->PropTabU32("ranges", tab, n);
+    fdt->PropCells("ranges");
 
     /* The message signalled interrupt comes first: that is the entry a driver
        reads to find this controller's own receiver. */
     fdt->PropU32("interrupt-parent", ctx.irq_phandle);
-    n = fdt_irq_spec(ctx, tab, fMsiIrqRes->base);
+    fdt_add_irq_spec(ctx, fMsiIrqRes->base);
     for (int i = 0; i < 4; i++) {
-        n += fdt_irq_spec(ctx, tab + n, fIrqRes[i]->base);
+        fdt_add_irq_spec(ctx, fIrqRes[i]->base);
     }
-    fdt->PropTabU32("interrupts", tab, n);
+    fdt->PropCells("interrupts");
     fdt->PropStrList("interrupt-names", "msi", "inta", "intb", "intc", "intd",
                      nullptr);
 
     /* Only the pin selects an entry. The per slot swizzle is applied by
        pci_bus_map_irq() before the interrupt ever reaches one of the four
        pins, so the table below describes the pins themselves. */
-    n = 0;
-    tab[n++] = 0;
-    tab[n++] = 0;
-    tab[n++] = 0;
-    tab[n++] = 7;
-    fdt->PropTabU32("interrupt-map-mask", tab, n);
+    fdt->AddCellU32(0);
+    fdt->AddCellU32(0);
+    fdt->AddCellU32(0);
+    fdt->AddCellU32(7);
+    fdt->PropCells("interrupt-map-mask");
 
-    n = 0;
     for (int pin = 1; pin <= 4; pin++) {
-        tab[n++] = 0; /* child unit address, phys.hi */
-        tab[n++] = 0;
-        tab[n++] = 0;
-        tab[n++] = pin; /* child interrupt specifier */
-        tab[n++] = ctx.irq_phandle;
-        n += fdt_irq_spec(ctx, tab + n, fIrqRes[pin - 1]->base);
+        fdt->AddCellU32(0); /* child unit address, phys.hi */
+        fdt->AddCellU32(0);
+        fdt->AddCellU32(0);
+        fdt->AddCellU32(pin); /* child interrupt specifier */
+        fdt->AddCellU32(ctx.irq_phandle);
+        fdt_add_irq_spec(ctx, fIrqRes[pin - 1]->base);
     }
-    assert(n <= (int)countof(tab));
-    fdt->PropTabU32("interrupt-map", tab, n);
+    fdt->PropCells("interrupt-map");
 
     /* Deliberately no "msi-parent": a driver takes the absence of one as the
        cue to use the receiver built into this controller, which is the one

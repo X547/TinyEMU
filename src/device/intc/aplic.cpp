@@ -608,23 +608,20 @@ void APLIC::BuildDomainFDT(FDTBuilder &fdt, const Domain &d, uint64_t base,
     if (fMsiMode) {
         fdt.PropU32("msi-parent", msi_phandle);
     } else {
-        uint32_t *tab = new uint32_t[2 * fHartCount];
         /* IDC n is hart n */
         for (int hart = 0; hart < fHartCount; hart++) {
-            tab[2 * hart] = intc_phandle[hart];
-            tab[2 * hart + 1] = d.supervisor ? IRQ_S_EXT : IRQ_M_EXT;
+            fdt.AddCellU32(intc_phandle[hart]);
+            fdt.AddCellU32(d.supervisor ? IRQ_S_EXT : IRQ_M_EXT);
         }
-        fdt.PropTabU32("interrupts-extended", tab, 2 * fHartCount);
-        delete[] tab;
+        fdt.PropCells("interrupts-extended");
     }
 
     if (d.child != nullptr) {
-        uint32_t tab[3];
         fdt.PropU32("riscv,children", child_phandle);
-        tab[0] = child_phandle;
-        tab[1] = 1;
-        tab[2] = fNumSources;
-        fdt.PropTabU32("riscv,delegation", tab, 3);
+        fdt.AddCellU32(child_phandle);
+        fdt.AddCellU32(1);
+        fdt.AddCellU32(fNumSources);
+        fdt.PropCells("riscv,delegation");
     }
 
     fdt.PropU32("phandle", phandle);

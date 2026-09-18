@@ -43,6 +43,11 @@ private:
     int fStringTableLen = 0;
     int fStringTableSize = 0;
 
+    /* the value being assembled by AddCell*(), emitted by PropCells() */
+    uint8_t *fCells = nullptr;
+    int fCellsLen = 0;
+    int fCellsSize = 0;
+
     uint32_t fNextPhandle = 1;
 
     struct {
@@ -55,6 +60,7 @@ private:
     void Put32(uint32_t v);
     void PutData(const uint8_t *data, int len);
     int StringOffset(const char *name);
+    void AddCellData(const void *data, int len);
 
 public:
     FDTBuilder() = default;
@@ -74,9 +80,17 @@ public:
     void BeginNodeNum(const char *name, uint64_t n);
     void EndNode();
 
+    /* A value of any length is assembled cell by cell, then emitted under a
+       name by PropCells(), which empties the buffer for the next property. A
+       caller does not have to size a table up front or count what it wrote. */
+    void AddCellU32(uint32_t val);
+    void AddCellU64(uint64_t val);
+    /* for a string or a string list value */
+    void AddCellString(const char *str);
+    void PropCells(const char *prop_name);
+
     void Prop(const char *prop_name, const void *data, int data_len);
     void PropEmpty(const char *prop_name) {Prop(prop_name, nullptr, 0);}
-    void PropTabU32(const char *prop_name, const uint32_t *tab, int tab_len);
     void PropU32(const char *prop_name, uint32_t val);
     void PropU64(const char *prop_name, uint64_t v0);
     void PropU64Range(const char *prop_name, uint64_t addr, uint64_t size);

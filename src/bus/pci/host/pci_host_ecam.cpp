@@ -26,7 +26,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <assert.h>
 
 #include "cutils.h"
 #include "fdt.h"
@@ -172,9 +171,6 @@ void PCIHostECAMDevice::EcamWrite(uint32_t offset, uint32_t val, int size_log2)
 void PCIHostECAMDevice::BuildFDT(FDTContext &ctx)
 {
     FDTBuilder *fdt = ctx.fdt;
-    /* an interrupt-map entry: unit address, pin, phandle and specifier */
-    uint32_t tab[PCIE_ECAM_SLOT_COUNT * 4 * (5 + FDT_IRQ_SPEC_MAX)];
-    int n;
 
     fdt->BeginNodeNum("pci", fEcamRes->base);
     fdt->PropStr("compatible", "pci-host-ecam-generic");
@@ -188,9 +184,9 @@ void PCIHostECAMDevice::BuildFDT(FDTContext &ctx)
        than one of them names its devices unambiguously. */
     fdt->PropU32("linux,pci-domain", ctx.pci_domain++);
 
-    tab[0] = 0;
-    tab[1] = fBusCount - 1;
-    fdt->PropTabU32("bus-range", tab, 2);
+    fdt->AddCellU32(0);
+    fdt->AddCellU32(fBusCount - 1);
+    fdt->PropCells("bus-range");
 
     /* An I/O window first, when the configuration asked for one. This is the
        only range that is not identity mapped: the child address is the port
@@ -201,58 +197,45 @@ void PCIHostECAMDevice::BuildFDT(FDTContext &ctx)
        PCI side address equals the CPU side address. A second, 64 bit window
        comes after that when the configuration asked for one; that is where a
        guest can put a 64 bit BAR that does not have to live below 4 GB. */
-    n = 0;
     if (fIoRes != nullptr) {
-        tab[n++] = PCI_RANGE_IO;
-        tab[n++] = fIoRes->base >> 32;
-        tab[n++] = fIoRes->base;
-        tab[n++] = fIoWindowRes->base >> 32;
-        tab[n++] = fIoWindowRes->base;
-        tab[n++] = fIoRes->size >> 32;
-        tab[n++] = fIoRes->size;
+        fdt->AddCellU32(PCI_RANGE_IO);
+        fdt->AddCellU64(fIoRes->base);
+        fdt->AddCellU64(fIoWindowRes->base);
+        fdt->AddCellU64(fIoRes->size);
     }
-    tab[n++] = PCI_RANGE_MMIO;          /* child phys.hi */
-    tab[n++] = fMmioRes->base >> 32;    /* child phys.mid */
-    tab[n++] = fMmioRes->base;          /* child phys.lo */
-    tab[n++] = fMmioRes->base >> 32;    /* parent address */
-    tab[n++] = fMmioRes->base;
-    tab[n++] = fMmioRes->size >> 32;    /* size */
-    tab[n++] = fMmioRes->size;
+    fdt->AddCellU32(PCI_RANGE_MMIO);    /* child phys.hi */
+    fdt->AddCellU64(fMmioRes->base);    /* child phys.mid, phys.lo */
+    fdt->AddCellU64(fMmioRes->base);    /* parent address */
+    fdt->AddCellU64(fMmioRes->size);    /* size */
     if (fMmio64Res != nullptr) {
-        tab[n++] = PCI_RANGE_MMIO_64BIT;
-        tab[n++] = fMmio64Res->base >> 32;
-        tab[n++] = fMmio64Res->base;
-        tab[n++] = fMmio64Res->base >> 32;
-        tab[n++] = fMmio64Res->base;
-        tab[n++] = fMmio64Res->size >> 32;
-        tab[n++] = fMmio64Res->size;
+        fdt->AddCellU32(PCI_RANGE_MMIO_64BIT);
+        fdt->AddCellU64(fMmio64Res->base);
+        fdt->AddCellU64(fMmio64Res->base);
+        fdt->AddCellU64(fMmio64Res->size);
     }
-    fdt->PropTabU32("ranges", tab, n);
+    fdt->PropCells("ranges");
 
     /* Only the device number and the pin select an entry. */
-    n = 0;
-    tab[n++] = 0xf800;
-    tab[n++] = 0;
-    tab[n++] = 0;
-    tab[n++] = 7;
-    fdt->PropTabU32("interrupt-map-mask", tab, n);
+    fdt->AddCellU32(0xf800);
+    fdt->AddCellU32(0);
+    fdt->AddCellU32(0);
+    fdt->AddCellU32(7);
+    fdt->PropCells("interrupt-map-mask");
 
     /* Derive the table from the routing function itself: whatever swizzle
        pci_bus_map_irq() implements is what the guest is told. */
-    n = 0;
     for (int slot = 0; slot < PCIE_ECAM_SLOT_COUNT; slot++) {
         for (int pin = 1; pin <= 4; pin++) {
             int intx = pci_bus_map_irq(slot << 3, pin - 1);
-            tab[n++] = slot << 11;  /* child unit address, phys.hi */
-            tab[n++] = 0;
-            tab[n++] = 0;
-            tab[n++] = pin;         /* child interrupt specifier */
-            tab[n++] = ctx.irq_phandle;
-            n += fdt_irq_spec(ctx, tab + n, fIrqRes[intx]->base);
+            fdt->AddCellU32(slot << 11); /* child unit address, phys.hi */
+            fdt->AddCellU32(0);
+            fdt->AddCellU32(0);
+            fdt->AddCellU32(pin);        /* child interrupt specifier */
+            fdt->AddCellU32(ctx.irq_phandle);
+            fdt_add_irq_spec(ctx, fIrqRes[intx]->base);
         }
     }
-    assert(n <= (int)countof(tab));
-    fdt->PropTabU32("interrupt-map", tab, n);
+    fdt->PropCells("interrupt-map");
 
     if (ctx.msi_phandle != 0) {
         fdt->PropU32("msi-parent", ctx.msi_phandle);

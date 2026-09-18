@@ -179,7 +179,6 @@ void PLIC::SetIRQ(int irq_num, int level)
 uint32_t PLIC::BuildFDT(FDTBuilder &fdt, uint64_t base,
                         const uint32_t *intc_phandle)
 {
-    uint32_t *tab = new uint32_t[4 * fHartCount];
     uint32_t phandle;
 
     fdt.BeginNodeNum("plic", base);
@@ -194,13 +193,12 @@ uint32_t PLIC::BuildFDT(FDTBuilder &fdt, uint64_t base,
 
     /* the context numbering DeviceRead() and DeviceWrite() decode */
     for (int hart = 0; hart < fHartCount; hart++) {
-        tab[4 * hart] = intc_phandle[hart];
-        tab[4 * hart + 1] = 11; /* M ext irq */
-        tab[4 * hart + 2] = intc_phandle[hart];
-        tab[4 * hart + 3] = 9; /* S ext irq */
+        fdt.AddCellU32(intc_phandle[hart]);
+        fdt.AddCellU32(11); /* M ext irq */
+        fdt.AddCellU32(intc_phandle[hart]);
+        fdt.AddCellU32(9); /* S ext irq */
     }
-    fdt.PropTabU32("interrupts-extended", tab, 4 * fHartCount);
-    delete[] tab;
+    fdt.PropCells("interrupts-extended");
 
     phandle = fdt.AllocPhandle();
     fdt.PropU32("phandle", phandle);
