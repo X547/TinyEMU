@@ -67,6 +67,30 @@ bool PCIBusWrapper::AssignResources(Device *dev)
 }
 
 
+//#pragma mark - PCIeLinkBus
+
+/* A bus that is one end of a PCI Express link, which carries exactly one
+   device. A second one put beside it would be invisible to the guest, so a
+   configuration naming several is refused rather than quietly given a switch:
+   the switch is part of the machine being described, and belongs in the
+   configuration file where it can be seen. */
+class PCIeLinkBus final: public PCIBusWrapper {
+public:
+    PCIeLinkBus(Device *owner, PCIBus *bus): PCIBusWrapper(owner, bus) {}
+
+    bool AddDevice(std::unique_ptr<Device> dev) override
+    {
+        if (DeviceCount() > 0) {
+            vm_error("%s: a PCI Express link carries one device; declare a "
+                     "\"pci-bridge\" here and nest them inside it\n",
+                     Owner()->Name());
+            return false;
+        }
+        return Bus::AddDevice(std::move(dev));
+    }
+};
+
+
 //#pragma mark - PCIePortDevice
 
 /* One downstream port of a switch, and the bus behind it. These are not
@@ -104,10 +128,8 @@ public:
 
 //#pragma mark - PCISwitchBus
 
-/* The bus inside a switch. On a PCI Express hierarchy every device added to
-   it is given a downstream port of its own; on a conventional bus, where a
-   guest scans all thirty two slots, they sit side by side as they would on
-   real hardware. */
+/* The bus inside a switch, which carries downstream ports. Every device added
+   to it is given one of its own, because the bus below a port is a link. */
 class PCISwitchBus final: public PCIBusWrapper {
 private:
     int fPortCount = 0;
@@ -119,9 +141,6 @@ public:
     {
         char name[64];
 
-        if (!pci_bus_is_pcie(AsPCIBus())) {
-            return Bus::AddDevice(std::move(dev));
-        }
         if (dev == nullptr) {
             return false;
         }
@@ -138,20 +157,30 @@ public:
 };
 
 
-//#pragma mark - pci_attach_bus_create
+//#pragma mark - bus creation
 
 std::unique_ptr<Bus> pci_attach_bus_create(Device *owner, PCIBus *bus)
 {
+    if (pci_bus_is_root(bus) || !pci_bus_is_pcie(bus)) {
+        return std::make_unique<PCIBusWrapper>(owner, bus);
+    }
+    return std::make_unique<PCIeLinkBus>(owner, bus);
+}
+
+
+/* The bus a declared switch's devices go on. A switch placed on a link is
+   entered through an upstream port, which is the bridge just created for it;
+   one placed on another switch's internal bus is entered through a downstream
+   port, so the upstream port of the switch proper is added here. */
+static std::unique_ptr<Bus> pci_switch_bus_create(Device *owner, PCIBus *bus)
+{
     char name[64];
 
-    if (pci_bus_is_root(bus) || !pci_bus_is_pcie(bus)) {
+    if (!pci_bus_is_pcie(bus)) {
         return std::make_unique<PCIBusWrapper>(owner, bus);
     }
 
     if (pci_bus_bridge_port_type(bus) == PCI_EXP_TYPE_UPSTREAM) {
-        /* One end of a link, so the single device it can carry is the
-           upstream port of a switch and the configuration's devices go on
-           the bus inside that. */
         snprintf(name, sizeof(name), "%s-up", owner->Name());
         PCIBus *inner = pci_bridge_init(bus, 0, name, PCI_BRIDGE_VENDOR_ID,
                                         PCI_BRIDGE_DEVICE_ID,
@@ -196,7 +225,7 @@ public:
             return false;
         }
 
-        fChildBus = pci_attach_bus_create(this, inner);
+        fChildBus = pci_switch_bus_create(this, inner);
         return fChildBus != nullptr;
     }
 

@@ -50,25 +50,21 @@ public:
 };
 
 
-/* The Bus a configuration's devices should be attached to, given the PCI bus
-   a host bridge or a bridge owns. What that takes depends on where the bus
-   sits:
-
-     - a root complex's own bus, or a conventional one, carries as many
-       devices as it has slots, and they go straight on it;
-     - a bus behind a root port or a downstream port is one end of a link and
-       so carries exactly one device, so a switch is placed on it and the
-       devices go on the bus inside that;
-     - a switch's internal bus carries downstream ports, so each device is
-       given one of its own.
+/* The Bus a host bridge's configuration attaches its devices to, given the
+   PCI bus that bridge owns. A root complex's own bus, and a conventional one,
+   carry as many devices as they have slots and take them straight on; a bus
+   behind a root port is one end of a PCI Express link and carries exactly
+   one, so a configuration naming several is refused and asked for the switch
+   that has to sit between them.
 
    Returns null on failure. */
 std::unique_ptr<Bus> pci_attach_bus_create(Device *owner, PCIBus *bus);
 
 
-/* The "pci-bridge" configuration node: a port on the bus above and, behind
-   it, whatever pci_attach_bus_create() decides that port needs, so the
-   devices nested inside end up where a guest can reach all of them. The guest
-   numbers the buses and programs the forwarding windows. Nesting one of these
-   inside another is how a deeper hierarchy is described. */
+/* The "pci-bridge" configuration node: one PCI Express switch, or a plain
+   bridge on a conventional bus. It is a port on the bus above and, behind it,
+   the bus the nested devices go on -- each on a downstream port of its own,
+   because the bus below a port is a link. The guest numbers the buses and
+   programs the forwarding windows. Nesting one of these inside another is how
+   a deeper hierarchy is described. */
 Device *pci_bridge_node_create(const char *name);

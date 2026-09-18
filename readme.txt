@@ -461,12 +461,11 @@ Where a device may sit is decided by the hierarchy, exactly as on hardware.
 The ECAM bridge's bus 0 is a root complex bus and holds as many devices as it
 has slots. A link, on the other hand, carries one device, so the bus behind
 the DesignWare root port and the bus behind any port of a switch each hold
-one. A configuration that names several devices in such a place is given the
-switch that has to sit between them: an upstream port, the bus inside it, and
-a downstream port for each device. That is what "pci-bridge" is, and it is
-also what the DesignWare bridge does with the devices declared under it, so
-a configuration written against the older bare-bus behaviour keeps working
-and simply finds its devices two tiers further down than it used to.
+one. A configuration that names several devices in such a place is refused,
+and asked for the switch that has to sit between them. That switch is
+"pci-bridge": an upstream port, the bus inside it, and a downstream port for
+each device nested in it. It is written out rather than inserted silently,
+because it is part of the machine the guest will enumerate.
 
 INTx is swizzled at every tier the way a guest expects: a device's pin is
 swizzled by its slot at each bridge it passes, and the host bridge's device
