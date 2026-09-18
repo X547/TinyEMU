@@ -193,6 +193,14 @@ Device types:
                          device tree advertises), "compatible" (which
                          controller it claims to be, default
                          "sifive,fu740-pcie"), and a nested PCI bus
+  pci-host-plda          PLDA XpressRich PCIe root complex, as the StarFive
+                         JH7110 has ("starfive,jh7110-pcie"); "mmio_size",
+                         "mmio64_size" and "bus_count" as above, no I/O
+                         aperture, and a nested PCI bus. Brings its own
+                         syscon and reset controller nodes, which the driver
+                         requires. A guest may accept only PCI domains 0
+                         and 1, so it should be among the first two host
+                         bridges declared
   pci-bridge             PCI Express switch; the devices nested in it sit
                          behind it rather than on the bus above. Nest one
                          inside another for a deeper hierarchy
@@ -426,11 +434,11 @@ than on the core, so it also wants the name:
 The node keeps "snps,dwmac" as its last compatible entry whatever the first
 one says, so a generic driver still binds to it.
 
-The two PCI host bridges differ in more than their register layout. The ECAM
-one is a bare bus: devices sit on bus 0 and interrupt over INTx. The
-DesignWare one models a real root complex, so it has a root port of its own on
-bus 0 and devices are enumerated behind it, and it carries a message signalled
-interrupt receiver. Devices on a bus that has one advertise MSI-X and plain
+The PCI host bridges differ in more than their register layout. The ECAM one
+is a bare bus: devices sit on bus 0 and interrupt over INTx. The DesignWare
+and PLDA ones model real root complexes, so each has a root port of its own on
+bus 0 and devices are enumerated behind it, and each carries a message
+signalled interrupt receiver. Devices on a bus that has one advertise MSI-X and plain
 MSI, and a guest uses one of them in preference to INTx; on a bus without one
 they offer neither, because a guest that chose either would have nothing to
 collect the message. Which of the two a guest takes is its own choice, and it
@@ -444,6 +452,13 @@ probes for. Linux's driver for that part wants clocks, resets and GPIOs that
 this machine does not model, so for Linux ask for "snps,dw-pcie" instead and
 its generic DesignWare host driver binds.
 
+The PLDA bridge reaches configuration space through a plain ECAM window, and
+collects INTx and message signalled interrupts in its own status registers,
+leaving on one line. Its device tree numbers the four INTx inputs from 0, by
+status bit. The JH7110's own device tree numbers them from 1, which the driver
+it shares with the Microchip part does not translate, so INTA would be lost;
+the numbering here is the one the driver expects.
+
 Several host bridges may be declared side by side. Each reserves its own
 windows, takes its own interrupt lines and is described as a PCI domain of
 its own, so a guest names the devices behind them unambiguously.
@@ -451,17 +466,17 @@ its own, so a guest names the devices behind them unambiguously.
 3.4 PCI topology
 ----------------
 
-Both host bridges present a PCI Express hierarchy: every function on one
-carries a PCI Express capability, and so has the full 4096 byte configuration
-space rather than the conventional 256 bytes. A guest reads the extended
-capability chain at offset 0x100 like any other; what it finds there is a
-device serial number, which every function has one of.
+The ECAM, DesignWare and PLDA host bridges present a PCI Express hierarchy:
+every function on one carries a PCI Express capability, and so has the full
+4096 byte configuration space rather than the conventional 256 bytes. A guest
+reads the extended capability chain at offset 0x100 like any other; what it
+finds there is a device serial number, which every function has one of.
 
 Where a device may sit is decided by the hierarchy, exactly as on hardware.
 The ECAM bridge's bus 0 is a root complex bus and holds as many devices as it
 has slots. A link, on the other hand, carries one device, so the bus behind
-the DesignWare root port and the bus behind any port of a switch each hold
-one. A configuration that names several devices in such a place is refused,
+the DesignWare or PLDA root port and the bus behind any port of a switch each
+hold one. A configuration that names several devices in such a place is refused,
 and asked for the switch that has to sit between them. That switch is
 "pci-bridge": an upstream port, the bus inside it, and a downstream port for
 each device nested in it. It is written out rather than inserted silently,

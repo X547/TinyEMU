@@ -35,6 +35,7 @@
 #include "nvme.h"
 #include "pci_bridge.h"
 #include "pci_host_dw.h"
+#include "pci_host_plda.h"
 #include "pci_host_ecam.h"
 #include "ps2.h"
 #include "scsi.h"
@@ -258,6 +259,22 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
                                    compatible, (uint64_t)mmio_size_mb << 20,
                                    (uint64_t)mmio64_size_mb << 20, io_size,
                                    bus_count);
+    }
+
+    if (strcmp(type, "pci-host-plda") == 0) {
+        int mmio_size_mb, mmio64_size_mb, bus_count;
+        if (!node_int_opt(node, "mmio_size", &mmio_size_mb,
+                          PCIE_PLDA_DEFAULT_MMIO_SIZE >> 20) ||
+            !node_int_opt(node, "mmio64_size", &mmio64_size_mb,
+                          PCIE_PLDA_DEFAULT_MMIO64_SIZE >> 20) ||
+            !node_int_opt(node, "bus_count", &bus_count,
+                          PCIE_PLDA_DEFAULT_BUS_COUNT)) {
+            return nullptr;
+        }
+        return new PCIHostPLDADevice(node->IdOr("pcie"),
+                                     (uint64_t)mmio_size_mb << 20,
+                                     (uint64_t)mmio64_size_mb << 20,
+                                     bus_count);
     }
 
     if (strcmp(type, "pci-bridge") == 0) {

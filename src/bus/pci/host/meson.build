@@ -4,6 +4,7 @@
 pci_host_sources = files(
   'pci_host_dw.cpp',
   'pci_host_ecam.cpp',
+  'pci_host_plda.cpp',
 )
 if x86emu
   pci_host_sources += files('pci_host_i440fx.cpp')
