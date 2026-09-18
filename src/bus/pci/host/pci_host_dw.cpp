@@ -198,19 +198,16 @@ bool PCIHostDWDevice::Prepare()
 
     /* A real root port, so that the type 1 configuration write mask, the
        capability list and the bus routing all come from the same code every
-       other bridge uses. */
+       other bridge uses. Its bus numbers come out of reset as zero and are
+       left that way: numbering the hierarchy is the guest's to do, and until
+       it has, nothing behind the port answers a configuration cycle. */
     fDevBus = pci_bridge_init(fRootBus.get(), 0, "dw-root-port",
                               DW_ROOT_PORT_VENDOR_ID, DW_ROOT_PORT_DEVICE_ID,
-                              PCI_EXP_TYPE_ROOT_PORT, &fRootPort);
+                              PCI_EXP_TYPE_ROOT_PORT, nullptr);
     if (fDevBus == nullptr) {
         vm_error("%s: could not create the root port\n", Name());
         return false;
     }
-    /* Numbered as a driver that never reprograms it would find it. Once one
-       does, the routing follows what it wrote. */
-    pci_device_set_config8(fRootPort, PCI_PRIMARY_BUS, 0);
-    pci_device_set_config8(fRootPort, PCI_SECONDARY_BUS, 1);
-    pci_device_set_config8(fRootPort, PCI_SUBORDINATE_BUS, fBusCount - 1);
 
     /* The bus behind the root port is one end of a link, so a configuration
        naming several devices gets the switch that has to sit between them. */

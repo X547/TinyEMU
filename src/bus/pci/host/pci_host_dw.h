@@ -99,7 +99,6 @@ class PCIHostDWDevice final: public Device, public PCIMsiTarget {
 private:
     PCIBusPtr fRootBus;         /* bus 0: the root port alone */
     PCIBus *fDevBus = nullptr;  /* the secondary bus, where devices live */
-    PCIDevice *fRootPort = nullptr;
     /* after fRootBus, so the devices go before the functions they registered */
     std::unique_ptr<Bus> fChildBus;
 
