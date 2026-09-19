@@ -1,7 +1,10 @@
 # Host integration: everything that talks to the operating system. The
 # emulator libraries see only the interfaces in api/.
 
-platform_inc = [inc, include_directories('common', 'curl', 'haiku', 'posix',
+# The per host headers the common code includes, such as wait_set.h.
+host_dir = platform_os == 'windows' ? 'win32' : 'posix'
+
+platform_inc = [inc, include_directories('common', 'curl', 'haiku', host_dir,
                                          'sdl')]
 
 platform_kwargs = lib_kwargs + {
@@ -9,11 +12,14 @@ platform_kwargs = lib_kwargs + {
 }
 
 # Services every build has, one implementation per host.
-host_sources = files('posix/host_time.cpp')
-if platform_os == 'haiku'
-  host_sources += files('haiku/fs_disk_os.cpp', 'haiku/host_memory.cpp')
+if platform_os == 'windows'
+  host_sources = files('win32/host_memory.cpp', 'win32/host_time.cpp')
+elif platform_os == 'haiku'
+  host_sources = files('haiku/fs_disk_os.cpp', 'haiku/host_memory.cpp',
+                       'posix/host_time.cpp')
 else
-  host_sources += files('posix/fs_disk_os.cpp', 'posix/host_memory.cpp')
+  host_sources = files('posix/fs_disk_os.cpp', 'posix/host_memory.cpp',
+                       'posix/host_time.cpp')
 endif
 
 emu_libs += static_library('platform_host', host_sources,
@@ -22,18 +28,28 @@ emu_libs += static_library('platform_host', host_sources,
 # The event loop and the back ends the machine's devices connect to.
 platform_sources = files(
   'common/event_loop.cpp',
+  'common/file_block.cpp',
   'common/host_platform.cpp',
-  'posix/event_loop_wait.cpp',
-  'posix/file_block.cpp',
-  'posix/fs_disk.cpp',
-  'posix/stdio_console.cpp',
 )
+if platform_os == 'windows'
+  platform_sources += files(
+    'common/no_disk_fs.cpp',
+    'win32/event_loop_wait.cpp',
+    'win32/stdio_console.cpp',
+  )
+else
+  platform_sources += files(
+    'posix/event_loop_wait.cpp',
+    'posix/fs_disk.cpp',
+    'posix/stdio_console.cpp',
+  )
+endif
 if platform_os == 'linux'
   platform_sources += files('linux/tap_ethernet.cpp')
 else
   platform_sources += files('common/no_tap_ethernet.cpp')
 endif
-if get_option('slirp')
+if slirp_enabled
   platform_sources += files('slirp/slirp_ethernet.cpp')
 else
   platform_sources += files('common/no_slirp_ethernet.cpp')

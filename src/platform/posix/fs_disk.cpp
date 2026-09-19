@@ -645,8 +645,10 @@ std::unique_ptr<HostFileSystem> disk_fs_open(const char *root_path)
 {
     struct stat st;
 
-    if (lstat(root_path, &st) != 0 || !S_ISDIR(st.st_mode))
+    if (lstat(root_path, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        fprintf(stderr, "%s: must be a directory\n", root_path);
         return nullptr;
+    }
 
     auto fs = std::make_unique<FSDeviceDisk>();
     fs->root_path = root_path;

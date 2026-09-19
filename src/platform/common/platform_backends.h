@@ -79,7 +79,7 @@ std::unique_ptr<HostBlockDevice> url_block_open(EventLoop &loop,
 std::unique_ptr<HostFileSystem> url_fs_open(EventLoop &loop, const char *url,
                                             const char *preload_file);
 
-/* a host directory; nullptr if 'path' is not one */
+/* a host directory */
 std::unique_ptr<HostFileSystem> disk_fs_open(const char *path);
 
 std::unique_ptr<HostEthernet> tap_ethernet_open(EventLoop &loop,

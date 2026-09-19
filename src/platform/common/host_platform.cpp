@@ -106,14 +106,8 @@ std::unique_ptr<HostEthernet> HostPlatform::OpenEthernet(const char *driver,
 
 std::unique_ptr<HostFileSystem> HostPlatform::OpenFileSystem(const char *path)
 {
-    std::unique_ptr<HostFileSystem> fs;
-
     if (url_backend_matches(path)) {
         return url_fs_open(fLoop, path, fOptions.build_preload_file);
     }
-    fs = disk_fs_open(path);
-    if (fs == nullptr) {
-        fprintf(stderr, "%s: must be a directory\n", path);
-    }
-    return fs;
+    return disk_fs_open(path);
 }

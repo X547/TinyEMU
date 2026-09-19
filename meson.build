@@ -135,6 +135,18 @@ endif
 # picking source files, not by testing the OS name in the sources.
 platform_os = host_machine.system()
 
+# The event loop waits on a completion port with ntdll's wait completion
+# packets, and raises the timer resolution through winmm. The runtime is linked
+# in so that the executable runs without the toolchain's DLLs.
+emu_link_args = []
+if platform_os == 'windows'
+  emu_deps += [cc.find_library('ntdll'), cc.find_library('winmm')]
+  emu_link_args += '-static'
+endif
+
+# slirp's Windows socket code is not wired up yet.
+slirp_enabled = get_option('slirp') and platform_os != 'windows'
+
 # ----------------------------------------------------------------------------
 # include path
 #
@@ -187,7 +199,7 @@ inc = include_directories(
 # Comes before common_args is frozen below, because it is the last thing to add
 # to common_defines.
 
-if get_option('slirp')
+if slirp_enabled
   common_defines += '-DCONFIG_SLIRP'
   common_c_args = common_defines + c_warn_args
   subdir('lib/slirp')
@@ -256,6 +268,7 @@ executable('temu',
   link_with: riscv_cpu_libs,
   cpp_args: common_args,
   dependencies: common_deps + emu_deps,
+  link_args: emu_link_args,
   install: true,
 )
 
@@ -263,7 +276,7 @@ summary({
   'SDL display': sdl_dep.found(),
   'Haiku display': haiku_gui,
   'x86 emulator': x86emu,
-  'slirp': get_option('slirp'),
+  'slirp': slirp_enabled,
   'network filesystem': fs_net_enabled,
   'builtin crypto': fs_net_enabled and builtin_crypto,
   'RISCV max XLEN': max_xlen,

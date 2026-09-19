@@ -110,7 +110,7 @@ int BlockDeviceFile::Read(uint64_t sector_num, uint8_t *buf, int n)
         int i;
         for(i = 0; i < n; i++) {
             if (!bf->sector_table[sector_num]) {
-                fseek(bf->f.get(), sector_num * SECTOR_SIZE, SEEK_SET);
+                fseeko(bf->f.get(), (off_t)sector_num * SECTOR_SIZE, SEEK_SET);
                 if (fread(buf, 1, SECTOR_SIZE, bf->f.get()) != SECTOR_SIZE)
                     memset(buf, 0, SECTOR_SIZE);
             } else {
@@ -122,7 +122,7 @@ int BlockDeviceFile::Read(uint64_t sector_num, uint8_t *buf, int n)
     } else {
         size_t len = (size_t)n * SECTOR_SIZE;
         size_t got;
-        fseek(bf->f.get(), sector_num * SECTOR_SIZE, SEEK_SET);
+        fseeko(bf->f.get(), (off_t)sector_num * SECTOR_SIZE, SEEK_SET);
         got = fread(buf, 1, len, bf->f.get());
         if (got < len)
             memset(buf + got, 0, len - got);
@@ -140,7 +140,7 @@ int BlockDeviceFile::Write(uint64_t sector_num, const uint8_t *buf, int n)
         ret = -1; /* error */
         break;
     case BLOCK_MODE_RW:
-        fseek(bf->f.get(), sector_num * SECTOR_SIZE, SEEK_SET);
+        fseeko(bf->f.get(), (off_t)sector_num * SECTOR_SIZE, SEEK_SET);
         fwrite(buf, 1, n * SECTOR_SIZE, bf->f.get());
         ret = 0;
         break;
@@ -245,7 +245,7 @@ std::unique_ptr<HostBlockDevice> file_block_open(EventLoop &loop,
         perror(filename);
         return nullptr;
     }
-    fseek(f, 0, SEEK_END);
+    fseeko(f, 0, SEEK_END);
     file_size = ftello(f);
 
     auto bf = std::make_unique<BlockDeviceFile>(loop);
