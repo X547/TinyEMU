@@ -30,6 +30,7 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 
+#include "console_escape.h"
 #include "cutils.h"
 #include "platform_backends.h"
 #include "run_control.h"
@@ -40,9 +41,9 @@ class StdioConsole final: public HostConsole, public PollSource {
 private:
     EventLoop &fLoop;
     RunControl &fRunControl;
+    ConsoleEscape fEscape;
     ConsoleTarget *fTarget = nullptr;
     int fStdinFd = 0;
-    int fEscState = 0;
     bool fWatching = false;
     /* the target had no room at the last Prepare() */
     bool fBlocked = false;
@@ -113,7 +114,8 @@ static void term_resize_handler(int sig)
 
 StdioConsole::StdioConsole(EventLoop &loop, RunControl &run_control):
     fLoop(loop),
-    fRunControl(run_control)
+    fRunControl(run_control),
+    fEscape(run_control)
 {
     fLoop.Add(this);
 }
@@ -144,8 +146,7 @@ void StdioConsole::WriteData(const uint8_t *buf, int len)
 
 int StdioConsole::ReadData(uint8_t *buf, int len)
 {
-    int ret, i, j;
-    uint8_t ch;
+    int ret;
 
     if (len <= 0)
         return 0;
@@ -158,39 +159,7 @@ int StdioConsole::ReadData(uint8_t *buf, int len)
         fRunControl.RequestShutdown(1);
         return 0;
     }
-
-    j = 0;
-    for(i = 0; i < ret; i++) {
-        ch = buf[i];
-        if (fEscState) {
-            fEscState = 0;
-            switch(ch) {
-            case 'x':
-                printf("Terminated\n");
-                fRunControl.RequestShutdown(0);
-                return j;
-            case 'h':
-                printf("\n"
-                       "C-a h   print this help\n"
-                       "C-a x   exit emulator\n"
-                       "C-a C-a send C-a\n"
-                       );
-                break;
-            case 1:
-                goto output_char;
-            default:
-                break;
-            }
-        } else {
-            if (ch == 1) {
-                fEscState = 1;
-            } else {
-            output_char:
-                buf[j++] = ch;
-            }
-        }
-    }
-    return j;
+    return fEscape.Filter(buf, ret);
 }
 
 

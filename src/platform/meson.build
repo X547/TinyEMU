@@ -27,6 +27,7 @@ emu_libs += static_library('platform_host', host_sources,
 
 # The event loop and the back ends the machine's devices connect to.
 platform_sources = files(
+  'common/console_escape.cpp',
   'common/event_loop.cpp',
   'common/file_block.cpp',
   'common/host_platform.cpp',
