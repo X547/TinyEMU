@@ -31,13 +31,17 @@
 #include <errno.h>
 #include <unistd.h>
 #include <time.h>
+#include <algorithm>
+#include <deque>
 
 #include "cutils.h"
+#include "event_loop.h"
 #include "virtio.h"
 #include "fs_wget.h"
 #include "list.h"
 #include "fbuf.h"
 #include "machine.h"
+#include "wait_set.h"
 
 typedef enum {
     CBLOCK_LOADING,
@@ -92,7 +96,18 @@ typedef struct Cluster {
     FileBuffer fbuf;
 } Cluster;
 
-struct BlockDeviceHTTP: public HostBlockDevice, public WGetWriteHandler {
+struct BlockRequestHTTP {
+    bool is_write;
+    uint64_t sector_num;
+    uint8_t *buf;
+    int sector_count;
+    int sector_index;
+    BlockCompletion *completion;
+};
+
+struct BlockDeviceHTTP: public HostBlockDevice, public WGetWriteHandler,
+                        public PollSource {
+    EventLoop &loop;
     HostBlockDevice *bs = this;
     int max_cache_size_kb;
     char url[1024];
@@ -117,16 +132,16 @@ struct BlockDeviceHTTP: public HostBlockDevice, public WGetWriteHandler {
     int64_t n_read_blocks;
     int64_t n_write_sectors;
 
-    /* current read request */
-    bool is_write;
-    uint64_t sector_num;
-    int cur_block_num;
-    int sector_index, sector_count;
-    BlockCompletion *completion;
-    uint8_t *io_buf;
+    /* the front one is served, the others wait their turn */
+    std::deque<BlockRequestHTTP> requests;
+    /* the front request may be able to go on */
+    bool pump_pending = false;
 
     /* prefetch */
     int prefetch_group_len;
+
+    BlockDeviceHTTP(EventLoop &loop): loop(loop) {loop.Add(this);}
+    ~BlockDeviceHTTP() override {loop.Remove(this);}
 
     void WGetWrite(int err, void *data, size_t size) override;
 
@@ -135,6 +150,10 @@ struct BlockDeviceHTTP: public HostBlockDevice, public WGetWriteHandler {
                   BlockCompletion *completion) override;
     int WriteAsync(uint64_t sector_num, const uint8_t *buf, int n,
                    BlockCompletion *completion) override;
+    void Cancel(BlockCompletion *completion) override;
+
+    void Prepare(WaitSet &ws) override;
+    void Dispatch(WaitSet &ws) override;
 };
 
 static void bf_update_block(CachedBlock *b, const uint8_t *data);
@@ -284,44 +303,46 @@ void PrefetchGroupRequest::WGetWrite(int err, void *data, size_t size)
     free(req);
 }
 
-static int bf_rw_async1(HostBlockDevice *bs, bool is_sync)
+/* Take the front request as far as the cache allows. Returns 1 while it
+   waits for a block and 0 once it is done. */
+static int bf_rw_step(BlockDeviceHTTP *bf)
 {
-    BlockDeviceHTTP *bf = static_cast<BlockDeviceHTTP *>(bs);
+    HostBlockDevice *bs = bf->bs;
+    BlockRequestHTTP *req = &bf->requests.front();
     int offset, block_num, n, cluster_num;
     CachedBlock *b;
     Cluster *c;
-    
+
     for(;;) {
-        n = bf->sector_count - bf->sector_index;
+        n = req->sector_count - req->sector_index;
         if (n == 0)
             break;
-        cluster_num = bf->sector_num / bf->sectors_per_cluster;
+        cluster_num = req->sector_num / bf->sectors_per_cluster;
         c = bf->clusters[cluster_num];
         if (c) {
-            offset = bf->sector_num % bf->sectors_per_cluster;
+            offset = req->sector_num % bf->sectors_per_cluster;
             n = min_int(n, bf->sectors_per_cluster - offset);
-            if (bf->is_write) {
+            if (req->is_write) {
                 file_buffer_write(&c->fbuf, offset * 512,
-                                  bf->io_buf + bf->sector_index * 512, n * 512);
+                                  req->buf + req->sector_index * 512, n * 512);
             } else {
                 file_buffer_read(&c->fbuf, offset * 512,
-                                 bf->io_buf + bf->sector_index * 512, n * 512);
+                                 req->buf + req->sector_index * 512, n * 512);
             }
-            bf->sector_index += n;
-            bf->sector_num += n;
+            req->sector_index += n;
+            req->sector_num += n;
         } else {
-            block_num = bf->sector_num / bf->block_size;
-            offset = bf->sector_num % bf->block_size;
+            block_num = req->sector_num / bf->block_size;
+            offset = req->sector_num % bf->block_size;
             n = min_int(n, bf->block_size - offset);
-            bf->cur_block_num = block_num;
-            
+
             b = bf_find_block(bf, block_num);
             if (b) {
                 if (b->state == CBLOCK_LOADING) {
                     /* wait until the block is loaded */
                     return 1;
                 } else {
-                    if (bf->is_write) {
+                    if (req->is_write) {
                         int cluster_size, cluster_offset;
                         uint8_t *buf;
                         /* allocate a new cluster */
@@ -342,40 +363,49 @@ static int bf_rw_async1(HostBlockDevice *bs, bool is_sync)
                         continue; /* write to the allocated cluster */
                     } else {
                         file_buffer_read(&b->fbuf, offset * 512,
-                                         bf->io_buf + bf->sector_index * 512, n * 512);
+                                         req->buf + req->sector_index * 512, n * 512);
                     }
-                    bf->sector_index += n;
-                    bf->sector_num += n;
+                    req->sector_index += n;
+                    req->sector_num += n;
                 }
             } else {
                 bf_start_load_block(bs, block_num);
                 return 1;
             }
-            bf->cur_block_num = -1;
         }
     }
-
-    if (!is_sync) {
-        //        printf("end of request\n");
-        /* end of request */
-        bf->completion->Complete(0);
-    } 
     return 0;
+}
+
+/* Finish the requests the cache now allows, oldest first. Called from the
+   event loop only, so that a completion never runs inside a request. */
+static void bf_pump(BlockDeviceHTTP *bf)
+{
+    while (!bf->requests.empty() && bf_rw_step(bf) == 0) {
+        BlockCompletion *completion = bf->requests.front().completion;
+        bf->requests.pop_front();
+        completion->Complete(0);
+    }
+}
+
+static void bf_schedule_pump(BlockDeviceHTTP *bf)
+{
+    if (!bf->requests.empty()) {
+        bf->pump_pending = true;
+        bf->loop.Wake();
+    }
 }
 
 static void bf_update_block(CachedBlock *b, const uint8_t *data)
 {
     BlockDeviceHTTP *bf = b->bf;
-    HostBlockDevice *bs = bf->bs;
 
     assert(b->state == CBLOCK_LOADING);
     file_buffer_write(&b->fbuf, 0, data, bf->block_size * 512);
     b->state = CBLOCK_LOADED;
-    
+
     /* continue I/O read/write if necessary */
-    if (b->block_num == bf->cur_block_num) {
-        bf_rw_async1(bs, false);
-    }
+    bf_schedule_pump(bf);
 }
 
 void CachedBlockLoader::WGetWrite(int err, void *data, size_t size)
@@ -392,46 +422,70 @@ void CachedBlockLoader::WGetWrite(int err, void *data, size_t size)
     bf_update_block(b, static_cast<const uint8_t *>(data));
 }
 
+/* Queue a request, and serve it at once if nothing is ahead of it. */
+static int bf_rw_async(BlockDeviceHTTP *bf, bool is_write, uint64_t sector_num,
+                       uint8_t *buf, int n, BlockCompletion *completion)
+{
+    bf->requests.push_back({is_write, sector_num, buf, n, 0, completion});
+    if (bf->requests.size() > 1)
+        return 1;
+    if (bf_rw_step(bf) != 0)
+        return 1;
+    bf->requests.pop_front();
+    return 0;
+}
+
 int BlockDeviceHTTP::ReadAsync(uint64_t sector_num, uint8_t *buf, int n,
                                BlockCompletion *completion)
 {
-    HostBlockDevice *bs = this;
-    BlockDeviceHTTP *bf = static_cast<BlockDeviceHTTP *>(bs);
     //    printf("bf_read_async: sector_num=%" PRId64 " n=%d\n", sector_num, n);
-    bf->is_write = false;
-    bf->sector_num = sector_num;
-    bf->io_buf = buf;
-    bf->sector_count = n;
-    bf->sector_index = 0;
-    bf->completion = completion;
-    bf->n_read_sectors += n;
-    return bf_rw_async1(bs, true);
+    n_read_sectors += n;
+    return bf_rw_async(this, false, sector_num, buf, n, completion);
 }
 
 int BlockDeviceHTTP::WriteAsync(uint64_t sector_num, const uint8_t *buf, int n,
                                 BlockCompletion *completion)
 {
-    HostBlockDevice *bs = this;
-    BlockDeviceHTTP *bf = static_cast<BlockDeviceHTTP *>(bs);
     //    printf("bf_write_async: sector_num=%" PRId64 " n=%d\n", sector_num, n);
-    bf->is_write = true;
-    bf->sector_num = sector_num;
-    bf->io_buf = (uint8_t *)buf;
-    bf->sector_count = n;
-    bf->sector_index = 0;
-    bf->completion = completion;
-    bf->n_write_sectors += n;
-    return bf_rw_async1(bs, true);
+    n_write_sectors += n;
+    return bf_rw_async(this, true, sector_num, (uint8_t *)buf, n, completion);
 }
 
-HostBlockDevice *block_device_init_http(const char *url, int max_cache_size_kb,
+void BlockDeviceHTTP::Cancel(BlockCompletion *completion)
+{
+    requests.erase(std::remove_if(requests.begin(), requests.end(),
+                                  [completion](const BlockRequestHTTP &req) {
+                                      return req.completion == completion;
+                                  }),
+                   requests.end());
+    /* the next one may be waiting for nothing but its turn */
+    bf_schedule_pump(this);
+}
+
+void BlockDeviceHTTP::Prepare(WaitSet &ws)
+{
+    if (pump_pending)
+        ws.LimitTimeout(0);
+}
+
+void BlockDeviceHTTP::Dispatch(WaitSet &ws)
+{
+    (void)ws;
+    if (pump_pending) {
+        pump_pending = false;
+        bf_pump(this);
+    }
+}
+
+HostBlockDevice *block_device_init_http(EventLoop &loop, const char *url,
+                                        int max_cache_size_kb,
                                         StartCallback *start)
 {
     HostBlockDevice *bs;
     BlockDeviceHTTP *bf;
     char *p;
 
-    bf = new BlockDeviceHTTP();
+    bf = new BlockDeviceHTTP(loop);
     bs = bf;
     strcpy(bf->url, url);
     /* get the path with the trailing '/' */
@@ -489,7 +543,6 @@ void BlockDeviceHTTP::WGetWrite(int err, void *data, size_t size)
     bf->nb_sectors = bf->block_size * (uint64_t)bf->nb_blocks;
     bf->n_cached_blocks = 0;
     bf->n_cached_blocks_max = max_int(1, bf->max_cache_size_kb / block_size_kb);
-    bf->cur_block_num = -1; /* no request in progress */
     
     bf->sectors_per_cluster = 8; /* 4 KB */
     bf->n_clusters = (bf->nb_sectors + bf->sectors_per_cluster - 1) / bf->sectors_per_cluster;

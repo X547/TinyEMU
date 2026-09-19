@@ -102,8 +102,10 @@ void pbkdf2_hmac_sha256(const uint8_t *pwd, int pwd_len,
                         const uint8_t *salt, int salt_len,
                         int iter, int key_len, uint8_t *out);
 
-/* XHR block device; 'start' runs once the image description is loaded */
-HostBlockDevice *block_device_init_http(const char *url, int max_cache_size_kb,
+/* XHR block device; 'start' runs once the image description is loaded, and
+   requests finish from 'loop' */
+HostBlockDevice *block_device_init_http(EventLoop &loop, const char *url,
+                                        int max_cache_size_kb,
                                         StartCallback *start);
 
 /* XHR file */

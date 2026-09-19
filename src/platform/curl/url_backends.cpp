@@ -55,7 +55,7 @@ std::unique_ptr<HostBlockDevice> url_block_open(EventLoop &loop,
     UrlStartCallback start;
 
     std::unique_ptr<HostBlockDevice> bs(
-        block_device_init_http(url, BLOCK_CACHE_SIZE, &start));
+        block_device_init_http(loop, url, BLOCK_CACHE_SIZE, &start));
     /* wait until the drive is initialized */
     loop.RunUntil([&start]() {return start.started;});
     return bs;

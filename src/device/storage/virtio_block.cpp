@@ -59,6 +59,7 @@ struct VIRTIOBlockDevice: public VIRTIODevice {
 
     int RecvRequest(int queue_idx, int desc_idx, int read_size,
                     int write_size) override;
+    void Reset() override;
 };
 
 typedef struct {
@@ -123,6 +124,7 @@ static void virtio_block_req_end(VIRTIODevice *s, int ret)
            stalls the queue forever because the guest waits for a used ring
            entry that never arrives. */
         virtio_block_req_end_status(s, status);
+        s1->req.buf.reset();
         break;
     }
 }
@@ -139,7 +141,14 @@ void VIRTIOBlockDevice::Completion::Complete(int ret)
     queue_notify(s1, s1->req.queue_idx);
 }
 
-/* XXX: handle async I/O */
+void VIRTIOBlockDevice::Reset()
+{
+    /* the queues the request came from are gone */
+    bs->Cancel(&fCompletion);
+    req_in_progress = false;
+    req.buf.reset();
+}
+
 int VIRTIOBlockDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
                                    int write_size)
 {
@@ -147,7 +156,6 @@ int VIRTIOBlockDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
     VIRTIOBlockDevice *s1 = this;
     HostBlockDevice *bs = s1->bs;
     BlockRequestHeader h;
-    uint8_t *buf;
     int len, ret;
 
     if (s1->req_in_progress)
@@ -175,11 +183,12 @@ int VIRTIOBlockDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
     case VIRTIO_BLK_T_OUT:
         assert(write_size >= 1);
         len = read_size - sizeof(h);
-        buf = static_cast<uint8_t *>(malloc(len));
-        memcpy_from_queue(s, buf, queue_idx, desc_idx, sizeof(h), len);
-        ret = bs->WriteAsync(h.sector_num, buf, len / SECTOR_SIZE,
-                             &s1->fCompletion);
-        free(buf);
+        /* kept until the write finishes */
+        s1->req.buf.reset(new uint8_t[len]);
+        memcpy_from_queue(s, s1->req.buf.get(), queue_idx, desc_idx,
+                          sizeof(h), len);
+        ret = bs->WriteAsync(h.sector_num, s1->req.buf.get(),
+                             len / SECTOR_SIZE, &s1->fCompletion);
         if (ret > 0) {
             /* asyncronous write */
             s1->req_in_progress = true;
@@ -189,8 +198,8 @@ int VIRTIOBlockDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
         break;
     case VIRTIO_BLK_T_FLUSH:
     case VIRTIO_BLK_T_FLUSH_OUT:
-        /* writes reach the backing file synchronously, so there is nothing
-           to flush */
+        /* a write is answered only once the back end has it, so there is
+           nothing to flush */
         virtio_block_req_end(s, 0);
         break;
     case VIRTIO_BLK_T_GET_ID:

@@ -354,6 +354,10 @@ USBStatusEnum USBStorage::HandleControl(URB *urb)
         case MSC_REQUEST_RESET:
             /* Abandon whatever was in flight and go back to waiting for a
                command wrapper. */
+            if (fCommandRunning) {
+                fUnits[fLun]->Cancel(&fRequest);
+                fCommandRunning = false;
+            }
             fState = MSC_STATE_CBW;
             fParkedUrb = nullptr;
             fDataPos = 0;

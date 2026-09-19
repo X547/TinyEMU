@@ -23,7 +23,8 @@
 
 #include <stdint.h>
 
-/* Notified when an asynchronous block request finishes. */
+/* Notified when an asynchronous block request finishes. It is also what names
+   the request, so each request in flight needs one of its own. */
 class BlockCompletion {
 public:
     virtual ~BlockCompletion() = default;
@@ -34,8 +35,13 @@ public:
 
 /* A disk image in 512 byte sectors. A request either finishes at once and
    returns 0, or returns 1 and notifies its completion later, from the event
-   loop with the device lock held; a negative return is an error. The completion may be null when the
-   caller does not care. */
+   loop with the device lock held; a negative return is an error. Any number
+   of requests may be in flight, and they finish in no particular order.
+
+   The buffer must stay valid until the completion runs or Cancel() returns.
+   The back end touches it only during the call and from the event loop, and
+   forgets a request before notifying it, so the completion may reuse itself
+   for the next one. Destroying the back end drops what is in flight. */
 class HostBlockDevice {
 public:
     virtual ~HostBlockDevice() = default;
@@ -45,4 +51,7 @@ public:
                           BlockCompletion *completion) = 0;
     virtual int WriteAsync(uint64_t sector_num, const uint8_t *buf, int n,
                            BlockCompletion *completion) = 0;
+    /* Drop the request 'completion' waits for: it is not notified and its
+       buffer is not touched again. Nothing happens if none is in flight. */
+    virtual void Cancel(BlockCompletion *completion) {(void)completion;}
 };

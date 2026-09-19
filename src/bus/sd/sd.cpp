@@ -98,8 +98,7 @@ SDMemoryCard::~SDMemoryCard() = default;
 
 void SDMemoryCard::Reset()
 {
-    /* A block already with the back end cannot be recalled, so it is
-       disowned: BlockDone() drops a completion whose card has moved on. */
+    fBlockDev->Cancel(fCompletion.get());
     fPendingCompletion = nullptr;
     fState = SD_STATE_IDLE;
     fRca = 0;
@@ -333,11 +332,6 @@ void SDMemoryCard::BlockDone(int ret)
 {
     SDDataCompletion *completion = fPendingCompletion;
 
-    if (completion == nullptr) {
-        /* The transfer was stopped or the card was reset while the block was
-           with the back end; nobody is waiting for it any more. */
-        return;
-    }
     fPendingCompletion = nullptr;
 
     if (ret < 0) {
@@ -352,6 +346,7 @@ void SDMemoryCard::BlockDone(int ret)
 
 void SDMemoryCard::StopTransfer()
 {
+    fBlockDev->Cancel(fCompletion.get());
     fPendingCompletion = nullptr;
     EndDataTransfer();
 }

@@ -140,7 +140,7 @@ struct SCSIRequest {
 
 /* A logical unit. Submit() returning true means the request is finished and
    the initiator owns it again; false means the answer arrives later through
-   req->completion. */
+   req->completion, unless the initiator takes it back with Cancel(). */
 class SCSIDevice {
 private:
     const char *fName;
@@ -156,6 +156,9 @@ public:
 
     virtual void Reset() = 0;
     virtual bool Submit(SCSIRequest *req) = 0;
+    /* Its completion is not called and its buffer is not touched again.
+       Nothing happens if 'req' is not in flight. */
+    virtual void Cancel(SCSIRequest *req) = 0;
 
     virtual uint32_t BlockSize() = 0;
     virtual uint64_t BlockCount() = 0;

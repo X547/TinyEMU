@@ -82,7 +82,7 @@ std::unique_ptr<HostBlockDevice> HostPlatform::OpenBlockDevice(const char *path)
     if (url_backend_matches(path)) {
         return url_block_open(fLoop, path);
     }
-    return file_block_open(path, fOptions.block_mode);
+    return file_block_open(fLoop, path, fOptions.block_mode);
 }
 
 

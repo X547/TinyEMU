@@ -336,6 +336,7 @@ private:
        queue is served, so the controller never has two in flight. */
     Completion fCompletion {*this};
     bool fBusy = false;
+    HostBlockDevice *fPendingBackend = nullptr;
     uint16_t fPendingCid = 0;
     uint16_t fPendingSqid = 0;
     uint16_t fPendingCqid = 0;
@@ -1215,6 +1216,7 @@ void NVMeDevice::ExecuteIo(int sqid, const NVMeCommand &cmd)
             /* The back end took it; the completion finishes the command and
                no queue is served until it does. */
             fBusy = true;
+            fPendingBackend = ns->Backend();
             fPendingCid = cmd.CommandId();
             fPendingSqid = sqid;
             fPendingCqid = cqid;
@@ -1269,10 +1271,8 @@ void NVMeDevice::Execute(int sqid, const NVMeCommand &cmd)
 
 void NVMeDevice::BlockDone(int ret)
 {
-    if (!fBusy) {
-        return;
-    }
     fBusy = false;
+    fPendingBackend = nullptr;
 
     int status = 0;
     if (ret < 0) {
@@ -1326,7 +1326,11 @@ void NVMeDevice::ControllerDisable()
         fCq[i] = NVMeCompQueue();
     }
     fAerCount = 0;
-    fBusy = false;
+    if (fBusy) {
+        fPendingBackend->Cancel(&fCompletion);
+        fBusy = false;
+        fPendingBackend = nullptr;
+    }
     fCsts &= ~(CSTS_RDY | CSTS_SHST_MASK);
     fIntMask = 0;
     if (fIrq != nullptr) {

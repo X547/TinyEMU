@@ -23,6 +23,7 @@
  */
 #include <stdio.h>
 #include <string.h>
+#include <memory>
 
 #include "bits.h"
 #include "ata.h"
@@ -49,6 +50,9 @@
    name. Anything past it is refused rather than wrapped. */
 #define ATA_DISK_MAX_LBA28 ((int64_t)1 << 28)
 
+/* The most sectors one command moves: a count of zero means 256. */
+#define ATA_DISK_MAX_SECTORS 256
+
 /* The mode IDENTIFY reports as selected until a guest picks another. A
    driver that finds none selected takes the drive for one that will not
    answer DMA commands and stays on PIO. */
@@ -57,8 +61,32 @@
 
 class ATADiskDevice final: public ATADevice {
 private:
+    class Completion final: public BlockCompletion {
+    private:
+        ATADiskDevice &fDisk;
+
+    public:
+        Completion(ATADiskDevice &disk): fDisk(disk) {}
+
+        void Complete(int ret) override {fDisk.BlockDone(ret);}
+    };
+
+    /* What the request with the back end is for. The drive stays busy
+       until it finishes. */
+    enum class InFlight {
+        None,
+        PioRead,
+        PioWrite,
+        DmaRead,
+        DmaWrite,
+    };
+
     std::unique_ptr<HostBlockDevice> fBs;
     bool fReadOnly;
+    Completion fCompletion {*this};
+    InFlight fInFlight = InFlight::None;
+    /* where the transfer in progress starts */
+    int64_t fIoLba = 0;
     int64_t fSectorCount = 0;
     int fCylinders = 0;
 
@@ -77,13 +105,13 @@ private:
     };
     OnBufferEnd fOnEnd = OnBufferEnd::Stop;
 
-    /* DMA in progress: where it is and how much is left. A partial sector
-       is held in fDmaSector between calls, because the scatter list may
-       split one anywhere. */
-    int64_t fDmaLba = 0;
-    int fDmaSectorsLeft = 0;
-    uint8_t fDmaSector[ATA_SECTOR_SIZE] {};
-    int fDmaSectorPos = 0;
+    /* DMA goes through a buffer holding the whole command: a read fills it
+       before the bus master is asked for the data, and a write reaches the
+       back end once the bus master has filled it. */
+    std::unique_ptr<uint8_t[]> fDmaBuffer {
+        new uint8_t[ATA_DISK_MAX_SECTORS * ATA_SECTOR_SIZE]};
+    uint32_t fDmaLen = 0;
+    uint32_t fDmaPos = 0;
 
     /* The DMA mode SET FEATURES selected, reported back in IDENTIFY. The PIO
        mode is chosen separately and reported nowhere, so it is not kept.
@@ -94,12 +122,19 @@ private:
     void SetCurrentLba(int64_t lba);
     bool LbaInRange(int64_t lba, int count) const;
 
+    void StartRequest(InFlight kind, int64_t lba, uint8_t *buf, int n);
+    void BlockDone(int ret);
+
     void Identify();
     void PioReadStart();
+    void PioReadFilled(int ret);
     void PioReadDone();
     void PioWriteStart();
     void PioWriteFlush();
+    void PioWriteFlushed(int ret);
     bool DmaStart(bool to_memory);
+    void DmaReadStaged(int ret);
+    void DmaEnd(bool ok, uint8_t error);
     void SetFeatures();
     void CommandDone(bool irq = true);
 
@@ -138,12 +173,62 @@ ATADiskDevice::ATADiskDevice(std::unique_ptr<HostBlockDevice> bs, bool read_only
 
 void ATADiskDevice::Reset()
 {
+    fBs->Cancel(&fCompletion);
+    fInFlight = InFlight::None;
     ATADevice::Reset();
     fOnEnd = OnBufferEnd::Stop;
     fReqSectors = 0;
     fIoSectors = 0;
-    fDmaSectorsLeft = 0;
-    fDmaSectorPos = 0;
+    fDmaLen = 0;
+    fDmaPos = 0;
+}
+
+
+//#pragma mark - back end
+
+/* Hand a transfer to the back end, busy until it finishes. Whether that is
+   now or later, BlockDone() carries on from there. */
+void ATADiskDevice::StartRequest(InFlight kind, int64_t lba, uint8_t *buf,
+                                 int n)
+{
+    int ret;
+
+    fInFlight = kind;
+    fIoLba = lba;
+    fStatus = ATA_STAT_READY | ATA_STAT_SEEK | ATA_STAT_BUSY;
+    fError = 0;
+    if (kind == InFlight::PioRead || kind == InFlight::DmaRead) {
+        ret = fBs->ReadAsync(lba, buf, n, &fCompletion);
+    } else {
+        ret = fBs->WriteAsync(lba, buf, n, &fCompletion);
+    }
+    if (ret <= 0) {
+        BlockDone(ret);
+    }
+}
+
+
+void ATADiskDevice::BlockDone(int ret)
+{
+    InFlight kind = fInFlight;
+
+    fInFlight = InFlight::None;
+    switch (kind) {
+    case InFlight::PioRead:
+        PioReadFilled(ret);
+        break;
+    case InFlight::PioWrite:
+        PioWriteFlushed(ret);
+        break;
+    case InFlight::DmaRead:
+        DmaReadStaged(ret);
+        break;
+    case InFlight::DmaWrite:
+        DmaEnd(ret >= 0, ATA_ERR_ECC);
+        break;
+    case InFlight::None:
+        break;
+    }
 }
 
 
@@ -321,14 +406,24 @@ void ATADiskDevice::PioReadStart()
 #ifdef DEBUG_ATA
     printf("ata: pio read lba=%lld count=%d\n", (long long)lba, n);
 #endif
-    if (fBs->ReadAsync(lba, fBuffer, n, nullptr) < 0) {
+    fIoSectors = n;
+    fBufferPos = 0;
+    fBufferEnd = 0;
+    StartRequest(InFlight::PioRead, lba, fBuffer, n);
+}
+
+
+void ATADiskDevice::PioReadFilled(int ret)
+{
+    int n = fIoSectors;
+
+    if (ret < 0) {
         AbortCommand();
         RaiseIrq();
         return;
     }
 
-    fIoSectors = n;
-    SetCurrentLba(lba + n);
+    SetCurrentLba(fIoLba + n);
     fNsector = (fNsector - n) & 0xff;
     fOnEnd = fNsector == 0 ? OnBufferEnd::ReadDone : OnBufferEnd::ReadNext;
     fBufferPos = 0;
@@ -375,22 +470,36 @@ void ATADiskDevice::PioWriteStart()
 void ATADiskDevice::PioWriteFlush()
 {
     int64_t lba = CurrentLba();
-    int n = fIoSectors;
 
     fBufferPos = 0;
     fBufferEnd = 0;
 #ifdef DEBUG_ATA
-    printf("ata: pio write lba=%lld count=%d\n", (long long)lba, n);
+    printf("ata: pio write lba=%lld count=%d\n", (long long)lba, fIoSectors);
 #endif
-    if (fReadOnly || fBs->WriteAsync(lba, fBuffer, n, nullptr) < 0) {
+    if (fReadOnly) {
         fStatus = ATA_STAT_READY | ATA_STAT_ERR;
-        fError = fReadOnly ? ATA_ERR_ABRT : ATA_ERR_ECC;
+        fError = ATA_ERR_ABRT;
+        fOnEnd = OnBufferEnd::Stop;
+        RaiseIrq();
+        return;
+    }
+    StartRequest(InFlight::PioWrite, lba, fBuffer, fIoSectors);
+}
+
+
+void ATADiskDevice::PioWriteFlushed(int ret)
+{
+    int n = fIoSectors;
+
+    if (ret < 0) {
+        fStatus = ATA_STAT_READY | ATA_STAT_ERR;
+        fError = ATA_ERR_ECC;
         fOnEnd = OnBufferEnd::Stop;
         RaiseIrq();
         return;
     }
 
-    SetCurrentLba(lba + n);
+    SetCurrentLba(fIoLba + n);
     fNsector = (fNsector - n) & 0xff;
     if (fNsector == 0) {
         fOnEnd = OnBufferEnd::Stop;
@@ -447,102 +556,84 @@ bool ATADiskDevice::DmaStart(bool to_memory)
     printf("ata: dma %s lba=%lld count=%d\n", to_memory ? "read" : "write",
            (long long)lba, n);
 #endif
-    fDmaLba = lba;
-    fDmaSectorsLeft = n;
-    fDmaSectorPos = 0;
+    fDmaLen = n * ATA_SECTOR_SIZE;
+    fDmaPos = 0;
+    if (to_memory) {
+        StartRequest(InFlight::DmaRead, lba, fDmaBuffer.get(), n);
+        return true;
+    }
+    fIoLba = lba;
     /* Busy until the bus master has moved it all. There is no interrupt
-       yet: the one that ends the command comes from DmaComplete(). */
+       yet: the one that ends the command comes once the data is written. */
+    fStatus = ATA_STAT_READY | ATA_STAT_SEEK | ATA_STAT_DRQ | ATA_STAT_BUSY;
+    fError = 0;
+    RequestDma(false);
+    return true;
+}
+
+
+void ATADiskDevice::DmaReadStaged(int ret)
+{
+    if (ret < 0) {
+        DmaEnd(false, ATA_ERR_ABRT);
+        return;
+    }
     fStatus = ATA_STAT_READY | ATA_STAT_SEEK | ATA_STAT_DRQ | ATA_STAT_BUSY;
     fError = 0;
     /* Last: if the engine is already running this moves the data and
        finishes the command before it returns. */
-    RequestDma(to_memory);
-    return true;
+    RequestDma(true);
 }
 
 
 uint32_t ATADiskDevice::DmaMove(uint8_t *mem, uint32_t len)
 {
-    uint32_t moved = 0;
+    uint32_t n = fDmaLen - fDmaPos;
 
-    while (moved < len && fDmaSectorsLeft > 0) {
-        /* Whole sectors go straight between the disk and guest memory; only
-           a scatter list that splits one needs the staging buffer. */
-        if (fDmaSectorPos == 0) {
-            uint32_t whole = (len - moved) / ATA_SECTOR_SIZE;
-            if (whole > (uint32_t)fDmaSectorsLeft) {
-                whole = fDmaSectorsLeft;
-            }
-            if (whole > 0) {
-                int ret;
-                if (fDmaToMemory) {
-                    ret = fBs->ReadAsync(fDmaLba, mem + moved, whole, nullptr);
-                } else {
-                    ret = fBs->WriteAsync(fDmaLba, mem + moved, whole,
-                                          nullptr);
-                }
-                if (ret < 0) {
-                    break;
-                }
-                fDmaLba += whole;
-                fDmaSectorsLeft -= whole;
-                moved += whole * ATA_SECTOR_SIZE;
-                continue;
-            }
-        }
-
-        if (fDmaToMemory) {
-            if (fDmaSectorPos == 0 &&
-                fBs->ReadAsync(fDmaLba, fDmaSector, 1, nullptr) < 0) {
-                break;
-            }
-            uint32_t n = ATA_SECTOR_SIZE - fDmaSectorPos;
-            if (n > len - moved) {
-                n = len - moved;
-            }
-            memcpy(mem + moved, fDmaSector + fDmaSectorPos, n);
-            fDmaSectorPos += n;
-            moved += n;
-        } else {
-            uint32_t n = ATA_SECTOR_SIZE - fDmaSectorPos;
-            if (n > len - moved) {
-                n = len - moved;
-            }
-            memcpy(fDmaSector + fDmaSectorPos, mem + moved, n);
-            fDmaSectorPos += n;
-            moved += n;
-        }
-
-        if (fDmaSectorPos == ATA_SECTOR_SIZE) {
-            if (!fDmaToMemory &&
-                fBs->WriteAsync(fDmaLba, fDmaSector, 1, nullptr) < 0) {
-                break;
-            }
-            fDmaSectorPos = 0;
-            fDmaLba++;
-            fDmaSectorsLeft--;
-        }
+    if (n > len) {
+        n = len;
     }
-    return moved;
+    if (fDmaToMemory) {
+        memcpy(mem, fDmaBuffer.get() + fDmaPos, n);
+    } else {
+        memcpy(fDmaBuffer.get() + fDmaPos, mem, n);
+    }
+    fDmaPos += n;
+    return n;
 }
 
 
 void ATADiskDevice::DmaComplete(bool ok)
 {
     fDmaPending = false;
-    if (!ok || fDmaSectorsLeft > 0) {
+    if (!ok || fDmaPos < fDmaLen) {
         /* The scatter list ran out before the command did, or something on
            the way failed. Either way the command did not finish. */
-        fStatus = ATA_STAT_READY | ATA_STAT_SEEK | ATA_STAT_ERR;
-        fError = ATA_ERR_ABRT;
+        DmaEnd(false, ATA_ERR_ABRT);
+    } else if (!fDmaToMemory) {
+        StartRequest(InFlight::DmaWrite, fIoLba, fDmaBuffer.get(),
+                     fDmaLen / ATA_SECTOR_SIZE);
     } else {
-        SetCurrentLba(fDmaLba);
+        DmaEnd(true, 0);
+    }
+}
+
+
+/* The end of a DMA command: for a read once the bus master has moved the
+   data, for a write once the back end has it. */
+void ATADiskDevice::DmaEnd(bool ok, uint8_t error)
+{
+    if (ok) {
+        SetCurrentLba(fIoLba + fDmaLen / ATA_SECTOR_SIZE);
         fNsector = 0;
         fStatus = ATA_STAT_READY | ATA_STAT_SEEK;
         fError = 0;
+    } else {
+        fStatus = ATA_STAT_READY | ATA_STAT_SEEK | ATA_STAT_ERR;
+        fError = error;
     }
-    fDmaSectorsLeft = 0;
-    fDmaSectorPos = 0;
+    fDmaLen = 0;
+    fDmaPos = 0;
     RaiseIrq();
 }
 
@@ -591,6 +682,10 @@ void ATADiskDevice::ExecCommand(uint8_t cmd)
 #ifdef DEBUG_ATA
     printf("ata: command 0x%02x\n", cmd);
 #endif
+    if (fInFlight != InFlight::None) {
+        /* A command written while the drive is busy is not taken. */
+        return;
+    }
     switch (cmd) {
     case ATA_CMD_IDENTIFY:
         Identify();

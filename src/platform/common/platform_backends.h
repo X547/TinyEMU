@@ -64,7 +64,9 @@ typedef enum {
     BLOCK_MODE_SNAPSHOT,
 } BlockModeEnum;
 
-std::unique_ptr<HostBlockDevice> file_block_open(const char *filename,
+/* requests finish from the event loop, when they do not finish at once */
+std::unique_ptr<HostBlockDevice> file_block_open(EventLoop &loop,
+                                                 const char *filename,
                                                  BlockModeEnum mode);
 
 /* HTTP back ends; transfers progress from the event loop */

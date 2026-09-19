@@ -82,6 +82,7 @@ public:
 
     void Reset() override;
     bool Submit(SCSIRequest *req) override;
+    void Cancel(SCSIRequest *req) override;
 
     uint32_t BlockSize() override {return SCSI_DISK_BLOCK_SIZE;}
     uint64_t BlockCount() override {return fBlockDev->SectorCount();}
@@ -90,12 +91,19 @@ public:
 
 void SCSIDisk::Reset()
 {
-    /* A request in flight cannot be recalled from the back end, so it is
-       disowned instead: BlockDone() drops a completion whose request has
-       already gone. */
+    Cancel(fPending);
+    memset(fSense, 0, sizeof(fSense));
+}
+
+
+void SCSIDisk::Cancel(SCSIRequest *req)
+{
+    if (req == nullptr || req != fPending) {
+        return;
+    }
+    fBlockDev->Cancel(&fCompletion);
     fPending = nullptr;
     fPendingLength = 0;
-    memset(fSense, 0, sizeof(fSense));
 }
 
 
@@ -328,10 +336,6 @@ void SCSIDisk::BlockDone(int ret)
     SCSIRequest *req = fPending;
     uint32_t length = fPendingLength;
 
-    if (req == nullptr) {
-        /* The unit was reset while the back end still had the request. */
-        return;
-    }
     fPending = nullptr;
     fPendingLength = 0;
 
