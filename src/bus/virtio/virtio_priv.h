@@ -31,6 +31,9 @@
 #define MAX_QUEUE 8
 #define MAX_CONFIG_SPACE_SIZE 256
 
+/* Offered by every device: the transports only have the virtio 1.0 layout. */
+#define VIRTIO_F_VERSION_1 (1ULL << 32)
+
 /* Enough for one vector per queue plus the configuration change. */
 #define VIRTIO_MSIX_VECTOR_COUNT 16
 
@@ -75,6 +78,9 @@ struct VIRTIODevice: public PCIBarTarget {
     uint32_t int_status = 0;
     uint32_t status = 0;
     uint32_t device_features_sel = 0;
+    /* what the driver accepted, 32 bits at a time */
+    uint32_t driver_features_sel = 0;
+    uint64_t driver_features = 0;
     uint32_t queue_sel = 0; /* currently selected queue */
     QueueState queue[MAX_QUEUE] {};
 

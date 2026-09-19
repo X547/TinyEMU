@@ -116,6 +116,20 @@ typedef struct {
 } VIRTIODesc;
 
 
+/* The half of the accepted features that the select register names. A
+   device reads them to tell a driver that knows virtio 1.0 from one that
+   does not. */
+static void virtio_write_driver_features(VIRTIODevice *s, uint32_t val)
+{
+    if (s->driver_features_sel == 0) {
+        s->driver_features = (s->driver_features & ~0xffffffffULL) | val;
+    } else if (s->driver_features_sel == 1) {
+        s->driver_features = (s->driver_features & 0xffffffffULL) |
+                             ((uint64_t)val << 32);
+    }
+}
+
+
 static void virtio_reset(VIRTIODevice *s)
 {
     int i;
@@ -123,6 +137,8 @@ static void virtio_reset(VIRTIODevice *s)
     s->status = 0;
     s->queue_sel = 0;
     s->device_features_sel = 0;
+    s->driver_features_sel = 0;
+    s->driver_features = 0;
     s->int_status = 0;
     s->config_msix_vector = PCI_MSIX_NO_VECTOR;
     for(i = 0; i < MAX_QUEUE; i++) {
@@ -741,6 +757,12 @@ void VIRTIOMMIOTransport::DeviceWrite(uint32_t offset, uint32_t val, int size_lo
         case VIRTIO_MMIO_DEVICE_FEATURES_SEL:
             s->device_features_sel = val;
             break;
+        case VIRTIO_MMIO_DRIVER_FEATURES_SEL:
+            s->driver_features_sel = val;
+            break;
+        case VIRTIO_MMIO_DRIVER_FEATURES:
+            virtio_write_driver_features(s, val);
+            break;
         case VIRTIO_MMIO_QUEUE_SEL:
             if (val < MAX_QUEUE)
                 s->queue_sel = val;
@@ -822,6 +844,14 @@ uint32_t VIRTIOPCITransport::DeviceRead(uint32_t offset1, int size_log2)
                 break;
             case VIRTIO_PCI_DEVICE_FEATURE_SEL:
                 val = s->device_features_sel;
+                break;
+            case VIRTIO_PCI_GUEST_FEATURE_SEL:
+                val = s->driver_features_sel;
+                break;
+            case VIRTIO_PCI_GUEST_FEATURE:
+                val = s->driver_features_sel < 2 ?
+                    (uint32_t)(s->driver_features >>
+                               (32 * s->driver_features_sel)) : 0;
                 break;
             case VIRTIO_PCI_QUEUE_DESC_LOW:
                 val = s->queue[s->queue_sel].desc_addr;
@@ -920,6 +950,12 @@ void VIRTIOPCITransport::DeviceWrite(uint32_t offset1, uint32_t val, int size_lo
             switch(offset) {
             case VIRTIO_PCI_DEVICE_FEATURE_SEL:
                 s->device_features_sel = val;
+                break;
+            case VIRTIO_PCI_GUEST_FEATURE_SEL:
+                s->driver_features_sel = val;
+                break;
+            case VIRTIO_PCI_GUEST_FEATURE:
+                virtio_write_driver_features(s, val);
                 break;
             case VIRTIO_PCI_QUEUE_DESC_LOW:
                 set_low32(&s->queue[s->queue_sel].desc_addr, val);

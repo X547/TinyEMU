@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <stddef.h>
 #include <inttypes.h>
 #include <assert.h>
 
@@ -32,10 +33,12 @@
 #include "virtio_priv.h"
 
 
+#define VIRTIO_NET_F_MRG_RXBUF (1ULL << 15)
+
 struct VIRTIONetDevice: public VIRTIODevice, public EthernetTarget {
     HostEthernet *es = nullptr;
-    int header_size = 0;
 
+    int HeaderSize() const;
     int RecvRequest(int queue_idx, int desc_idx, int read_size,
                     int write_size) override;
     void ManualQueueNotify(int queue_idx) override
@@ -57,8 +60,17 @@ typedef struct {
     uint16_t gso_size;
     uint16_t csum_start;
     uint16_t csum_offset;
-//  uint16_t num_buffers;
+    uint16_t num_buffers;
 } VIRTIONetHeader;
+
+/* A driver that accepted virtio 1.0 or merged receive buffers puts a buffer
+   count in the header; a legacy one ends it before. */
+int VIRTIONetDevice::HeaderSize() const
+{
+    if (driver_features & (VIRTIO_F_VERSION_1 | VIRTIO_NET_F_MRG_RXBUF))
+        return sizeof(VIRTIONetHeader);
+    return offsetof(VIRTIONetHeader, num_buffers);
+}
 
 int VIRTIONetDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
                                  int write_size)
@@ -67,16 +79,17 @@ int VIRTIONetDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
     VIRTIONetDevice *s1 = (VIRTIONetDevice *)s;
     HostEthernet *es = s1->es;
     VIRTIONetHeader h;
+    int header_size = HeaderSize();
     uint8_t *buf;
     int len;
 
     if (queue_idx == 1) {
         /* send to network */
-        if (memcpy_from_queue(s, &h, queue_idx, desc_idx, 0, s1->header_size) < 0)
+        if (memcpy_from_queue(s, &h, queue_idx, desc_idx, 0, header_size) < 0)
             return 0;
-        len = read_size - s1->header_size;
+        len = read_size - header_size;
         buf = static_cast<uint8_t *>(malloc(len));
-        memcpy_from_queue(s, buf, queue_idx, desc_idx, s1->header_size, len);
+        memcpy_from_queue(s, buf, queue_idx, desc_idx, header_size, len);
         es->WritePacket(buf, len);
         free(buf);
         virtio_consume_desc(s, queue_idx, desc_idx, 0);
@@ -99,11 +112,11 @@ bool VIRTIONetDevice::CanWritePacket()
 void VIRTIONetDevice::WritePacket(const uint8_t *buf, int buf_len)
 {
     VIRTIODevice *s = this;
-    VIRTIONetDevice *s1 = this;
     int queue_idx = 0;
     QueueState *qs = &s->queue[queue_idx];
     int desc_idx;
     VIRTIONetHeader h;
+    int header_size = HeaderSize();
     int len, read_size, write_size;
     uint16_t avail_idx;
 
@@ -116,12 +129,14 @@ void VIRTIONetDevice::WritePacket(const uint8_t *buf, int buf_len)
                              (qs->last_avail_idx & (qs->num - 1)) * 2);
     if (get_desc_rw_size(s, &read_size, &write_size, queue_idx, desc_idx))
         return;
-    len = s1->header_size + buf_len; 
+    len = header_size + buf_len; 
     if (len > write_size)
         return;
-    memset(&h, 0, s1->header_size);
-    memcpy_to_queue(s, queue_idx, desc_idx, 0, &h, s1->header_size);
-    memcpy_to_queue(s, queue_idx, desc_idx, s1->header_size, buf, buf_len);
+    memset(&h, 0, sizeof(h));
+    /* the whole packet is in this one buffer */
+    h.num_buffers = 1;
+    memcpy_to_queue(s, queue_idx, desc_idx, 0, &h, header_size);
+    memcpy_to_queue(s, queue_idx, desc_idx, header_size, buf, buf_len);
     virtio_consume_desc(s, queue_idx, desc_idx, len);
     qs->last_avail_idx++;
 }
@@ -147,8 +162,6 @@ std::unique_ptr<VIRTIODevice> virtio_net_init(VIRTIOBusDef *bus,
     s->config_space[6] = 0;
     s->config_space[7] = 0;
 
-    s->header_size = sizeof(VIRTIONetHeader);
-    
     es->target = s.get();
     return s;
 }
