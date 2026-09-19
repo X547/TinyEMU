@@ -355,7 +355,7 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
         if (vm_get_str_opt(node->props, "compatible", &compatible) < 0 ||
             !node_int_opt(node, "clock", &clock_mhz,
                           DW_MMC_DEFAULT_CLOCK_HZ / 1000000) ||
-            !node_int_opt(node, "dma", &dma, 1)) {
+            !node_int_opt(node, "dma", &dma, DW_MMC_DEFAULT_DMA_BITS)) {
             return nullptr;
         }
         if (compatible == nullptr) {
@@ -365,8 +365,12 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
             vm_error("dw-mmc: 'clock' must be between 1 and 1000 MHz\n");
             return nullptr;
         }
+        if (dma != 0 && dma != 32 && dma != 64) {
+            vm_error("dw-mmc: 'dma' must be 0, 32 or 64\n");
+            return nullptr;
+        }
         return dw_mmc_node_create(node->IdOr("dw-mmc"), compatible,
-                                  (uint32_t)clock_mhz * 1000000, dma != 0);
+                                  (uint32_t)clock_mhz * 1000000, dma);
     }
 
     if (strcmp(type, "sd-card") == 0 || strcmp(type, "mmc-card") == 0) {

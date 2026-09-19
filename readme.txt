@@ -264,7 +264,8 @@ Device types:
   dw-mmc                 Synopsys DesignWare MMC host on the FDT bus, as the
                          StarFive JH7110 has; "clock" (the card interface
                          clock in MHz, default 50), "compatible" (default
-                         "snps,dw-mshc"), "dma" (default 1; 0 reports a
+                         "snps,dw-mshc"), "dma" (the DMA descriptor address
+                         width, 32 as on the JH7110 or 64; 0 for a
                          controller built without its DMA engine), and a
                          nested SD bus
   sd-card               SD memory card; "file", and "read_only"
@@ -384,8 +385,12 @@ The DesignWare MMC host carries the same cards, on the FDT bus only:
     FDT bus -> dw-mmc -> SD bus -> mmc-card
 
 It moves data through a 32 word FIFO, by programmed I/O or with its internal
-DMA controller, which walks chained or ring descriptors with 64 bit
-addresses. It can send the stop command itself at the end of a transfer. The
+DMA controller, which walks chained or ring descriptors with 32 or 64 bit
+addresses. Which of the two it has is fixed when the part is built, and
+changes the descriptor format and the DMA register layout, so a guest whose
+driver knows only one needs a controller configured with that one. Without
+the DMA controller the node says "fifo-mode" for drivers that do not check.
+It can send the stop command itself at the end of a transfer. The
 node carries a fixed clock for both of its clock inputs; "starfive,jh7110-mmc"
 as "compatible" binds the JH7110 driver, which needs nothing more.
 

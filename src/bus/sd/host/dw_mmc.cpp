@@ -67,6 +67,16 @@
 #define DW_MMC_BUFADDRL  0x0a0
 #define DW_MMC_BUFADDRU  0x0a4
 
+/* The 32 bit address layout packs the same registers without the high
+   halves. */
+#define DW_MMC_IDSTS32   0x08c
+#define DW_MMC_IDINTEN32 0x090
+#define DW_MMC_DSCADDR32 0x094
+#define DW_MMC_BUFADDR32 0x098
+
+/* An offset that names no register in the layout in use. */
+#define DW_MMC_NO_REG    UINT32_MAX
+
 /* Where the FIFO is from version 2.40a on; every address above it reaches
    the FIFO too. */
 #define DW_MMC_DATA      0x200
@@ -127,9 +137,10 @@
     (DW_MMC_IDMAC_NORMAL | DW_MMC_IDMAC_ABNORMAL | DW_MMC_IDMAC_NI | \
      DW_MMC_IDMAC_AI)
 
-/* A 64 bit address descriptor: control, sizes, buffer 1, and buffer 2 or
-   the next descriptor. */
-#define DW_MMC_DESC_SIZE 32
+/* A descriptor: control, sizes, buffer 1, and buffer 2 or the next
+   descriptor, in words or, with 64 bit addresses, in pairs of words. */
+#define DW_MMC_DESC32_SIZE 16
+#define DW_MMC_DESC64_SIZE 32
 #define DW_MMC_DES0_DIC bit_at(1)
 #define DW_MMC_DES0_CH  bit_at(4)
 #define DW_MMC_DES0_ER  bit_at(5)
@@ -146,8 +157,8 @@
 #define DW_MMC_VERID_VALUE 0x5342270a
 
 /* One SD/MMC card, AHB host bus 32 bits wide, a 32 bit address bus, the
-   internal DMA controller or none, FIFO RAM inside, hold register, 64 bit
-   descriptor addresses. */
+   internal DMA controller or none, FIFO RAM inside, hold register, and 32 or
+   64 bit descriptor addresses. */
 #define DW_MMC_HCON_CARD_TYPE      bit_at(0)
 #define DW_MMC_HCON_AHB            bit_at(6)
 #define DW_MMC_HCON_DATA_32        (1u << 7)
@@ -166,7 +177,7 @@ class DWMMCDevice final: public Device, public DeviceIO, public SDBusTarget,
 private:
     const char *fCompatible;
     uint32_t fClockHz;
-    bool fDma;
+    int fDmaBits; /* DMA address width, 0 for no DMA controller */
 
     PhysMemoryMap *fMemMap = nullptr;
     IRQSignal *fIrq = nullptr;
@@ -226,6 +237,7 @@ private:
 
     /* registers */
     void ResetRegs();
+    uint32_t RegOffset(uint32_t offset) const;
     uint32_t ReadReg(uint32_t offset);
     void WriteReg(uint32_t offset, uint32_t val);
     uint32_t Rintsts() const;
@@ -276,8 +288,9 @@ private:
 
 public:
     DWMMCDevice(const char *name, const char *compatible, uint32_t clock_hz,
-                bool dma):
-        Device(name), fCompatible(compatible), fClockHz(clock_hz), fDma(dma) {}
+                int dma_bits):
+        Device(name), fCompatible(compatible), fClockHz(clock_hz),
+        fDmaBits(dma_bits) {}
 
     bool Prepare() override;
     bool Realize() override;
@@ -384,12 +397,38 @@ uint32_t DWMMCDevice::Hcon() const
     uint32_t hcon = DW_MMC_HCON_CARD_TYPE | DW_MMC_HCON_AHB |
                     DW_MMC_HCON_DATA_32 | DW_MMC_HCON_ADDR_32 |
                     DW_MMC_HCON_DMA_WIDTH_32 | DW_MMC_HCON_FIFO_RAM |
-                    DW_MMC_HCON_HOLD_REG | DW_MMC_HCON_ADDR_CONFIG_64;
+                    DW_MMC_HCON_HOLD_REG;
 
-    if (!fDma) {
+    if (fDmaBits == 0) {
         hcon |= DW_MMC_HCON_DMA_NONE;
+    } else if (fDmaBits == 64) {
+        hcon |= DW_MMC_HCON_ADDR_CONFIG_64;
     }
     return hcon;
+}
+
+
+uint32_t DWMMCDevice::RegOffset(uint32_t offset) const
+{
+    if (fDmaBits == 64) {
+        return offset;
+    }
+    switch (offset) {
+    case DW_MMC_IDSTS32:
+        return DW_MMC_IDSTS;
+    case DW_MMC_IDINTEN32:
+        return DW_MMC_IDINTEN;
+    case DW_MMC_DSCADDR32:
+        return DW_MMC_DSCADDRL;
+    case DW_MMC_BUFADDR32:
+        return DW_MMC_BUFADDRL;
+    case DW_MMC_DSCADDRU:
+    case DW_MMC_BUFADDRL:
+    case DW_MMC_BUFADDRU:
+        return DW_MMC_NO_REG;
+    default:
+        return offset;
+    }
 }
 
 
@@ -439,7 +478,10 @@ void DWMMCDevice::ResetRegs()
 
 uint32_t DWMMCDevice::ReadReg(uint32_t offset)
 {
+    offset = RegOffset(offset);
     switch (offset) {
+    case DW_MMC_NO_REG:
+        return 0;
     case DW_MMC_CMD:
         /* A command is taken as soon as it is written. */
         return Reg(DW_MMC_CMD) & ~DW_MMC_CMD_START;
@@ -491,6 +533,7 @@ uint32_t DWMMCDevice::ReadReg(uint32_t offset)
 
 void DWMMCDevice::WriteReg(uint32_t offset, uint32_t val)
 {
+    offset = RegOffset(offset);
     switch (offset) {
     case DW_MMC_CTRL:
         /* The reset bits clear themselves: every reset is over at once. */
@@ -566,6 +609,7 @@ void DWMMCDevice::WriteReg(uint32_t offset, uint32_t val)
     case DW_MMC_DSCADDRU:
     case DW_MMC_BUFADDRL:
     case DW_MMC_BUFADDRU:
+    case DW_MMC_NO_REG:
         break;
     default:
         Reg(offset) = val;
@@ -948,7 +992,7 @@ void DWMMCDevice::DataComplete(bool ok)
 
 bool DWMMCDevice::DmaEnabled() const
 {
-    return fDma && (Reg(DW_MMC_CTRL) & DW_MMC_CTRL_USE_IDMAC) != 0 &&
+    return fDmaBits != 0 && (Reg(DW_MMC_CTRL) & DW_MMC_CTRL_USE_IDMAC) != 0 &&
            (Reg(DW_MMC_BMOD) & DW_MMC_BMOD_DE) != 0;
 }
 
@@ -972,9 +1016,11 @@ void DWMMCDevice::DmaFatal()
 
 bool DWMMCDevice::DescFetch()
 {
-    uint8_t desc[DW_MMC_DESC_SIZE];
+    bool wide = fDmaBits == 64;
+    uint32_t desc_size = wide ? DW_MMC_DESC64_SIZE : DW_MMC_DESC32_SIZE;
+    uint8_t desc[DW_MMC_DESC64_SIZE];
 
-    if (!DmaCopy(fDescAddr, desc, sizeof(desc), false)) {
+    if (!DmaCopy(fDescAddr, desc, desc_size, false)) {
         DmaFatal();
         return false;
     }
@@ -986,11 +1032,19 @@ bool DWMMCDevice::DescFetch()
         return false;
     }
 
-    uint32_t sizes = get_le32(desc + 8);
-    uint64_t second = get_le64(desc + 24);
+    uint32_t sizes;
+    uint64_t second;
+    if (wide) {
+        sizes = get_le32(desc + 8);
+        fSegAddr[0] = get_le64(desc + 16);
+        second = get_le64(desc + 24);
+    } else {
+        sizes = get_le32(desc + 4);
+        fSegAddr[0] = get_le32(desc + 8);
+        second = get_le32(desc + 12);
+    }
 
     fDescCtrl = des0;
-    fSegAddr[0] = get_le64(desc + 16);
     fSegLen[0] = get_bits(sizes, 0, 13);
     if ((des0 & DW_MMC_DES0_CH) != 0) {
         fSegLen[1] = 0;
@@ -1000,8 +1054,11 @@ bool DWMMCDevice::DescFetch()
            apart in words. */
         fSegAddr[1] = second;
         fSegLen[1] = get_bits(sizes, 13, 13);
-        fNextDesc = fDescAddr + DW_MMC_DESC_SIZE +
+        fNextDesc = fDescAddr + desc_size +
                     4 * get_bits(Reg(DW_MMC_BMOD), DW_MMC_BMOD_DSL_SHIFT, 5);
+        if (!wide) {
+            fNextDesc = (uint32_t)fNextDesc;
+        }
     }
     if ((des0 & DW_MMC_DES0_ER) != 0) {
         fNextDesc = fDescBase;
@@ -1214,6 +1271,11 @@ void DWMMCDevice::BuildFDT(FDTContext &ctx)
     fdt->PropCells("clocks");
     fdt->PropStrList("clock-names", "biu", "ciu", nullptr);
     fdt->PropU32("fifo-depth", DW_MMC_FIFO_DEPTH);
+    if (fDmaBits == 0) {
+        /* For drivers that take the DMA controller for granted rather than
+           reading it from the hardware configuration register. */
+        fdt->PropEmpty("fifo-mode");
+    }
     fdt->PropU32("max-frequency", fClockHz);
     if (fCard != nullptr) {
         fdt->PropU32("bus-width", fCard->BusWidth());
@@ -1233,7 +1295,7 @@ void DWMMCDevice::BuildFDT(FDTContext &ctx)
 //#pragma mark - factory
 
 Device *dw_mmc_node_create(const char *name, const char *compatible,
-                           uint32_t clock_hz, bool dma)
+                           uint32_t clock_hz, int dma_bits)
 {
-    return new DWMMCDevice(name, compatible, clock_hz, dma);
+    return new DWMMCDevice(name, compatible, clock_hz, dma_bits);
 }
