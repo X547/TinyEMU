@@ -89,4 +89,7 @@ public:
     /* Makes the current or next wait return at once, so that the sources
        are prepared again. Any thread, and signal handlers. */
     void Wake();
+
+    /* The host's side of the loop, for the host's own back ends. */
+    LoopWaker &Waker() {return *fWaker;}
 };

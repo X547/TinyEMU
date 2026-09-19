@@ -203,8 +203,10 @@ bool LoopWaker::Collect(WaitSet &ws)
                 w->state = HandleWait::IDLE;
                 if (w->watched)
                     ws.fSignaled.push_back(w->handle);
-            } else {
+            } else if (e.lpCompletionKey == 0 && e.lpOverlapped == nullptr) {
                 woken = true;
+            } else {
+                ws.fCompletions.push_back(e);
             }
         }
         if (n < MAX_PACKETS)
@@ -212,6 +214,19 @@ bool LoopWaker::Collect(WaitSet &ws)
         timeout = 0;
     }
     return woken;
+}
+
+
+bool event_loop_attach(EventLoop &loop, HANDLE file, void *key)
+{
+    if (CreateIoCompletionPort(file, loop.Waker().port,
+                               reinterpret_cast<ULONG_PTR>(key), 0) == nullptr)
+        return false;
+    /* Nothing to take off the port for a request that finished at once,
+       and no event to set on the handle. */
+    return SetFileCompletionNotificationModes(
+        file, FILE_SKIP_COMPLETION_PORT_ON_SUCCESS |
+                  FILE_SKIP_SET_EVENT_ON_HANDLE);
 }
 
 

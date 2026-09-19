@@ -29,18 +29,19 @@ emu_libs += static_library('platform_host', host_sources,
 platform_sources = files(
   'common/console_escape.cpp',
   'common/event_loop.cpp',
-  'common/file_block.cpp',
   'common/host_platform.cpp',
 )
 if platform_os == 'windows'
   platform_sources += files(
     'common/no_disk_fs.cpp',
     'win32/event_loop_wait.cpp',
+    'win32/file_block.cpp',
     'win32/stdio_console.cpp',
   )
 else
   platform_sources += files(
     'posix/event_loop_wait.cpp',
+    'posix/file_block.cpp',
     'posix/fs_disk.cpp',
     'posix/stdio_console.cpp',
   )

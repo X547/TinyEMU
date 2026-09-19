@@ -38,6 +38,7 @@ private:
 
     std::vector<HANDLE> fWatched;
     std::vector<HANDLE> fSignaled;
+    std::vector<OVERLAPPED_ENTRY> fCompletions;
 
 public:
     int timeout_ms;
@@ -57,9 +58,22 @@ public:
                fSignaled.end();
     }
 
+    /* Valid in Dispatch(): the overlapped I/O that finished during the
+       wait, which each source picks its own out of by key. */
+    const std::vector<OVERLAPPED_ENTRY> &Completions() const
+    {
+        return fCompletions;
+    }
+
     void LimitTimeout(int ms)
     {
         if (ms < timeout_ms)
             timeout_ms = ms;
     }
 };
+
+
+/* Makes the overlapped I/O on 'file' finish through the loop: a request
+   that does not finish at once shows up in Completions() with 'key'. One
+   that finishes at once is not reported again. */
+bool event_loop_attach(EventLoop &loop, HANDLE file, void *key);
