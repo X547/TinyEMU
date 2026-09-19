@@ -18,7 +18,7 @@ TinyEMU System Emulator by Fabrice Bellard
 
 - VirtIO console, network, block device, input, 2D GPU and 9P filesystem
 
-- Graphical display with SDL, or a native window on Haiku
+- Graphical display with SDL, or a native window on Haiku and Windows
 
 - JSON configuration file
 
@@ -46,6 +46,8 @@ TinyEMU System Emulator by Fabrice Bellard
   sdl             SDL 1.2 graphical display (feature, default auto)
   haiku_gui       native Haiku window instead of SDL, Haiku hosts only
                   (feature, default auto; -Dsdl=enabled keeps SDL)
+  win32_gui       native Win32 window instead of SDL, Windows hosts only
+                  (feature, default auto; -Dsdl=enabled keeps SDL)
   fs_net          network filesystem, needs libcurl and libcrypto
                   (feature, default disabled)
   builtin_crypto  use the bundled AES/SHA256 code instead of libcrypto
@@ -63,8 +65,8 @@ TinyEMU System Emulator by Fabrice Bellard
   meson setup build -Dfs_net=enabled -Dx86emu=false
 
 - On Windows 8 or later, build with MinGW-w64 GCC the same way. The
-  console only shows guest output for now; there is no display, slirp,
-  tap or 9P host directory yet.
+  console only shows guest output for now; there is no slirp, tap or 9P
+  host directory yet.
 
 - You can optionally install the programs with:
 

@@ -8,6 +8,11 @@ option('haiku_gui',
   value: 'auto',
   description: 'native Haiku window instead of SDL (Haiku hosts only)')
 
+option('win32_gui',
+  type: 'feature',
+  value: 'auto',
+  description: 'native Win32 window instead of SDL (Windows hosts only)')
+
 option('fs_net',
   type: 'feature',
   value: 'disabled',

@@ -54,7 +54,7 @@ if slirp_enabled
 else
   platform_sources += files('common/no_slirp_ethernet.cpp')
 endif
-if not sdl_dep.found() and not haiku_gui
+if not sdl_dep.found() and not haiku_gui and not win32_gui
   platform_sources += files('common/no_display.cpp')
 endif
 if not fs_net_enabled
@@ -70,6 +70,12 @@ endif
 if haiku_gui
   emu_libs += static_library('platform_haiku_gui',
     files('haiku/haiku_display.cpp', 'haiku/haiku_keymap.cpp'),
+    kwargs: platform_kwargs,
+  )
+endif
+if win32_gui
+  emu_libs += static_library('platform_win32_gui',
+    files('win32/win32_display.cpp', 'win32/win32_keymap.cpp'),
     kwargs: platform_kwargs,
   )
 endif

@@ -93,16 +93,28 @@ if x86emu
   common_defines += '-DCONFIG_X86EMU'
 endif
 
-# The display: a native Haiku window where there is one, SDL otherwise. An
-# explicit -Dsdl=enabled keeps SDL on Haiku too.
+# The display: a native window on Haiku and Windows, SDL otherwise. An
+# explicit -Dsdl=enabled keeps SDL there too.
 haiku_gui_opt = get_option('haiku_gui') \
   .disable_auto_if(get_option('sdl').enabled()) \
   .require(host_machine.system() == 'haiku',
            error_message: 'the Haiku window needs a Haiku host')
 be_dep = cpp.find_library('be', required: haiku_gui_opt)
 haiku_gui = be_dep.found()
+
+win32_gui_opt = get_option('win32_gui') \
+  .disable_auto_if(get_option('sdl').enabled()) \
+  .require(host_machine.system() == 'windows',
+           error_message: 'the Win32 window needs a Windows host')
+win32_gui = win32_gui_opt.allowed()
+
 if haiku_gui
   emu_deps += be_dep
+  sdl_dep = dependency('', required: false)
+elif win32_gui
+  foreach libname : ['user32', 'gdi32', 'imm32']
+    emu_deps += cc.find_library(libname)
+  endforeach
   sdl_dep = dependency('', required: false)
 else
   sdl_dep = dependency('sdl', required: get_option('sdl'))
@@ -275,6 +287,7 @@ executable('temu',
 summary({
   'SDL display': sdl_dep.found(),
   'Haiku display': haiku_gui,
+  'Windows display': win32_gui,
   'x86 emulator': x86emu,
   'slirp': slirp_enabled,
   'network filesystem': fs_net_enabled,
