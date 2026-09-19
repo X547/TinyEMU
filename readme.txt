@@ -281,6 +281,12 @@ Device types:
                          address, default the first free one) and "phy_id"
                          (the identifier the guest reads, default one no
                          vendor owns so that a generic driver binds)
+  dw-i2c                 Synopsys DesignWare I2C controller on the FDT bus,
+                         as the StarFive JH7110 has; "compatible" (default
+                         "snps,designware-i2c"), and a nested I2C bus
+  i2c-hid                HID over I2C target; "reg" (its 7 bit address,
+                         0x08 to 0x77, default the first free one), and a
+                         nested HID bus carrying one function
 
 The virtio devices work on either transport: attached to the FDT bus they
 appear as virtio-mmio, and attached to a PCI bus they appear as PCI devices.
@@ -319,11 +325,26 @@ Input devices nest the same way:
     PCI bus -> xhci -> USB bus -> usb-hid -> HID bus -> hid-keyboard
 
 A HID function is a report descriptor and the reports that go with it, and
-knows nothing about the transport carrying it, so the planned I2C and SPI
-transports will take the same "hid-keyboard" and "hid-tablet" nodes. A
-"usb-hid" carries up to four of them, each on an interface and an interrupt
-endpoint of its own; a guest whose driver binds one function per USB device
-rather than per interface needs a "usb-hid" for each instead.
+knows nothing about the transport carrying it, so the same "hid-keyboard" and
+"hid-tablet" nodes work over USB and over I2C. A "usb-hid" carries up to four
+of them, each on an interface and an interrupt endpoint of its own; a guest
+whose driver binds one function per USB device rather than per interface
+needs a "usb-hid" for each instead.
+
+Over I2C the path runs through the controller and the bus it provides:
+
+    FDT bus -> dw-i2c -> I2C bus -> i2c-hid -> HID bus -> hid-keyboard
+
+An "i2c-hid" carries one function, because the protocol gives a target one
+report descriptor; a keyboard and a tablet are two targets. Like an MDIO bus,
+an I2C bus is described rather than enumerated: it places the targets that
+name no address on the first free one from 0x08, after every address the
+configuration names has been taken, and emits them into the device tree. Each
+"i2c-hid" also takes an interrupt line of its own from the machine's interrupt
+controller, which it holds while the host has something to read, as the
+protocol's level triggered line is meant to be. The controller runs commands
+as they are queued, so a transfer takes the bus no time; it holds the bus when
+its command FIFO runs dry without a STOP, as the drivers expect.
 
 Whichever devices are realized last holding the keyboard and the pointer roles
 are the ones the emulator window sends its events to, so a configuration

@@ -39,6 +39,7 @@ typedef enum {
     RES_IO,        /* PCI I/O port space */
     RES_IRQ,       /* interrupt controller input line */
     RES_MDIO_ADDR, /* address on an MDIO bus */
+    RES_I2C_ADDR,  /* 7 bit address on an I2C bus */
 } ResourceTypeEnum;
 
 

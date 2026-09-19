@@ -35,6 +35,7 @@
 class Bus;
 class Device;
 class FDTBuilder;
+class I2CBus;
 class MDIOBus;
 class PCIMsiTarget;
 struct PCIBus;
@@ -145,6 +146,9 @@ public:
     /* Non-null only for an MDIO bus, so that a PHY can refuse to be attached
        anywhere else. */
     virtual MDIOBus *AsMDIOBus() {return nullptr;}
+
+    /* Likewise for an I2C bus. */
+    virtual I2CBus *AsI2CBus() {return nullptr;}
 
     /* The bus at the top of the tree, which is the machine's SystemBus. A
        device that needs the machine's port space or interrupt lines while

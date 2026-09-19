@@ -29,6 +29,7 @@
 #include "ata.h"
 #include "ata_pci.h"
 #include "cutils.h"
+#include "dw_i2c.h"
 #include "dw_mmc.h"
 #include "dwmac.h"
 #include "hid.h"
@@ -373,6 +374,17 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
                                   (uint32_t)clock_mhz * 1000000, dma);
     }
 
+    if (strcmp(type, "dw-i2c") == 0) {
+        const char *compatible;
+        if (vm_get_str_opt(node->props, "compatible", &compatible) < 0) {
+            return nullptr;
+        }
+        if (compatible == nullptr) {
+            compatible = DW_I2C_DEFAULT_COMPATIBLE;
+        }
+        return dw_i2c_node_create(node->IdOr("dw-i2c"), compatible);
+    }
+
     if (strcmp(type, "sd-card") == 0 || strcmp(type, "mmc-card") == 0) {
         int read_only;
         if (!node_int_opt(node, "read_only", &read_only, 0)) {
@@ -425,6 +437,21 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
             return nullptr;
         }
         return usb_hid_node_create(port);
+    }
+
+    if (strcmp(type, "i2c-hid") == 0) {
+        int address;
+        /* Without an address the bus places the target, as it does an
+           Ethernet PHY. */
+        if (!node_int_opt(node, "reg", &address, -1)) {
+            return nullptr;
+        }
+        if (node->children == nullptr) {
+            vm_error("i2c-hid: needs a nested HID bus with a function on "
+                     "it\n");
+            return nullptr;
+        }
+        return i2c_hid_node_create(address);
     }
 
     if (strcmp(type, "hid-keyboard") == 0 || strcmp(type, "hid-tablet") == 0) {

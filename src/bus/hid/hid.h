@@ -201,3 +201,6 @@ Device *hid_tablet_node_create(DeviceContext *ctx, int index);
 
 /* usb_hid.cpp */
 Device *usb_hid_node_create(int port);
+
+/* i2c_hid.cpp; 'address' is -1 for the first free one */
+Device *i2c_hid_node_create(int address);

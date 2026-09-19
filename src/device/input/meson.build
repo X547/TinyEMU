@@ -1,6 +1,7 @@
 input_sources = files(
   'hid_keyboard.cpp',
   'hid_tablet.cpp',
+  'i2c_hid.cpp',
   'ps2_keyboard.cpp',
   'ps2_mouse.cpp',
   'usb_hid.cpp',

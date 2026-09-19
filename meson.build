@@ -153,6 +153,8 @@ inc = include_directories(
   'src/bus/ata',
   'src/bus/ata/host',
   'src/bus/hid',
+  'src/bus/i2c',
+  'src/bus/i2c/host',
   'src/bus/mdio',
   'src/bus/pci',
   'src/bus/pci/host',
@@ -216,6 +218,7 @@ subdir('src/cpu/riscv')
 subdir('src/cpu/x86')
 subdir('src/bus/ata')
 subdir('src/bus/hid')
+subdir('src/bus/i2c')
 subdir('src/bus/mdio')
 subdir('src/bus/pci')
 subdir('src/bus/ps2')
