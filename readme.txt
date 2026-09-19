@@ -261,7 +261,13 @@ Device types:
                          "compatible" (which controller the device tree node
                          claims to be, default "arasan,sdhci-8.9a", and
                          unused on PCI), and a nested SD bus
-  sd-card                SD memory card; "file", and "read_only"
+  dw-mmc                 Synopsys DesignWare MMC host on the FDT bus, as the
+                         StarFive JH7110 has; "clock" (the card interface
+                         clock in MHz, default 50), "compatible" (default
+                         "snps,dw-mshc"), "dma" (default 1; 0 reports a
+                         controller built without its DMA engine), and a
+                         nested SD bus
+  sd-card               SD memory card; "file", and "read_only"
   mmc-card               eMMC storage device; "file", and "read_only"
   dwmac                  Synopsys DesignWare Ethernet QoS MAC on the FDT bus;
                          "driver" and "ifname" as for virtio-net,
@@ -372,6 +378,16 @@ descriptors, Auto CMD12 and Auto CMD23, and offers MSI-X and MSI on a PCI
 bus that has a receiver for them. Cards move data one block at a time and may
 answer later, so a block back end that does not complete at once -- the HTTP
 one -- stalls the controller rather than the emulator.
+
+The DesignWare MMC host carries the same cards, on the FDT bus only:
+
+    FDT bus -> dw-mmc -> SD bus -> mmc-card
+
+It moves data through a 32 word FIFO, by programmed I/O or with its internal
+DMA controller, which walks chained or ring descriptors with 64 bit
+addresses. It can send the stop command itself at the end of a transfer. The
+node carries a fixed clock for both of its clock inputs; "starfive,jh7110-mmc"
+as "compatible" binds the JH7110 driver, which needs nothing more.
 
 Both card types report 512 byte blocks and do not offer partial ones, so
 SET_BLOCKLEN takes 512 and nothing else. Neither claims the erase command

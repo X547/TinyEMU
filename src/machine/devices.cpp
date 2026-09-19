@@ -29,6 +29,7 @@
 #include "ata.h"
 #include "ata_pci.h"
 #include "cutils.h"
+#include "dw_mmc.h"
 #include "dwmac.h"
 #include "hid.h"
 #include "mdio.h"
@@ -346,6 +347,26 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
         }
         return sdhci_node_create(node->IdOr("sdhci"),
                                  compatible, (uint32_t)clock_mhz * 1000000);
+    }
+
+    if (strcmp(type, "dw-mmc") == 0) {
+        const char *compatible;
+        int clock_mhz, dma;
+        if (vm_get_str_opt(node->props, "compatible", &compatible) < 0 ||
+            !node_int_opt(node, "clock", &clock_mhz,
+                          DW_MMC_DEFAULT_CLOCK_HZ / 1000000) ||
+            !node_int_opt(node, "dma", &dma, 1)) {
+            return nullptr;
+        }
+        if (compatible == nullptr) {
+            compatible = DW_MMC_DEFAULT_COMPATIBLE;
+        }
+        if (clock_mhz < 1 || clock_mhz > 1000) {
+            vm_error("dw-mmc: 'clock' must be between 1 and 1000 MHz\n");
+            return nullptr;
+        }
+        return dw_mmc_node_create(node->IdOr("dw-mmc"), compatible,
+                                  (uint32_t)clock_mhz * 1000000, dma != 0);
     }
 
     if (strcmp(type, "sd-card") == 0 || strcmp(type, "mmc-card") == 0) {
