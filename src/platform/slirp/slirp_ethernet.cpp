@@ -106,11 +106,13 @@ extern "C" void slirp_output(void *opaque, const uint8_t *pkt, int pkt_len)
 
 std::unique_ptr<HostEthernet> slirp_ethernet_open(EventLoop &loop)
 {
-    struct in_addr net_addr  = { .s_addr = htonl(0x0a000200) }; /* 10.0.2.0 */
-    struct in_addr mask = { .s_addr = htonl(0xffffff00) }; /* 255.255.255.0 */
-    struct in_addr host = { .s_addr = htonl(0x0a000202) }; /* 10.0.2.2 */
-    struct in_addr dhcp = { .s_addr = htonl(0x0a00020f) }; /* 10.0.2.15 */
-    struct in_addr dns  = { .s_addr = htonl(0x0a000203) }; /* 10.0.2.3 */
+    /* assigned rather than initialized: s_addr is a macro on some hosts */
+    struct in_addr net_addr, mask, host, dhcp, dns;
+    net_addr.s_addr = htonl(0x0a000200); /* 10.0.2.0 */
+    mask.s_addr = htonl(0xffffff00); /* 255.255.255.0 */
+    host.s_addr = htonl(0x0a000202); /* 10.0.2.2 */
+    dhcp.s_addr = htonl(0x0a00020f); /* 10.0.2.15 */
+    dns.s_addr = htonl(0x0a000203); /* 10.0.2.3 */
     const char *bootfile = NULL;
     const char *vhostname = NULL;
     int restricted = 0;

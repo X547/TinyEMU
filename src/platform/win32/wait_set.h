@@ -21,6 +21,7 @@
  */
 #pragma once
 
+#include <winsock2.h>
 #include <windows.h>
 #include <algorithm>
 #include <vector>
@@ -41,9 +42,21 @@ private:
     std::vector<OVERLAPPED_ENTRY> fCompletions;
 
 public:
+    /* Sockets, for libraries that fill descriptor sets themselves. After
+       the wait they hold what is ready, as select() leaves them. */
+    fd_set rfds, wfds, efds;
+    /* unused: Winsock numbers no sockets, but the libraries fill it */
+    int fd_max = -1;
+    /* the select() result, valid in Dispatch() */
+    int ready = 0;
     int timeout_ms;
 
-    explicit WaitSet(int timeout): timeout_ms(timeout) {}
+    explicit WaitSet(int timeout): timeout_ms(timeout)
+    {
+        FD_ZERO(&rfds);
+        FD_ZERO(&wfds);
+        FD_ZERO(&efds);
+    }
 
     void WatchHandle(HANDLE h)
     {

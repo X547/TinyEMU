@@ -148,16 +148,29 @@ endif
 platform_os = host_machine.system()
 
 # The event loop waits on a completion port with ntdll's wait completion
-# packets, and raises the timer resolution through winmm. The runtime is linked
-# in so that the executable runs without the toolchain's DLLs.
+# packets, raises the timer resolution through winmm and watches sockets
+# through Winsock. The runtime is linked in so that the executable runs
+# without the toolchain's DLLs.
 emu_link_args = []
 if platform_os == 'windows'
-  emu_deps += [cc.find_library('ntdll'), cc.find_library('winmm')]
+  foreach libname : ['ntdll', 'winmm', 'ws2_32', 'iphlpapi']
+    emu_deps += cc.find_library(libname)
+  endforeach
   emu_link_args += '-static'
+  # A Winsock fd_set holds 64 sockets unless told otherwise, and slirp hands
+  # its sets to the event loop, so both sides must agree. <windows.h> would
+  # otherwise bring in the Winsock that <winsock2.h> replaces.
+  common_defines += ['-DFD_SETSIZE=1024', '-DWIN32_LEAN_AND_MEAN']
+  # Bit fields laid out as GCC does elsewhere: the Microsoft layout MinGW
+  # defaults to puts slirp's 20 byte IP header at 23 bytes.
+  foreach lang : ['c', 'cpp']
+    add_project_arguments(
+      meson.get_compiler(lang).get_supported_arguments('-mno-ms-bitfields'),
+      language: lang)
+  endforeach
 endif
 
-# slirp's Windows socket code is not wired up yet.
-slirp_enabled = get_option('slirp') and platform_os != 'windows'
+slirp_enabled = get_option('slirp')
 
 # ----------------------------------------------------------------------------
 # include path

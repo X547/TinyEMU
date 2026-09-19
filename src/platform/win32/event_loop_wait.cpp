@@ -24,6 +24,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <memory>
+#include <utility>
+#include <winsock2.h>
 #include <windows.h>
 #include <winternl.h>
 #include <timeapi.h>
@@ -78,8 +80,12 @@ struct HandleWait {
 class LoopWaker {
 private:
     std::vector<std::unique_ptr<HandleWait>> fWaits;
+    /* signalled when a socket of the wait set changes */
+    WSAEVENT fSocketEvent = nullptr;
+    bool fHaveSockets = false;
 
     HandleWait *Find(HANDLE h);
+    void ArmSockets(WaitSet &ws);
 
 public:
     HANDLE port;
@@ -115,7 +121,45 @@ LoopWaker::~LoopWaker()
             NtCancelWaitCompletionPacket(w->packet, TRUE);
         CloseHandle(w->packet);
     }
+    if (fSocketEvent != nullptr)
+        WSACloseEvent(fSocketEvent);
     CloseHandle(port);
+}
+
+
+/* Sockets cannot be waited on, so a change on any of them signals one
+   event, which is. What is true already is found by looking at once. */
+void LoopWaker::ArmSockets(WaitSet &ws)
+{
+    std::vector<std::pair<SOCKET, long>> sockets;
+    auto add = [&sockets](const fd_set &set, long events) {
+        for (u_int i = 0; i < set.fd_count; i++) {
+            auto it = std::find_if(sockets.begin(), sockets.end(),
+                                   [&set, i](const std::pair<SOCKET, long> &s) {
+                                       return s.first == set.fd_array[i];
+                                   });
+            if (it != sockets.end())
+                it->second |= events;
+            else
+                sockets.emplace_back(set.fd_array[i], events);
+        }
+    };
+
+    if (fSocketEvent == nullptr)
+        fSocketEvent = WSACreateEvent();
+    /* first, so that any change from here on signals the event again */
+    WSAResetEvent(fSocketEvent);
+    add(ws.rfds, FD_READ | FD_ACCEPT | FD_CLOSE);
+    add(ws.wfds, FD_WRITE | FD_CONNECT | FD_CLOSE);
+    add(ws.efds, FD_OOB);
+    for (const auto &s : sockets)
+        WSAEventSelect(s.first, fSocketEvent, s.second);
+
+    fd_set r = ws.rfds, w = ws.wfds, e = ws.efds;
+    timeval zero = {0, 0};
+    if (select(0, &r, &w, &e, &zero) > 0)
+        ws.timeout_ms = 0;
+    ws.WatchHandle(fSocketEvent);
 }
 
 
@@ -132,6 +176,10 @@ HandleWait *LoopWaker::Find(HANDLE h)
 void LoopWaker::Arm(WaitSet &ws)
 {
     NTSTATUS st;
+
+    fHaveSockets = ws.rfds.fd_count + ws.wfds.fd_count + ws.efds.fd_count > 0;
+    if (fHaveSockets)
+        ArmSockets(ws);
 
     for (auto &w : fWaits)
         w->watched = false;
@@ -212,6 +260,17 @@ bool LoopWaker::Collect(WaitSet &ws)
         if (n < MAX_PACKETS)
             break;
         timeout = 0;
+    }
+
+    /* the sockets that are ready now, as a select() would leave them */
+    if (fHaveSockets) {
+        timeval zero = {0, 0};
+        ws.ready = select(0, &ws.rfds, &ws.wfds, &ws.efds, &zero);
+        if (ws.ready < 0) {
+            FD_ZERO(&ws.rfds);
+            FD_ZERO(&ws.wfds);
+            FD_ZERO(&ws.efds);
+        }
     }
     return woken;
 }

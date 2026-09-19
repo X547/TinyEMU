@@ -65,7 +65,7 @@ TinyEMU System Emulator by Fabrice Bellard
   meson setup build -Dfs_net=enabled -Dx86emu=false
 
 - On Windows 8 or later, build with MinGW-w64 GCC the same way. There is
-  no slirp, tap or 9P host directory there yet.
+  no tap or 9P host directory there yet.
 
 - You can optionally install the programs with:
 
