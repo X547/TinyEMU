@@ -3,7 +3,11 @@
 
 #ifdef CONFIG_SLIRP
 
+#ifdef _WIN32
+#include <winsock2.h>
+#else
 #include <netinet/in.h>
+#endif
 
 /* slirp is built as C while the emulator embedding it is C++, so both the
    entry points and the two callbacks the embedder must provide need C

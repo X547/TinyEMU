@@ -11,6 +11,18 @@
 int slirp_debug = DBG_CALL|DBG_MISC|DBG_ERROR;
 #endif
 
+#ifndef HAVE_INET_ATON
+int
+inet_aton(const char *cp, struct in_addr *ia)
+{
+	uint32_t addr = inet_addr(cp);
+	if (addr == 0xffffffff)
+		return 0;
+	ia->s_addr = addr;
+	return 1;
+}
+#endif
+
 struct quehead {
 	struct quehead *qh_link;
 	struct quehead *qh_rlink;

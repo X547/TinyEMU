@@ -10,18 +10,33 @@
 
 typedef char *caddr_t;
 
-# include <windows.h>
+/* Winsock before <windows.h>, which would bring in the old one. */
 # include <winsock2.h>
 # include <ws2tcpip.h>
+# include <windows.h>
 # include <sys/timeb.h>
 # include <iphlpapi.h>
 
+/* errno is Winsock's error below, so these are its codes rather than the C
+   library's. */
+# undef EWOULDBLOCK
+# undef EINPROGRESS
+# undef ENOTCONN
+# undef EHOSTUNREACH
+# undef ENETUNREACH
+# undef ECONNREFUSED
 # define EWOULDBLOCK WSAEWOULDBLOCK
 # define EINPROGRESS WSAEINPROGRESS
 # define ENOTCONN WSAENOTCONN
 # define EHOSTUNREACH WSAEHOSTUNREACH
 # define ENETUNREACH WSAENETUNREACH
 # define ECONNREFUSED WSAECONNREFUSED
+
+/* Only the type: reads and writes go through recv() and send(). */
+struct iovec {
+    void *iov_base;
+    size_t iov_len;
+};
 #else
 # define ioctlsocket ioctl
 # define closesocket(s) close(s)
