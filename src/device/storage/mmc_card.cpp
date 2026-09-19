@@ -102,7 +102,7 @@ private:
     void BuildCsd();
     void BuildExtCsd();
 
-    int Illegal(uint8_t *response);
+    int Illegal();
     int Switch(const SDCommand &cmd, uint8_t *response);
     int ReadWrite(const SDCommand &cmd, uint8_t *response, bool is_write,
                   bool multiple);
@@ -257,11 +257,12 @@ void MMCCard::BuildExtCsd()
 
 //#pragma mark - commands
 
-int MMCCard::Illegal(uint8_t *response)
+int MMCCard::Illegal()
 {
+    /* A device does not answer a command it may not take; the next response
+       reports it. */
     Fail(SD_STATUS_ILLEGAL_COMMAND);
-    BuildR1(response);
-    return SD_RESPONSE_SHORT;
+    return -1;
 }
 
 
@@ -272,7 +273,7 @@ int MMCCard::Switch(const SDCommand &cmd, uint8_t *response)
     uint8_t value = (uint8_t)(cmd.arg >> MMC_SWITCH_VALUE_SHIFT);
 
     if (fState != SD_STATE_TRAN) {
-        return Illegal(response);
+        return Illegal();
     }
     if (access == MMC_SWITCH_CMD_SET) {
         /* Only the standard command set exists here, and selecting it is a
@@ -316,7 +317,7 @@ int MMCCard::ReadWrite(const SDCommand &cmd, uint8_t *response, bool is_write,
     uint64_t sector;
 
     if (fState != SD_STATE_TRAN) {
-        return Illegal(response);
+        return Illegal();
     }
     if (is_write && ReadOnly()) {
         Fail(SD_STATUS_WP_VIOLATION);
@@ -345,15 +346,19 @@ int MMCCard::Command(const SDCommand &cmd, uint8_t *response)
         return 0; /* answered by silence */
 
     case MMC_CMD_SEND_OP_COND: {
-        uint32_t ocr = SD_OCR_VOLTAGE_WINDOW | SD_OCR_POWER_UP_DONE;
+        uint32_t ocr = SD_OCR_VOLTAGE_WINDOW;
         if (fHighCapacity) {
             ocr |= MMC_OCR_SECTOR_MODE;
         }
         /* An argument of zero is the host asking what the device wants
-           rather than offering it; only an offer moves the state on. */
+           rather than offering it; only an offer moves the state on, and
+           until then the device reports itself still powering up. */
         if ((cmd.arg & SD_OCR_VOLTAGE_WINDOW) != 0 &&
             fState == SD_STATE_IDLE) {
             fState = SD_STATE_READY;
+        }
+        if (fState != SD_STATE_IDLE) {
+            ocr |= SD_OCR_POWER_UP_DONE;
         }
         BuildShort(response, ocr);
         return SD_RESPONSE_SHORT;
@@ -361,7 +366,7 @@ int MMCCard::Command(const SDCommand &cmd, uint8_t *response)
 
     case SD_CMD_ALL_SEND_CID:
         if (fState != SD_STATE_READY) {
-            return Illegal(response);
+            return Illegal();
         }
         fState = SD_STATE_IDENT;
         BuildLong(response, fCid);
@@ -371,7 +376,7 @@ int MMCCard::Command(const SDCommand &cmd, uint8_t *response)
         /* Unlike SD, the host chooses the address and the device is told
            what it is. */
         if (fState != SD_STATE_IDENT && fState != SD_STATE_STBY) {
-            return Illegal(response);
+            return Illegal();
         }
         fRca = cmd.arg >> 16;
         fState = SD_STATE_STBY;
@@ -415,7 +420,7 @@ int MMCCard::Command(const SDCommand &cmd, uint8_t *response)
         /* On this bus that number is SEND_EXT_CSD, which hands the register
            over the data lines rather than in the response. */
         if (fState != SD_STATE_TRAN) {
-            return Illegal(response);
+            return Illegal();
         }
         memcpy(fRegData, fExtCsd, MMC_EXT_CSD_SIZE);
         StartRegisterRead(MMC_EXT_CSD_SIZE);
@@ -481,8 +486,9 @@ int MMCCard::Command(const SDCommand &cmd, uint8_t *response)
 
     default:
         /* Application commands are an SD invention, so CMD55 lands here too
-           and is refused, which is what tells a driver which bus it is on. */
-        return Illegal(response);
+           and goes unanswered, which is what tells a driver which bus it is
+           on. */
+        return Illegal();
     }
 }
 

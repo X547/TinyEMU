@@ -89,7 +89,7 @@ private:
 
     /* The R1 an addressed command answers with, together with the state
        check every one of them makes. */
-    int Illegal(uint8_t *response);
+    int Illegal();
     int ReadWrite(const SDCommand &cmd, uint8_t *response, bool is_write,
                   bool multiple);
 
@@ -307,11 +307,12 @@ void SDCard::BuildSwitchStatus(uint32_t arg, bool set)
 
 //#pragma mark - commands
 
-int SDCard::Illegal(uint8_t *response)
+int SDCard::Illegal()
 {
+    /* A card does not answer a command it may not take; the next response
+       reports it. */
     Fail(SD_STATUS_ILLEGAL_COMMAND);
-    BuildR1(response);
-    return SD_RESPONSE_SHORT;
+    return -1;
 }
 
 
@@ -321,7 +322,7 @@ int SDCard::ReadWrite(const SDCommand &cmd, uint8_t *response, bool is_write,
     uint64_t sector;
 
     if (fState != SD_STATE_TRAN) {
-        return Illegal(response);
+        return Illegal();
     }
     if (is_write && ReadOnly()) {
         Fail(SD_STATUS_WP_VIOLATION);
@@ -374,7 +375,7 @@ int SDCard::NormalCommand(const SDCommand &cmd, uint8_t *response)
 
     case SD_CMD_ALL_SEND_CID:
         if (fState != SD_STATE_READY) {
-            return Illegal(response);
+            return Illegal();
         }
         fState = SD_STATE_IDENT;
         BuildLong(response, fCid);
@@ -382,7 +383,7 @@ int SDCard::NormalCommand(const SDCommand &cmd, uint8_t *response)
 
     case SD_CMD_SEND_RELATIVE_ADDR: {
         if (fState != SD_STATE_IDENT && fState != SD_STATE_STBY) {
-            return Illegal(response);
+            return Illegal();
         }
         /* The card publishes an address of its own; only zero is reserved,
            and one card on the bus needs no more than one value. */
@@ -410,7 +411,7 @@ int SDCard::NormalCommand(const SDCommand &cmd, uint8_t *response)
 
     case SD_CMD_SWITCH_FUNC:
         if (fState != SD_STATE_TRAN) {
-            return Illegal(response);
+            return Illegal();
         }
         BuildSwitchStatus(cmd.arg, (cmd.arg & (1u << 31)) != 0);
         StartRegisterRead(SD_SWITCH_SIZE);
@@ -503,14 +504,14 @@ int SDCard::NormalCommand(const SDCommand &cmd, uint8_t *response)
 
     case SD_CMD_APP_CMD:
         if (cmd.arg >> 16 != fRca) {
-            return Illegal(response);
+            return Illegal();
         }
         fAppCmd = true;
         BuildR1(response);
         return SD_RESPONSE_SHORT;
 
     default:
-        return Illegal(response);
+        return Illegal();
     }
 }
 
@@ -525,7 +526,7 @@ int SDCard::AppCommand(const SDCommand &cmd, uint8_t *response)
 
     case SD_ACMD_SD_STATUS:
         if (fState != SD_STATE_TRAN) {
-            return Illegal(response);
+            return Illegal();
         }
         BuildSdStatus();
         StartRegisterRead(SD_STATUS_SIZE);
@@ -534,7 +535,7 @@ int SDCard::AppCommand(const SDCommand &cmd, uint8_t *response)
 
     case SD_ACMD_SEND_NUM_WR_BLOCKS:
         if (fState != SD_STATE_TRAN) {
-            return Illegal(response);
+            return Illegal();
         }
         /* Nothing here ever fails a block part way through, so every block
            of the last write was programmed. */
@@ -568,7 +569,7 @@ int SDCard::AppCommand(const SDCommand &cmd, uint8_t *response)
 
     case SD_ACMD_SEND_SCR:
         if (fState != SD_STATE_TRAN) {
-            return Illegal(response);
+            return Illegal();
         }
         memcpy(fRegData, fScr, SD_SCR_SIZE);
         StartRegisterRead(SD_SCR_SIZE);
