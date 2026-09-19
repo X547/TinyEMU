@@ -1126,6 +1126,9 @@ static bool exec_0f(X86CPUState *s, Decoder &d)
     case 0x32:
         cpu_rdmsr(s);
         break;
+    case 0x33:
+        cpu_rdpmc(s);
+        break;
     case 0x34:
         cpu_sysenter(s);
         return false;

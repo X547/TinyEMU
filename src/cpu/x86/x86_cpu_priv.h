@@ -148,6 +148,7 @@ enum {
     CR4_PSE = 4,
     CR4_PAE = 5,
     CR4_PGE = 7,
+    CR4_PCE = 8,
 };
 
 enum {
@@ -332,6 +333,9 @@ struct X86CPUState {
     uint32_t sysenter_esp;
     uint32_t sysenter_eip;
     uint64_t tsc_offset;
+    /* P6 performance counters; they hold what was written and never count */
+    uint32_t pmc_evtsel[2];
+    uint64_t pmc_ctr[2];
 
     /* derived state, see cpu_update_mode() */
     uint8_t cpl;
@@ -362,7 +366,7 @@ struct X86CPUState {
 };
 
 
-/* The 64 bit value RDTSC, RDMSR and WRMSR pass in EDX:EAX. */
+/* The 64 bit value RDTSC, RDMSR, WRMSR and RDPMC pass in EDX:EAX. */
 static inline uint64_t get_edx_eax(X86CPUState *s)
 {
     return concat_bits(s->regs[REG_EDX], s->regs[REG_EAX], 32);
@@ -395,6 +399,7 @@ void cpu_set_cr4(X86CPUState *s, uint32_t val);
 void cpu_cpuid(X86CPUState *s);
 void cpu_rdmsr(X86CPUState *s);
 void cpu_wrmsr(X86CPUState *s);
+void cpu_rdpmc(X86CPUState *s);
 uint64_t cpu_get_tsc(X86CPUState *s);
 
 /* x86_seg.cpp */

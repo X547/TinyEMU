@@ -49,10 +49,17 @@ enum {
     MSR_TSC = 0x10,
     MSR_PLATFORM_ID = 0x17,
     MSR_UCODE_REV = 0x8b,
+    MSR_PERFCTR0 = 0xc1,
+    MSR_PERFCTR1 = 0xc2,
     MSR_SYSENTER_CS = 0x174,
     MSR_SYSENTER_ESP = 0x175,
     MSR_SYSENTER_EIP = 0x176,
+    MSR_EVNTSEL0 = 0x186,
+    MSR_EVNTSEL1 = 0x187,
 };
+
+/* P6 counters are 40 bits wide */
+static const int PMC_BITS = 40;
 
 static const uint32_t CR0_VALID_MASK = bit_at(CR0_PE) | bit_at(CR0_MP) |
     bit_at(CR0_EM) | bit_at(CR0_TS) | bit_at(CR0_ET) | bit_at(CR0_NE) |
@@ -60,7 +67,7 @@ static const uint32_t CR0_VALID_MASK = bit_at(CR0_PE) | bit_at(CR0_MP) |
     bit_at(CR0_PG);
 
 static const uint32_t CR4_VALID_MASK = bit_at(CR4_TSD) | bit_at(CR4_DE) |
-    bit_at(CR4_PSE) | bit_at(CR4_PGE);
+    bit_at(CR4_PSE) | bit_at(CR4_PGE) | bit_at(CR4_PCE);
 
 
 static void cpu_dump_state(X86CPUState *s)
@@ -485,6 +492,8 @@ static void cpu_reset(X86CPUState *s)
     s->sysenter_esp = 0;
     s->sysenter_eip = 0;
     s->tsc_offset = 0;
+    memset(s->pmc_evtsel, 0, sizeof(s->pmc_evtsel));
+    memset(s->pmc_ctr, 0, sizeof(s->pmc_ctr));
 
     s->cpl = 0;
     for (int seg = 0; seg < SEG_COUNT; seg++) {
@@ -573,6 +582,10 @@ void cpu_rdmsr(X86CPUState *s)
     case MSR_UCODE_REV:
         val = 0;
         break;
+    case MSR_PERFCTR0:
+    case MSR_PERFCTR1:
+        val = s->pmc_ctr[s->regs[REG_ECX] - MSR_PERFCTR0];
+        break;
     case MSR_SYSENTER_CS:
         val = s->sysenter_cs;
         break;
@@ -581,6 +594,10 @@ void cpu_rdmsr(X86CPUState *s)
         break;
     case MSR_SYSENTER_EIP:
         val = s->sysenter_eip;
+        break;
+    case MSR_EVNTSEL0:
+    case MSR_EVNTSEL1:
+        val = s->pmc_evtsel[s->regs[REG_ECX] - MSR_EVNTSEL0];
         break;
     default:
         raise_exception(s, EXCP_GP, 0);
@@ -601,6 +618,12 @@ void cpu_wrmsr(X86CPUState *s)
         break;
     case MSR_UCODE_REV:
         break;
+    case MSR_PERFCTR0:
+    case MSR_PERFCTR1:
+        /* the upper bits come from bit 31, not from EDX */
+        s->pmc_ctr[s->regs[REG_ECX] - MSR_PERFCTR0] =
+            get_bits(sign_extend(val, 32), 0, PMC_BITS);
+        break;
     case MSR_SYSENTER_CS:
         s->sysenter_cs = get_bits(val, 0, 16);
         break;
@@ -610,9 +633,26 @@ void cpu_wrmsr(X86CPUState *s)
     case MSR_SYSENTER_EIP:
         s->sysenter_eip = val;
         break;
+    case MSR_EVNTSEL0:
+    case MSR_EVNTSEL1:
+        if (get_bits(val, 32, 32) != 0) {
+            raise_exception(s, EXCP_GP, 0);
+        }
+        s->pmc_evtsel[s->regs[REG_ECX] - MSR_EVNTSEL0] = val;
+        break;
     default:
         raise_exception(s, EXCP_GP, 0);
     }
+}
+
+void cpu_rdpmc(X86CPUState *s)
+{
+    uint32_t idx = s->regs[REG_ECX];
+
+    if ((s->cpl != 0 && !get_bit(s->cr4, CR4_PCE)) || idx > 1) {
+        raise_exception(s, EXCP_GP, 0);
+    }
+    set_edx_eax(s, s->pmc_ctr[idx]);
 }
 
 
