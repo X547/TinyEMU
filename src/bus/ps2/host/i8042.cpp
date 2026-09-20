@@ -153,7 +153,9 @@ bool I8042Controller::AttachDevice(PS2Device *dev, int port)
 void I8042Controller::Port::PS2DataAvailable(bool available)
 {
     owner->fPending = set_bit(owner->fPending, index, available);
-    owner->UpdateIRQ();
+    if (!owner->fInRead) {
+        owner->UpdateIRQ();
+    }
 }
 
 
@@ -221,7 +223,11 @@ bool I8042Controller::Translate(uint8_t val, uint8_t *out)
 
 
 /* One byte out of a port's device, translated when the mode register asks
-   for it. */
+   for it. A read may take more than one byte out of the device, because the
+   translator folds a release prefix into the code behind it, so the line is
+   left alone until the byte the guest is to see has been settled on: it
+   drops for the byte read and rises again only for a byte the guest will
+   really be given, which is one interrupt per byte read. */
 uint8_t I8042Controller::ReadFromPort(int port)
 {
     PS2Device *dev = fPorts[port].dev;
@@ -229,27 +235,38 @@ uint8_t I8042Controller::ReadFromPort(int port)
         return 0;
     }
 
+    fInRead = true;
+    uint8_t val;
     for (;;) {
         bool is_scancode = false;
-        uint8_t val = dev->Read(&is_scancode);
+        uint8_t raw = dev->Read(&is_scancode);
         if (!is_scancode || (fMode & KBD_MODE_KCC) == 0) {
             /* Replies -- acknowledgements, identifiers, the scancode set a
                keyboard reports -- are not scancodes and go through as they
                are, and so does everything when translation is off. */
-            return val;
+            val = raw;
+            break;
         }
-        uint8_t out;
-        if (Translate(val, &out)) {
-            return out;
+        if (Translate(raw, &val)) {
+            break;
         }
         /* A swallowed release prefix. The code it belongs to was queued with
            it, so it is there; if it somehow is not, hand the prefix over
            rather than spinning. */
         if (!dev->HasData()) {
             fXlateBreak = false;
-            return val;
+            val = raw;
+            break;
         }
     }
+    fInRead = false;
+
+    uint8_t pending = fPending;
+    fPending = set_bit(fPending, port, false);
+    UpdateIRQ();
+    fPending = pending;
+    UpdateIRQ();
+    return val;
 }
 
 

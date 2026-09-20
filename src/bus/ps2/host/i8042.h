@@ -82,6 +82,10 @@ private:
        with. */
     bool fXlateBreak = false;
 
+    /* Set while one read of the data port is taking bytes out of a device,
+       so that the line is left alone until the read is over. */
+    bool fInRead = false;
+
     IRQSignal *fKbdIrq = nullptr;
     IRQSignal *fAuxIrq = nullptr;
 
