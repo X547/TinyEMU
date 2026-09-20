@@ -45,9 +45,12 @@ public:
        return nullptr. */
     virtual std::unique_ptr<HostBlockDevice> OpenBlockDevice(
         const char *path) = 0;
-    /* 'ifname' is the host interface, for a driver that attaches to one */
-    virtual std::unique_ptr<HostEthernet> OpenEthernet(const char *driver,
-                                                       const char *ifname) = 0;
+    /* 'ifname' is the host interface, for a driver that attaches to one;
+       'forwards' are the host ports a driver that translates addresses
+       publishes the guest's services on. */
+    virtual std::unique_ptr<HostEthernet> OpenEthernet(
+        const char *driver, const char *ifname,
+        const std::vector<EthernetForward> &forwards) = 0;
     virtual std::unique_ptr<HostFileSystem> OpenFileSystem(
         const char *path) = 0;
 };

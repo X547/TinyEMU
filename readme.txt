@@ -240,7 +240,8 @@ Device types:
   ata-disk               ATA disk; "file", and "read_only"
   virtio-block           "file"
   virtio-9p              "file", "tag"
-  virtio-net             "driver" ("user" or "tap"), "ifname" for tap
+  virtio-net             "driver" ("user" or "tap"), "ifname" for tap, and
+                         "forward" (see below) for user
   virtio-console         uses the emulator console
   virtio-input           "kind" ("keyboard", "mouse" or "tablet")
   virtio-gpu             2D display with a cursor; "width" and "height"
@@ -621,6 +622,35 @@ and configure the network in the guest system with:
 
 ifconfig eth0 192.168.3.2
 route add -net 0.0.0.0 gw 192.168.3.1 eth0
+
+The "user" driver translates addresses, so the guest reaches the network but
+nothing on the network has an address for the guest. A service the guest
+offers is published on a host port instead, with a "forward" entry beside the
+"driver" that asks for it:
+
+{ type: "ne2000", driver: "user",
+  forward: [ { host_port: 2323, guest_port: 23 } ] }
+
+A connection to port 2323 of the host then arrives at port 23 of the guest.
+"proto" is "tcp" or "udp", default "tcp". "host_addr" is the address the port
+is accepted on, and defaults to 127.0.0.1: a forward is a hole through to the
+guest, so opening it on "0.0.0.0" -- which offers the guest to the whole
+network -- is something the configuration has to ask for. "guest_addr" names
+which guest the connection goes to, and defaults to the one address the
+built-in DHCP server hands out.
+
+Only the "user" driver takes forwards. A "tap" guest is on the host's own
+network with an address of its own, and is reached at it.
+
+FTP needs more than its control port forwarded, because the data connection
+is made separately and to an address the two ends tell each other over the
+control one. Forwarding port 21 gets the session started, and the address
+translation rewrites what passes: an FTP client using active mode (the PORT
+command, which is what the ftp program shipped with Windows does by default)
+works, and one using passive mode works if it ignores the address in the
+server's reply and reuses the one it is already connected to, which clients
+written for NAT do. Forwarding port 20 as well achieves nothing: in active
+mode the guest makes that connection outward rather than accepting one.
 
 3.6 Network filesystem
 ----------------------

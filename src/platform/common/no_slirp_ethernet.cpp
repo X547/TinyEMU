@@ -25,9 +25,11 @@
 #include "platform_backends.h"
 
 
-std::unique_ptr<HostEthernet> slirp_ethernet_open(EventLoop &loop)
+std::unique_ptr<HostEthernet> slirp_ethernet_open(
+    EventLoop &loop, const std::vector<EthernetForward> &forwards)
 {
     (void)loop;
+    (void)forwards;
     fprintf(stderr, "Unsupported network driver 'user'\n");
     return nullptr;
 }

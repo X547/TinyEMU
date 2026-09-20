@@ -25,6 +25,7 @@
 
 #include "host_block.h"
 #include "host_console.h"
+#include "host_ethernet.h"
 #include "host_fs.h"
 #include "host_input.h"
 #include "host_screen.h"
@@ -84,4 +85,7 @@ std::unique_ptr<HostFileSystem> disk_fs_open(const char *path);
 
 std::unique_ptr<HostEthernet> tap_ethernet_open(EventLoop &loop,
                                                 const char *ifname);
-std::unique_ptr<HostEthernet> slirp_ethernet_open(EventLoop &loop);
+/* 'forwards' are the host ports the guest's own services are published on;
+   the address translation gives it no address the host could reach. */
+std::unique_ptr<HostEthernet> slirp_ethernet_open(
+    EventLoop &loop, const std::vector<EthernetForward> &forwards);

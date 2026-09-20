@@ -104,7 +104,8 @@ extern "C" void slirp_output(void *opaque, const uint8_t *pkt, int pkt_len)
 }
 
 
-std::unique_ptr<HostEthernet> slirp_ethernet_open(EventLoop &loop)
+std::unique_ptr<HostEthernet> slirp_ethernet_open(
+    EventLoop &loop, const std::vector<EthernetForward> &forwards)
 {
     /* assigned rather than initialized: s_addr is a macro on some hosts */
     struct in_addr net_addr, mask, host, dhcp, dns;
@@ -133,6 +134,20 @@ std::unique_ptr<HostEthernet> slirp_ethernet_open(EventLoop &loop)
     net->mac_addr[3] = 0x00;
     net->mac_addr[4] = 0x00;
     net->mac_addr[5] = 0x01;
+
+    /* The listening sockets go in the same set the stack's other sockets are
+       polled from, so nothing more is needed to accept on them. */
+    for (const EthernetForward &fwd : forwards) {
+        struct in_addr from, to;
+        from.s_addr = htonl(fwd.host_addr);
+        to.s_addr = htonl(fwd.guest_addr);
+        if (slirp_add_hostfwd(net->state, fwd.is_udp, from, fwd.host_port,
+                              to, fwd.guest_port) < 0) {
+            fprintf(stderr, "user: could not listen on %s port %d\n",
+                    fwd.is_udp ? "udp" : "tcp", fwd.host_port);
+            return nullptr;
+        }
+    }
 
     return net;
 }

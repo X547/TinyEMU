@@ -23,6 +23,24 @@
 
 #include <stdint.h>
 
+#include <vector>
+
+/* One connection a back end that translates addresses accepts on the guest's
+   behalf. A guest behind such a back end has no address the host can reach,
+   so a service it offers is published on a host port instead.
+
+   Addresses are in host byte order. A host address of 0 accepts on every
+   address of the host; a guest address of 0 is whichever address the back end
+   gave the guest. */
+struct EthernetForward {
+    bool is_udp = false;
+    uint32_t host_addr = 0;
+    uint16_t host_port = 0;
+    uint32_t guest_addr = 0;
+    uint16_t guest_port = 0;
+};
+
+
 /* The device half of the link, installed on the host half once the device
    exists. */
 class EthernetTarget {

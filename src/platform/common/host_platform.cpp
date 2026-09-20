@@ -86,15 +86,23 @@ std::unique_ptr<HostBlockDevice> HostPlatform::OpenBlockDevice(const char *path)
 }
 
 
-std::unique_ptr<HostEthernet> HostPlatform::OpenEthernet(const char *driver,
-                                                         const char *ifname)
+std::unique_ptr<HostEthernet> HostPlatform::OpenEthernet(
+    const char *driver, const char *ifname,
+    const std::vector<EthernetForward> &forwards)
 {
     if (strcmp(driver, "user") == 0) {
-        return slirp_ethernet_open(fLoop);
+        return slirp_ethernet_open(fLoop, forwards);
     }
     if (strcmp(driver, "tap") == 0) {
         if (ifname == nullptr) {
             fprintf(stderr, "tap: expecting an 'ifname' property\n");
+            return nullptr;
+        }
+        /* A tap interface puts the guest on the host's own network, where it
+           has an address of its own and nothing needs forwarding. */
+        if (!forwards.empty()) {
+            fprintf(stderr, "tap: 'forward' is for a driver that translates "
+                    "addresses\n");
             return nullptr;
         }
         return tap_ethernet_open(fLoop, ifname);
