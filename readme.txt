@@ -222,6 +222,14 @@ Device types:
                          8, 15, 16, 24 and 32 bits per pixel. The planar and
                          chained graphics modes addressed through the
                          0xa0000 window are not drawn
+  banshee                3dfx Voodoo Banshee on a PCI bus, with a 2D drawing
+                         engine and a hardware cursor; "vram" (video memory
+                         in MB, a power of two from 4 to 32, default 16),
+                         "model" ("banshee" or "voodoo3", which changes only
+                         what a driver matches on), and "width" and "height"
+                         (default 1024 and 768) for the size the window
+                         opens at. It has no VGA core, so it shows nothing
+                         until a driver turns its video processor on
   i8042                  the PC's keyboard controller; "vmmouse" (default 1)
                          adds the VMware backdoor port the absolute pointer
                          protocol is read through, and a nested PS/2 bus
@@ -439,6 +447,28 @@ that did not. A card image larger than two gigabytes becomes a high capacity
 card, addressed in blocks; a smaller one is addressed in bytes and holds
 what its capacity fields can express, which for an image whose size is not a
 round number of allocation units is a little less than the file.
+
+The Banshee is the display to reach for when a guest is old enough to have a
+driver for it and new enough to want its drawing accelerated. Where the
+standard VGA is a frame buffer and nothing else, this carries the 2D engine
+that goes with one: screen to screen blits, rectangle fills, host to screen
+blits and lines, each combining a source, the destination and an 8x8 pattern
+through a ternary raster operation, with two clip rectangles and colorkey
+ranges that select between four of those operations per pixel. It also has
+the 64x64 two bit hardware cursor, which is what keeps a pointer off the
+drawing path altogether.
+
+Stretched blits and polygon fills are not drawn, and neither are line styles,
+so a stippled line comes out solid. There is no 3D engine and no command
+FIFO: a command runs when its register is written or when the launch area is,
+and has finished by the time the write returns, so the engine reports itself
+idle and its FIFO empty at all times.
+
+The card has no VGA core, which is the one thing a real Banshee has that this
+does not. Nothing is shown until a driver turns the video processor on, so a
+machine with one of these and nothing else is blank through its firmware and
+its boot loader, and the picture appears when the guest's driver sets a mode.
+A machine that needs a picture before then wants a "vga" instead.
 
 The NE2000 is the adapter to reach for when a guest is old enough that its
 driver list ends well before virtio. It goes either inside a PCI host bridge,

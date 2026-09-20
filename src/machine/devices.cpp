@@ -28,6 +28,7 @@
 
 #include "ata.h"
 #include "ata_pci.h"
+#include "banshee.h"
 #include "cutils.h"
 #include "dw_i2c.h"
 #include "dw_mmc.h"
@@ -273,6 +274,19 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
         }
 #endif
         return simplefb_node_create(ctx, width, height);
+    }
+
+    if (strcmp(type, "banshee") == 0) {
+        const char *model;
+        int vram_mb, width, height;
+        if (vm_get_str_opt(node->props, "model", &model) < 0 ||
+            !node_int_opt(node, "vram", &vram_mb, BANSHEE_DEFAULT_VRAM_MB) ||
+            !node_int_opt(node, "width", &width, 1024) ||
+            !node_int_opt(node, "height", &height, 768)) {
+            return nullptr;
+        }
+        return banshee_node_create(ctx, node->IdOr("banshee"), model, vram_mb,
+                                   width, height);
     }
 
     if (strcmp(type, "syscon-poweroff") == 0) {

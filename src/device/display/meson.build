@@ -1,4 +1,4 @@
-display_sources = files('simplefb.cpp', 'virtio_gpu.cpp')
+display_sources = files('banshee.cpp', 'simplefb.cpp', 'virtio_gpu.cpp')
 if x86emu
   display_sources += files('vga.cpp')
 endif
