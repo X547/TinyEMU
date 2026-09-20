@@ -54,58 +54,13 @@ public:
     void Refresh(HostScreen *screen) override;
 };
 
-#define MAX_MERGE_DISTANCE 3
-
-void simplefb_refresh(FBDevice *fb_dev, HostScreen *screen,
-                      PhysMemoryRange *mem_range, int fb_page_count)
-{
-    const uint32_t *dirty_bits;
-    uint32_t dirty_val;
-    int y0, y1, page_y0, page_y1, byte_pos, page_index, bit_pos;
-
-    dirty_bits = mem_range->DirtyBits();
-    
-    page_index = 0;
-    y0 = y1 = 0;
-    while (page_index < fb_page_count) {
-        dirty_val = dirty_bits[page_index >> 5];
-        if (dirty_val != 0) {
-            bit_pos = 0;
-            while (dirty_val != 0) {
-                while (!get_bit(dirty_val, bit_pos))
-                    bit_pos++;
-                dirty_val = set_bit(dirty_val, bit_pos, false);
-
-                byte_pos = (page_index + bit_pos) * DEVRAM_PAGE_SIZE;
-                page_y0 = byte_pos / fb_dev->stride;
-                page_y1 = ((byte_pos + DEVRAM_PAGE_SIZE - 1) / fb_dev->stride) + 1;
-                page_y1 = min_int(page_y1, fb_dev->height);
-                if (y0 == y1) {
-                    y0 = page_y0;
-                    y1 = page_y1;
-                } else if (page_y0 <= (y1 + MAX_MERGE_DISTANCE)) {
-                    /* union with current region */
-                    y1 = page_y1;
-                } else {
-                    /* flush */
-                    screen->Update(0, y0, fb_dev->width, y1 - y0);
-                    y0 = page_y0;
-                    y1 = page_y1;
-                }
-            }
-        }
-        page_index += 32;
-    }
-
-    if (y0 != y1) {
-        screen->Update(0, y0, fb_dev->width, y1 - y0);
-    }
-}
-
 void SimpleFBState::Refresh(HostScreen *screen)
 {
     screen->SetFramebuffer(fb_data, width, height, stride);
-    simplefb_refresh(this, screen, mem_range, fb_page_count);
+    fb_walk_dirty(mem_range, fb_page_count, 0, stride, height,
+                  [&](int y0, int y1) {
+        screen->Update(0, y0, width, y1 - y0);
+    });
 }
 
 FBDevice *simplefb_init(PhysMemoryMap *map, uint64_t phys_addr,

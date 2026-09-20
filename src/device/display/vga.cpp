@@ -28,6 +28,8 @@
 #include <inttypes.h>
 #include <assert.h>
 
+#include <vector>
+
 #include "bits.h"
 #include "cutils.h"
 #include "devices.h"
@@ -106,6 +108,29 @@ public:
 };
 
 
+/* What the registers currently ask the display to be. It is worked out
+   again on every refresh and compared with the mode being shown, which is
+   how a mode switch is noticed without watching every register write. */
+enum VGAModeKind {
+    VGA_MODE_BLANK,
+    VGA_MODE_TEXT,
+    VGA_MODE_GRAPHIC, /* a linear frame buffer, set through the VBE ports */
+};
+
+struct VGAMode {
+    VGAModeKind kind = VGA_MODE_BLANK;
+    int width = 0;       /* of the displayed picture, in pixels */
+    int height = 0;
+    int bpp = 0;         /* bits per pixel of the guest's data */
+    int line_offset = 0; /* guest bytes between one row and the next */
+    uint32_t start = 0;  /* where the first row starts in video memory */
+    int cwidth = 0;      /* text mode character cell */
+    int cheight = 0;
+
+    bool operator==(const VGAMode &other) const = default;
+};
+
+
 class VGAState final: public FBDevice, public PCIBarTarget {
 public:
     int fb_page_count;
@@ -113,6 +138,10 @@ public:
     PhysMemoryRange *mem_range2;
     PCIDevice *pci_dev;
     PhysMemoryRange *rom_range;
+
+    /* the largest mode the guest is offered, from the configuration */
+    int max_width;
+    int max_height;
 
     uint8_t *vga_ram; /* 128K at 0xa0000 */
     
@@ -139,23 +168,34 @@ public:
     /* text mode state */
     uint32_t last_palette[16];
     uint16_t last_ch_attr[MAX_TEXT_WIDTH * MAX_TEXT_HEIGHT];
-    uint32_t last_width;
-    uint32_t last_height;
-    uint16_t last_line_offset;
-    uint16_t last_start_addr;
-    uint16_t last_cursor_offset;
+    uint32_t last_cursor_offset;
     uint8_t last_cursor_start;
     uint8_t last_cursor_end;
-    
+
     /* VBE extension */
     uint16_t vbe_index;
     uint16_t vbe_regs[VBE_DISPI_INDEX_NB];
+
+    /* the mode being shown */
+    VGAMode mode;
+    bool full_update = true; /* draw the whole picture on the next refresh */
+    /* the picture of a mode the screen cannot be handed as it stands */
+    std::vector<uint8_t> shadow;
+    uint32_t palette32[256] = {}; /* the DAC palette, as host pixels */
 
     void Refresh(HostScreen *screen) override;
     void SetBar(int bar_num, uint64_t addr, bool enabled) override;
 
     uint32_t VbeRead(uint32_t offset, int size_log2);
     void VbeWrite(uint32_t offset, uint32_t val, int size_log2);
+
+    VGAMode CurrentMode() const;
+    void ApplyMode(const VGAMode &new_mode);
+    void UpdateVbeVirtualSize();
+    bool UpdatePalette256();
+    void DrawRows(int y0, int y1);
+    void RefreshGraphic(HostScreen *screen);
+    void RefreshText(HostScreen *screen);
 
     VGAPortIO<0x3c0> fIo3c0 {*this};
     VGAPortIO<0x3b4> fIo3b4 {*this};
@@ -220,6 +260,45 @@ static inline int c6_to_8(int v)
     return (v << 2) | (b << 1) | b;
 }
 
+static inline int c5_to_8(int v)
+{
+    v = get_bits(v, 0, 5);
+    return (v << 3) | (v >> 2);
+}
+
+/* One row of the guest's pixels, as the 32 bit xRGB the screen takes. The
+   32 bit modes are already in that form and are not copied at all. */
+static void vga_convert_row(uint32_t *dst, const uint8_t *src, int width,
+                            int bpp, const uint32_t *palette)
+{
+    uint32_t v;
+
+    switch (bpp) {
+    case 8:
+        for (int i = 0; i < width; i++)
+            dst[i] = palette[src[i]];
+        break;
+    case 15:
+        for (int i = 0; i < width; i++) {
+            v = get_le16(src + i * 2);
+            dst[i] = (c5_to_8(v >> 10) << 16) | (c5_to_8(v >> 5) << 8) |
+                c5_to_8(v);
+        }
+        break;
+    case 16:
+        for (int i = 0; i < width; i++) {
+            v = get_le16(src + i * 2);
+            dst[i] = (c5_to_8(v >> 11) << 16) | (c6_to_8(v >> 5) << 8) |
+                c5_to_8(v);
+        }
+        break;
+    case 24:
+        for (int i = 0; i < width; i++, src += 3)
+            dst[i] = (src[2] << 16) | (src[1] << 8) | src[0];
+        break;
+    }
+}
+
 static int update_palette16(VGAState *s, uint32_t *palette)
 {
     int full_update, i;
@@ -244,55 +323,31 @@ static int update_palette16(VGAState *s, uint32_t *palette)
     return full_update;
 }
 
-/* the text refresh is just for debugging and initial boot message, so
-   it is very incomplete */
-static void vga_text_refresh(VGAState *s, HostScreen *screen)
+/* The text refresh is just for the boot messages and the BIOS menus, so it
+   is very incomplete: the font comes from the start of the video memory
+   window and the characters from the colour page of it, which is where the
+   video BIOS puts them. */
+void VGAState::RefreshText(HostScreen *screen)
 {
-    FBDevice *fb_dev = s;
-    int width, height, cwidth, cheight, cy, cx, x1, y1, width1, height1;
+    VGAState *s = this;
+    int width, height, cwidth, cheight, cy, cx;
     int cx_min, cx_max, dup9;
     uint32_t ch_attr, line_offset, start_addr, ch_addr, ch_addr1, ch, cattr;
     uint8_t *vga_ram, *font_ptr, *dst;
     uint32_t fgcol, bgcol, cursor_offset, cursor_start, cursor_end;
     bool full_update;
 
-    full_update = update_palette16(s, s->last_palette);
+    full_update = update_palette16(s, s->last_palette) || s->full_update;
 
     vga_ram = s->vga_ram;
-    
-    line_offset = s->cr[0x13];
-    line_offset <<= 3;
-    line_offset >>= 1;
 
-    start_addr = concat_bits<uint32_t>(s->cr[0x0c], s->cr[0x0d], 8);
-    
-    cheight = get_bits(s->cr[9], 0, 5) + 1;
-    cwidth = 8;
-    if (!get_bit(s->sr[1], 0))
-        cwidth++;
-    
-    width = (s->cr[0x01] + 1);
-    height = s->cr[0x12] |
-        (get_bit(s->cr[0x07], 1) << 8) |
-        (get_bit(s->cr[0x07], 6) << 9);
-    height = (height + 1) / cheight;
-    
-    width1 = width * cwidth;
-    height1 = height * cheight;
-    if (fb_dev->width < width1 || fb_dev->height < height1 ||
-        width > MAX_TEXT_WIDTH || height > MAX_TEXT_HEIGHT)
-        return; /* not enough space */
-    if (s->last_line_offset != line_offset ||
-        s->last_start_addr != start_addr ||
-        s->last_width != width ||
-        s->last_height != height) {
-        s->last_line_offset = line_offset;
-        s->last_start_addr = start_addr;
-        s->last_width = width;
-        s->last_height = height;
-        full_update = true;
-    }
-       
+    line_offset = mode.line_offset;
+    start_addr = mode.start;
+    cwidth = mode.cwidth;
+    cheight = mode.cheight;
+    width = mode.width / cwidth;
+    height = mode.height / cheight;
+
     /* update cursor position */
     cursor_offset = concat_bits<uint32_t>(s->cr[0x0e], s->cr[0x0f], 8) -
         start_addr;
@@ -313,16 +368,14 @@ static void vga_text_refresh(VGAState *s, HostScreen *screen)
 
     ch_addr1 = 0x18000 + (start_addr * 2);
     cursor_offset = 0x18000 + (start_addr + cursor_offset) * 2;
-    
-    x1 = (fb_dev->width - width1) / 2;
-    y1 = (fb_dev->height - height1) / 2;
+
 #if 0
     printf("text refresh %dx%d font=%dx%d start_addr=0x%x line_offset=0x%x\n",
            width, height, cwidth, cheight, start_addr, line_offset);
 #endif
     for(cy = 0; cy < height; cy++) {
         ch_addr = ch_addr1;
-        dst = fb_dev->fb_data + (y1 + cy * cheight) * fb_dev->stride + x1 * 4;
+        dst = fb_data + cy * cheight * stride;
         cx_min = width;
         cx_max = -1;
         for(cx = 0; cx < width; cx++) {
@@ -337,13 +390,13 @@ static void vga_text_refresh(VGAState *s, HostScreen *screen)
                 bgcol = s->last_palette[get_bits(cattr, 4, 4)];
                 fgcol = s->last_palette[get_bits(cattr, 0, 4)];
                 if (cwidth == 8) {
-                    vga_draw_glyph8(dst, fb_dev->stride, font_ptr, cheight,
+                    vga_draw_glyph8(dst, stride, font_ptr, cheight,
                                     fgcol, bgcol);
                 } else {
                     dup9 = 0;
                     if (ch >= 0xb0 && ch <= 0xdf && get_bit(s->ar[0x10], 2))
                         dup9 = 1;
-                    vga_draw_glyph9(dst, fb_dev->stride, font_ptr, cheight,
+                    vga_draw_glyph9(dst, stride, font_ptr, cheight,
                                     fgcol, bgcol, dup9);
                 }
                 /* cursor display */
@@ -356,13 +409,13 @@ static void vga_text_refresh(VGAState *s, HostScreen *screen)
 
                     if (line_last >= line_start && line_start < cheight) {
                         h = line_last - line_start + 1;
-                        dst1 = dst + fb_dev->stride * line_start;
+                        dst1 = dst + stride * line_start;
                         if (cwidth == 8) {
-                            vga_draw_glyph8(dst1, fb_dev->stride,
+                            vga_draw_glyph8(dst1, stride,
                                             cursor_glyph,
                                             h, fgcol, bgcol);
                         } else {
-                            vga_draw_glyph9(dst1, fb_dev->stride,
+                            vga_draw_glyph9(dst1, stride,
                                             cursor_glyph,
                                             h, fgcol, bgcol, 1);
                         }
@@ -374,28 +427,198 @@ static void vga_text_refresh(VGAState *s, HostScreen *screen)
         }
         if (cx_max >= cx_min) {
             //            printf("redraw %d %d %d\n", cy, cx_min, cx_max);
-            screen->Update(x1 + cx_min * cwidth, y1 + cy * cheight,
+            screen->Update(cx_min * cwidth, cy * cheight,
                            (cx_max - cx_min + 1) * cwidth, cheight);
         }
         ch_addr1 += line_offset;
     }
 }
 
+
+/* The palette a 256 colour mode is drawn with, as host pixels. Returns
+   whether it changed, which costs the whole picture a redraw. */
+bool VGAState::UpdatePalette256()
+{
+    /* the DAC holds six bits per component unless the VBE extension has
+       widened it to eight */
+    bool dac8 = get_bit(vbe_regs[VBE_DISPI_INDEX_ENABLE], 5);
+    bool changed = false;
+
+    for (int i = 0; i < 256; i++) {
+        const uint8_t *entry = &palette[i * 3];
+        uint32_t col;
+        if (dac8) {
+            col = (entry[0] << 16) | (entry[1] << 8) | entry[2];
+        } else {
+            col = (c6_to_8(entry[0]) << 16) | (c6_to_8(entry[1]) << 8) |
+                c6_to_8(entry[2]);
+        }
+        if (col != palette32[i]) {
+            palette32[i] = col;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+
+/* Rows 'y0' up to 'y1' of the guest's picture, into the shadow the screen
+   is shown from. A 32 bit mode is shown from video memory itself. */
+void VGAState::DrawRows(int y0, int y1)
+{
+    if (mode.bpp == 32)
+        return;
+
+    const uint8_t *src = mem_range->phys_mem + mode.start +
+        (size_t)y0 * mode.line_offset;
+    uint8_t *dst = shadow.data() + (size_t)y0 * stride;
+
+    for (int y = y0; y < y1; y++) {
+        vga_convert_row((uint32_t *)dst, src, width, mode.bpp, palette32);
+        src += mode.line_offset;
+        dst += stride;
+    }
+}
+
+
+void VGAState::RefreshGraphic(HostScreen *screen)
+{
+    bool redraw = full_update;
+
+    if (mode.bpp == 8 && UpdatePalette256())
+        redraw = true;
+
+    if (redraw) {
+        /* the dirty bits are taken and dropped: every row is drawn anyway */
+        mem_range->DirtyBits();
+        DrawRows(0, height);
+        screen->Update(0, 0, width, height);
+        return;
+    }
+
+    fb_walk_dirty(mem_range, fb_page_count, mode.start, mode.line_offset,
+                  height, [&](int y0, int y1) {
+        DrawRows(y0, y1);
+        screen->Update(0, y0, width, y1 - y0);
+    });
+}
+
+
+/* The mode the registers describe. Anything the device cannot draw -- a
+   blanked display, the planar and chained modes addressed through the
+   0xa0000 window, a size the video memory cannot hold -- is a blank one. */
+VGAMode VGAState::CurrentMode() const
+{
+    VGAMode m;
+    const VGAMode blank;
+
+    if (get_bit(vbe_regs[VBE_DISPI_INDEX_ENABLE], 0)) {
+        int bpp = vbe_regs[VBE_DISPI_INDEX_BPP];
+        int bytes = (bpp + 7) / 8;
+
+        if (bpp != 8 && bpp != 15 && bpp != 16 && bpp != 24 && bpp != 32)
+            return blank; /* including the 4 bit mode, which is planar */
+        m.bpp = bpp;
+        m.width = vbe_regs[VBE_DISPI_INDEX_XRES];
+        m.height = vbe_regs[VBE_DISPI_INDEX_YRES];
+        if (m.width <= 0 || m.height <= 0)
+            return blank;
+        m.line_offset = max_int(vbe_regs[VBE_DISPI_INDEX_VIRT_WIDTH],
+                                m.width) * bytes;
+        uint64_t start = (uint64_t)vbe_regs[VBE_DISPI_INDEX_Y_OFFSET] *
+            m.line_offset +
+            (uint64_t)vbe_regs[VBE_DISPI_INDEX_X_OFFSET] * bytes;
+        /* a mode panned past what the video memory holds is shown as far
+           as it reaches */
+        if (start >= (uint64_t)fb_size)
+            return blank;
+        m.start = (uint32_t)start;
+        m.height = min_int(m.height, (fb_size - (int)m.start) / m.line_offset);
+        if (m.height <= 0)
+            return blank;
+        m.kind = VGA_MODE_GRAPHIC;
+        return m;
+    }
+
+    if (!get_bit(ar_index, 5) || get_bit(gr[0x06], 0))
+        return blank;
+
+    m.cheight = get_bits(cr[9], 0, 5) + 1;
+    m.cwidth = get_bit(sr[1], 0) ? 8 : 9;
+    int cols = cr[0x01] + 1;
+    int lines = cr[0x12] | (get_bit(cr[0x07], 1) << 8) |
+        (get_bit(cr[0x07], 6) << 9);
+    int rows = (lines + 1) / m.cheight;
+    if (cols <= 1 || rows <= 1 || cols > MAX_TEXT_WIDTH ||
+        rows > MAX_TEXT_HEIGHT) {
+        return blank; /* nothing has been programmed for yet */
+    }
+    m.width = cols * m.cwidth;
+    m.height = rows * m.cheight;
+    /* the offset register counts the words between one row and the next */
+    m.line_offset = cr[0x13] * 4;
+    m.start = concat_bits<uint32_t>(cr[0x0c], cr[0x0d], 8);
+    m.kind = VGA_MODE_TEXT;
+    return m;
+}
+
+
+/* Show 'new_mode' from here on, sizing the picture the screen is handed and
+   the shadow it is drawn into. */
+void VGAState::ApplyMode(const VGAMode &new_mode)
+{
+    if (new_mode == mode)
+        return;
+
+    mode = new_mode;
+    full_update = true;
+    switch (mode.kind) {
+    case VGA_MODE_BLANK:
+        /* the size the screen was is kept, so that a mode switch through a
+           blanked display does not resize it twice */
+        fb_data = nullptr;
+        shadow.clear();
+        break;
+    case VGA_MODE_GRAPHIC:
+        width = mode.width;
+        height = mode.height;
+        if (mode.bpp == 32) {
+            /* the guest's pixels are what the screen takes: no copy */
+            stride = mode.line_offset;
+            fb_data = mem_range->phys_mem + mode.start;
+            shadow.clear();
+            break;
+        }
+        [[fallthrough]];
+    case VGA_MODE_TEXT:
+        width = mode.width;
+        height = mode.height;
+        stride = width * 4;
+        shadow.assign((size_t)stride * height, 0);
+        fb_data = shadow.data();
+        break;
+    }
+}
+
+
 void VGAState::Refresh(HostScreen *screen)
 {
-    VGAState *s = this;
-    FBDevice *fb_dev = this;
+    ApplyMode(CurrentMode());
 
-    screen->SetFramebuffer(fb_data, width, height, stride);
-    if (!get_bit(s->ar_index, 5)) {
-        /* blank */
-    } else if (get_bit(s->gr[0x06], 0)) {
-        /* graphic mode (VBE) */
-        simplefb_refresh(fb_dev, screen, s->mem_range, s->fb_page_count);
-    } else {
-        /* text mode */
-        vga_text_refresh(s, screen);
+    switch (mode.kind) {
+    case VGA_MODE_BLANK:
+        screen->SetFramebuffer(nullptr, width, height, 0);
+        break;
+    case VGA_MODE_TEXT:
+        screen->SetFramebuffer(fb_data, width, height, stride);
+        RefreshText(screen);
+        break;
+    case VGA_MODE_GRAPHIC:
+        screen->SetFramebuffer(fb_data, width, height, stride);
+        RefreshGraphic(screen);
+        break;
     }
+    full_update = false;
 }
 
 /* force some bits to zero */
@@ -644,11 +867,28 @@ static void vga_ioport_write(VGAState *s, uint32_t addr, uint32_t val)
 }
 
 
+/* How wide and tall the guest may make its picture in the memory it has.
+   The width is what it asked for, at least as wide as the mode; the height
+   is how many of those rows fit, which is how far it may pan. */
+void VGAState::UpdateVbeVirtualSize()
+{
+    int bytes = (vbe_regs[VBE_DISPI_INDEX_BPP] + 7) / 8;
+    int virt_width = max_int(vbe_regs[VBE_DISPI_INDEX_VIRT_WIDTH],
+                             vbe_regs[VBE_DISPI_INDEX_XRES]);
+    int line_offset = virt_width * bytes;
+
+    if (line_offset <= 0)
+        return;
+    vbe_regs[VBE_DISPI_INDEX_VIRT_WIDTH] = virt_width;
+    vbe_regs[VBE_DISPI_INDEX_VIRT_HEIGHT] =
+        min_int(fb_size / line_offset, 0xffff);
+}
+
+
 void VGAState::VbeWrite(uint32_t offset, uint32_t val, int size_log2)
 {
     VGAState *s = this;
-    FBDevice *fb_dev = s;
-    
+
     if (offset == 0) {
         s->vbe_index = val;
     } else {
@@ -663,30 +903,33 @@ void VGAState::VbeWrite(uint32_t offset, uint32_t val, int size_log2)
         case VBE_DISPI_INDEX_ENABLE:
             if ((val & VBE_DISPI_ENABLED) &&
                 !(s->vbe_regs[VBE_DISPI_INDEX_ENABLE] & VBE_DISPI_ENABLED)) {
-                /* set graphic mode */
-                /* XXX: resolution change not really supported */
-                if (s->vbe_regs[VBE_DISPI_INDEX_XRES] <= 4096 &&
-                    s->vbe_regs[VBE_DISPI_INDEX_YRES] <= 4096 &&
-                    (s->vbe_regs[VBE_DISPI_INDEX_XRES] * 4 *
-                     s->vbe_regs[VBE_DISPI_INDEX_YRES]) <= fb_dev->fb_size) {
-                    fb_dev->width = s->vbe_regs[VBE_DISPI_INDEX_XRES];
-                    fb_dev->height = s->vbe_regs[VBE_DISPI_INDEX_YRES];
-                    fb_dev->stride = fb_dev->width * 4;
-                }
-                s->vbe_regs[VBE_DISPI_INDEX_VIRT_WIDTH] =
-                    s->vbe_regs[VBE_DISPI_INDEX_XRES];
-                s->vbe_regs[VBE_DISPI_INDEX_VIRT_HEIGHT] =
-                    s->vbe_regs[VBE_DISPI_INDEX_YRES];
+                /* a mode is set: the picture starts at the beginning of the
+                   video memory again, and the refresh takes the size from
+                   the registers as they now stand */
+                s->vbe_regs[VBE_DISPI_INDEX_VIRT_WIDTH] = 0;
                 s->vbe_regs[VBE_DISPI_INDEX_X_OFFSET] = 0;
                 s->vbe_regs[VBE_DISPI_INDEX_Y_OFFSET] = 0;
+                s->vbe_regs[VBE_DISPI_INDEX_ENABLE] = val;
+                s->UpdateVbeVirtualSize();
+                if (!(val & VBE_DISPI_NOCLEARMEM)) {
+                    int rows = min_int(s->vbe_regs[VBE_DISPI_INDEX_YRES],
+                                       s->vbe_regs[VBE_DISPI_INDEX_VIRT_HEIGHT]);
+                    memset(s->mem_range->phys_mem, 0,
+                           (size_t)rows *
+                           s->vbe_regs[VBE_DISPI_INDEX_VIRT_WIDTH] *
+                           ((s->vbe_regs[VBE_DISPI_INDEX_BPP] + 7) / 8));
+                }
             }
+            s->vbe_regs[VBE_DISPI_INDEX_ENABLE] = val;
+            break;
+        case VBE_DISPI_INDEX_BPP:
+        case VBE_DISPI_INDEX_VIRT_WIDTH:
             s->vbe_regs[s->vbe_index] = val;
+            s->UpdateVbeVirtualSize();
             break;
         case VBE_DISPI_INDEX_XRES:
         case VBE_DISPI_INDEX_YRES:
-        case VBE_DISPI_INDEX_BPP:
         case VBE_DISPI_INDEX_BANK:
-        case VBE_DISPI_INDEX_VIRT_WIDTH:
         case VBE_DISPI_INDEX_VIRT_HEIGHT:
         case VBE_DISPI_INDEX_X_OFFSET:
         case VBE_DISPI_INDEX_Y_OFFSET:
@@ -707,10 +950,10 @@ uint32_t VGAState::VbeRead(uint32_t offset, int size_log2)
         if (s->vbe_regs[VBE_DISPI_INDEX_ENABLE] & VBE_DISPI_GETCAPS) {
             switch(s->vbe_index) {
             case VBE_DISPI_INDEX_XRES:
-                val = s->width;
+                val = s->max_width;
                 break;
             case VBE_DISPI_INDEX_YRES:
-                val = s->height;
+                val = s->max_height;
                 break;
             case VBE_DISPI_INDEX_BPP:
                 val = 32;
@@ -759,6 +1002,10 @@ static std::unique_ptr<FBDevice> pci_vga_init(PCIBus *bus, int width,
     auto s = std::make_unique<VGAState>();
     FBDevice *fb_dev = s.get();
 
+    /* the configured size is the mode the guest is offered, and the video
+       memory is what that mode takes at 32 bits per pixel */
+    s->max_width = width;
+    s->max_height = height;
     fb_dev->width = width;
     fb_dev->height = height;
     fb_dev->stride = width * 4;

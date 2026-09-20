@@ -25,6 +25,7 @@
 #define CUTILS_H
 
 #include <inttypes.h>
+#include <stddef.h>
 
 /* slirp is built as C and includes this header, so the functions it shares
    with the C++ emulator need C linkage. */

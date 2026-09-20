@@ -214,8 +214,14 @@ Device types:
                          PIIX3 ISA bridge that routes the four INTx lines
                          onto the PIC, and a nested PCI bus
   vga                    the standard VGA on a PCI bus, which is also what
-                         decodes the legacy VGA and VBE ports; "width",
-                         "height", and the machine's vga_bios as its ROM
+                         decodes the legacy VGA and VBE ports; "width" and
+                         "height" are the largest mode it offers and the
+                         size the window opens at, and the machine's
+                         vga_bios is its ROM. It follows the guest from one
+                         mode to another: text, and the VBE linear modes at
+                         8, 15, 16, 24 and 32 bits per pixel. The planar and
+                         chained graphics modes addressed through the
+                         0xa0000 window are not drawn
   i8042                  the PC's keyboard controller; "vmmouse" (default 1)
                          adds the VMware backdoor port the absolute pointer
                          protocol is read through, and a nested PS/2 bus
