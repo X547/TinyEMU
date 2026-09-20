@@ -34,6 +34,7 @@
 #include "dwmac.h"
 #include "hid.h"
 #include "mdio.h"
+#include "ne2000.h"
 #include "nvme.h"
 #include "pci_bridge.h"
 #include "pci_host_dw.h"
@@ -534,6 +535,22 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
         }
         return new DwmacDevice(ctx, std::move(net), compatible, phy_mode,
                                quirks);
+    }
+
+    if (strcmp(type, "ne2000") == 0) {
+        int port, irq;
+        /* Only a card jumpered onto a port based machine names either; on
+           PCI the guest places both. */
+        if (!node_int_opt(node, "reg", &port, -1) ||
+            !node_int_opt(node, "irq", &irq, -1)) {
+            return nullptr;
+        }
+        auto net = node_open_ethernet(node, ctx);
+        if (net == nullptr) {
+            return nullptr;
+        }
+        return new NE2000Device(ctx, std::move(net), node->IdOr("ne2000"),
+                                port, irq);
     }
 
     if (strcmp(type, "ethernet-phy") == 0) {

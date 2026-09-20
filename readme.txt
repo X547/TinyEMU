@@ -281,6 +281,11 @@ Device types:
                          nested SD bus
   sd-card               SD memory card; "file", and "read_only"
   mmc-card               eMMC storage device; "file", and "read_only"
+  ne2000                 NE2000 Ethernet adapter, on PCI as an RTL8029AS or
+                         on the ports a PC's ISA bus carried one on; "driver"
+                         and "ifname" as for virtio-net, and "reg" (default
+                         0x300) and "irq" (default 9) for the ports, which
+                         only a card on the pc bus takes
   dwmac                  Synopsys DesignWare Ethernet QoS MAC on the FDT bus;
                          "driver" and "ifname" as for virtio-net,
                          "compatible" (which core the node claims to be,
@@ -433,6 +438,24 @@ that did not. A card image larger than two gigabytes becomes a high capacity
 card, addressed in blocks; a smaller one is addressed in bytes and holds
 what its capacity fields can express, which for an image whose size is not a
 round number of allocation units is a little less than the file.
+
+The NE2000 is the adapter to reach for when a guest is old enough that its
+driver list ends well before virtio. It goes either inside a PCI host bridge,
+where it is the RTL8029AS every NE2000 driver knows, or straight on the pc
+bus, where it is the ISA card jumpered to the ports and the line "reg" and
+"irq" name; a machine that addresses its devices neither way has nowhere to
+put one, and says so. Both are the same DP8390 behind the same 32 KB of
+buffer memory, and nothing about it is programmed from the machine, so a card
+moved off 0x300 or off line 9 has to be told to the guest's driver as well.
+
+The card has no bus master: everything passes through its one data port,
+which the guest points at the buffer with a start address and a byte count.
+Transmitting hands the buffer straight to the back end, and a frame arriving
+from the back end is placed straight into the receive ring. The back end is
+asked before it delivers one, so the ring never overflows and the overflow
+recovery a driver carries is never reached. The error counters stay at zero,
+the multicast hash filter works, and neither the loopback modes nor the byte
+order bit is modelled.
 
 The Ethernet MAC nests the same way, and the PHY it talks to is a device of
 its own on the MDIO bus the MAC provides:
