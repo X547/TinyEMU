@@ -446,9 +446,15 @@ void PICState::Write(uint32_t offset, uint32_t val, int size_log2)
         } else if (get_bit(val, 3)) {
             if (get_bit(val, 1))
                 s->read_reg_select = get_bit(val, 0);
-            if (get_bit(val, 6))
+            if (get_bit(val, 6)) {
                 s->special_mask = get_bit(val, 5);
+                /* which requests outrank what is in service has changed */
+                s->update_target->UpdatePICIRQ();
+            }
         } else {
+            /* Ending an interrupt, or rotating the priorities, lets a
+               request that was outranked through, so the processor is asked
+               again once the command has been carried out. */
             switch(val) {
             case 0x00:
             case 0x80:
@@ -497,6 +503,7 @@ void PICState::Write(uint32_t offset, uint32_t val, int size_log2)
                 s->priority_add = (priority + 1) & 7;
                 break;
             }
+            s->update_target->UpdatePICIRQ();
         }
     } else {
         switch(s->init_state) {
