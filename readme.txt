@@ -485,11 +485,12 @@ speakers and a headphone jack recorded to a file:
                nothing is converted
   host         where the sound goes: an object with "driver" and what that
                driver takes:
-                 "host"  the host's own audio system (WASAPI on Windows);
-                         "device" picks an output by part of its name, and
-                         without it the default output is followed as the
-                         user changes it. On a host without an audio back
-                         end it is "none". The default
+                 "host"  the host's own audio system: WASAPI on Windows,
+                         where "device" picks an output by part of its
+                         name and without it the default output is
+                         followed as the user changes it; the Media Kit's
+                         system mixer on Haiku. On a host without an audio
+                         back end it is "none". The default
                  "wav"   "file", a WAV file the guest's sound is written to
                  "none"  nothing, but the guest's streams keep time
                "latency" (default 20) is how far ahead of the listener,

@@ -43,12 +43,16 @@ if platform_os == 'windows'
   )
 else
   platform_sources += files(
-    'common/no_host_audio.cpp',
     'posix/event_loop_wait.cpp',
     'posix/file_block.cpp',
     'posix/fs_disk.cpp',
     'posix/stdio_console.cpp',
   )
+endif
+if platform_os == 'haiku'
+  platform_sources += files('haiku/media_audio.cpp')
+elif platform_os != 'windows'
+  platform_sources += files('common/no_host_audio.cpp')
 endif
 if platform_os == 'linux'
   platform_sources += files('linux/tap_ethernet.cpp')

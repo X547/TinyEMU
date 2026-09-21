@@ -187,6 +187,13 @@ if whp_enabled
   emu_deps += whp_deps
 endif
 
+# Haiku plays sound through the Media Kit, whose nodes are loopers.
+if platform_os == 'haiku'
+  foreach libname : ['be', 'media']
+    emu_deps += cpp.find_library(libname)
+  endforeach
+endif
+
 slirp_enabled = get_option('slirp')
 
 # ----------------------------------------------------------------------------
