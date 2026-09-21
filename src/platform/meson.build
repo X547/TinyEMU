@@ -51,6 +51,11 @@ if platform_os == 'linux'
 else
   platform_sources += files('common/no_tap_ethernet.cpp')
 endif
+if platform_os == 'linux' and host_machine.cpu_family() in ['x86', 'x86_64']
+  platform_sources += files('linux/kvm_x86.cpp')
+else
+  platform_sources += files('common/no_x86_hypervisor.cpp')
+endif
 if slirp_enabled
   platform_sources += files('slirp/slirp_ethernet.cpp')
 else

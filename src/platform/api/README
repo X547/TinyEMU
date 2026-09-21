@@ -12,3 +12,6 @@ lock (src/core/device_lock.h).
   only with the device lock held; a thread of its own takes the lock first.
 - A host object that must do work on a thread of its own, such as a window,
   hands it over rather than doing it in the call.
+- The x86 hypervisor runs the processor on the processor thread, so its
+  running methods are called without the lock; host_x86_hypervisor.h says
+  which.

@@ -30,7 +30,9 @@
 
 #include "bits.h"
 #include "cutils.h"
+#include "host_memory.h"
 #include "host_time.h"
+#include "host_x86_hypervisor.h"
 #include "iomem.h"
 #include "devices.h"
 #include "simplefb.h"
@@ -40,20 +42,6 @@
 #include "machine.h"
 #include "pci.h"
 #include "pci_host_i440fx.h"
-
-#if defined(__linux__) && (defined(__i386__) || defined(__x86_64__))
-#define USE_KVM
-#endif
-
-#ifdef USE_KVM
-#include <fcntl.h>
-#include <unistd.h>
-#include <linux/kvm.h>
-#include <sys/mman.h>
-#include <sys/ioctl.h>
-#include <signal.h>
-#include <sys/time.h>
-#endif
 
 //#define DEBUG_BIOS
 //#define DUMP_IOPORT
@@ -1003,37 +991,36 @@ static int64_t pit_update_irq(PITState *pit)
 
 class PCMachine;
 
-#ifdef USE_KVM
-/* With KVM the kernel owns guest RAM and the dirty log, so the memory map
-   delegates to it instead of managing the mappings itself. */
-class KvmPhysMemoryMap final: public PhysMemoryMap {
+/* With a hypervisor the host reads guest RAM directly and keeps the dirty
+   log, so the memory map tells it about each mapping instead of managing
+   them itself. */
+class HypervisorPhysMemoryMap final: public PhysMemoryMap {
 private:
-    PCMachine &fMachine;
+    HostX86Hypervisor &fHypervisor;
 
     void MapRam(PhysMemoryRange *pr);
 
 public:
-    KvmPhysMemoryMap(PCMachine &machine): fMachine(machine) {}
+    HypervisorPhysMemoryMap(HostX86Hypervisor &hypervisor):
+        fHypervisor(hypervisor) {}
 
     PhysMemoryRange *RegisterRam(uint64_t addr, uint64_t size,
                                  int devram_flags) override;
-    void FreeRam(PhysMemoryRange *pr) override;
     const uint32_t *GetDirtyBits(PhysMemoryRange *pr) override;
     void SetRamAddr(PhysMemoryRange *pr, uint64_t addr, bool enabled) override;
 };
 
-/* With KVM the interrupt controller lives in the kernel, so device IRQs go
+/* With a hypervisor the interrupt controller is the host's, so device IRQs go
    straight there rather than through the emulated 8259s. */
-class KvmIRQTarget final: public IRQTarget {
+class HypervisorIRQTarget final: public IRQTarget {
 private:
     PCMachine &fMachine;
 
 public:
-    KvmIRQTarget(PCMachine &machine): fMachine(machine) {}
+    HypervisorIRQTarget(PCMachine &machine): fMachine(machine) {}
 
     void SetIRQ(int irq_num, int level) override;
 };
-#endif
 
 class PCMachine final:
     public VirtMachine,
@@ -1041,7 +1028,8 @@ class PCMachine final:
     public CPUIRQTarget,
     public PITTickSource,
     public X86HardIntnoSource,
-    public X86TscSource {
+    public X86TscSource,
+    public X86HypervisorTarget {
 public:
     uint64_t ram_size;
     PhysMemoryMap *mem_map;
@@ -1061,17 +1049,9 @@ public:
     VMPortTarget *vmport = nullptr;
     uint64_t fb_base = 0;
 
-#ifdef USE_KVM
-    bool kvm_enabled;
-    int kvm_fd;
-    int vm_fd;
-    int vcpu_fd;
-    int kvm_run_size;
-    struct kvm_run *kvm_run;
-    KvmIRQTarget kvm_irq_target {*this};
-    /* the processor thread, for signalling it out of KVM_RUN */
-    pthread_t vcpu_thread;
-#endif
+    /* runs the processor instead of the interpreter when the host has one */
+    std::unique_ptr<HostX86Hypervisor> hypervisor;
+    HypervisorIRQTarget fHypervisorIrqTarget {*this};
 
     /* fixed-function port stubs and the VMware backdoor port */
     uint32_t Port80Read(uint32_t offset, int size_log2);
@@ -1082,9 +1062,12 @@ public:
     void VmPortWrite(uint32_t addr, uint32_t val, int size_log2);
     uint32_t BiosDebugRead(uint32_t offset, int size_log2);
     void BiosDebugWrite(uint32_t offset, uint32_t val, int size_log2);
-    /* the CPU reaches the port map through this */
-    uint32_t PortRead(uint32_t port, int size_log2);
-    void PortWrite(uint32_t port, uint32_t val, int size_log2);
+    /* X86HypervisorTarget; the interpreter reaches the port map through
+       fPortIo too */
+    uint32_t PortRead(uint32_t port, int size_log2) override;
+    void PortWrite(uint32_t port, uint32_t val, int size_log2) override;
+    void MmioRead(uint64_t addr, uint8_t *data, int len) override;
+    void MmioWrite(uint64_t addr, const uint8_t *data, int len) override;
 
     DeviceIOAdapter<PCMachine, &PCMachine::Port80Read,
                     &PCMachine::Port80Write> fPort80Io {*this};
@@ -1179,17 +1162,16 @@ uint32_t PCMachine::VmPortRead(uint32_t addr, int size_log2)
     PCMachine *s = this;
     uint32_t regs[6];
 
-#ifdef USE_KVM
-    if (s->kvm_enabled) {
-        struct kvm_regs r;
+    if (s->hypervisor) {
+        HostX86Regs r;
 
-        ioctl(s->vcpu_fd, KVM_GET_REGS, &r);
-        regs[REG_EAX] = r.rax;
-        regs[REG_EBX] = r.rbx;
-        regs[REG_ECX] = r.rcx;
-        regs[REG_EDX] = r.rdx;
-        regs[REG_ESI] = r.rsi;
-        regs[REG_EDI] = r.rdi;
+        s->hypervisor->GetRegs(&r);
+        regs[REG_EAX] = r.gpr[0];
+        regs[REG_EBX] = r.gpr[3];
+        regs[REG_ECX] = r.gpr[1];
+        regs[REG_EDX] = r.gpr[2];
+        regs[REG_ESI] = r.gpr[6];
+        regs[REG_EDI] = r.gpr[7];
 
         if (regs[REG_EAX] == VMPORT_MAGIC) {
 
@@ -1197,17 +1179,15 @@ uint32_t PCMachine::VmPortRead(uint32_t addr, int size_log2)
 
             /* Note: in 64 bits the high parts are reset to zero
                in all cases. */
-            r.rax = regs[REG_EAX];
-            r.rbx = regs[REG_EBX];
-            r.rcx = regs[REG_ECX];
-            r.rdx = regs[REG_EDX];
-            r.rsi = regs[REG_ESI];
-            r.rdi = regs[REG_EDI];
-            ioctl(s->vcpu_fd, KVM_SET_REGS, &r);
+            r.gpr[0] = regs[REG_EAX];
+            r.gpr[3] = regs[REG_EBX];
+            r.gpr[1] = regs[REG_ECX];
+            r.gpr[2] = regs[REG_EDX];
+            r.gpr[6] = regs[REG_ESI];
+            r.gpr[7] = regs[REG_EDI];
+            s->hypervisor->SetRegs(r);
         }
-    } else
-#endif
-    {
+    } else {
         regs[REG_EAX] = x86_cpu_get_reg(s->cpu_state, 0);
         regs[REG_EBX] = x86_cpu_get_reg(s->cpu_state, 3);
         regs[REG_ECX] = x86_cpu_get_reg(s->cpu_state, 1);
@@ -1303,92 +1283,34 @@ uint32_t PCMachine::PortRead(uint32_t port, int size_log2)
     return val;
 }
 
-#ifdef USE_KVM
-
-static void sigalrm_handler(int sig)
-{
-}
-
-#define CPUID_APIC bit_at(9)
-#define CPUID_ACPI bit_at(22)
-
-static void kvm_set_cpuid(PCMachine *s)
-{
-    struct kvm_cpuid2 *kvm_cpuid;
-    int n_ent_max, i;
-    struct kvm_cpuid_entry2 *ent;
-    
-    n_ent_max = 128;
-    kvm_cpuid = static_cast<struct kvm_cpuid2 *>(
-        mallocz(sizeof(struct kvm_cpuid2) +
-                n_ent_max * sizeof(kvm_cpuid->entries[0])));
-    
-    kvm_cpuid->nent = n_ent_max;
-    if (ioctl(s->kvm_fd, KVM_GET_SUPPORTED_CPUID, kvm_cpuid) < 0) {
-        perror("KVM_GET_SUPPORTED_CPUID");
-        exit(1);
-    }
-
-    for(i = 0; i < kvm_cpuid->nent; i++) {
-        ent = &kvm_cpuid->entries[i];
-        /* remove the APIC & ACPI to be in sync with the emulator */
-        if (ent->function == 1 || ent->function == 0x80000001) {
-            ent->edx &= ~(CPUID_APIC | CPUID_ACPI);
-        }
-    }
-    
-    if (ioctl(s->vcpu_fd, KVM_SET_CPUID2, kvm_cpuid) < 0) {
-        perror("KVM_SET_CPUID2");
-        exit(1);
-    }
-    free(kvm_cpuid);
-}
-
 /* XXX: should check overlapping mappings */
-void KvmPhysMemoryMap::MapRam(PhysMemoryRange *pr)
+void HypervisorPhysMemoryMap::MapRam(PhysMemoryRange *pr)
 {
-    PCMachine *s = &fMachine;
-    struct kvm_userspace_memory_region region;
-    int flags;
-
-    region.slot = IndexOfRange(pr);
-    flags = 0;
-    if (pr->devram_flags & DEVRAM_FLAG_ROM)
-        flags |= KVM_MEM_READONLY;
-    if (pr->devram_flags & DEVRAM_FLAG_DIRTY_BITS)
-        flags |= KVM_MEM_LOG_DIRTY_PAGES;
-    region.flags = flags;
-    region.guest_phys_addr = pr->addr;
-    region.memory_size = pr->size;
-#if 0
-    printf("map slot %d: %08lx %08lx\n",
-           region.slot, pr->addr, pr->size);
-#endif
-    region.userspace_addr = (uintptr_t)pr->phys_mem;
-    if (ioctl(s->vm_fd, KVM_SET_USER_MEMORY_REGION, &region) < 0) {
-        perror("KVM_SET_USER_MEMORY_REGION");
-        exit(1);
-    }
+    fHypervisor.MapRam(IndexOfRange(pr), pr->addr, pr->size, pr->phys_mem,
+                       (pr->devram_flags & DEVRAM_FLAG_ROM) != 0,
+                       (pr->devram_flags & DEVRAM_FLAG_DIRTY_BITS) != 0);
 }
 
-/* XXX: just for one region */
-PhysMemoryRange *KvmPhysMemoryMap::RegisterRam(uint64_t addr, uint64_t size,
-                                               int devram_flags)
+PhysMemoryRange *HypervisorPhysMemoryMap::RegisterRam(uint64_t addr,
+                                                      uint64_t size,
+                                                      int devram_flags)
 {
     PhysMemoryRange *pr;
-    uint8_t *phys_mem;
 
     pr = RegisterRamEntry(addr, size, devram_flags);
 
-    phys_mem = static_cast<uint8_t *>(mmap(NULL, size, PROT_READ | PROT_WRITE,
-                                           MAP_SHARED | MAP_ANONYMOUS, -1, 0));
-    if (!phys_mem)
-        return NULL;
-    pr->phys_mem = phys_mem;
+    pr->phys_mem = host_ram_alloc(size);
+    if (pr->phys_mem == nullptr) {
+        fprintf(stderr, "Could not allocate VM memory\n");
+        exit(1);
+    }
     if (devram_flags & DEVRAM_FLAG_DIRTY_BITS) {
-        int n_pages = size >> 12;
+        /* the hypervisor fills whole 64 bit words */
+        int n_pages = size >> DEVRAM_PAGE_SIZE_LOG2;
         pr->dirty_bits_size = ((n_pages + 63) / 64) * 8;
-        pr->dirty_bits = mallocz_t<uint32_t>(pr->dirty_bits_size);
+        pr->dirty_bits_tab[0] = std::make_unique<uint32_t[]>(
+            pr->dirty_bits_size / sizeof(uint32_t));
+        pr->dirty_bits = pr->dirty_bits_tab[0].get();
     }
 
     if (pr->size != 0) {
@@ -1397,8 +1319,8 @@ PhysMemoryRange *KvmPhysMemoryMap::RegisterRam(uint64_t addr, uint64_t size,
     return pr;
 }
 
-void KvmPhysMemoryMap::SetRamAddr(PhysMemoryRange *pr, uint64_t addr,
-                                  bool enabled)
+void HypervisorPhysMemoryMap::SetRamAddr(PhysMemoryRange *pr, uint64_t addr,
+                                         bool enabled)
 {
     if (enabled) {
         if (pr->size == 0 || addr != pr->addr) {
@@ -1417,322 +1339,96 @@ void KvmPhysMemoryMap::SetRamAddr(PhysMemoryRange *pr, uint64_t addr,
     }
 }
 
-const uint32_t *KvmPhysMemoryMap::GetDirtyBits(PhysMemoryRange *pr)
+const uint32_t *HypervisorPhysMemoryMap::GetDirtyBits(PhysMemoryRange *pr)
 {
-    PCMachine *s = &fMachine;
-    struct kvm_dirty_log dlog;
-    
     if (pr->size == 0) {
         /* not mapped: we assume no modification was made */
         memset(pr->dirty_bits, 0, pr->dirty_bits_size);
     } else {
-        dlog.slot = IndexOfRange(pr);
-        dlog.dirty_bitmap = pr->dirty_bits;
-        if (ioctl(s->vm_fd, KVM_GET_DIRTY_LOG, &dlog) < 0) {
-            perror("KVM_GET_DIRTY_LOG");
-            exit(1);
-        }
+        fHypervisor.GetDirtyLog(IndexOfRange(pr), pr->dirty_bits);
     }
     return pr->dirty_bits;
 }
 
-void KvmPhysMemoryMap::FreeRam(PhysMemoryRange *pr)
+void HypervisorIRQTarget::SetIRQ(int irq_num, int level)
 {
-    /* XXX: do it */
-    munmap(pr->phys_mem, pr->org_size);
-    free(pr->dirty_bits);
+    fMachine.hypervisor->SetIRQ(irq_num, level);
 }
 
-void KvmIRQTarget::SetIRQ(int irq_num, int level)
+void PCMachine::MmioWrite(uint64_t paddr, const uint8_t *data, int len)
 {
-    PCMachine *s = &fMachine;
-    struct kvm_irq_level irq_level;
-    irq_level.irq = irq_num;
-    irq_level.level = level;
-    if (ioctl(s->vm_fd, KVM_IRQ_LINE, &irq_level) < 0) {
-        perror("KVM_IRQ_LINE");
-        exit(1);
-    }
-}
-
-static void kvm_init(PCMachine *s)
-{
-    int ret, i;
-    struct sigaction act;
-    struct kvm_pit_config pit_config;
-    uint64_t base_addr;
-    
-    s->kvm_enabled = false;
-    s->kvm_fd = open("/dev/kvm", O_RDWR);
-    if (s->kvm_fd < 0) {
-        fprintf(stderr, "KVM not available\n");
-        return;
-    }
-    ret = ioctl(s->kvm_fd, KVM_GET_API_VERSION, 0);
-    if (ret < 0) {
-        perror("KVM_GET_API_VERSION");
-        exit(1);
-    }
-    if (ret != 12) {
-        fprintf(stderr, "Unsupported KVM version\n");
-        close(s->kvm_fd);
-        s->kvm_fd = -1;
-        return;
-    }
-    s->vm_fd = ioctl(s->kvm_fd, KVM_CREATE_VM, 0);
-    if (s->vm_fd < 0) {
-        perror("KVM_CREATE_VM");
-        exit(1);
-    }
-
-    /* just before the BIOS */
-    base_addr = 0xfffbc000;
-    if (ioctl(s->vm_fd, KVM_SET_IDENTITY_MAP_ADDR, &base_addr) < 0) {
-        perror("KVM_SET_IDENTITY_MAP_ADDR");
-        exit(1);
-    }
-    
-    if (ioctl(s->vm_fd, KVM_SET_TSS_ADDR, (long)(base_addr + 0x1000)) < 0) {
-        perror("KVM_SET_TSS_ADDR");
-        exit(1);
-    }
-    
-    if (ioctl(s->vm_fd, KVM_CREATE_IRQCHIP, 0) < 0) {
-        perror("KVM_CREATE_IRQCHIP");
-        exit(1);
-    }
-
-    memset(&pit_config, 0, sizeof(pit_config));
-    pit_config.flags = KVM_PIT_SPEAKER_DUMMY;
-    if (ioctl(s->vm_fd, KVM_CREATE_PIT2, &pit_config)) {
-        perror("KVM_CREATE_PIT2");
-        exit(1);
-    }
-    
-    s->vcpu_fd = ioctl(s->vm_fd, KVM_CREATE_VCPU, 0);
-    if (s->vcpu_fd < 0) {
-        perror("KVM_CREATE_VCPU");
-        exit(1);
-    }
-
-    kvm_set_cpuid(s);
-    
-    /* map the kvm_run structure */
-    s->kvm_run_size = ioctl(s->kvm_fd, KVM_GET_VCPU_MMAP_SIZE, NULL);
-    if (s->kvm_run_size < 0) {
-        perror("KVM_GET_VCPU_MMAP_SIZE");
-        exit(1);
-    }
-
-    s->kvm_run = static_cast<struct kvm_run *>(
-        mmap(NULL, s->kvm_run_size, PROT_READ | PROT_WRITE,
-             MAP_SHARED, s->vcpu_fd, 0));
-    if (!s->kvm_run) {
-        perror("mmap kvm_run");
-        exit(1);
-    }
-
-    for(i = 0; i < 16; i++) {
-        s->pic_irq[i].Init(&s->kvm_irq_target, i);
-    }
-
-    act.sa_handler = sigalrm_handler;
-    sigemptyset(&act.sa_mask);
-    act.sa_flags = 0;
-    sigaction(SIGALRM, &act, NULL);
-    /* The timer signal is for the processor thread, which unblocks it. Every
-       thread started after this inherits the mask. */
-    sigset_t set;
-    sigemptyset(&set);
-    sigaddset(&set, SIGALRM);
-    pthread_sigmask(SIG_BLOCK, &set, NULL);
-
-    s->kvm_enabled = true;
-
-    /* nothing is registered yet, so swapping in the KVM-backed map is safe */
-    delete s->mem_map;
-    s->mem_map = new KvmPhysMemoryMap(*s);
-}
-
-static void kvm_exit_io(PCMachine *s, struct kvm_run *run)
-{
-    uint8_t *ptr;
-    int i;
-    
-    ptr = (uint8_t *)run + run->io.data_offset;
-    //    printf("port: addr=%04x\n", run->io.port);
-    
-    for(i = 0; i < run->io.count; i++) {
-        if (run->io.direction == KVM_EXIT_IO_OUT) {
-            switch(run->io.size) {
-            case 1:
-                s->PortWrite(run->io.port, *(uint8_t *)ptr, 0);
-                break;
-            case 2:
-                s->PortWrite(run->io.port, *(uint16_t *)ptr, 1);
-                break;
-            case 4:
-                s->PortWrite(run->io.port, *(uint32_t *)ptr, 2);
-                break;
-            default:
-                abort();
-            }
-        } else {
-            switch(run->io.size) {
-            case 1:
-                *(uint8_t *)ptr = s->PortRead(run->io.port, 0);
-                break;
-            case 2:
-                *(uint16_t *)ptr = s->PortRead(run->io.port, 1);
-                break;
-            case 4:
-                *(uint32_t *)ptr = s->PortRead(run->io.port, 2);
-                break;
-            default:
-                abort();
-            }
-        }
-        ptr += run->io.size;
-    }
-}
-
-static void kvm_exit_mmio(PCMachine *s, struct kvm_run *run)
-{
-    uint8_t *data = run->mmio.data;
     PhysMemoryRange *pr;
     uint64_t addr;
-    
-    pr = s->mem_map->FindRange(run->mmio.phys_addr);
-    if (run->mmio.is_write) {
-        if (!pr || pr->is_ram)
-            return;
-        addr = run->mmio.phys_addr - pr->addr;
-        switch(run->mmio.len) {
-        case 1:
-            if (pr->devio_flags & DEVIO_SIZE8) {
-                pr->io->DeviceWrite(addr, *(uint8_t *)data, 0);
-            }
-            break;
-        case 2:
-            if (pr->devio_flags & DEVIO_SIZE16) {
-                pr->io->DeviceWrite(addr, *(uint16_t *)data, 1);
-            }
-            break;
-        case 4:
-            if (pr->devio_flags & DEVIO_SIZE32) {
-                pr->io->DeviceWrite(addr, *(uint32_t *)data, 2);
-            }
-            break;
-        case 8:
-            if (pr->devio_flags & DEVIO_SIZE32) {
-                pr->io->DeviceWrite(addr, *(uint32_t *)data, 2);
-                pr->io->DeviceWrite(addr + 4, *(uint32_t *)(data + 4), 2);
-            }
-            break;
-        default:
-            abort();
-        }
-    } else {
-        if (!pr || pr->is_ram)
-            goto no_dev;
-        addr = run->mmio.phys_addr - pr->addr;
-        switch(run->mmio.len) {
-        case 1:
-            if (!(pr->devio_flags & DEVIO_SIZE8))
-                goto no_dev;
-            *(uint8_t *)data = pr->io->DeviceRead(addr, 0);
-            break;
-        case 2:
-            if (!(pr->devio_flags & DEVIO_SIZE16))
-                goto no_dev;
-            *(uint16_t *)data = pr->io->DeviceRead(addr, 1);
-            break;
-        case 4:
-            if (!(pr->devio_flags & DEVIO_SIZE32))
-                goto no_dev;
-            *(uint32_t *)data = pr->io->DeviceRead(addr, 2);
-            break;
-        case 8:
-            if (pr->devio_flags & DEVIO_SIZE32) {
-                *(uint32_t *)data =
-                    pr->io->DeviceRead(addr, 2);
-                *(uint32_t *)(data + 4) =
-                    pr->io->DeviceRead(addr + 4, 2);
-            } else {
-            no_dev:
-                memset(run->mmio.data, 0, run->mmio.len);
-            }
-            break;
-        default:
-            abort();
-        }
-            
-    }
-}
 
-static void kvm_exec(PCMachine *s)
-{
-    struct kvm_run *run = s->kvm_run;
-    struct itimerval ival;
-    int ret;
-    
-    /* Not efficient but simple: we use a timer to interrupt the
-       execution after a given time */
-    ival.it_interval.tv_sec = 0;
-    ival.it_interval.tv_usec = 0;
-    ival.it_value.tv_sec = 0;
-    ival.it_value.tv_usec = 10 * 1000; /* 10 ms max */
-    setitimer(ITIMER_REAL, &ival, NULL);
-
-    ret = ioctl(s->vcpu_fd, KVM_RUN, 0);
-    /* a request to return that came in while running has done its job */
-    run->immediate_exit = 0;
-    if (ret < 0) {
-        if (errno == EINTR || errno == EAGAIN) {
-            /* timeout */
-            return;
+    pr = mem_map->FindRange(paddr);
+    if (!pr || pr->is_ram)
+        return;
+    addr = paddr - pr->addr;
+    switch(len) {
+    case 1:
+        if (pr->devio_flags & DEVIO_SIZE8) {
+            pr->io->DeviceWrite(addr, *(const uint8_t *)data, 0);
         }
-        perror("KVM_RUN");
-        exit(1);
-    }
-    //    printf("exit=%d\n", run->exit_reason);
-    switch(run->exit_reason) {
-    case KVM_EXIT_HLT:
         break;
-    case KVM_EXIT_IO: {
-        DeviceLocker locker(s->Lock());
-        kvm_exit_io(s, run);
-        break;
-    }
-    case KVM_EXIT_MMIO: {
-        DeviceLocker locker(s->Lock());
-        kvm_exit_mmio(s, run);
-        break;
-    }
-    case KVM_EXIT_FAIL_ENTRY:
-        fprintf(stderr, "KVM_EXIT_FAIL_ENTRY: reason=0x%" PRIx64 "\n",
-                (uint64_t)run->fail_entry.hardware_entry_failure_reason);
-#if 0
-        {
-            struct kvm_regs regs;
-            if (ioctl(s->vcpu_fd, KVM_GET_REGS, &regs) < 0) {
-                perror("KVM_SET_REGS");
-                exit(1);
-            }
-            printf("RIP=%016" PRIx64 "\n", (uint64_t)regs.rip);
+    case 2:
+        if (pr->devio_flags & DEVIO_SIZE16) {
+            pr->io->DeviceWrite(addr, *(const uint16_t *)data, 1);
         }
-#endif
-        exit(1);
-    case KVM_EXIT_INTERNAL_ERROR:
-        fprintf(stderr, "KVM_EXIT_INTERNAL_ERROR: suberror=0x%x\n",
-                (uint32_t)run->internal.suberror);
-        exit(1);
+        break;
+    case 4:
+        if (pr->devio_flags & DEVIO_SIZE32) {
+            pr->io->DeviceWrite(addr, *(const uint32_t *)data, 2);
+        }
+        break;
+    case 8:
+        if (pr->devio_flags & DEVIO_SIZE32) {
+            pr->io->DeviceWrite(addr, *(const uint32_t *)data, 2);
+            pr->io->DeviceWrite(addr + 4, *(const uint32_t *)(data + 4), 2);
+        }
+        break;
     default:
-        fprintf(stderr, "KVM: unsupported exit_reason=%d\n", run->exit_reason);
-        exit(1);
+        abort();
     }
 }
-#endif
+
+void PCMachine::MmioRead(uint64_t paddr, uint8_t *data, int len)
+{
+    PhysMemoryRange *pr;
+    uint64_t addr;
+
+    pr = mem_map->FindRange(paddr);
+    if (!pr || pr->is_ram)
+        goto no_dev;
+    addr = paddr - pr->addr;
+    switch(len) {
+    case 1:
+        if (!(pr->devio_flags & DEVIO_SIZE8))
+            goto no_dev;
+        *(uint8_t *)data = pr->io->DeviceRead(addr, 0);
+        break;
+    case 2:
+        if (!(pr->devio_flags & DEVIO_SIZE16))
+            goto no_dev;
+        *(uint16_t *)data = pr->io->DeviceRead(addr, 1);
+        break;
+    case 4:
+        if (!(pr->devio_flags & DEVIO_SIZE32))
+            goto no_dev;
+        *(uint32_t *)data = pr->io->DeviceRead(addr, 2);
+        break;
+    case 8:
+        if (!(pr->devio_flags & DEVIO_SIZE32))
+            goto no_dev;
+        *(uint32_t *)data = pr->io->DeviceRead(addr, 2);
+        *(uint32_t *)(data + 4) = pr->io->DeviceRead(addr + 4, 2);
+        break;
+    default:
+        abort();
+    }
+    return;
+ no_dev:
+    memset(data, 0, len);
+}
 
 #define TSC_FREQ 100000000
 
@@ -1805,18 +1501,18 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     s->ram_size = p->ram_size;
     
     s->port_map = new PhysMemoryMap();
-    s->mem_map = new PhysMemoryMap();
 
-#ifdef USE_KVM
     if (p->accel_enable) {
-        kvm_init(s);
+        s->hypervisor = host_x86_hypervisor_open(*s, *p->device_lock);
     }
-#endif
 
-#ifdef USE_KVM
-    if (!s->kvm_enabled)
-#endif
-    {
+    if (s->hypervisor) {
+        s->mem_map = new HypervisorPhysMemoryMap(*s->hypervisor);
+        for (int i = 0; i < 16; i++) {
+            s->pic_irq[i].Init(&s->fHypervisorIrqTarget, i);
+        }
+    } else {
+        s->mem_map = new PhysMemoryMap();
         s->cpu_state = x86_cpu_init(s->mem_map);
         x86_cpu_set_tsc_source(s->cpu_state, s);
         x86_cpu_set_port_io(s->cpu_state, &s->fPortIo);
@@ -1857,10 +1553,7 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
 #endif
     }
 
-#ifdef USE_KVM
-    if (!s->kvm_enabled)
-#endif
-    {
+    if (!s->hypervisor) {
         s->pic_state = pic2_init(s->port_map, 0x20, 0xa0,
                                  0x4d0, 0x4d1, s, s->pic_irq);
         x86_cpu_set_hard_intno_source(s->cpu_state, s);
@@ -2174,59 +1867,19 @@ static void copy_kernel(PCMachine *s, const uint8_t *buf, int buf_len,
     params->gdt_table[2] = 0x00cf9b000000ffffLL; /* CS */
     params->gdt_table[3] = 0x00cf93000000ffffLL; /* DS */
         
-#ifdef USE_KVM
-    if (s->kvm_enabled) {
-        struct kvm_sregs sregs;
-        struct kvm_segment seg;
-        struct kvm_regs regs;
-        
-        /* init flat protected mode */
+    if (s->hypervisor) {
+        HostX86Regs regs;
 
-        if (ioctl(s->vcpu_fd, KVM_GET_SREGS, &sregs) < 0) {
-            perror("KVM_GET_SREGS");
-            exit(1);
-        }
+        s->hypervisor->SetFlatProtectedMode(
+            KERNEL_PARAMS_ADDR + offsetof(struct linux_params, gdt_table),
+            sizeof(params->gdt_table) - 1, 2 << 3, 3 << 3);
 
-        sregs.cr0 |= (1 << 0); /* CR0_PE */
-        sregs.gdt.base = KERNEL_PARAMS_ADDR +
-            offsetof(struct linux_params, gdt_table);
-        sregs.gdt.limit = sizeof(params->gdt_table) - 1;
-        
-        memset(&seg, 0, sizeof(seg));
-        seg.limit = 0xffffffff;
-        seg.present = 1;
-        seg.db = 1;
-        seg.s = 1; /* code/data */
-        seg.g = 1; /* 4KB granularity */
-
-        seg.type = 0xb; /* code */
-        seg.selector = 2 << 3;
-        sregs.cs = seg;
-
-        seg.type = 0x3; /* data */
-        seg.selector = 3 << 3;
-        sregs.ds = seg;
-        sregs.es = seg;
-        sregs.ss = seg;
-        sregs.fs = seg;
-        sregs.gs = seg;
-        
-        if (ioctl(s->vcpu_fd, KVM_SET_SREGS, &sregs) < 0) {
-            perror("KVM_SET_SREGS");
-            exit(1);
-        }
-        
         memset(&regs, 0, sizeof(regs));
         regs.rip = load_address;
-        regs.rsi = KERNEL_PARAMS_ADDR;
+        regs.gpr[6] = KERNEL_PARAMS_ADDR; /* esi */
         regs.rflags = 0x2;
-        if (ioctl(s->vcpu_fd, KVM_SET_REGS, &regs) < 0) {
-            perror("KVM_SET_REGS");
-            exit(1);
-        }
-    } else
-#endif
-    {
+        s->hypervisor->SetRegs(regs);
+    } else {
         int i;
         X86CPUSeg sd;
         uint32_t val;
@@ -2260,7 +1913,7 @@ static void copy_kernel(PCMachine *s, const uint8_t *buf, int buf_len,
         static const uint8_t pci_irqs[4] = { 9, 10, 11, 12 };
 
         i440fx_map_interrupts(s->i440fx_state, elcr, pci_irqs);
-        /* XXX: KVM support */
+        /* XXX: hypervisor support */
         if (s->pic_state) {
             pic2_set_elcr(s->pic_state.get(), elcr);
         }
@@ -2269,15 +1922,9 @@ static void copy_kernel(PCMachine *s, const uint8_t *buf, int buf_len,
 
 void PCMachine::ProcessorThreadStarted()
 {
-#ifdef USE_KVM
-    if (kvm_enabled) {
-        sigset_t set;
-        vcpu_thread = pthread_self();
-        sigemptyset(&set);
-        sigaddset(&set, SIGALRM);
-        pthread_sigmask(SIG_UNBLOCK, &set, NULL);
+    if (hypervisor) {
+        hypervisor->ProcessorThreadStarted();
     }
-#endif
 }
 
 /* The CMOS periodic interrupt is polled, so it has no deadline. */
@@ -2286,45 +1933,35 @@ int64_t PCMachine::RunTimers()
     PCMachine *s = this;
 
     cmos_update_irq(s->cmos_state.get());
-#ifdef USE_KVM
-    if (s->kvm_enabled)
+    /* the hypervisor has the PIT */
+    if (s->hypervisor)
         return -1;
-#endif
     return pit_update_irq(s->pit_state.get());
 }
 
 bool PCMachine::Idle()
 {
-#ifdef USE_KVM
-    /* the kernel waits for the interrupt inside KVM_RUN */
-    if (kvm_enabled)
+    /* the hypervisor waits for the interrupt inside Run() */
+    if (hypervisor)
         return false;
-#endif
     return x86_cpu_get_power_down(cpu_state);
 }
 
 void PCMachine::Interp(int max_exec_cycles)
 {
     PCMachine *s = this;
-#ifdef USE_KVM
-    if (s->kvm_enabled) {
-        kvm_exec(s);
-    } else
-#endif
-    {
+    if (s->hypervisor) {
+        s->hypervisor->Run();
+    } else {
         x86_cpu_interp(s->cpu_state, max_exec_cycles);
     }
 }
 
 void PCMachine::InterruptExecution()
 {
-#ifdef USE_KVM
-    if (kvm_enabled) {
-        /* immediate_exit covers a signal that lands before KVM_RUN */
-        kvm_run->immediate_exit = 1;
-        pthread_kill(vcpu_thread, SIGALRM);
+    if (hypervisor) {
+        hypervisor->InterruptRun();
     }
-#endif
 }
 
 class PcMachineClass final: public VirtMachineClass {

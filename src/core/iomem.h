@@ -145,8 +145,8 @@ struct PhysMemoryRange {
 
 
 /* The default implementation backs RAM with anonymous memory and keeps the
-   dirty bitmap itself; the x86 KVM path overrides the virtual methods to let
-   the kernel own both.
+   dirty bitmap itself; the x86 machine overrides the virtual methods to hand
+   both to a host hypervisor.
 
    The map changes only on the processor thread, with the device lock held.
    The processor looks up RAM without the lock; everything else uses the map
