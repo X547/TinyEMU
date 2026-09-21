@@ -264,6 +264,7 @@ void PS2MouseDevice::Write(uint8_t val)
             Queue(fType);
             break;
         default:
+            Queue(PS2_REPLY_RESEND);
             break;
         }
         break;
