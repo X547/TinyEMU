@@ -119,3 +119,27 @@ std::unique_ptr<HostFileSystem> HostPlatform::OpenFileSystem(const char *path)
     }
     return disk_fs_open(path);
 }
+
+
+std::unique_ptr<HostAudio> HostPlatform::OpenAudio(
+    const AudioSettings &settings)
+{
+    if (strcmp(settings.driver, "host") == 0) {
+        auto audio = host_audio_open(fLoop, settings);
+        if (audio != nullptr) {
+            return audio;
+        }
+        /* A configuration is meant to run on any host, so one without an
+           audio system still runs the guest, silently. */
+        fprintf(stderr, "audio: no host audio, continuing without sound\n");
+        return null_audio_open(fLoop, settings);
+    }
+    if (strcmp(settings.driver, "wav") == 0) {
+        return wav_audio_open(fLoop, settings);
+    }
+    if (strcmp(settings.driver, "none") == 0) {
+        return null_audio_open(fLoop, settings);
+    }
+    fprintf(stderr, "Unsupported audio driver '%s'\n", settings.driver);
+    return nullptr;
+}

@@ -83,4 +83,6 @@ public:
         const char *driver, const char *ifname,
         const std::vector<EthernetForward> &forwards) override;
     std::unique_ptr<HostFileSystem> OpenFileSystem(const char *path) override;
+    std::unique_ptr<HostAudio> OpenAudio(
+        const AudioSettings &settings) override;
 };

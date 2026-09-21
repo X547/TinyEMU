@@ -23,6 +23,7 @@
 
 #include <memory>
 
+#include "host_audio.h"
 #include "host_block.h"
 #include "host_console.h"
 #include "host_ethernet.h"
@@ -89,3 +90,12 @@ std::unique_ptr<HostEthernet> tap_ethernet_open(EventLoop &loop,
    the address translation gives it no address the host could reach. */
 std::unique_ptr<HostEthernet> slirp_ethernet_open(
     EventLoop &loop, const std::vector<EthernetForward> &forwards);
+
+/* The host's own audio system; nullptr when the build has none. */
+std::unique_ptr<HostAudio> host_audio_open(EventLoop &loop,
+                                           const AudioSettings &settings);
+/* A WAV file, and a stream that moves nothing; both keep the host's time. */
+std::unique_ptr<HostAudio> wav_audio_open(EventLoop &loop,
+                                          const AudioSettings &settings);
+std::unique_ptr<HostAudio> null_audio_open(EventLoop &loop,
+                                           const AudioSettings &settings);

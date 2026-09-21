@@ -30,6 +30,8 @@ platform_sources = files(
   'common/console_escape.cpp',
   'common/event_loop.cpp',
   'common/host_platform.cpp',
+  'common/paced_audio.cpp',
+  'common/wav_audio.cpp',
 )
 if platform_os == 'windows'
   platform_sources += files(
@@ -37,9 +39,11 @@ if platform_os == 'windows'
     'win32/event_loop_wait.cpp',
     'win32/file_block.cpp',
     'win32/stdio_console.cpp',
+    'win32/wasapi_audio.cpp',
   )
 else
   platform_sources += files(
+    'common/no_host_audio.cpp',
     'posix/event_loop_wait.cpp',
     'posix/file_block.cpp',
     'posix/fs_disk.cpp',

@@ -23,6 +23,7 @@
 
 #include <memory>
 
+#include "host_audio.h"
 #include "host_block.h"
 #include "host_console.h"
 #include "host_ethernet.h"
@@ -53,4 +54,6 @@ public:
         const std::vector<EthernetForward> &forwards) = 0;
     virtual std::unique_ptr<HostFileSystem> OpenFileSystem(
         const char *path) = 0;
+    virtual std::unique_ptr<HostAudio> OpenAudio(
+        const AudioSettings &settings) = 0;
 };

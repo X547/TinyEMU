@@ -149,11 +149,12 @@ platform_os = host_machine.system()
 
 # The event loop waits on a completion port with ntdll's wait completion
 # packets, raises the timer resolution through winmm and watches sockets
-# through Winsock. The runtime is linked in so that the executable runs
-# without the toolchain's DLLs.
+# through Winsock; sound goes out through WASAPI, a COM API whose thread
+# asks the scheduler for audio priority. The runtime is linked in so that
+# the executable runs without the toolchain's DLLs.
 emu_link_args = []
 if platform_os == 'windows'
-  foreach libname : ['ntdll', 'winmm', 'ws2_32', 'iphlpapi']
+  foreach libname : ['ntdll', 'winmm', 'ws2_32', 'iphlpapi', 'ole32', 'avrt']
     emu_deps += cc.find_library(libname)
   endforeach
   emu_link_args += '-static'
