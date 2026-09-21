@@ -167,11 +167,14 @@ void I8042Controller::UpdateIRQ()
     int irq_kbd_level = 0;
     int irq_mouse_level = 0;
 
-    fStatus &= ~(KBD_STAT_OBF | KBD_STAT_MOUSE_OBF);
-    if (fPending) {
+    fStatus &= ~(KBD_STAT_OBF | KBD_STAT_MOUSE_OBF | KBD_STAT_GTO);
+    if (fReplyFull || fPending) {
         fStatus |= KBD_STAT_OBF;
-        /* kbd data takes priority over aux data. */
-        if (fPending == KBD_PENDING_AUX) {
+        if (fReplyFull && fReplyTimeout)
+            fStatus |= KBD_STAT_GTO;
+        /* The controller's byte comes first, then kbd data before aux
+           data. */
+        if (fReplyFull ? fReplyAux : fPending == KBD_PENDING_AUX) {
             fStatus |= KBD_STAT_MOUSE_OBF;
             if (fMode & KBD_MODE_MOUSE_INT)
                 irq_mouse_level = 1;
@@ -225,9 +228,8 @@ bool I8042Controller::Translate(uint8_t val, uint8_t *out)
 /* One byte out of a port's device, translated when the mode register asks
    for it. A read may take more than one byte out of the device, because the
    translator folds a release prefix into the code behind it, so the line is
-   left alone until the byte the guest is to see has been settled on: it
-   drops for the byte read and rises again only for a byte the guest will
-   really be given, which is one interrupt per byte read. */
+   left alone until the byte the guest is to see has been settled on, and
+   DataRead() pulses it after that. */
 uint8_t I8042Controller::ReadFromPort(int port)
 {
     PS2Device *dev = fPorts[port].dev;
@@ -260,24 +262,32 @@ uint8_t I8042Controller::ReadFromPort(int port)
         }
     }
     fInRead = false;
-
-    uint8_t pending = fPending;
-    fPending = set_bit(fPending, port, false);
-    UpdateIRQ();
-    fPending = pending;
-    UpdateIRQ();
     return val;
 }
 
 
-/* A byte the controller itself puts in a port's output, as it does for its
-   own self test result. */
-void I8042Controller::QueueFromController(uint8_t val, int port)
+void I8042Controller::PulseIRQ()
 {
-    PS2Device *dev = fPorts[port].dev;
-    if (dev != nullptr) {
-        dev->Queue(val);
-    }
+    uint8_t pending = fPending;
+    bool reply_full = fReplyFull;
+    fPending = 0;
+    fReplyFull = false;
+    UpdateIRQ();
+    fPending = pending;
+    fReplyFull = reply_full;
+    UpdateIRQ();
+}
+
+
+/* A byte the controller itself puts in its output, as it does for its own
+   command replies. It holds one, so a second replaces the first. */
+void I8042Controller::Reply(uint8_t val, bool aux, bool timeout)
+{
+    fReply = val;
+    fReplyAux = aux;
+    fReplyTimeout = timeout;
+    fReplyFull = true;
+    UpdateIRQ();
 }
 
 
@@ -300,7 +310,7 @@ void I8042Controller::CommandWrite(uint32_t addr, uint32_t val, int size_log2)
 #endif
     switch (val) {
     case KBD_CCMD_READ_MODE:
-        QueueFromController(fMode, I8042_PORT_AUX);
+        Reply(fMode, false);
         break;
     case KBD_CCMD_WRITE_MODE:
     case KBD_CCMD_WRITE_OBUF:
@@ -316,14 +326,14 @@ void I8042Controller::CommandWrite(uint32_t addr, uint32_t val, int size_log2)
         fMode &= ~KBD_MODE_DISABLE_MOUSE;
         break;
     case KBD_CCMD_TEST_MOUSE:
-        QueueFromController(0x00, I8042_PORT_KBD);
+        Reply(0x00, false);
         break;
     case KBD_CCMD_SELF_TEST:
         fStatus |= KBD_STAT_SELFTEST;
-        QueueFromController(0x55, I8042_PORT_KBD);
+        Reply(0x55, false);
         break;
     case KBD_CCMD_KBD_TEST:
-        QueueFromController(0x00, I8042_PORT_KBD);
+        Reply(0x00, false);
         break;
     case KBD_CCMD_KBD_DISABLE:
         fMode |= KBD_MODE_DISABLE_KBD;
@@ -334,7 +344,7 @@ void I8042Controller::CommandWrite(uint32_t addr, uint32_t val, int size_log2)
         UpdateIRQ();
         break;
     case KBD_CCMD_READ_INPORT:
-        QueueFromController(0x00, I8042_PORT_KBD);
+        Reply(0x00, false);
         break;
     case KBD_CCMD_READ_OUTPORT:
         /* XXX: check that */
@@ -343,7 +353,7 @@ void I8042Controller::CommandWrite(uint32_t addr, uint32_t val, int size_log2)
             val |= 0x10;
         if (fStatus & KBD_STAT_MOUSE_OBF)
             val |= 0x20;
-        QueueFromController(val, I8042_PORT_KBD);
+        Reply(val, false);
         break;
     case KBD_CCMD_ENABLE_A20:
         ioport_set_a20(1);
@@ -367,10 +377,19 @@ void I8042Controller::CommandWrite(uint32_t addr, uint32_t val, int size_log2)
 uint32_t I8042Controller::DataRead(uint32_t addr, int size_log2)
 {
     uint32_t val;
-    if (fPending == KBD_PENDING_AUX)
+    if (fReplyFull) {
+        val = fReply;
+        fReplyFull = false;
+    } else if (fPending == KBD_PENDING_AUX) {
         val = ReadFromPort(I8042_PORT_AUX);
-    else
+    } else if (fPending != 0) {
         val = ReadFromPort(I8042_PORT_KBD);
+    } else {
+        /* An empty buffer reads as the byte it last held. */
+        return fLastData;
+    }
+    fLastData = val;
+    PulseIRQ();
 #ifdef DEBUG_KBD
     printf("kbd: read data=0x%02x\n", val);
 #endif
@@ -388,8 +407,11 @@ void I8042Controller::DataWrite(uint32_t addr, uint32_t val, int size_log2)
 
     switch (fWriteCmd) {
     case 0:
+        /* Nothing on the port answers, which the controller reports. */
         if (kbd != nullptr)
             kbd->Write(val);
+        else
+            Reply(PS2_REPLY_RESEND, false, true);
         break;
     case KBD_CCMD_WRITE_MODE:
         fMode = val;
@@ -400,10 +422,10 @@ void I8042Controller::DataWrite(uint32_t addr, uint32_t val, int size_log2)
         UpdateIRQ();
         break;
     case KBD_CCMD_WRITE_OBUF:
-        QueueFromController(val, I8042_PORT_KBD);
+        Reply(val, false);
         break;
     case KBD_CCMD_WRITE_AUX_OBUF:
-        QueueFromController(val, I8042_PORT_AUX);
+        Reply(val, true);
         break;
     case KBD_CCMD_WRITE_OUTPORT:
         ioport_set_a20(get_bit(val, 1));
@@ -414,6 +436,8 @@ void I8042Controller::DataWrite(uint32_t addr, uint32_t val, int size_log2)
     case KBD_CCMD_WRITE_MOUSE:
         if (aux != nullptr)
             aux->Write(val);
+        else
+            Reply(PS2_REPLY_RESEND, true, true);
         break;
     default:
         break;

@@ -77,6 +77,16 @@ private:
     /* Bitmask of ports with data available. */
     uint8_t fPending = 0;
 
+    /* The controller's own output byte: a command reply, or the timeout it
+       reports for a byte sent to an empty port. It is there whether or not
+       anything is plugged in, and is read before the devices' bytes. */
+    bool fReplyFull = false;
+    uint8_t fReply = 0;
+    bool fReplyAux = false; /* read as coming from the auxiliary port */
+    bool fReplyTimeout = false;
+    /* What the data port gives when nothing is waiting. */
+    uint8_t fLastData = 0;
+
     /* Set while a set 2 release prefix has been swallowed and the code that
        follows it still has to carry the top bit set 1 marks a release
        with. */
@@ -90,7 +100,10 @@ private:
     IRQSignal *fAuxIrq = nullptr;
 
     void UpdateIRQ();
-    void QueueFromController(uint8_t val, int port);
+    void Reply(uint8_t val, bool aux, bool timeout = false);
+    /* Lowers the line for the byte just read and raises it again for the
+       next one, which is one interrupt per byte read. */
+    void PulseIRQ();
     uint8_t ReadFromPort(int port);
     /* False when the byte was a release prefix, which set 1 folds into the
        code that follows it rather than sending on its own. */
