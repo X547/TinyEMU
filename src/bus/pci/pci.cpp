@@ -771,10 +771,18 @@ PCIBus *pci_bridge_init(PCIBus *parent, int devfn, const char *name,
        bit ones for the same reason: the port space is larger than one host
        bridge's aperture, so the ports behind the second bridge in a machine
        do not fit in 16 bits and a bridge reporting the narrow window would be
-       refused them. */
-    d->config[PCI_PREF_MEMORY_BASE] = PCI_PREF_RANGE_TYPE_64;
-    d->config[PCI_PREF_MEMORY_LIMIT] = PCI_PREF_RANGE_TYPE_64;
-    d->config[PCI_IO_BASE] = PCI_IO_RANGE_TYPE_32;
+       refused them.
+
+       All three come out of reset closed, which is a base of all ones against
+       a limit of zero. Leaving the registers at zero instead would read back
+       as a window open over the bottom of each space, and a guest that takes
+       its bridges at their word would believe firmware had placed one there. */
+    put_le16(&d->config[PCI_PREF_MEMORY_BASE],
+             0xfff0 | PCI_PREF_RANGE_TYPE_64);
+    put_le16(&d->config[PCI_PREF_MEMORY_LIMIT], PCI_PREF_RANGE_TYPE_64);
+    put_le16(&d->config[PCI_MEMORY_BASE], 0xfff0);
+    put_le16(&d->config[PCI_MEMORY_LIMIT], 0x0000);
+    d->config[PCI_IO_BASE] = 0xf0 | PCI_IO_RANGE_TYPE_32;
     d->config[PCI_IO_LIMIT] = PCI_IO_RANGE_TYPE_32;
 
     d->secondary_bus = pci_bus_init(parent->mem_map, parent->port_map);
