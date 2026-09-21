@@ -67,6 +67,7 @@ public:
 
     void Init();
 
+    bool HasInterruptControllers() override {return true;}
     void MapRam(int slot, uint64_t addr, uint64_t size, uint8_t *host_mem,
                 bool read_only, bool log_dirty) override;
     void GetDirtyLog(int slot, uint32_t *bitmap) override;
@@ -76,7 +77,8 @@ public:
     void SetFlatProtectedMode(uint32_t gdt_base, uint16_t gdt_limit,
                               uint16_t code_sel, uint16_t data_sel) override;
     void ProcessorThreadStarted() override;
-    void Run() override;
+    void Run(int64_t timeout_us) override;
+    bool Idle(bool intr) override {return false;}
     void InterruptRun() override;
 };
 
@@ -407,7 +409,7 @@ void KvmX86Hypervisor::ExitMmio()
 }
 
 
-void KvmX86Hypervisor::Run()
+void KvmX86Hypervisor::Run(int64_t timeout_us)
 {
     struct kvm_run *run = fRun;
     struct itimerval ival;
@@ -415,10 +417,12 @@ void KvmX86Hypervisor::Run()
 
     /* Not efficient but simple: we use a timer to interrupt the
        execution after a given time */
+    if (timeout_us <= 0 || timeout_us > 10 * 1000)
+        timeout_us = 10 * 1000; /* 10 ms max */
     ival.it_interval.tv_sec = 0;
     ival.it_interval.tv_usec = 0;
     ival.it_value.tv_sec = 0;
-    ival.it_value.tv_usec = 10 * 1000; /* 10 ms max */
+    ival.it_value.tv_usec = timeout_us;
     setitimer(ITIMER_REAL, &ival, NULL);
 
     ret = ioctl(fVcpuFd, KVM_RUN, 0);

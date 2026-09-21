@@ -28,6 +28,11 @@ option('x86emu',
   value: true,
   description: 'build the x86 emulator')
 
+option('whp',
+  type: 'feature',
+  value: 'auto',
+  description: 'run the x86 machine on the Windows Hypervisor Platform (Windows x86-64 hosts only)')
+
 option('slirp',
   type: 'boolean',
   value: true,

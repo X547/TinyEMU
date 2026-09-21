@@ -1051,7 +1051,13 @@ public:
 
     /* runs the processor instead of the interpreter when the host has one */
     std::unique_ptr<HostX86Hypervisor> hypervisor;
+    /* the hypervisor has the 8259s and the 8254 rather than the machine */
+    bool fHypervisorIrqchip = false;
     HypervisorIRQTarget fHypervisorIrqTarget {*this};
+    /* Otherwise the machine's: INTR as the 8259s drive it, read without the
+       lock, and how long the hypervisor may run before the PIT is due. */
+    std::atomic<bool> fCpuIrq {false};
+    int64_t fTimerDelayUs = -1;
 
     /* fixed-function port stubs and the VMware backdoor port */
     uint32_t Port80Read(uint32_t offset, int size_log2);
@@ -1068,6 +1074,8 @@ public:
     void PortWrite(uint32_t port, uint32_t val, int size_log2) override;
     void MmioRead(uint64_t addr, uint8_t *data, int len) override;
     void MmioWrite(uint64_t addr, const uint8_t *data, int len) override;
+    bool InterruptRequested() override;
+    int AcknowledgeInterrupt() override;
 
     DeviceIOAdapter<PCMachine, &PCMachine::Port80Read,
                     &PCMachine::Port80Write> fPort80Io {*this};
@@ -1218,11 +1226,31 @@ void PCMachine::VmPortWrite(uint32_t addr, uint32_t val, int size_log2)
 
 void PCMachine::SetCPUIRQ(int level)
 {
-    x86_cpu_set_irq(cpu_state, level);
+    if (hypervisor) {
+        bool raised = level && !fCpuIrq.load();
+        fCpuIrq.store(level != 0);
+        /* The processor thread looks at INTR before each run, so only a
+           request from elsewhere has to stop a run in progress. */
+        if (raised && !OnProcessorThread()) {
+            hypervisor->InterruptRun();
+        }
+    } else {
+        x86_cpu_set_irq(cpu_state, level);
+    }
     Kick();
 }
 
 int PCMachine::HardIntno()
+{
+    return pic2_get_hard_intno(pic_state.get());
+}
+
+bool PCMachine::InterruptRequested()
+{
+    return fCpuIrq.load();
+}
+
+int PCMachine::AcknowledgeInterrupt()
 {
     return pic2_get_hard_intno(pic_state.get());
 }
@@ -1361,9 +1389,15 @@ void PCMachine::MmioWrite(uint64_t paddr, const uint8_t *data, int len)
     uint64_t addr;
 
     pr = mem_map->FindRange(paddr);
-    if (!pr || pr->is_ram)
+    if (!pr)
         return;
     addr = paddr - pr->addr;
+    if (pr->is_ram) {
+        if (!(pr->devram_flags & DEVRAM_FLAG_ROM) && addr + len <= pr->size) {
+            memcpy(mem_map->GetRamPtr(paddr, true), data, len);
+        }
+        return;
+    }
     switch(len) {
     case 1:
         if (pr->devio_flags & DEVIO_SIZE8) {
@@ -1397,9 +1431,15 @@ void PCMachine::MmioRead(uint64_t paddr, uint8_t *data, int len)
     uint64_t addr;
 
     pr = mem_map->FindRange(paddr);
-    if (!pr || pr->is_ram)
+    if (!pr)
         goto no_dev;
     addr = paddr - pr->addr;
+    if (pr->is_ram) {
+        if (addr + len > pr->size)
+            goto no_dev;
+        memcpy(data, pr->phys_mem + addr, len);
+        return;
+    }
     switch(len) {
     case 1:
         if (!(pr->devio_flags & DEVIO_SIZE8))
@@ -1508,8 +1548,11 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
 
     if (s->hypervisor) {
         s->mem_map = new HypervisorPhysMemoryMap(*s->hypervisor);
-        for (int i = 0; i < 16; i++) {
-            s->pic_irq[i].Init(&s->fHypervisorIrqTarget, i);
+        s->fHypervisorIrqchip = s->hypervisor->HasInterruptControllers();
+        if (s->fHypervisorIrqchip) {
+            for (int i = 0; i < 16; i++) {
+                s->pic_irq[i].Init(&s->fHypervisorIrqTarget, i);
+            }
         }
     } else {
         s->mem_map = new PhysMemoryMap();
@@ -1553,10 +1596,12 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
 #endif
     }
 
-    if (!s->hypervisor) {
+    if (!s->fHypervisorIrqchip) {
         s->pic_state = pic2_init(s->port_map, 0x20, 0xa0,
                                  0x4d0, 0x4d1, s, s->pic_irq);
-        x86_cpu_set_hard_intno_source(s->cpu_state, s);
+        if (s->cpu_state) {
+            x86_cpu_set_hard_intno_source(s->cpu_state, s);
+        }
         s->pit_state = pit_init(s->port_map, 0x40, 0x61, &s->pic_irq[0], s);
     }
 
@@ -1934,16 +1979,16 @@ int64_t PCMachine::RunTimers()
 
     cmos_update_irq(s->cmos_state.get());
     /* the hypervisor has the PIT */
-    if (s->hypervisor)
+    if (s->fHypervisorIrqchip)
         return -1;
-    return pit_update_irq(s->pit_state.get());
+    s->fTimerDelayUs = pit_update_irq(s->pit_state.get());
+    return s->fTimerDelayUs;
 }
 
 bool PCMachine::Idle()
 {
-    /* the hypervisor waits for the interrupt inside Run() */
     if (hypervisor)
-        return false;
+        return hypervisor->Idle(fCpuIrq.load());
     return x86_cpu_get_power_down(cpu_state);
 }
 
@@ -1951,7 +1996,7 @@ void PCMachine::Interp(int max_exec_cycles)
 {
     PCMachine *s = this;
     if (s->hypervisor) {
-        s->hypervisor->Run();
+        s->hypervisor->Run(s->fTimerDelayUs);
     } else {
         x86_cpu_interp(s->cpu_state, max_exec_cycles);
     }

@@ -38,29 +38,41 @@ struct HostX86Regs {
 
 
 /* The machine half: the port and memory accesses the processor makes to
-   devices. Called with the device lock held. */
+   devices, and the interrupt controller when the hypervisor has none. Called
+   with the device lock held. */
 class X86HypervisorTarget {
 public:
     virtual ~X86HypervisorTarget() = default;
 
     virtual uint32_t PortRead(uint32_t port, int size_log2) = 0;
     virtual void PortWrite(uint32_t port, uint32_t val, int size_log2) = 0;
-    /* 'len' is 1, 2, 4 or 8. */
+    /* Guest physical memory, RAM included for a hypervisor that emulates an
+       instruction through here. 'len' is 1, 2, 4 or 8. */
     virtual void MmioRead(uint64_t addr, uint8_t *data, int len) = 0;
     virtual void MmioWrite(uint64_t addr, const uint8_t *data, int len) = 0;
+
+    /* Whether the interrupt controller raises INTR. */
+    virtual bool InterruptRequested() = 0;
+    /* Acknowledges the request and returns its vector. */
+    virtual int AcknowledgeInterrupt() = 0;
 };
 
 
-/* One processor the host runs in hardware. The hypervisor also provides the
-   interrupt controllers and the timer, and waits in Run() while the processor
-   is halted.
+/* One processor the host runs in hardware.
 
-   Run(), ProcessorThreadStarted() and InterruptRun() are called without the
-   device lock; Run() takes it around each access it hands to the target. The
+   A hypervisor with interrupt controllers of its own provides the 8259s and
+   the 8254, takes the lines through SetIRQ() and waits in Run() while the
+   processor is halted. One without them takes interrupts from the target, and
+   the machine waits while Idle() says so.
+
+   Run(), ProcessorThreadStarted(), Idle() and InterruptRun() are called
+   without the device lock; Run() takes it around each call to the target. The
    other methods are called with the lock held. */
 class HostX86Hypervisor {
 public:
     virtual ~HostX86Hypervisor() = default;
+
+    virtual bool HasInterruptControllers() = 0;
 
     /* Guest RAM at 'addr' backed by 'host_mem'. 'slot' names the range from
        then on; mapping it again moves it, and a size of 0 removes it. */
@@ -71,6 +83,7 @@ public:
        64 bit words; the log starts over. */
     virtual void GetDirtyLog(int slot, uint32_t *bitmap) = 0;
 
+    /* Only with interrupt controllers of its own. */
     virtual void SetIRQ(int irq, int level) = 0;
 
     /* SetRegs() leaves the registers HostX86Regs does not hold alone. */
@@ -84,8 +97,12 @@ public:
 
     /* On the processor thread, before the first Run(). */
     virtual void ProcessorThreadStarted() = 0;
-    /* Runs until an access for the target, a halt, or about 10 ms. */
-    virtual void Run() = 0;
+    /* Runs until an access for the target, a halt, or 'timeout_us'; -1 is
+       about 10 ms. */
+    virtual void Run(int64_t timeout_us) = 0;
+    /* Halted with no interrupt it could take while INTR is at 'intr'. Always
+       false with interrupt controllers of its own. */
+    virtual bool Idle(bool intr) = 0;
     /* Any thread: makes Run() return soon. */
     virtual void InterruptRun() = 0;
 };

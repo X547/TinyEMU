@@ -170,6 +170,22 @@ if platform_os == 'windows'
   endforeach
 endif
 
+# The x86 machine's processor on the Windows Hypervisor Platform. Linked
+# directly, so the executable needs the platform's DLLs to start.
+whp_opt = get_option('whp') \
+  .disable_auto_if(not x86emu) \
+  .require(platform_os == 'windows' and
+           host_machine.cpu_family() == 'x86_64',
+           error_message: 'WHP needs a Windows x86-64 host')
+whp_deps = []
+foreach libname : ['winhvplatform', 'winhvemulation']
+  whp_deps += cc.find_library(libname, required: whp_opt)
+endforeach
+whp_enabled = whp_opt.allowed() and whp_deps[0].found() and whp_deps[1].found()
+if whp_enabled
+  emu_deps += whp_deps
+endif
+
 slirp_enabled = get_option('slirp')
 
 # ----------------------------------------------------------------------------
@@ -302,6 +318,7 @@ summary({
   'Haiku display': haiku_gui,
   'Windows display': win32_gui,
   'x86 emulator': x86emu,
+  'Windows Hypervisor Platform': whp_enabled,
   'slirp': slirp_enabled,
   'network filesystem': fs_net_enabled,
   'builtin crypto': fs_net_enabled and builtin_crypto,
