@@ -288,6 +288,16 @@ Device types:
                          width, 32 as on the JH7110 or 64; 0 for a
                          controller built without its DMA engine), and a
                          nested SD bus
+  intel-hda              Intel High Definition Audio controller (ICH6) on PCI;
+                         "input_streams" and "output_streams" (default 4
+                         each), and a nested HDA link
+  hda-codec              codec on an HDA link; "address" (default the first
+                         free one), "vendor_id", "subsystem_id" and
+                         "revision_id" (what a driver matches on), and a
+                         nested bus carrying its function groups
+  hda-audio-group        audio function group, and a nested bus carrying its
+                         ports
+  hda-output             output converter and the pin it drives (see below)
   sd-card               SD memory card; "file", and "read_only"
   mmc-card               eMMC storage device; "file", and "read_only"
   ne2000                 NE2000 Ethernet adapter, on PCI as an RTL8029AS or
@@ -447,6 +457,48 @@ that did not. A card image larger than two gigabytes becomes a high capacity
 card, addressed in blocks; a smaller one is addressed in bytes and holds
 what its capacity fields can express, which for an image whose size is not a
 round number of allocation units is a little less than the file.
+
+HD Audio nests the way the hardware does: a controller, the link it drives,
+the codecs on the link, their function groups, and the ports of a group.
+
+    PCI bus -> intel-hda -> HDA link -> hda-codec -> hda-audio-group
+            -> hda-output
+
+Each "hda-output" is a converter and the pin it drives, and plays to a host
+back end of its own, so one controller may carry, say, a line out to the
+speakers and a headphone jack recorded to a file:
+
+  kind         "line-out" (default), "speaker" or "headphone"
+  location     "rear", "front", "left", "right", "top", "bottom" or
+               "internal"; the default follows "kind". An internal pin is
+               a fixed one, anything else a jack
+  association  1 to 15 (default 1), and "sequence", 0 to 15 (default 0):
+               how the pins group, as the pin configuration tells the
+               driver. Pins in one association are one device, in the
+               order their sequences give
+  channels     1 to 16 (default 2)
+  plugged      whether something is in the jack (default 1). A driver that
+               follows the jacks silences the speakers while headphones
+               are plugged in
+  rates        the sample rates the converter offers, e.g. [44100, 48000];
+               by default only the rate the host end runs at, so that
+               nothing is converted
+  host         where the sound goes: an object with "driver" and what that
+               driver takes:
+                 "host"  the host's own audio system (WASAPI on Windows);
+                         "device" picks an output by part of its name, and
+                         without it the default output is followed as the
+                         user changes it. On a host without an audio back
+                         end it is "none". The default
+                 "wav"   "file", a WAV file the guest's sound is written to
+                 "none"  nothing, but the guest's streams keep time
+               "latency" (default 20) is how far ahead of the listener,
+               in milliseconds, the guest may run
+
+A stream moves at the pace of the host end's own clock rather than the
+emulator's: the host device asks for frames and the controller fetches them
+from the guest's buffers as it does, so the two never drift apart and nothing
+is resampled.
 
 The Banshee is the display to reach for when a guest is old enough to have a
 driver for it and new enough to want its drawing accelerated. Where the

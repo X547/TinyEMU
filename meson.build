@@ -206,6 +206,8 @@ inc = include_directories(
   'lib/softfp',
   'src/bus/ata',
   'src/bus/ata/host',
+  'src/bus/hda',
+  'src/bus/hda/host',
   'src/bus/hid',
   'src/bus/i2c',
   'src/bus/i2c/host',
@@ -223,6 +225,7 @@ inc = include_directories(
   'src/core',
   'src/cpu/riscv',
   'src/cpu/x86',
+  'src/device/audio',
   'src/device/char',
   'src/device/display',
   'src/device/fs',
@@ -271,6 +274,7 @@ subdir('src/core')
 subdir('src/cpu/riscv')
 subdir('src/cpu/x86')
 subdir('src/bus/ata')
+subdir('src/bus/hda')
 subdir('src/bus/hid')
 subdir('src/bus/i2c')
 subdir('src/bus/mdio')
@@ -280,6 +284,7 @@ subdir('src/bus/scsi')
 subdir('src/bus/sd')
 subdir('src/bus/usb')
 subdir('src/bus/virtio')
+subdir('src/device/audio')
 subdir('src/device/char')
 subdir('src/device/display')
 subdir('src/device/fs')

@@ -33,7 +33,10 @@
 #include "dw_i2c.h"
 #include "dw_mmc.h"
 #include "dwmac.h"
+#include "hda.h"
+#include "hda_codec.h"
 #include "hid.h"
+#include "intel_hda.h"
 #include "mdio.h"
 #include "ne2000.h"
 #include "nvme.h"
@@ -224,6 +227,114 @@ static std::unique_ptr<HostFileSystem> node_open_fs(const VMDeviceNode *node,
     fs = ctx->platform->OpenFileSystem(fname);
     free(fname);
     return fs;
+}
+
+
+/* The node's "host" object: where a port's sound goes to or comes from.
+   Without one it is the host's own audio system. Reports and returns nullptr
+   on failure. */
+static std::unique_ptr<HostAudio> node_open_audio(const VMDeviceNode *node,
+                                                  DeviceContext *ctx,
+                                                  AudioDirectionEnum direction)
+{
+    const char *type = node->type.c_str();
+    AudioSettings settings;
+    const char *driver = nullptr, *device = nullptr, *file = nullptr;
+    int loop = 0, latency = settings.latency_ms;
+
+    settings.direction = direction;
+    JSONValue host = json_object_get(node->props, "host");
+    if (!json_is_undefined(host)) {
+        if (host.type != JSON_OBJ) {
+            vm_error("%s: 'host' must be an object\n", type);
+            return nullptr;
+        }
+        if (vm_get_str_opt(host, "driver", &driver) < 0 ||
+            vm_get_str_opt(host, "device", &device) < 0 ||
+            vm_get_str_opt(host, "file", &file) < 0 ||
+            vm_get_int_opt(host, "loop", &loop, 0) < 0 ||
+            vm_get_int_opt(host, "latency", &latency, latency) < 0) {
+            return nullptr;
+        }
+    }
+    if (latency < 1 || latency > 1000) {
+        vm_error("%s: 'latency' must be between 1 and 1000 ms\n", type);
+        return nullptr;
+    }
+    if (driver != nullptr) {
+        settings.driver = driver;
+    }
+    settings.device = device;
+    settings.loop = loop != 0;
+    settings.latency_ms = latency;
+
+    char *path = nullptr;
+    if (file != nullptr) {
+        path = get_file_path(ctx->params->cfg_filename, file);
+        settings.file = path;
+    }
+    auto audio = ctx->platform->OpenAudio(settings);
+    free(path);
+    return audio;
+}
+
+
+/* An "hda-output" or "hda-input" node's pin and converter. Reports and
+   returns false on anything it cannot read. */
+static bool node_parse_hda_port(const VMDeviceNode *node, HDAPortConfig *out)
+{
+    const char *type = node->type.c_str();
+    const char *kind, *location;
+    int plugged;
+
+    if (vm_get_str_opt(node->props, "kind", &kind) < 0 ||
+        vm_get_str_opt(node->props, "location", &location) < 0 ||
+        !node_int_opt(node, "association", &out->association, 1) ||
+        !node_int_opt(node, "sequence", &out->sequence, 0) ||
+        !node_int_opt(node, "channels", &out->channels, 2) ||
+        !node_int_opt(node, "plugged", &plugged, 1)) {
+        return false;
+    }
+    if (kind != nullptr && !hda_pin_kind_from_name(kind, &out->kind)) {
+        vm_error("%s: unknown kind '%s'\n", type, kind);
+        return false;
+    }
+    if (location != nullptr &&
+        !hda_pin_location_from_name(location, &out->location)) {
+        vm_error("%s: unknown location '%s'\n", type, location);
+        return false;
+    }
+    if (out->association < 1 || out->association > 15) {
+        vm_error("%s: 'association' must be between 1 and 15\n", type);
+        return false;
+    }
+    if (out->sequence < 0 || out->sequence > 15) {
+        vm_error("%s: 'sequence' must be between 0 and 15\n", type);
+        return false;
+    }
+    if (out->channels < 1 || out->channels > 16) {
+        vm_error("%s: 'channels' must be between 1 and 16\n", type);
+        return false;
+    }
+    out->plugged = plugged != 0;
+
+    JSONValue list = json_object_get(node->props, "rates");
+    if (!json_is_undefined(list)) {
+        if (list.type != JSON_ARRAY) {
+            vm_error("%s: 'rates' must be an array of sample rates\n", type);
+            return false;
+        }
+        for (int i = 0; i < list.u.array->Length(); i++) {
+            JSONValue item = json_array_get(list, i);
+            if (item.type != JSON_INT || hda_rate_index(item.u.int32) < 0) {
+                vm_error("%s: 'rates' may only hold rates the link carries, "
+                         "8000 to 192000\n", type);
+                return false;
+            }
+            out->rates.push_back(item.u.int32);
+        }
+    }
+    return true;
 }
 
 
@@ -528,6 +639,53 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
         }
         return xhci_node_create(node->IdOr("xhci"),
                                 usb2_ports, usb3_ports);
+    }
+
+    if (strcmp(type, "intel-hda") == 0) {
+        int input_streams, output_streams;
+        if (!node_int_opt(node, "input_streams", &input_streams,
+                          INTEL_HDA_DEFAULT_STREAMS) ||
+            !node_int_opt(node, "output_streams", &output_streams,
+                          INTEL_HDA_DEFAULT_STREAMS)) {
+            return nullptr;
+        }
+        return intel_hda_node_create(node->IdOr("hda"), input_streams,
+                                     output_streams);
+    }
+
+    if (strcmp(type, "hda-codec") == 0) {
+        int address, vendor_id, subsystem_id, revision_id;
+        if (!node_int_opt(node, "address", &address, -1) ||
+            !node_int_opt(node, "vendor_id", &vendor_id,
+                          HDA_CODEC_DEFAULT_VENDOR_ID) ||
+            !node_int_opt(node, "subsystem_id", &subsystem_id, 0) ||
+            !node_int_opt(node, "revision_id", &revision_id, 0x00100100)) {
+            return nullptr;
+        }
+        if (node->children == nullptr) {
+            vm_error("hda-codec: needs a nested bus with a function group on "
+                     "it\n");
+            return nullptr;
+        }
+        return hda_codec_node_create(node->IdOr("hda-codec"), address,
+                                     vendor_id, subsystem_id, revision_id);
+    }
+
+    if (strcmp(type, "hda-audio-group") == 0) {
+        return hda_audio_group_node_create(node->IdOr("hda-audio-group"));
+    }
+
+    if (strcmp(type, "hda-output") == 0) {
+        HDAPortConfig config;
+        if (!node_parse_hda_port(node, &config)) {
+            return nullptr;
+        }
+        auto audio = node_open_audio(node, ctx, AUDIO_RENDER);
+        if (audio == nullptr) {
+            return nullptr;
+        }
+        return hda_output_node_create(node->IdOr("hda-output"), config,
+                                      std::move(audio));
     }
 
     if (strcmp(type, "usb-hub") == 0) {
