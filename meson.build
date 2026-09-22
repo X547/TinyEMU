@@ -187,6 +187,26 @@ if whp_enabled
   emu_deps += whp_deps
 endif
 
+# The x86 machine's processor on Haiku's NVMM. libnvmm's headers are private
+# ones, so the dependency is put together here.
+nvmm_opt = get_option('nvmm') \
+  .disable_auto_if(not x86emu) \
+  .require(platform_os == 'haiku' and
+           host_machine.cpu_family() == 'x86_64',
+           error_message: 'NVMM needs a Haiku x86-64 host')
+nvmm_lib = cc.find_library('nvmm', required: nvmm_opt)
+nvmm_enabled = false
+if nvmm_lib.found()
+  nvmm_inc = include_directories(
+    '/boot/system/develop/headers/private/libs/nvmm', is_system: true)
+  nvmm_enabled = cc.has_header('nvmm.h', include_directories: nvmm_inc,
+                               required: nvmm_opt)
+endif
+if nvmm_enabled
+  emu_deps += declare_dependency(dependencies: nvmm_lib,
+                                 include_directories: nvmm_inc)
+endif
+
 # Haiku plays sound through the Media Kit, whose nodes are loopers.
 if platform_os == 'haiku'
   foreach libname : ['be', 'media']
@@ -332,6 +352,7 @@ summary({
   'Windows display': win32_gui,
   'x86 emulator': x86emu,
   'Windows Hypervisor Platform': whp_enabled,
+  'NVMM': nvmm_enabled,
   'slirp': slirp_enabled,
   'network filesystem': fs_net_enabled,
   'builtin crypto': fs_net_enabled and builtin_crypto,

@@ -32,6 +32,7 @@
 
 #include "bits.h"
 #include "device_lock.h"
+#include "host_memory.h"
 #include "host_x86_hypervisor.h"
 
 
@@ -104,6 +105,11 @@ public:
     bool Init();
 
     bool HasInterruptControllers() override {return false;}
+    uint8_t *AllocRam(size_t size) override {return host_ram_alloc(size);}
+    void FreeRam(uint8_t *ptr, size_t size) override
+    {
+        host_ram_free(ptr, size);
+    }
     void MapRam(int slot, uint64_t addr, uint64_t size, uint8_t *host_mem,
                 bool read_only, bool log_dirty) override;
     void GetDirtyLog(int slot, uint32_t *bitmap) override;

@@ -21,6 +21,7 @@
  */
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include <memory>
@@ -73,6 +74,12 @@ public:
     virtual ~HostX86Hypervisor() = default;
 
     virtual bool HasInterruptControllers() = 0;
+
+    /* Memory for guest RAM, zeroed, as host_ram_alloc() gives it. It comes
+       from here because a hypervisor may have to set it up before anything
+       is written to it; nullptr on failure. */
+    virtual uint8_t *AllocRam(size_t size) = 0;
+    virtual void FreeRam(uint8_t *ptr, size_t size) = 0;
 
     /* Guest RAM at 'addr' backed by 'host_mem'. 'slot' names the range from
        then on; mapping it again moves it, and a size of 0 removes it. */

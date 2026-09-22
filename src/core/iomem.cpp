@@ -172,7 +172,9 @@ PhysMemoryRange *PhysMemoryMap::RegisterRam(uint64_t addr, uint64_t size,
 
 void PhysMemoryMap::FreeRam(PhysMemoryRange *pr)
 {
-    host_ram_free(pr->phys_mem, pr->org_size);
+    if (pr->phys_mem != nullptr) {
+        host_ram_free(pr->phys_mem, pr->org_size);
+    }
 }
 
 

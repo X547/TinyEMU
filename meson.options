@@ -33,6 +33,11 @@ option('whp',
   value: 'auto',
   description: 'run the x86 machine on the Windows Hypervisor Platform (Windows x86-64 hosts only)')
 
+option('nvmm',
+  type: 'feature',
+  value: 'auto',
+  description: 'run the x86 machine on NVMM (Haiku x86-64 hosts only)')
+
 option('slirp',
   type: 'boolean',
   value: true,

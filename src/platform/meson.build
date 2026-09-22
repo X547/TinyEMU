@@ -63,6 +63,8 @@ if platform_os == 'linux' and host_machine.cpu_family() in ['x86', 'x86_64']
   platform_sources += files('linux/kvm_x86.cpp')
 elif whp_enabled
   platform_sources += files('win32/whp_x86.cpp')
+elif nvmm_enabled
+  platform_sources += files('haiku/nvmm_x86.cpp')
 else
   platform_sources += files('common/no_x86_hypervisor.cpp')
 endif

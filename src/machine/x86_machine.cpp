@@ -30,7 +30,6 @@
 
 #include "bits.h"
 #include "cutils.h"
-#include "host_memory.h"
 #include "host_time.h"
 #include "host_x86_hypervisor.h"
 #include "iomem.h"
@@ -1003,6 +1002,7 @@ private:
 public:
     HypervisorPhysMemoryMap(HostX86Hypervisor &hypervisor):
         fHypervisor(hypervisor) {}
+    ~HypervisorPhysMemoryMap() override;
 
     PhysMemoryRange *RegisterRam(uint64_t addr, uint64_t size,
                                  int devram_flags) override;
@@ -1319,6 +1319,19 @@ void HypervisorPhysMemoryMap::MapRam(PhysMemoryRange *pr)
                        (pr->devram_flags & DEVRAM_FLAG_DIRTY_BITS) != 0);
 }
 
+/* The base destructor cannot reach FreeRam() here, so the memory goes back
+   to the hypervisor first. */
+HypervisorPhysMemoryMap::~HypervisorPhysMemoryMap()
+{
+    for (int i = 0; i < RangeCount(); i++) {
+        PhysMemoryRange *pr = RangeAt(i);
+        if (pr->is_ram && pr->phys_mem != nullptr) {
+            fHypervisor.FreeRam(pr->phys_mem, pr->org_size);
+            pr->phys_mem = nullptr;
+        }
+    }
+}
+
 PhysMemoryRange *HypervisorPhysMemoryMap::RegisterRam(uint64_t addr,
                                                       uint64_t size,
                                                       int devram_flags)
@@ -1327,7 +1340,7 @@ PhysMemoryRange *HypervisorPhysMemoryMap::RegisterRam(uint64_t addr,
 
     pr = RegisterRamEntry(addr, size, devram_flags);
 
-    pr->phys_mem = host_ram_alloc(size);
+    pr->phys_mem = fHypervisor.AllocRam(size);
     if (pr->phys_mem == nullptr) {
         fprintf(stderr, "Could not allocate VM memory\n");
         exit(1);
