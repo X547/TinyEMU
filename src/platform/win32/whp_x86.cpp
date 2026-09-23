@@ -182,6 +182,15 @@ bool WhpX86Hypervisor::Init()
     if (FAILED(hr))
         Fail("setting the CPUID exit list", hr);
 
+    /* An MSR the hypervisor does not handle reads as 0 and ignores writes,
+       rather than faulting a guest that probes it. */
+    WHV_MSR_ACTION msr_action = WHvMsrActionIgnoreWriteReadZero;
+    hr = WHvSetPartitionProperty(fPartition,
+                                 WHvPartitionPropertyCodeUnimplementedMsrAction,
+                                 &msr_action, sizeof(msr_action));
+    if (FAILED(hr))
+        Fail("setting the unimplemented MSR action", hr);
+
     hr = WHvSetupPartition(fPartition);
     if (FAILED(hr))
         Fail("WHvSetupPartition", hr);
