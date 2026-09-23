@@ -81,6 +81,7 @@ private:
     bool fHalted = false;
 
     void Fail(const char *what);
+    void SetResetFpuState();
     bool InjectInterrupt();
     void InjectException(int vector);
     void ExitMsr(const struct nvmm_vcpu_exit *ctx);
@@ -161,6 +162,8 @@ bool NvmmX86Hypervisor::Init()
         Fail("setting the assist callbacks");
     }
 
+    SetResetFpuState();
+
     /* remove the APIC & ACPI to be in sync with the emulator */
     static const uint32_t leaves[] = {1, 0x80000001};
     for (uint32_t leaf: leaves) {
@@ -175,6 +178,27 @@ bool NvmmX86Hypervisor::Init()
         }
     }
     return true;
+}
+
+
+/* The x87 and SSE state after a processor reset. The vcpu starts with it
+   already, but the driver masks the MXCSR it is given with the mask beside it,
+   and the mask it resets to is zero, so the guest would start with every SSE
+   exception unmasked. A full mask asks for the host's. */
+void NvmmX86Hypervisor::SetResetFpuState()
+{
+    struct nvmm_x64_state *state = fVcpu.vcpu.state;
+    struct nvmm_x64_state_fpu &fpu = state->fpu;
+
+    memset(&fpu, 0, sizeof(fpu));
+    fpu.fx_cw = 0x0040;
+    fpu.fx_tw = 0x55;
+    fpu.fx_zero = 0x55;
+    fpu.fx_mxcsr = 0x1f80;
+    fpu.fx_mxcsr_mask = ~(uint32_t)0;
+
+    if (nvmm_vcpu_setstate(&fMach, &fVcpu.vcpu, NVMM_X64_STATE_FPU) == -1)
+        Fail("nvmm_vcpu_setstate");
 }
 
 
