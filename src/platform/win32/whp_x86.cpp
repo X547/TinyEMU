@@ -32,6 +32,7 @@
 #include <winhvemulation.h>
 
 #include "bits.h"
+#include "cutils.h"
 #include "device_lock.h"
 #include "host_memory.h"
 #include "host_x86_hypervisor.h"
@@ -84,6 +85,7 @@ private:
                         WHV_REGISTER_VALUE *values);
     void SetVpRegisters(const WHV_REGISTER_NAME *names, UINT32 count,
                         const WHV_REGISTER_VALUE *values);
+    bool AcceptsPicInterrupt();
     bool InjectInterrupt();
     void ExitCpuid(const WHV_RUN_VP_EXIT_CONTEXT &ctx);
 
@@ -544,6 +546,33 @@ void CALLBACK WhpX86Vcpu::TimerCallback(PTP_CALLBACK_INSTANCE instance,
 }
 
 
+/* The 8259s reach the processor through LINT0 of its local APIC, so only
+   while that is in ExtINT mode and unmasked, or the APIC is off, as KVM's
+   APIC has it. The injection itself goes around the APIC. */
+bool WhpX86Vcpu::AcceptsPicInterrupt()
+{
+    WHV_REGISTER_NAME name = WHvX64RegisterApicBase;
+    WHV_REGISTER_VALUE base;
+    /* the xAPIC register page */
+    alignas(16) uint8_t page[4096];
+    UINT32 size;
+    HRESULT hr;
+
+    if (!fOwner.fLocalApic)
+        return true;
+    GetVpRegisters(&name, 1, &base);
+    if (!get_bit(base.Reg64, 11)) /* the APIC is disabled */
+        return true;
+    hr = WHvGetVirtualProcessorInterruptControllerState2(
+        fPartition, fIndex, page, sizeof(page), &size);
+    if (FAILED(hr))
+        whp_fail("WHvGetVirtualProcessorInterruptControllerState2", hr);
+    uint32_t lvt0 = get_le32(page + 0x350);
+    return !get_bit(lvt0, 16) && /* not masked */
+        get_bits(lvt0, 8, 3) == 7; /* ExtINT */
+}
+
+
 /* With the lock held, before a run: hands the processor the interrupt the
    8259s raise when it can take one, and otherwise asks to exit once it can.
    False while it stays halted. */
@@ -553,7 +582,8 @@ bool WhpX86Vcpu::InjectInterrupt()
     WHV_REGISTER_NAME names[3];
     WHV_REGISTER_VALUE values[3] {};
     UINT32 count = 0;
-    bool intr = fIndex == 0 && target.InterruptRequested();
+    bool intr = fIndex == 0 && target.InterruptRequested() &&
+        AcceptsPicInterrupt();
 
     if (intr && !fInterruptionPending && !fInterruptShadow &&
         (fRflags & RFLAGS_IF)) {
