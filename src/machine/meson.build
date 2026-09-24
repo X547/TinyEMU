@@ -4,7 +4,7 @@ machine_sources = files(
   'riscv_machine.cpp',
 )
 if x86emu
-  machine_sources += files('x86_machine.cpp')
+  machine_sources += files('pc_acpi.cpp', 'x86_machine.cpp')
 endif
 
 emu_libs += static_library('machine', machine_sources,

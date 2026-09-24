@@ -43,6 +43,7 @@
 #include "machine.h"
 #include "pci.h"
 #include "pci_host_i440fx.h"
+#include "pc_acpi.h"
 
 //#define DEBUG_BIOS
 //#define DUMP_IOPORT
@@ -1043,6 +1044,8 @@ public:
     IRQSignal pic_irq[16];
     std::unique_ptr<PITState> pit_state;
     std::unique_ptr<CMOSState> cmos_state;
+    /* what the ACPI tables of a kernel boot describe */
+    std::unique_ptr<AcpiPmBlock> fAcpiPm;
 
     /* The configuration's devices, and what realizing them produced. */
     SystemBus *bus = nullptr;
@@ -1118,8 +1121,14 @@ public:
     void InterruptExecution() override;
 };
 
+/* Where a kernel boot routes PIRQA-D: two lines no ISA device of a PC
+   owns, leaving 9 for the SCI and 12 for the PS/2 mouse. */
+static const uint8_t kKernelPciIrqs[4] = { 10, 11, 10, 11 };
+
 static void copy_kernel(PCMachine *s, const uint8_t *buf, int buf_len,
                         const char *cmd_line);
+static void pc_acpi_setup(PCMachine *s);
+static uint8_t *get_ram_range_ptr(PCMachine *s, uint64_t addr, uint64_t len);
 static void set_flat_gdt(uint8_t *gdt);
 static void start_flat_protected_mode(PCMachine *s, uint32_t gdt_addr,
                                       uint32_t entry, int reg,
@@ -1128,7 +1137,8 @@ static void map_pci_interrupts(PCMachine *s);
 static bool is_elf(const uint8_t *buf, int buf_len);
 static bool pvh_load(PCMachine *s, const uint8_t *buf, int buf_len,
                      const uint8_t *initrd, int initrd_len,
-                     const char *cmd_line, uint32_t bios_size);
+                     const char *cmd_line, uint32_t bios_size,
+                     uint64_t rsdp);
 
 void PCMachine::BiosDebugWrite(uint32_t offset, uint32_t val, int size_log2)
 {
@@ -1527,12 +1537,13 @@ void PCMachine::FlushTlbWriteRange(uint8_t *ram_addr, size_t ram_size)
 /* The addresses and lines the chipset above holds. They are reserved so that
    a device the configuration declares cannot be placed on top of one of
    them. */
-static bool pc_claim_fixed_ranges(PCMachine *s)
+static bool pc_claim_fixed_ranges(PCMachine *s, bool acpi)
 {
     RangeAllocator &io = s->bus->IoAlloc();
     RangeAllocator &irq = s->bus->IrqAlloc();
 
-    return io.Claim(0x20, 2, "pic") && io.Claim(0xa0, 2, "pic") &&
+    return (!acpi || io.Claim(ACPI_PM_BASE, ACPI_PM_SIZE, "acpi")) &&
+        io.Claim(0x20, 2, "pic") && io.Claim(0xa0, 2, "pic") &&
         io.Claim(0x4d0, 2, "elcr") &&
         io.Claim(0x40, 4, "pit") && io.Claim(0x61, 1, "pit") &&
         io.Claim(0x70, 2, "cmos") &&
@@ -1684,7 +1695,9 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     s->bus->IoAlloc().SetWindow(0, PC_IO_SPACE_SIZE);
     s->bus->MmioAlloc().SetWindow(FRAMEBUFFER_BASE_ADDR,
                                   PC_DEVICE_WINDOW_SIZE);
-    if (!pc_claim_fixed_ranges(s)) {
+    /* A kernel booted without firmware gets its ACPI tables from here. */
+    bool acpi = p->files[VM_FILE_KERNEL].buf != nullptr;
+    if (!pc_claim_fixed_ranges(s, acpi)) {
         return nullptr;
     }
 
@@ -1719,6 +1732,10 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
         }
     }
 
+    if (acpi) {
+        pc_acpi_setup(s);
+    }
+
     if (p->files[VM_FILE_KERNEL].buf) {
         const VMFileEntry &kernel = p->files[VM_FILE_KERNEL];
         const VMFileEntry &initrd = p->files[VM_FILE_INITRD];
@@ -1726,7 +1743,7 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
         if (is_elf(kernel.buf, kernel.len)) {
             if (!pvh_load(s, kernel.buf, kernel.len, initrd.buf, initrd.len,
                           p->cmdline ? p->cmdline : "",
-                          p->files[VM_FILE_BIOS].len)) {
+                          p->files[VM_FILE_BIOS].len, PC_ACPI_ADDR)) {
                 return nullptr;
             }
         } else {
@@ -2046,15 +2063,33 @@ static void start_flat_protected_mode(PCMachine *s, uint32_t gdt_addr,
 static void map_pci_interrupts(PCMachine *s)
 {
     uint8_t elcr[2];
-    static const uint8_t pci_irqs[4] = { 9, 10, 11, 12 };
 
     if (s->i440fx_state == nullptr)
         return;
-    i440fx_map_interrupts(s->i440fx_state, elcr, pci_irqs);
+    i440fx_map_interrupts(s->i440fx_state, elcr, kKernelPciIrqs);
     /* XXX: hypervisor support */
     if (s->pic_state) {
         pic2_set_elcr(s->pic_state.get(), elcr);
     }
+}
+
+static void pc_acpi_setup(PCMachine *s)
+{
+    PcAcpiConfig config;
+    uint8_t *mem = get_ram_range_ptr(s, PC_ACPI_ADDR, PC_ACPI_SIZE);
+
+    config.i8042 = s->port_map->FindRange(0x64) != nullptr;
+    config.pci_gsis = kKernelPciIrqs;
+    /* the hole between RAM and the machine's own device window */
+    config.pci_mmio_base = (s->ram_size + 0xfffff) & ~(uint64_t)0xfffff;
+    config.pci_mmio_end = FRAMEBUFFER_BASE_ADDR;
+    assert(mem != NULL);
+    memset(mem, 0, PC_ACPI_SIZE);
+    pc_acpi_build(mem, config);
+
+    s->fAcpiPm = std::make_unique<AcpiPmBlock>(*s);
+    s->port_map->RegisterDevice(ACPI_PM_BASE, ACPI_PM_SIZE, s->fAcpiPm.get(),
+                                DEVIO_SIZE8 | DEVIO_SIZE16 | DEVIO_SIZE32);
 }
 
 /* PVH boot: an ELF kernel with a PHYS32_ENTRY note is entered there in flat
@@ -2158,7 +2193,8 @@ static bool pvh_find_entry(const uint8_t *buf, uint64_t len, uint32_t *entry)
 
 static bool pvh_load(PCMachine *s, const uint8_t *buf, int buf_len,
                      const uint8_t *initrd, int initrd_len,
-                     const char *cmd_line, uint32_t bios_size)
+                     const char *cmd_line, uint32_t bios_size,
+                     uint64_t rsdp)
 {
     bool elf64;
     uint64_t phoff;
@@ -2249,6 +2285,7 @@ static bool pvh_load(PCMachine *s, const uint8_t *buf, int buf_len,
     HvmStartInfo *si = &bd->start_info;
     si->magic = XEN_HVM_START_MAGIC;
     si->version = 1;
+    si->rsdp_paddr = rsdp;
 
     if (strlen(cmd_line) >= sizeof(bd->cmdline)) {
         vm_error("pc: the kernel command line is longer than %d bytes\n",

@@ -818,7 +818,9 @@ able to run many operating systems.
 The x86 emulator accepts a Linux kernel image (bzImage), or an ELF kernel
 with a PVH entry point (a Linux vmlinux built with CONFIG_PVH), which also
 gets the "initrd" and the memory map. No BIOS image is necessary. A 64 bit
-kernel needs a hypervisor.
+kernel needs a hypervisor. Either kind of kernel finds ACPI tables at
+0xe0000 describing the PCI host bridge and its interrupt routing, the i8042
+and a PM timer, and can power the machine off through ACPI.
 
 The PC is built from the configuration's device tree, as every machine is.
 What it has before any device is declared is the part a PC cannot be without:
