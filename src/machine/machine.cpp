@@ -761,30 +761,9 @@ void VirtMachine::Stop()
 }
 
 
-/* fKicked is set before fSleeping is read here, and fSleeping before
-   fKicked is read in WaitForKick(), so one of the two sides always sees the
-   other. */
 void VirtMachine::Kick()
 {
-    fKicked.store(true);
-    if (fSleeping.load()) {
-        std::lock_guard<std::mutex> locker(fWaitMutex);
-        fWaitCond.notify_one();
-    }
-}
-
-
-void VirtMachine::WaitForKick(int64_t timeout_us)
-{
-    std::unique_lock<std::mutex> locker(fWaitMutex);
-
-    fSleeping.store(true);
-    if (!fKicked.load()) {
-        fWaitCond.wait_for(locker, std::chrono::microseconds(timeout_us),
-                           [this]() {return fKicked.load();});
-    }
-    fKicked.store(false);
-    fSleeping.store(false);
+    fWakeup.Kick();
 }
 
 
@@ -823,7 +802,7 @@ void VirtMachine::ThreadLoop()
             delay = MAX_SLEEP_US;
         if (refresh_delay >= 0 && refresh_delay < delay)
             delay = refresh_delay;
-        WaitForKick(delay);
+        fWakeup.Wait(delay);
     }
 }
 

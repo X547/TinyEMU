@@ -13,13 +13,14 @@ platform_kwargs = lib_kwargs + {
 
 # Services every build has, one implementation per host.
 if platform_os == 'windows'
-  host_sources = files('win32/host_memory.cpp', 'win32/host_time.cpp')
+  host_sources = files('win32/host_memory.cpp', 'win32/host_time.cpp',
+                       'win32/host_wakeup.cpp')
 elif platform_os == 'haiku'
   host_sources = files('haiku/fs_disk_os.cpp', 'haiku/host_memory.cpp',
-                       'posix/host_time.cpp')
+                       'posix/host_time.cpp', 'posix/host_wakeup.cpp')
 else
   host_sources = files('posix/fs_disk_os.cpp', 'posix/host_memory.cpp',
-                       'posix/host_time.cpp')
+                       'posix/host_time.cpp', 'posix/host_wakeup.cpp')
 endif
 
 emu_libs += static_library('platform_host', host_sources,

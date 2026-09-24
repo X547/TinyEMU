@@ -25,14 +25,13 @@
 
 #include <stdint.h>
 #include <atomic>
-#include <condition_variable>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <thread>
 
 #include "host_input.h"
 #include "host_screen.h"
+#include "host_wakeup.h"
 #include "json.h"
 
 /* This header is included both by the machines, which have already pulled in
@@ -170,11 +169,7 @@ private:
     /* the processor thread's, or no thread's while it is not running */
     std::atomic<std::thread::id> fThreadId {};
     std::atomic<bool> fStopRequested {false};
-    /* see Kick() and WaitForKick() */
-    std::mutex fWaitMutex;
-    std::condition_variable fWaitCond;
-    std::atomic<bool> fKicked {false};
-    std::atomic<bool> fSleeping {false};
+    HostWakeup fWakeup;
 
     HostScreen *fScreen = nullptr;
     FBDevice *fScreenSource = nullptr;
@@ -182,7 +177,6 @@ private:
 
     void ThreadLoop();
     int64_t RefreshScreen();
-    void WaitForKick(int64_t timeout_us);
 
 protected:
     DeviceLock *fDeviceLock = nullptr;
