@@ -28,6 +28,8 @@
 #include <inttypes.h>
 #include <assert.h>
 
+#include <algorithm>
+
 #include "bits.h"
 #include "cutils.h"
 #include "host_time.h"
@@ -1113,6 +1115,15 @@ public:
 
 static void copy_kernel(PCMachine *s, const uint8_t *buf, int buf_len,
                         const char *cmd_line);
+static void set_flat_gdt(uint8_t *gdt);
+static void start_flat_protected_mode(PCMachine *s, uint32_t gdt_addr,
+                                      uint32_t entry, int reg,
+                                      uint32_t reg_val);
+static void map_pci_interrupts(PCMachine *s);
+static bool is_elf(const uint8_t *buf, int buf_len);
+static bool pvh_load(PCMachine *s, const uint8_t *buf, int buf_len,
+                     const uint8_t *initrd, int initrd_len,
+                     const char *cmd_line, uint32_t bios_size);
 
 void PCMachine::BiosDebugWrite(uint32_t offset, uint32_t val, int size_log2)
 {
@@ -1678,9 +1689,19 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     }
 
     if (p->files[VM_FILE_KERNEL].buf) {
-        copy_kernel(s, p->files[VM_FILE_KERNEL].buf,
-                    p->files[VM_FILE_KERNEL].len,
-                    p->cmdline ? p->cmdline : "");
+        const VMFileEntry &kernel = p->files[VM_FILE_KERNEL];
+        const VMFileEntry &initrd = p->files[VM_FILE_INITRD];
+
+        if (is_elf(kernel.buf, kernel.len)) {
+            if (!pvh_load(s, kernel.buf, kernel.len, initrd.buf, initrd.len,
+                          p->cmdline ? p->cmdline : "",
+                          p->files[VM_FILE_BIOS].len)) {
+                return nullptr;
+            }
+        } else {
+            copy_kernel(s, kernel.buf, kernel.len,
+                        p->cmdline ? p->cmdline : "");
+        }
     }
 
     return owned;
@@ -1922,19 +1943,43 @@ static void copy_kernel(PCMachine *s, const uint8_t *buf, int buf_len,
         params->lfb_base = s->fb_base;
     }
     
-    params->gdt_table[2] = 0x00cf9b000000ffffLL; /* CS */
-    params->gdt_table[3] = 0x00cf93000000ffffLL; /* DS */
-        
+    set_flat_gdt((uint8_t *)params + offsetof(struct linux_params, gdt_table));
+    start_flat_protected_mode(s, KERNEL_PARAMS_ADDR +
+                              offsetof(struct linux_params, gdt_table),
+                              load_address, 6, KERNEL_PARAMS_ADDR); /* esi */
+    map_pci_interrupts(s);
+}
+
+/* The GDT a kernel entered in flat protected mode starts with: code in
+   entry 2 and data in entry 3. */
+#define BOOT_GDT_ENTRIES 4
+
+static void set_flat_gdt(uint8_t *gdt)
+{
+    put_le64(gdt, 0);
+    put_le64(gdt + 8, 0);
+    put_le64(gdt + 16, 0x00cf9b000000ffffULL); /* CS */
+    put_le64(gdt + 24, 0x00cf93000000ffffULL); /* DS */
+}
+
+/* Starts the processor at 'entry' in 32 bit protected mode with paging off,
+   the segments flat from the GDT at 'gdt_addr', and general register 'reg'
+   holding 'reg_val'. */
+static void start_flat_protected_mode(PCMachine *s, uint32_t gdt_addr,
+                                      uint32_t entry, int reg,
+                                      uint32_t reg_val)
+{
+    uint16_t gdt_limit = BOOT_GDT_ENTRIES * 8 - 1;
+
     if (s->hypervisor) {
         HostX86Regs regs;
 
-        s->hypervisor->SetFlatProtectedMode(
-            KERNEL_PARAMS_ADDR + offsetof(struct linux_params, gdt_table),
-            sizeof(params->gdt_table) - 1, 2 << 3, 3 << 3);
+        s->hypervisor->SetFlatProtectedMode(gdt_addr, gdt_limit,
+                                            2 << 3, 3 << 3);
 
         memset(&regs, 0, sizeof(regs));
-        regs.rip = load_address;
-        regs.gpr[6] = KERNEL_PARAMS_ADDR; /* esi */
+        regs.rip = entry;
+        regs.gpr[reg] = reg_val;
         regs.rflags = 0x2;
         s->hypervisor->SetRegs(regs);
     } else {
@@ -1943,10 +1988,9 @@ static void copy_kernel(PCMachine *s, const uint8_t *buf, int buf_len,
         uint32_t val;
         val = x86_cpu_get_reg(s->cpu_state, X86_CPU_REG_CR0);
         x86_cpu_set_reg(s->cpu_state, X86_CPU_REG_CR0, val | (1 << 0));
-        
-        sd.base = KERNEL_PARAMS_ADDR +
-            offsetof(struct linux_params, gdt_table);
-        sd.limit = sizeof(params->gdt_table) - 1;
+
+        sd.base = gdt_addr;
+        sd.limit = gdt_limit;
         x86_cpu_set_seg(s->cpu_state, X86_CPU_SEG_GDT, &sd);
         sd.sel = 2 << 3;
         sd.base = 0;
@@ -1960,22 +2004,274 @@ static void copy_kernel(PCMachine *s, const uint8_t *buf, int buf_len,
                 x86_cpu_set_seg(s->cpu_state, i, &sd);
             }
         }
-                        
-        x86_cpu_set_reg(s->cpu_state, X86_CPU_REG_EIP, load_address);
-        x86_cpu_set_reg(s->cpu_state, 6, KERNEL_PARAMS_ADDR); /* esi */
+
+        x86_cpu_set_reg(s->cpu_state, X86_CPU_REG_EIP, entry);
+        x86_cpu_set_reg(s->cpu_state, reg, reg_val);
+    }
+}
+
+/* With no firmware to program the PIRQ registers, the loader routes the
+   INTx lines itself. */
+static void map_pci_interrupts(PCMachine *s)
+{
+    uint8_t elcr[2];
+    static const uint8_t pci_irqs[4] = { 9, 10, 11, 12 };
+
+    if (s->i440fx_state == nullptr)
+        return;
+    i440fx_map_interrupts(s->i440fx_state, elcr, pci_irqs);
+    /* XXX: hypervisor support */
+    if (s->pic_state) {
+        pic2_set_elcr(s->pic_state.get(), elcr);
+    }
+}
+
+/* PVH boot: an ELF kernel with a PHYS32_ENTRY note is entered there in flat
+   32 bit protected mode, paging off, with EBX pointing at an hvm_start_info
+   (Xen's arch/x86/hvm/start_info.h). */
+
+#define XEN_HVM_START_MAGIC 0x336ec578
+#define XEN_ELFNOTE_PHYS32_ENTRY 18
+
+struct HvmStartInfo {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t flags;
+    uint32_t nr_modules;
+    uint64_t modlist_paddr;
+    uint64_t cmdline_paddr;
+    uint64_t rsdp_paddr;
+    uint64_t memmap_paddr;
+    uint32_t memmap_entries;
+    uint32_t reserved;
+};
+
+struct HvmModlistEntry {
+    uint64_t paddr;
+    uint64_t size;
+    uint64_t cmdline_paddr;
+    uint64_t reserved;
+};
+
+struct HvmMemmapEntry {
+    uint64_t addr;
+    uint64_t size;
+    uint32_t type;
+    uint32_t reserved;
+};
+
+#define PVH_MEMMAP_MAX 8
+#define PVH_CMDLINE_SIZE 2048
+
+/* Everything the kernel is handed besides itself and the initrd, in the page
+   below the VGA hole, which the memory map reports as reserved. */
+struct PvhBootData {
+    HvmStartInfo start_info;
+    HvmModlistEntry modules[1];
+    HvmMemmapEntry memmap[PVH_MEMMAP_MAX];
+    uint64_t gdt[BOOT_GDT_ENTRIES];
+    char cmdline[PVH_CMDLINE_SIZE];
+};
+
+#define PVH_BOOT_DATA_ADDR 0x9f000
+static_assert(sizeof(PvhBootData) <= 0xa0000 - PVH_BOOT_DATA_ADDR,
+              "the PVH boot data does not fit below the VGA hole");
+
+#define ELF_CLASS32 1
+#define ELF_CLASS64 2
+#define ELF_EM_386 3
+#define ELF_EM_X86_64 62
+#define ELF_PT_LOAD 1
+#define ELF_PT_NOTE 4
+
+static bool is_elf(const uint8_t *buf, int buf_len)
+{
+    return buf_len >= 4 && memcmp(buf, "\x7f" "ELF", 4) == 0;
+}
+
+/* Guest RAM [addr, addr + len) when one writable RAM range holds all of it,
+   otherwise NULL. */
+static uint8_t *get_ram_range_ptr(PCMachine *s, uint64_t addr, uint64_t len)
+{
+    PhysMemoryRange *pr = s->mem_map->FindRange(addr);
+
+    if (!pr || !pr->is_ram || (pr->devram_flags & DEVRAM_FLAG_ROM) ||
+        len > pr->addr + pr->size - addr)
+        return NULL;
+    return pr->phys_mem + (uintptr_t)(addr - pr->addr);
+}
+
+/* The PHYS32_ENTRY value in the notes 'buf' holds, if any. */
+static bool pvh_find_entry(const uint8_t *buf, uint64_t len, uint32_t *entry)
+{
+    uint64_t pos = 0;
+
+    while (len - pos >= 12) {
+        uint32_t namesz = get_le32(buf + pos);
+        uint32_t descsz = get_le32(buf + pos + 4);
+        uint32_t type = get_le32(buf + pos + 8);
+        uint64_t name = pos + 12;
+        uint64_t desc = name + ((namesz + 3) & ~3ULL);
+
+        if (desc > len || ((descsz + 3) & ~3ULL) > len - desc)
+            return false;
+        if (namesz == 4 && memcmp(buf + name, "Xen", 4) == 0 &&
+            type == XEN_ELFNOTE_PHYS32_ENTRY && descsz >= 4) {
+            *entry = get_le32(buf + desc);
+            return true;
+        }
+        pos = desc + ((descsz + 3) & ~3ULL);
+    }
+    return false;
+}
+
+static bool pvh_load(PCMachine *s, const uint8_t *buf, int buf_len,
+                     const uint8_t *initrd, int initrd_len,
+                     const char *cmd_line, uint32_t bios_size)
+{
+    bool elf64;
+    uint64_t phoff;
+    int phentsize, phnum, machine;
+    uint64_t kernel_end = 0;
+    uint32_t entry;
+    bool has_entry = false;
+
+    if (buf_len < 0x40 || buf[5] != 1 /* little endian */ ||
+        (buf[4] != ELF_CLASS32 && buf[4] != ELF_CLASS64)) {
+        vm_error("pc: the kernel is not a little endian ELF file\n");
+        return false;
+    }
+    elf64 = buf[4] == ELF_CLASS64;
+    machine = get_le16(buf + 18);
+    if (machine != (elf64 ? ELF_EM_X86_64 : ELF_EM_386)) {
+        vm_error("pc: the kernel is not an x86 ELF file\n");
+        return false;
+    }
+    /* the interpreter is an i686 */
+    if (elf64 && !s->hypervisor) {
+        vm_error("pc: a 64 bit kernel needs a hypervisor\n");
+        return false;
+    }
+    if (elf64) {
+        phoff = get_le64(buf + 32);
+        phentsize = get_le16(buf + 54);
+        phnum = get_le16(buf + 56);
+    } else {
+        phoff = get_le32(buf + 28);
+        phentsize = get_le16(buf + 42);
+        phnum = get_le16(buf + 44);
+    }
+    if (phentsize < (elf64 ? 56 : 32) ||
+        phoff > (uint64_t)buf_len ||
+        (uint64_t)phnum * phentsize > buf_len - phoff) {
+        vm_error("pc: the kernel's program headers are truncated\n");
+        return false;
     }
 
-    /* map PCI interrupts (no BIOS, so we must do it) */
-    {
-        uint8_t elcr[2];
-        static const uint8_t pci_irqs[4] = { 9, 10, 11, 12 };
+    for (int i = 0; i < phnum; i++) {
+        const uint8_t *ph = buf + phoff + (uint64_t)i * phentsize;
+        uint32_t type = get_le32(ph);
+        uint64_t offset, paddr, filesz, memsz;
 
-        i440fx_map_interrupts(s->i440fx_state, elcr, pci_irqs);
-        /* XXX: hypervisor support */
-        if (s->pic_state) {
-            pic2_set_elcr(s->pic_state.get(), elcr);
+        if (elf64) {
+            offset = get_le64(ph + 8);
+            paddr = get_le64(ph + 24);
+            filesz = get_le64(ph + 32);
+            memsz = get_le64(ph + 40);
+        } else {
+            offset = get_le32(ph + 4);
+            paddr = get_le32(ph + 12);
+            filesz = get_le32(ph + 16);
+            memsz = get_le32(ph + 20);
+        }
+        if (offset > (uint64_t)buf_len || filesz > buf_len - offset) {
+            vm_error("pc: a kernel segment is past the end of the file\n");
+            return false;
+        }
+        if (type == ELF_PT_NOTE && !has_entry) {
+            has_entry = pvh_find_entry(buf + offset, filesz, &entry);
+        } else if (type == ELF_PT_LOAD && memsz != 0) {
+            uint8_t *ptr = NULL;
+
+            /* below 1 MB is the boot data and the legacy areas */
+            if (filesz <= memsz && paddr >= 0x100000)
+                ptr = get_ram_range_ptr(s, paddr, memsz);
+            if (ptr == NULL) {
+                vm_error("pc: no RAM for the kernel segment at 0x%" PRIx64
+                         "-0x%" PRIx64 "\n", paddr, paddr + memsz);
+                return false;
+            }
+            memcpy(ptr, buf + offset, filesz);
+            memset(ptr + filesz, 0, memsz - filesz);
+            kernel_end = std::max(kernel_end, paddr + memsz);
         }
     }
+    if (!has_entry) {
+        vm_error("pc: the ELF kernel has no PVH entry point\n");
+        return false;
+    }
+
+    PvhBootData *bd = reinterpret_cast<PvhBootData *>(
+        get_ram_range_ptr(s, PVH_BOOT_DATA_ADDR, sizeof(PvhBootData)));
+    assert(bd != NULL);
+    memset(bd, 0, sizeof(*bd));
+    HvmStartInfo *si = &bd->start_info;
+    si->magic = XEN_HVM_START_MAGIC;
+    si->version = 1;
+
+    if (strlen(cmd_line) >= sizeof(bd->cmdline)) {
+        vm_error("pc: the kernel command line is longer than %d bytes\n",
+                 PVH_CMDLINE_SIZE - 1);
+        return false;
+    }
+    strcpy(bd->cmdline, cmd_line);
+    si->cmdline_paddr = PVH_BOOT_DATA_ADDR + offsetof(PvhBootData, cmdline);
+
+    /* the initrd at the top of RAM */
+    if (initrd_len > 0) {
+        uint64_t addr = (s->ram_size - initrd_len) & ~(uint64_t)0xfff;
+        uint8_t *ptr = NULL;
+
+        if ((uint64_t)initrd_len < s->ram_size &&
+            addr >= ((kernel_end + 0xfff) & ~(uint64_t)0xfff))
+            ptr = get_ram_range_ptr(s, addr, initrd_len);
+        if (ptr == NULL) {
+            vm_error("pc: not enough RAM above the kernel for the initrd\n");
+            return false;
+        }
+        memcpy(ptr, initrd, initrd_len);
+        bd->modules[0].paddr = addr;
+        bd->modules[0].size = initrd_len;
+        si->nr_modules = 1;
+        si->modlist_paddr = PVH_BOOT_DATA_ADDR +
+            offsetof(PvhBootData, modules);
+    }
+
+    /* The RAM there is, less the boot data page, the VGA hole and the BIOS
+       area. */
+    int n = 0;
+    auto add_range = [bd, &n](uint64_t addr, uint64_t size, uint32_t type) {
+        assert(n < PVH_MEMMAP_MAX);
+        bd->memmap[n].addr = addr;
+        bd->memmap[n].size = size;
+        bd->memmap[n].type = type;
+        n++;
+    };
+    add_range(0, PVH_BOOT_DATA_ADDR, E820_RAM);
+    add_range(PVH_BOOT_DATA_ADDR, 0x100000 - PVH_BOOT_DATA_ADDR,
+              E820_RESERVED);
+    add_range(0x100000, s->ram_size - 0x100000, E820_RAM);
+    if (bios_size != 0)
+        add_range(0x100000000ULL - bios_size, bios_size, E820_RESERVED);
+    si->memmap_paddr = PVH_BOOT_DATA_ADDR + offsetof(PvhBootData, memmap);
+    si->memmap_entries = n;
+
+    set_flat_gdt(reinterpret_cast<uint8_t *>(bd->gdt));
+    start_flat_protected_mode(s, PVH_BOOT_DATA_ADDR +
+                              offsetof(PvhBootData, gdt),
+                              entry, 3, PVH_BOOT_DATA_ADDR); /* ebx */
+    map_pci_interrupts(s);
+    return true;
 }
 
 void PCMachine::ProcessorThreadStarted()

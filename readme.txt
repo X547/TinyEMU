@@ -810,8 +810,10 @@ and no SSE, which is slower but needs nothing from the host. The x86
 emulator uses the same set of VirtIO devices as the RISCV emulator and is
 able to run many operating systems.
 
-The x86 emulator accepts a Linux kernel image (bzImage). No BIOS image
-is necessary.
+The x86 emulator accepts a Linux kernel image (bzImage), or an ELF kernel
+with a PVH entry point (a Linux vmlinux built with CONFIG_PVH), which also
+gets the "initrd" and the memory map. No BIOS image is necessary. A 64 bit
+kernel needs a hypervisor.
 
 The PC is built from the configuration's device tree, as every machine is.
 What it has before any device is declared is the part a PC cannot be without:
