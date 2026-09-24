@@ -37,10 +37,10 @@
 #define IOAPIC_VERSION 0x11
 
 /* redirection entry */
-#define RTE_DELIVERY_STATUS bit_at(12)
-#define RTE_REMOTE_IRR      bit_at(14)
-#define RTE_LEVEL           bit_at(15)
-#define RTE_MASKED          bit_at(16)
+#define RTE_DELIVERY_STATUS bit_at<uint64_t>(12)
+#define RTE_REMOTE_IRR      bit_at<uint64_t>(14)
+#define RTE_LEVEL           bit_at<uint64_t>(15)
+#define RTE_MASKED          bit_at<uint64_t>(16)
 #define RTE_READ_ONLY       (RTE_DELIVERY_STATUS | RTE_REMOTE_IRR)
 
 
