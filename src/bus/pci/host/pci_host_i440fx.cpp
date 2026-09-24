@@ -168,6 +168,10 @@ public:
 
         fState = std::make_unique<I440FXState>();
         fPciBus = pci_bus_init(sys->MemMap(), sys->PortMap());
+        /* The messages go to the machine's local APICs, when it has them. */
+        if (sys->MsiTarget() != nullptr) {
+            pci_bus_set_msi_target(fPciBus.get(), sys->MsiTarget());
+        }
         fState->pci_bus = fPciBus.get();
         /* The lines are the machine's, which on a PC are wired before any
            device exists, so the array is contiguous from line 0. */

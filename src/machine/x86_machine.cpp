@@ -1031,7 +1031,8 @@ class PCMachine final:
     public PITTickSource,
     public X86HardIntnoSource,
     public X86TscSource,
-    public X86HypervisorTarget {
+    public X86HypervisorTarget,
+    public PCIMsiTarget {
 public:
     uint64_t ram_size;
     PhysMemoryMap *mem_map;
@@ -1053,6 +1054,8 @@ public:
 
     /* runs the processor instead of the interpreter when the host has one */
     std::unique_ptr<HostX86Hypervisor> hypervisor;
+    /* the hypervisor provides local APICs, and MSIs go to them */
+    bool fLocalApic = false;
     /* the hypervisor has the 8259s and the 8254 rather than the machine */
     bool fHypervisorIrqchip = false;
     HypervisorIRQTarget fHypervisorIrqTarget {*this};
@@ -1078,6 +1081,8 @@ public:
     void MmioWrite(uint64_t addr, const uint8_t *data, int len) override;
     bool InterruptRequested() override;
     int AcknowledgeInterrupt() override;
+    /* PCIMsiTarget */
+    void SendMsi(uint64_t addr, uint32_t data) override;
 
     DeviceIOAdapter<PCMachine, &PCMachine::Port80Read,
                     &PCMachine::Port80Write> fPort80Io {*this};
@@ -1264,6 +1269,16 @@ bool PCMachine::InterruptRequested()
 int PCMachine::AcknowledgeInterrupt()
 {
     return pic2_get_hard_intno(pic_state.get());
+}
+
+/* Only a write to the local APICs' page is an interrupt; anything else is
+   the memory write an MSI really is. */
+void PCMachine::SendMsi(uint64_t addr, uint32_t data)
+{
+    if ((addr >> 20) == 0xfee)
+        hypervisor->SendMsi(addr, data);
+    else
+        mem_map->IoWrite(addr, data, 2);
 }
 
 int64_t PCMachine::Ticks()
@@ -1544,8 +1559,15 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
         vm_error("pc: only one processor is supported\n");
         return nullptr;
     }
-    if (p->interrupt_controller != nullptr) {
-        vm_error("pc: the interrupt controller cannot be chosen\n");
+    HostX86Options options;
+    if (p->interrupt_controller == nullptr ||
+        strcmp(p->interrupt_controller, "pic") == 0) {
+        options.local_apic = false;
+    } else if (strcmp(p->interrupt_controller, "apic") == 0) {
+        options.local_apic = true;
+    } else {
+        vm_error("pc: interrupt_controller must be \"pic\" or \"apic\", "
+                 "not \"%s\"\n", p->interrupt_controller);
         return nullptr;
     }
     /* The nesting in the file is the nesting of the buses, so the root one
@@ -1567,8 +1589,15 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     s->port_map = new PhysMemoryMap();
 
     if (p->accel_enable) {
-        s->hypervisor = host_x86_hypervisor_open(*s, *p->device_lock);
+        s->hypervisor = host_x86_hypervisor_open(*s, *p->device_lock,
+                                                 options);
     }
+    /* the interpreter has no local APIC */
+    if (options.local_apic && !s->hypervisor) {
+        vm_error("pc: interrupt_controller \"apic\" needs a hypervisor\n");
+        return nullptr;
+    }
+    s->fLocalApic = options.local_apic;
 
     if (s->hypervisor) {
         s->mem_map = new HypervisorPhysMemoryMap(*s->hypervisor);
@@ -1650,6 +1679,8 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
        controllers, the timer and the clock. */
     s->bus = new SystemBus(s->mem_map, s->port_map, s->pic_irq,
                            PC_IRQ_COUNT);
+    if (s->fLocalApic)
+        s->bus->SetMsiTarget(s);
     s->bus->IoAlloc().SetWindow(0, PC_IO_SPACE_SIZE);
     s->bus->MmioAlloc().SetWindow(FRAMEBUFFER_BASE_ADDR,
                                   PC_DEVICE_WINDOW_SIZE);

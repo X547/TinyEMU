@@ -38,6 +38,13 @@ struct HostX86Regs {
 };
 
 
+/* What the machine needs from the hypervisor, fixed when it is opened. */
+struct HostX86Options {
+    /* local APICs, reached by SendMsi() */
+    bool local_apic = false;
+};
+
+
 /* The machine half: the port and memory accesses the processor makes to
    devices, and the interrupt controller when the hypervisor has none. Called
    with the device lock held. */
@@ -92,6 +99,9 @@ public:
 
     /* Only with interrupt controllers of its own. */
     virtual void SetIRQ(int irq, int level) = 0;
+    /* Only with local APICs: delivers the interrupt message a write of
+       'data' to 'addr' in the 0xfee00000 page describes. Any thread. */
+    virtual void SendMsi(uint64_t addr, uint32_t data) = 0;
 
     /* SetRegs() leaves the registers HostX86Regs does not hold alone. */
     virtual void GetRegs(HostX86Regs *regs) = 0;
@@ -116,6 +126,8 @@ public:
 
 
 /* Implemented once per host; the build picks the file. nullptr when the host
-   has no hypervisor, having said why if it should have had one. */
+   has no hypervisor or cannot provide 'options', having said why if it
+   should have had one. */
 std::unique_ptr<HostX86Hypervisor> host_x86_hypervisor_open(
-    X86HypervisorTarget &target, DeviceLock &lock);
+    X86HypervisorTarget &target, DeviceLock &lock,
+    const HostX86Options &options);

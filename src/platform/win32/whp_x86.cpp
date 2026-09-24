@@ -56,6 +56,8 @@ class WhpX86Hypervisor final: public HostX86Hypervisor {
 private:
     X86HypervisorTarget &fTarget;
     DeviceLock &fLock;
+    /* the hypervisor emulates the local APIC */
+    bool fLocalApic;
     WHV_PARTITION_HANDLE fPartition = nullptr;
     bool fVpCreated = false;
     WHV_EMULATOR_HANDLE fEmulator = nullptr;
@@ -98,8 +100,9 @@ private:
                                        void *context, PTP_TIMER timer);
 
 public:
-    WhpX86Hypervisor(X86HypervisorTarget &target, DeviceLock &lock):
-        fTarget(target), fLock(lock) {}
+    WhpX86Hypervisor(X86HypervisorTarget &target, DeviceLock &lock,
+                     bool local_apic):
+        fTarget(target), fLock(lock), fLocalApic(local_apic) {}
     ~WhpX86Hypervisor() override;
 
     bool Init();
@@ -114,6 +117,7 @@ public:
                 bool read_only, bool log_dirty) override;
     void GetDirtyLog(int slot, uint32_t *bitmap) override;
     void SetIRQ(int irq, int level) override;
+    void SendMsi(uint64_t addr, uint32_t data) override;
     void GetRegs(HostX86Regs *regs) override;
     void SetRegs(const HostX86Regs &regs) override;
     void SetFlatProtectedMode(uint32_t gdt_base, uint16_t gdt_limit,
@@ -166,8 +170,18 @@ bool WhpX86Hypervisor::Init()
     if (FAILED(hr))
         Fail("setting the processor count", hr);
 
+    if (fLocalApic) {
+        WHV_X64_LOCAL_APIC_EMULATION_MODE mode =
+            WHvX64LocalApicEmulationModeXApic;
+        hr = WHvSetPartitionProperty(
+            fPartition, WHvPartitionPropertyCodeLocalApicEmulationMode,
+            &mode, sizeof(mode));
+        if (FAILED(hr))
+            Fail("enabling the local APIC", hr);
+    }
+
     /* CPUID comes to us for the leaves that report the APIC and ACPI, which
-       the machine does not have. */
+       the machine may not have. */
     WHV_EXTENDED_VM_EXITS exits {};
     exits.X64CpuidExit = 1;
     hr = WHvSetPartitionProperty(fPartition,
@@ -269,6 +283,41 @@ void WhpX86Hypervisor::SetIRQ(int irq, int level)
 {
     /* the machine keeps the 8259s, so no line comes here */
     abort();
+}
+
+
+/* The MSI address holds the destination and its mode, the data the vector,
+   the delivery mode and the trigger. */
+void WhpX86Hypervisor::SendMsi(uint64_t addr, uint32_t data)
+{
+    WHV_INTERRUPT_CONTROL ic {};
+    HRESULT hr;
+
+    switch (get_bits(data, 8, 3)) {
+    case 0: ic.Type = WHvX64InterruptTypeFixed; break;
+    case 1: ic.Type = WHvX64InterruptTypeLowestPriority; break;
+    case 4: ic.Type = WHvX64InterruptTypeNmi; break;
+    case 5: ic.Type = WHvX64InterruptTypeInit; break;
+    default:
+        /* SMI and ExtINT have nowhere to go */
+        return;
+    }
+    ic.DestinationMode = get_bit(addr, 2) ?
+        WHvX64InterruptDestinationModeLogical :
+        WHvX64InterruptDestinationModePhysical;
+    if (get_bit(data, 15)) {
+        /* a level triggered message only counts while asserted */
+        if (!get_bit(data, 14))
+            return;
+        ic.TriggerMode = WHvX64InterruptTriggerModeLevel;
+    } else {
+        ic.TriggerMode = WHvX64InterruptTriggerModeEdge;
+    }
+    ic.Destination = get_bits(addr, 12, 8);
+    ic.Vector = get_bits(data, 0, 8);
+    hr = WHvRequestInterrupt(fPartition, &ic, sizeof(ic));
+    if (FAILED(hr))
+        Fail("WHvRequestInterrupt", hr);
 }
 
 
@@ -450,13 +499,27 @@ void CALLBACK WhpX86Hypervisor::TimerCallback(PTP_CALLBACK_INSTANCE instance,
    False while it stays halted. */
 bool WhpX86Hypervisor::InjectInterrupt()
 {
-    WHV_REGISTER_NAME names[2];
-    WHV_REGISTER_VALUE values[2] {};
+    WHV_REGISTER_NAME names[3];
+    WHV_REGISTER_VALUE values[3] {};
     UINT32 count = 0;
     bool intr = fTarget.InterruptRequested();
 
     if (intr && !fInterruptionPending && !fInterruptShadow &&
         (fRflags & RFLAGS_IF)) {
+        /* With the local APIC, HLT waits inside the hypervisor, and an
+           injected interrupt does not end the wait by itself. */
+        if (fLocalApic) {
+            WHV_REGISTER_NAME name = WHvRegisterInternalActivityState;
+            HRESULT hr = WHvGetVirtualProcessorRegisters(fPartition, 0, &name,
+                                                         1, &values[count]);
+            if (FAILED(hr))
+                Fail("WHvGetVirtualProcessorRegisters", hr);
+            if (values[count].InternalActivity.HaltSuspend) {
+                values[count].InternalActivity.HaltSuspend = 0;
+                names[count] = name;
+                count++;
+            }
+        }
         names[count] = WHvRegisterPendingInterruption;
         values[count].PendingInterruption.InterruptionPending = 1;
         values[count].PendingInterruption.InterruptionType =
@@ -499,9 +562,13 @@ void WhpX86Hypervisor::ExitCpuid(const WHV_RUN_VP_EXIT_CONTEXT &ctx)
     values[2].Reg64 = c.DefaultResultRbx;
     values[3].Reg64 = c.DefaultResultRcx;
     values[4].Reg64 = c.DefaultResultRdx;
-    /* remove the APIC & ACPI to be in sync with the emulator */
-    if (c.Rax == 1 || c.Rax == 0x80000001)
-        values[4].Reg64 &= ~(uint64_t)(CPUID_APIC | CPUID_ACPI);
+    /* remove the APIC (unless the machine has one) & ACPI to be in sync
+       with the emulator */
+    if (c.Rax == 1 || c.Rax == 0x80000001) {
+        values[4].Reg64 &= ~(uint64_t)CPUID_ACPI;
+        if (!fLocalApic)
+            values[4].Reg64 &= ~(uint64_t)CPUID_APIC;
+    }
     hr = WHvSetVirtualProcessorRegisters(fPartition, 0, names, 5, values);
     if (FAILED(hr))
         Fail("WHvSetVirtualProcessorRegisters", hr);
@@ -602,7 +669,8 @@ void WhpX86Hypervisor::InterruptRun()
 
 
 std::unique_ptr<HostX86Hypervisor> host_x86_hypervisor_open(
-    X86HypervisorTarget &target, DeviceLock &lock)
+    X86HypervisorTarget &target, DeviceLock &lock,
+    const HostX86Options &options)
 {
     WHV_CAPABILITY cap;
     UINT32 size;
@@ -615,7 +683,17 @@ std::unique_ptr<HostX86Hypervisor> host_x86_hypervisor_open(
         return nullptr;
     }
 
-    auto whp = std::make_unique<WhpX86Hypervisor>(target, lock);
+    if (options.local_apic) {
+        hr = WHvGetCapability(WHvCapabilityCodeFeatures, &cap, sizeof(cap),
+                              &size);
+        if (FAILED(hr) || !cap.Features.LocalApicEmulation) {
+            fprintf(stderr, "WHP has no local APIC emulation\n");
+            return nullptr;
+        }
+    }
+
+    auto whp = std::make_unique<WhpX86Hypervisor>(target, lock,
+                                                  options.local_apic);
     if (!whp->Init())
         return nullptr;
     return whp;

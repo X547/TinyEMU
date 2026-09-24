@@ -103,6 +103,7 @@ public:
                 bool read_only, bool log_dirty) override;
     void GetDirtyLog(int slot, uint32_t *bitmap) override;
     void SetIRQ(int irq, int level) override;
+    void SendMsi(uint64_t addr, uint32_t data) override;
     void GetRegs(HostX86Regs *regs) override;
     void SetRegs(const HostX86Regs &regs) override;
     void SetFlatProtectedMode(uint32_t gdt_base, uint16_t gdt_limit,
@@ -262,6 +263,13 @@ void NvmmX86Hypervisor::GetDirtyLog(int slot, uint32_t *bitmap)
 void NvmmX86Hypervisor::SetIRQ(int irq, int level)
 {
     /* the machine keeps the 8259s, so no line comes here */
+    abort();
+}
+
+
+void NvmmX86Hypervisor::SendMsi(uint64_t addr, uint32_t data)
+{
+    /* there is no local APIC to send to */
     abort();
 }
 
@@ -529,8 +537,13 @@ bool NvmmX86Hypervisor::Idle(bool intr)
 
 
 std::unique_ptr<HostX86Hypervisor> host_x86_hypervisor_open(
-    X86HypervisorTarget &target, DeviceLock &lock)
+    X86HypervisorTarget &target, DeviceLock &lock,
+    const HostX86Options &options)
 {
+    if (options.local_apic) {
+        fprintf(stderr, "NVMM has no local APIC\n");
+        return nullptr;
+    }
     if (nvmm_init() == -1) {
         fprintf(stderr, "NVMM not available: %s\n", strerror(errno));
         return nullptr;

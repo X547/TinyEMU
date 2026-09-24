@@ -24,9 +24,11 @@
 
 /* The interpreter is the normal case here, so this is silent. */
 std::unique_ptr<HostX86Hypervisor> host_x86_hypervisor_open(
-    X86HypervisorTarget &target, DeviceLock &lock)
+    X86HypervisorTarget &target, DeviceLock &lock,
+    const HostX86Options &options)
 {
     (void)target;
     (void)lock;
+    (void)options;
     return nullptr;
 }

@@ -48,6 +48,8 @@ class KvmX86Hypervisor final: public HostX86Hypervisor {
 private:
     X86HypervisorTarget &fTarget;
     DeviceLock &fLock;
+    /* the in-kernel local APIC is shown to the guest */
+    bool fLocalApic;
     int fKvmFd;
     int fVmFd = -1;
     int fVcpuFd = -1;
@@ -62,8 +64,9 @@ private:
 
 public:
     KvmX86Hypervisor(X86HypervisorTarget &target, DeviceLock &lock,
-                     int kvm_fd):
-        fTarget(target), fLock(lock), fKvmFd(kvm_fd) {}
+                     bool local_apic, int kvm_fd):
+        fTarget(target), fLock(lock), fLocalApic(local_apic),
+        fKvmFd(kvm_fd) {}
     ~KvmX86Hypervisor() override;
 
     void Init();
@@ -78,6 +81,7 @@ public:
                 bool read_only, bool log_dirty) override;
     void GetDirtyLog(int slot, uint32_t *bitmap) override;
     void SetIRQ(int irq, int level) override;
+    void SendMsi(uint64_t addr, uint32_t data) override;
     void GetRegs(HostX86Regs *regs) override;
     void SetRegs(const HostX86Regs &regs) override;
     void SetFlatProtectedMode(uint32_t gdt_base, uint16_t gdt_limit,
@@ -125,9 +129,12 @@ void KvmX86Hypervisor::SetCpuid()
 
     for(i = 0; i < kvm_cpuid->nent; i++) {
         ent = &kvm_cpuid->entries[i];
-        /* remove the APIC & ACPI to be in sync with the emulator */
+        /* remove the APIC (unless the machine has one) & ACPI to be in
+           sync with the emulator */
         if (ent->function == 1 || ent->function == 0x80000001) {
-            ent->edx &= ~(CPUID_APIC | CPUID_ACPI);
+            ent->edx &= ~CPUID_ACPI;
+            if (!fLocalApic)
+                ent->edx &= ~CPUID_APIC;
         }
     }
 
@@ -255,6 +262,21 @@ void KvmX86Hypervisor::SetIRQ(int irq, int level)
     irq_level.level = level;
     if (ioctl(fVmFd, KVM_IRQ_LINE, &irq_level) < 0) {
         perror("KVM_IRQ_LINE");
+        exit(1);
+    }
+}
+
+
+void KvmX86Hypervisor::SendMsi(uint64_t addr, uint32_t data)
+{
+    struct kvm_msi msi;
+
+    memset(&msi, 0, sizeof(msi));
+    msi.address_lo = (uint32_t)addr;
+    msi.address_hi = (uint32_t)(addr >> 32);
+    msi.data = data;
+    if (ioctl(fVmFd, KVM_SIGNAL_MSI, &msi) < 0) {
+        perror("KVM_SIGNAL_MSI");
         exit(1);
     }
 }
@@ -479,7 +501,8 @@ void KvmX86Hypervisor::InterruptRun()
 
 
 std::unique_ptr<HostX86Hypervisor> host_x86_hypervisor_open(
-    X86HypervisorTarget &target, DeviceLock &lock)
+    X86HypervisorTarget &target, DeviceLock &lock,
+    const HostX86Options &options)
 {
     int kvm_fd, ret;
 
@@ -499,7 +522,8 @@ std::unique_ptr<HostX86Hypervisor> host_x86_hypervisor_open(
         return nullptr;
     }
 
-    auto kvm = std::make_unique<KvmX86Hypervisor>(target, lock, kvm_fd);
+    auto kvm = std::make_unique<KvmX86Hypervisor>(target, lock,
+                                                  options.local_apic, kvm_fd);
     kvm->Init();
     return kvm;
 }
