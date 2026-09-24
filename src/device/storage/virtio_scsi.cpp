@@ -308,46 +308,6 @@ void VIRTIOSCSIDevice::Complete(SCSIRequest *req)
 }
 
 
-/* A command to a unit number nothing is attached to, on a target that exists.
-   INQUIRY has to succeed and say so, which is how a driver scanning the target
-   learns the unit is absent. */
-static void vscsi_no_unit(SCSIRequest *req)
-{
-    uint8_t buf[36];
-    uint32_t len;
-
-    switch (req->cdb[0]) {
-    case SCSI_INQUIRY:
-        memset(buf, 0, sizeof(buf));
-        buf[0] = 0x7f; /* no unit here, and none can be */
-        buf[2] = 0x05;
-        buf[3] = 0x02;
-        buf[4] = sizeof(buf) - 5;
-        len = req->buf_len < sizeof(buf) ? req->buf_len : sizeof(buf);
-        if (len > 0) {
-            memcpy(req->buf, buf, len);
-        }
-        scsi_set_good(req, len);
-        break;
-
-    case SCSI_REQUEST_SENSE:
-        scsi_set_sense(req, SCSI_SENSE_ILLEGAL_REQUEST,
-                       SCSI_ASC_LUN_NOT_SUPPORTED);
-        len = req->buf_len < SCSI_SENSE_LEN ? req->buf_len : SCSI_SENSE_LEN;
-        if (len > 0) {
-            memcpy(req->buf, req->sense, len);
-        }
-        scsi_set_good(req, len);
-        break;
-
-    default:
-        scsi_set_sense(req, SCSI_SENSE_ILLEGAL_REQUEST,
-                       SCSI_ASC_LUN_NOT_SUPPORTED);
-        break;
-    }
-}
-
-
 int VIRTIOSCSIDevice::Command(int desc_idx, int read_size, int write_size)
 {
     uint8_t hdr[VSCSI_REQ_CMD_HDR];
@@ -421,7 +381,7 @@ int VIRTIOSCSIDevice::Command(int desc_idx, int read_size, int write_size)
         return 0;
     }
     if (fUnit == nullptr) {
-        vscsi_no_unit(&fRequest);
+        scsi_no_unit(&fRequest);
         Finish(VIRTIO_SCSI_S_OK);
         return 0;
     }

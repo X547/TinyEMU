@@ -232,6 +232,11 @@ void scsi_set_good(SCSIRequest *req, uint32_t length);
 /* Refuse a command whose data phase does not fit it, without running it. */
 void scsi_set_phase_error(SCSIRequest *req);
 
+/* Answer a command to a unit number nothing is attached to, on a target that
+   exists. INQUIRY has to succeed and say so, which is how an initiator
+   scanning the target learns the unit is absent. */
+void scsi_no_unit(SCSIRequest *req);
+
 /* How long a CDB with this operation code is, from the group code in its top
    three bits. Returns 0 for the two vendor specific groups, whose length only
    the transport knows. */

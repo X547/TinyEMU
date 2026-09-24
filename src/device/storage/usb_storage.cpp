@@ -271,13 +271,6 @@ void USBStorage::StartCommand(const uint8_t *cdb, int cdb_len)
         return;
     }
 
-    if (unit == nullptr) {
-        /* No such unit. There is nothing to take the command, so the wrapper
-           reports the failure and a REQUEST SENSE would find nothing. */
-        fStatus = CSW_STATUS_FAIL;
-        return;
-    }
-
     fRequest = SCSIRequest();
     memcpy(fRequest.cdb, cdb, cdb_len < SCSI_MAX_CDB ? cdb_len : SCSI_MAX_CDB);
     fRequest.cdb_len = cdb_len;
@@ -288,6 +281,12 @@ void USBStorage::StartCommand(const uint8_t *cdb, int cdb_len)
     fRequest.buf = fBuf;
     fRequest.buf_len = fDataLen;
     fRequest.completion = this;
+
+    if (unit == nullptr) {
+        scsi_no_unit(&fRequest);
+        FinishCommand();
+        return;
+    }
 
     fCommandRunning = true;
     if (unit->Submit(&fRequest)) {

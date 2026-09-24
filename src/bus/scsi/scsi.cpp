@@ -61,6 +61,43 @@ void scsi_set_phase_error(SCSIRequest *req)
 }
 
 
+void scsi_no_unit(SCSIRequest *req)
+{
+    uint8_t buf[36];
+    uint32_t len;
+
+    switch (req->cdb[0]) {
+    case SCSI_INQUIRY:
+        memset(buf, 0, sizeof(buf));
+        buf[0] = 0x7f; /* no unit here, and none can be */
+        buf[2] = 0x05;
+        buf[3] = 0x02;
+        buf[4] = sizeof(buf) - 5;
+        len = req->buf_len < sizeof(buf) ? req->buf_len : sizeof(buf);
+        if (len > 0) {
+            memcpy(req->buf, buf, len);
+        }
+        scsi_set_good(req, len);
+        break;
+
+    case SCSI_REQUEST_SENSE:
+        scsi_set_sense(req, SCSI_SENSE_ILLEGAL_REQUEST,
+                       SCSI_ASC_LUN_NOT_SUPPORTED);
+        len = req->buf_len < SCSI_SENSE_LEN ? req->buf_len : SCSI_SENSE_LEN;
+        if (len > 0) {
+            memcpy(req->buf, req->sense, len);
+        }
+        scsi_set_good(req, len);
+        break;
+
+    default:
+        scsi_set_sense(req, SCSI_SENSE_ILLEGAL_REQUEST,
+                       SCSI_ASC_LUN_NOT_SUPPORTED);
+        break;
+    }
+}
+
+
 int scsi_cdb_len(uint8_t opcode)
 {
     /* The group code in the top three bits of the operation code fixes the
