@@ -64,7 +64,7 @@ private:
     /* shut down, until the machine ends */
     bool fShutdown = false;
 
-    void SetCpuid();
+    void SetCpuid(int index);
     void ExitIo();
     void ExitMmio();
 
@@ -301,7 +301,7 @@ KvmX86Vcpu::KvmX86Vcpu(KvmX86Hypervisor &owner, int index):
         exit(1);
     }
 
-    SetCpuid();
+    SetCpuid(index);
 
     /* map the kvm_run structure */
     fRunSize = ioctl(fOwner.fKvmFd, KVM_GET_VCPU_MMAP_SIZE, NULL);
@@ -329,7 +329,7 @@ KvmX86Vcpu::~KvmX86Vcpu()
 }
 
 
-void KvmX86Vcpu::SetCpuid()
+void KvmX86Vcpu::SetCpuid(int index)
 {
     struct kvm_cpuid2 *kvm_cpuid;
     int n_ent_max, i;
@@ -354,6 +354,20 @@ void KvmX86Vcpu::SetCpuid()
             ent->edx &= ~CPUID_ACPI;
             if (!fOwner.fLocalApic)
                 ent->edx &= ~CPUID_APIC;
+        }
+        /* The table is the host's; the APIC ID it reports is the vcpu's,
+           which is its index. */
+        switch (ent->function) {
+        case 1:
+            ent->ebx = set_bits(ent->ebx, 24, 8, (uint32_t)index);
+            break;
+        case 0xb:
+        case 0x1f:
+            ent->edx = index;
+            break;
+        case 0x8000001e:
+            ent->eax = index;
+            break;
         }
     }
 

@@ -136,8 +136,10 @@ commented examples.
 "cpus" sets the number of processors, 1 unless given. A RISC-V machine takes
 up to 64; each hart gets its own CLINT timer and software interrupt and a
 machine and a supervisor mode PLIC context. The harts take turns on one host
-thread, so more of them do not make the guest faster. The PC machine has one
-processor.
+thread, so more of them do not make the guest faster. The PC machine takes
+up to 255 with interrupt_controller "apic" and one otherwise; each runs on a
+host thread of its own in the hypervisor, and a kernel booted without
+firmware finds them all in its MADT.
 
 "interrupt_controller" chooses a RISC-V machine's external interrupt
 controller:

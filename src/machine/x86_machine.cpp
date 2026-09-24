@@ -1338,6 +1338,8 @@ int64_t PCMachine::Ticks()
 /* The two PICs give sixteen lines, and the port space is what a 16 bit port
    number can name. */
 #define PC_IRQ_COUNT 16
+/* xAPIC IDs 0 to 254 */
+#define PC_MAX_CPUS 255
 #define PC_IO_SPACE_SIZE 0x10000
 
 /* Where a device that wants host address space rather than ports is placed.
@@ -1626,10 +1628,6 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
         vm_error("unsupported machine: %s\n", p->machine_name);
         return nullptr;
     }
-    if (p->cpu_count != 1) {
-        vm_error("pc: only one processor is supported\n");
-        return nullptr;
-    }
     HostX86Options options;
     if (p->interrupt_controller == nullptr ||
         strcmp(p->interrupt_controller, "pic") == 0) {
@@ -1641,6 +1639,18 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
                  "not \"%s\"\n", p->interrupt_controller);
         return nullptr;
     }
+    /* The processors beyond the first are started through their local
+       APICs, whose xAPIC IDs stop short of the broadcast one. */
+    if (p->cpu_count < 1 || p->cpu_count > PC_MAX_CPUS) {
+        vm_error("pc: cpus must be between 1 and %d\n", PC_MAX_CPUS);
+        return nullptr;
+    }
+    if (p->cpu_count > 1 && !options.local_apic) {
+        vm_error("pc: more than one processor needs interrupt_controller "
+                 "\"apic\"\n");
+        return nullptr;
+    }
+    options.cpu_count = p->cpu_count;
     /* The nesting in the file is the nesting of the buses, so the root one
        has to be the kind this machine provides. */
     if (p->root_bus_type != NULL && strcmp(p->root_bus_type, "pc") != 0) {
@@ -2151,6 +2161,7 @@ static void pc_acpi_setup(PCMachine *s)
 
     config.i8042 = s->port_map->FindRange(0x64) != nullptr;
     config.apic = s->fLocalApic;
+    config.cpu_count = s->fCpuCount;
     config.pci_gsis = kKernelPciIrqs;
     /* the hole between RAM and the machine's own device window */
     config.pci_mmio_base = (s->ram_size + 0xfffff) & ~(uint64_t)0xfffff;
