@@ -300,8 +300,12 @@ void USBStorage::StartCommand(const uint8_t *cdb, int cdb_len)
 void USBStorage::FinishCommand()
 {
     fDataDone = fRequest.actual_length;
-    fStatus = fRequest.status == SCSI_STATUS_GOOD ? CSW_STATUS_PASS
-                                                  : CSW_STATUS_FAIL;
+    if (fRequest.phase_error) {
+        fStatus = CSW_STATUS_PHASE;
+    } else {
+        fStatus = fRequest.status == SCSI_STATUS_GOOD ? CSW_STATUS_PASS
+                                                      : CSW_STATUS_FAIL;
+    }
 }
 
 

@@ -52,6 +52,15 @@ void scsi_set_good(SCSIRequest *req, uint32_t length)
 }
 
 
+void scsi_set_phase_error(SCSIRequest *req)
+{
+    req->status = SCSI_STATUS_CHECK_CONDITION;
+    req->sense_len = 0;
+    req->actual_length = 0;
+    req->phase_error = true;
+}
+
+
 int scsi_cdb_len(uint8_t opcode)
 {
     /* The group code in the top three bits of the operation code fixes the

@@ -287,18 +287,16 @@ bool SCSIDisk::ReadWrite(SCSIRequest *req, uint64_t lba, uint32_t blocks,
         return true;
     }
 
-    uint32_t length = blocks * SCSI_DISK_BLOCK_SIZE;
-    if (length > req->buf_len) {
-        /* The initiator promised less room than the command needs. Serve what
-           fits, in whole blocks, and let the residue say so. */
-        blocks = req->buf_len / SCSI_DISK_BLOCK_SIZE;
-        if (blocks == 0) {
-            Fail(req, SCSI_SENSE_ILLEGAL_REQUEST,
-                 SCSI_ASC_INVALID_FIELD_IN_CDB);
-            return true;
-        }
-        length = blocks * SCSI_DISK_BLOCK_SIZE;
+    /* A data phase in the wrong direction or too short for the command cannot
+       be served in part: the initiator would take a partial transfer for the
+       whole one. */
+    uint64_t length64 = (uint64_t)blocks * SCSI_DISK_BLOCK_SIZE;
+    if (req->dir != (is_write ? SCSI_DIR_TO_DEV : SCSI_DIR_FROM_DEV) ||
+        length64 > req->buf_len) {
+        scsi_set_phase_error(req);
+        return true;
     }
+    uint32_t length = (uint32_t)length64;
 
     if (fPending != nullptr) {
         /* Nothing should be able to reach here: the transport waits for a

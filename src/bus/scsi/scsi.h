@@ -133,6 +133,10 @@ struct SCSIRequest {
     uint8_t status = SCSI_STATUS_GOOD;
     uint8_t sense[SCSI_SENSE_LEN] {};
     int sense_len = 0;
+    /* The data phase the initiator offered does not fit the command: the
+       wrong direction, or less room than the command moves. Nothing was
+       transferred, and the transport reports a failure of its own. */
+    bool phase_error = false;
 
     SCSICompletion *completion = nullptr;
 };
@@ -224,6 +228,9 @@ void scsi_set_sense(SCSIRequest *req, uint8_t sense_key, uint16_t asc_ascq);
 
 /* Mark a command successful, having moved 'length' bytes. */
 void scsi_set_good(SCSIRequest *req, uint32_t length);
+
+/* Refuse a command whose data phase does not fit it, without running it. */
+void scsi_set_phase_error(SCSIRequest *req);
 
 /* How long a CDB with this operation code is, from the group code in its top
    three bits. Returns 0 for the two vendor specific groups, whose length only

@@ -276,7 +276,12 @@ void VIRTIOSCSIDevice::Respond(int desc_idx, uint8_t response,
 
 void VIRTIOSCSIDevice::Finish(uint8_t response)
 {
-    Respond(fDescIdx, response, &fRequest);
+    if (fRequest.phase_error) {
+        /* the buffers do not fit the command, which ran no further */
+        Respond(fDescIdx, VIRTIO_SCSI_S_FAILURE, nullptr);
+    } else {
+        Respond(fDescIdx, response, &fRequest);
+    }
     fBuf.reset();
     fBusy = false;
 }
