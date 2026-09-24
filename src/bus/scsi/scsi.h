@@ -59,7 +59,7 @@ class HostBlockDevice;
 #define SCSI_ASC_INVALID_FIELD_IN_CDB       0x2400
 #define SCSI_ASC_LUN_NOT_SUPPORTED          0x2500
 #define SCSI_ASC_UNRECOVERED_READ_ERROR     0x1100
-#define SCSI_ASC_WRITE_FAULT                0x0300
+#define SCSI_ASC_WRITE_ERROR                0x0c00
 #define SCSI_ASC_MEDIUM_NOT_PRESENT         0x3a00
 #define SCSI_ASC_POWER_ON_RESET             0x2900
 

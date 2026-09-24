@@ -60,6 +60,7 @@ private:
     Completion fCompletion {*this};
     SCSIRequest *fPending = nullptr;
     uint32_t fPendingLength = 0;
+    bool fPendingWrite = false;
 
     /* The sense data a failed command left behind, for the REQUEST SENSE that
        a bulk-only transport's host sends afterwards. */
@@ -317,11 +318,12 @@ bool SCSIDisk::ReadWrite(SCSIRequest *req, uint64_t lba, uint32_t blocks,
         /* In flight; the completion finishes the request. */
         fPending = req;
         fPendingLength = length;
+        fPendingWrite = is_write;
         return false;
     }
     if (ret < 0) {
         Fail(req, SCSI_SENSE_MEDIUM_ERROR,
-             is_write ? SCSI_ASC_WRITE_FAULT : SCSI_ASC_UNRECOVERED_READ_ERROR);
+             is_write ? SCSI_ASC_WRITE_ERROR : SCSI_ASC_UNRECOVERED_READ_ERROR);
         return true;
     }
     Good(req, length);
@@ -338,7 +340,9 @@ void SCSIDisk::BlockDone(int ret)
     fPendingLength = 0;
 
     if (ret < 0) {
-        Fail(req, SCSI_SENSE_MEDIUM_ERROR, SCSI_ASC_UNRECOVERED_READ_ERROR);
+        Fail(req, SCSI_SENSE_MEDIUM_ERROR,
+             fPendingWrite ? SCSI_ASC_WRITE_ERROR
+                           : SCSI_ASC_UNRECOVERED_READ_ERROR);
     } else {
         Good(req, length);
     }
