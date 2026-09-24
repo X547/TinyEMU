@@ -6,5 +6,6 @@ storage_sources = files(
   'sd_card.cpp',
   'usb_storage.cpp',
   'virtio_block.cpp',
+  'virtio_scsi.cpp',
 )
 emu_libs += static_library('device_storage', storage_sources, kwargs: lib_kwargs)

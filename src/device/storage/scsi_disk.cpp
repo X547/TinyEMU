@@ -34,7 +34,7 @@
 #define SCSI_DISK_BLOCK_SIZE 512
 
 #define SCSI_DISK_VENDOR   "TinyEMU "         /*  8 characters, padded */
-#define SCSI_DISK_PRODUCT  "USB Disk        " /* 16 characters, padded */
+#define SCSI_DISK_PRODUCT  "SCSI Disk       " /* 16 characters, padded */
 #define SCSI_DISK_REVISION "1.0 "             /*  4 characters, padded */
 #define SCSI_DISK_SERIAL   "TEMU00000001"
 
@@ -456,8 +456,10 @@ bool SCSIDisk::Submit(SCSIRequest *req)
 
 //#pragma mark - factory
 
-Device *scsi_disk_node_create(std::unique_ptr<HostBlockDevice> bs, int lun)
+Device *scsi_disk_node_create(std::unique_ptr<HostBlockDevice> bs, int target,
+                              int lun)
 {
     return new SCSIDeviceNode("scsi-disk",
-                              std::make_unique<SCSIDisk>(std::move(bs)), lun);
+                              std::make_unique<SCSIDisk>(std::move(bs)),
+                              target, lun);
 }

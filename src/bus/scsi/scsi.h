@@ -165,14 +165,18 @@ public:
 };
 
 
-/* Implemented by the initiator, which owns the units attached to it. */
+/* Implemented by the initiator, which owns the units attached to it. A unit is
+   addressed by a target and a logical unit number within it; an initiator
+   that reaches only one target has only target 0. */
 class SCSIBusTarget {
 public:
     virtual ~SCSIBusTarget() = default;
 
-    /* The lowest unused logical unit number, or -1 when the target is full. */
-    virtual int FindFreeLun() = 0;
-    virtual bool AttachDevice(SCSIDevice *dev, uint32_t lun) = 0;
+    /* Fill in whichever of 'target' and 'lun' is negative with the first
+       address that is free, or return false when there is none. */
+    virtual bool FindFreeAddress(int *target, int *lun) = 0;
+    virtual bool AttachDevice(SCSIDevice *dev, uint32_t target,
+                              uint32_t lun) = 0;
 };
 
 
@@ -198,10 +202,13 @@ public:
 class SCSIDeviceNode final: public Device {
 private:
     std::unique_ptr<SCSIDevice> fDev;
-    int fLun; /* < 0 asks for the first free unit */
+    /* < 0 asks for the first free one */
+    int fTarget;
+    int fLun;
 
 public:
-    SCSIDeviceNode(const char *name, std::unique_ptr<SCSIDevice> dev, int lun);
+    SCSIDeviceNode(const char *name, std::unique_ptr<SCSIDevice> dev,
+                   int target, int lun);
     ~SCSIDeviceNode() override;
 
     SCSIDevice *Dev() const {return fDev.get();}
@@ -223,5 +230,13 @@ void scsi_set_good(SCSIRequest *req, uint32_t length);
    the transport knows. */
 int scsi_cdb_len(uint8_t opcode);
 
+/* Answer REPORT LUNS for a target whose units are 'units', null where there
+   is none, into a buffer of 'buf_len' bytes. REPORT LUNS asks the target
+   rather than one of its units, so the initiator answers it where the map
+   lives. Returns how many bytes were moved. */
+uint32_t scsi_report_luns(uint8_t *buf, uint32_t buf_len,
+                          SCSIDevice *const *units, int count);
+
 /* scsi_disk.cpp */
-Device *scsi_disk_node_create(std::unique_ptr<HostBlockDevice> bs, int lun);
+Device *scsi_disk_node_create(std::unique_ptr<HostBlockDevice> bs, int target,
+                              int lun);

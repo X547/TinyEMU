@@ -152,8 +152,8 @@ public:
     void Cancel(URB *urb) override;
 
     /* SCSIBusTarget */
-    int FindFreeLun() override;
-    bool AttachDevice(SCSIDevice *dev, uint32_t lun) override;
+    bool FindFreeAddress(int *target, int *lun) override;
+    bool AttachDevice(SCSIDevice *dev, uint32_t target, uint32_t lun) override;
 
     /* SCSICompletion */
     void Complete(SCSIRequest *req) override;
@@ -194,19 +194,31 @@ void USBStorage::Reset()
 }
 
 
-int USBStorage::FindFreeLun()
+bool USBStorage::FindFreeAddress(int *target, int *lun)
 {
+    /* The bulk-only transport reaches a single target. */
+    if (*target < 0) {
+        *target = 0;
+    }
+    if (*lun >= 0) {
+        return true;
+    }
     for (int i = 0; i < SCSI_MAX_LUN; i++) {
         if (fUnits[i] == nullptr) {
-            return i;
+            *lun = i;
+            return true;
         }
     }
-    return -1;
+    return false;
 }
 
 
-bool USBStorage::AttachDevice(SCSIDevice *dev, uint32_t lun)
+bool USBStorage::AttachDevice(SCSIDevice *dev, uint32_t target, uint32_t lun)
 {
+    if (target != 0) {
+        vm_error("usb-storage: has only target 0, not %u\n", target);
+        return false;
+    }
     if (lun >= SCSI_MAX_LUN) {
         vm_error("usb-storage: logical unit %u is out of range\n", lun);
         return false;
@@ -239,32 +251,9 @@ bool USBStorage::EnsureBuffer(uint32_t size)
 }
 
 
-/* REPORT LUNS asks the target, not one of its units, which units exist, so it
-   is answered here where the map lives rather than by any one unit. */
 bool USBStorage::ReportLuns()
 {
-    uint32_t count = 0;
-
-    memset(fBuf, 0, fDataLen < 8 ? fDataLen : 8);
-    for (int i = 0; i <= fMaxLun; i++) {
-        if (fUnits[i] == nullptr) {
-            continue;
-        }
-        uint32_t offset = 8 + count * 8;
-        if (offset + 8 <= fDataLen) {
-            memset(fBuf + offset, 0, 8);
-            /* Single level addressing: the unit number goes in byte one. */
-            fBuf[offset + 1] = i;
-        }
-        count++;
-    }
-    if (fDataLen >= 4) {
-        put_be32(fBuf, count * 8);
-    }
-    fDataDone = 8 + count * 8;
-    if (fDataDone > fDataLen) {
-        fDataDone = fDataLen;
-    }
+    fDataDone = scsi_report_luns(fBuf, fDataLen, fUnits, fMaxLun + 1);
     fStatus = CSW_STATUS_PASS;
     return true;
 }

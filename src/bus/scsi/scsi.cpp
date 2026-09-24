@@ -26,6 +26,7 @@
 #include <string.h>
 
 #include "bits.h"
+#include "cutils.h"
 #include "machine.h"
 
 
@@ -66,6 +67,35 @@ int scsi_cdb_len(uint8_t opcode)
 }
 
 
+uint32_t scsi_report_luns(uint8_t *buf, uint32_t buf_len,
+                          SCSIDevice *const *units, int count)
+{
+    uint8_t entry[8];
+    uint32_t len = 8;
+
+    if (buf_len == 0) {
+        return 0;
+    }
+    memset(buf, 0, buf_len < 8 ? buf_len : 8);
+    for (int i = 0; i < count; i++) {
+        if (units[i] == nullptr) {
+            continue;
+        }
+        /* Single level addressing: the unit number goes in byte one. */
+        memset(entry, 0, sizeof(entry));
+        entry[1] = i;
+        if (len + 8 <= buf_len) {
+            memcpy(buf + len, entry, 8);
+        }
+        len += 8;
+    }
+    if (buf_len >= 4) {
+        put_be32(buf, len - 8);
+    }
+    return len < buf_len ? len : buf_len;
+}
+
+
 //#pragma mark - SCSIBus
 
 bool SCSIBus::AssignResources(Device *dev)
@@ -86,8 +116,9 @@ bool SCSIBus::AssignResources(Device *dev)
 //#pragma mark - SCSIDeviceNode
 
 SCSIDeviceNode::SCSIDeviceNode(const char *name,
-                               std::unique_ptr<SCSIDevice> dev, int lun):
-    Device(name), fDev(std::move(dev)), fLun(lun)
+                               std::unique_ptr<SCSIDevice> dev, int target,
+                               int lun):
+    Device(name), fDev(std::move(dev)), fTarget(target), fLun(lun)
 {
 }
 
@@ -103,14 +134,13 @@ bool SCSIDeviceNode::Realize()
         return false;
     }
 
-    SCSIBusTarget *target = bus->Target();
+    SCSIBusTarget *initiator = bus->Target();
+    int target = fTarget;
     int lun = fLun;
-    if (lun < 0) {
-        lun = target->FindFreeLun();
-        if (lun < 0) {
-            vm_error("%s: no free logical unit number\n", Name());
-            return false;
-        }
+    if ((target < 0 || lun < 0) &&
+        !initiator->FindFreeAddress(&target, &lun)) {
+        vm_error("%s: no free SCSI address\n", Name());
+        return false;
     }
-    return target->AttachDevice(fDev.get(), lun);
+    return initiator->AttachDevice(fDev.get(), target, lun);
 }

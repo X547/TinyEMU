@@ -32,6 +32,7 @@
 #include "devices.h"
 #include "fdt.h"
 #include "list.h"
+#include "scsi.h"
 #include "virtio.h"
 #include "virtio_priv.h"
 
@@ -251,6 +252,9 @@ void virtio_init(VIRTIODevice *s, VIRTIOBusDef *bus,
             break;
         case 3:
             class_id = 0x0780; /* console */
+            break;
+        case 8:
+            class_id = 0x0100; /* SCSI host */
             break;
         case 9:
             class_id = 0x2;
@@ -1060,8 +1064,29 @@ public:
 };
 
 
+/* The SCSI bus is declared, and its units attached to it, before the device
+   they reach exists, so the bus names this instead of the device. Units attach
+   from their own Realize(), which runs after the host's. */
+class VirtioSCSIBusTarget final: public SCSIBusTarget {
+private:
+    std::unique_ptr<VIRTIODevice> &fDev;
+
+public:
+    VirtioSCSIBusTarget(std::unique_ptr<VIRTIODevice> &dev): fDev(dev) {}
+
+    bool FindFreeAddress(int *target, int *lun) override
+        {return virtio_scsi_bus_target(fDev.get())->FindFreeAddress(target,
+                                                                    lun);}
+
+    bool AttachDevice(SCSIDevice *dev, uint32_t target, uint32_t lun) override
+        {return virtio_scsi_bus_target(fDev.get())->AttachDevice(dev, target,
+                                                                 lun);}
+};
+
+
 typedef enum {
     VIRTIO_KIND_BLOCK,
+    VIRTIO_KIND_SCSI,
     VIRTIO_KIND_NET,
     VIRTIO_KIND_CONSOLE,
     VIRTIO_KIND_9P,
@@ -1090,10 +1115,21 @@ private:
     std::unique_ptr<HostEthernet> fNet;
     std::unique_ptr<VIRTIODevice> fDev;
     std::unique_ptr<VirtioInputTarget> fInputTarget;
+    /* declared after fDev, so that the units go before the host */
+    std::unique_ptr<VirtioSCSIBusTarget> fSCSITarget;
+    std::unique_ptr<Bus> fChildBus;
 
 public:
     VirtioDevice(const char *name, VirtioKindEnum kind, DeviceContext *ctx):
-        Device(name), fKind(kind), fCtx(ctx) {}
+        Device(name), fKind(kind), fCtx(ctx)
+    {
+        if (kind == VIRTIO_KIND_SCSI) {
+            fSCSITarget = std::make_unique<VirtioSCSIBusTarget>(fDev);
+            fChildBus = std::make_unique<SCSIBus>(this, fSCSITarget.get());
+        }
+    }
+
+    Bus *ChildBus() override {return fChildBus.get();}
 
     void SetInputType(VirtioInputTypeEnum type) {fInputType = type;}
     void SetBlockDevice(std::unique_ptr<HostBlockDevice> bs)
@@ -1141,6 +1177,9 @@ public:
                 return false;
             }
             fDev = virtio_block_init(&vbus, fBlockDev.get());
+            break;
+        case VIRTIO_KIND_SCSI:
+            fDev = virtio_scsi_init(&vbus);
             break;
         case VIRTIO_KIND_NET:
             if (fNet == nullptr) {
@@ -1209,6 +1248,12 @@ Device *virtio_block_node_create(DeviceContext *ctx,
                                          ctx);
     dev->SetBlockDevice(std::move(bs));
     return dev;
+}
+
+
+Device *virtio_scsi_node_create(DeviceContext *ctx)
+{
+    return new VirtioDevice("virtio-scsi", VIRTIO_KIND_SCSI, ctx);
 }
 
 

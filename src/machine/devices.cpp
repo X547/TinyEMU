@@ -755,15 +755,16 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
     }
 
     if (strcmp(type, "scsi-disk") == 0) {
-        int lun;
-        if (!node_int_opt(node, "lun", &lun, -1)) {
+        int target, lun;
+        if (!node_int_opt(node, "target", &target, -1) ||
+            !node_int_opt(node, "lun", &lun, -1)) {
             return nullptr;
         }
         auto bs = node_open_block(node, ctx);
         if (bs == nullptr) {
             return nullptr;
         }
-        return scsi_disk_node_create(std::move(bs), lun);
+        return scsi_disk_node_create(std::move(bs), target, lun);
     }
 
     if (strcmp(type, "dwmac") == 0) {
@@ -845,6 +846,10 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
             return nullptr;
         }
         return virtio_block_node_create(ctx, std::move(bs));
+    }
+
+    if (strcmp(type, "virtio-scsi") == 0) {
+        return virtio_scsi_node_create(ctx);
     }
 
     if (strcmp(type, "virtio-net") == 0) {

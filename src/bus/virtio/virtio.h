@@ -63,6 +63,14 @@ void virtio_set_debug(VIRTIODevice *s, int debug_flags);
 std::unique_ptr<VIRTIODevice> virtio_block_init(VIRTIOBusDef *bus,
                                                 HostBlockDevice *bs);
 
+/* SCSI host device */
+
+class SCSIBusTarget;
+
+std::unique_ptr<VIRTIODevice> virtio_scsi_init(VIRTIOBusDef *bus);
+/* Where the units on the host's SCSI bus attach. */
+SCSIBusTarget *virtio_scsi_bus_target(VIRTIODevice *s);
+
 /* network device */
 
 std::unique_ptr<VIRTIODevice> virtio_net_init(VIRTIOBusDef *bus,
@@ -120,6 +128,8 @@ struct DeviceContext;
    an MMIO machine and behind a PCI bridge. */
 Device *virtio_block_node_create(DeviceContext *ctx,
                                  std::unique_ptr<HostBlockDevice> bs);
+/* Provides a SCSI bus for the units declared inside it. */
+Device *virtio_scsi_node_create(DeviceContext *ctx);
 Device *virtio_net_node_create(DeviceContext *ctx,
                                std::unique_ptr<HostEthernet> net);
 Device *virtio_console_node_create(DeviceContext *ctx);
