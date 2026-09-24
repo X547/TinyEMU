@@ -32,8 +32,11 @@
 #include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-#include <sys/time.h>
 #include <linux/kvm.h>
+
+#include <atomic>
+#include <memory>
+#include <vector>
 
 #include "bits.h"
 #include "device_lock.h"
@@ -44,30 +47,62 @@
 #define CPUID_APIC bit_at(9)
 #define CPUID_ACPI bit_at(22)
 
-class KvmX86Hypervisor final: public HostX86Hypervisor {
+
+class KvmX86Hypervisor;
+
+/* One vcpu. The in-kernel local APIC waits at HLT, so a run lasts until an
+   access for the target or InterruptRun(). */
+class KvmX86Vcpu final: public HostX86Vcpu {
 private:
-    X86HypervisorTarget &fTarget;
-    DeviceLock &fLock;
-    /* the in-kernel local APIC is shown to the guest */
-    bool fLocalApic;
-    int fKvmFd;
-    int fVmFd = -1;
-    int fVcpuFd = -1;
+    KvmX86Hypervisor &fOwner;
+    int fFd = -1;
     int fRunSize = 0;
     struct kvm_run *fRun = nullptr;
-    /* the processor thread, for signalling it out of KVM_RUN */
-    pthread_t fVcpuThread {};
+    /* the thread that runs it, for signalling it out of KVM_RUN */
+    pthread_t fThread {};
+    std::atomic<bool> fThreadKnown {false};
 
     void SetCpuid();
-    void SetGsiRouting();
     void ExitIo();
     void ExitMmio();
 
 public:
+    KvmX86Vcpu(KvmX86Hypervisor &owner, int index);
+    ~KvmX86Vcpu() override;
+
+    void GetRegs(HostX86Regs *regs) override;
+    void SetRegs(const HostX86Regs &regs) override;
+    void SetFlatProtectedMode(uint32_t gdt_base, uint16_t gdt_limit,
+                              uint16_t code_sel, uint16_t data_sel) override;
+    void ThreadStarted() override;
+    void Run() override;
+    bool Idle(bool intr) override {return false;}
+    void InterruptRun() override;
+};
+
+
+/* The VM keeps the 8259s, the 8254, the IOAPIC and the local APICs in the
+   kernel. */
+class KvmX86Hypervisor final: public HostX86Hypervisor {
+private:
+    friend class KvmX86Vcpu;
+
+    X86HypervisorTarget &fTarget;
+    DeviceLock &fLock;
+    /* the in-kernel local APIC is shown to the guest */
+    bool fLocalApic;
+    int fCpuCount;
+    int fKvmFd;
+    int fVmFd = -1;
+    std::vector<std::unique_ptr<KvmX86Vcpu>> fVcpus;
+
+    void SetGsiRouting();
+
+public:
     KvmX86Hypervisor(X86HypervisorTarget &target, DeviceLock &lock,
-                     bool local_apic, int kvm_fd):
-        fTarget(target), fLock(lock), fLocalApic(local_apic),
-        fKvmFd(kvm_fd) {}
+                     const HostX86Options &options, int kvm_fd):
+        fTarget(target), fLock(lock), fLocalApic(options.local_apic),
+        fCpuCount(options.cpu_count), fKvmFd(kvm_fd) {}
     ~KvmX86Hypervisor() override;
 
     void Init();
@@ -83,14 +118,7 @@ public:
     void GetDirtyLog(int slot, uint32_t *bitmap) override;
     void SetIRQ(int irq, int level) override;
     void SendMsi(uint64_t addr, uint32_t data) override;
-    void GetRegs(HostX86Regs *regs) override;
-    void SetRegs(const HostX86Regs &regs) override;
-    void SetFlatProtectedMode(uint32_t gdt_base, uint16_t gdt_limit,
-                              uint16_t code_sel, uint16_t data_sel) override;
-    void ProcessorThreadStarted() override;
-    void Run(int64_t timeout_us) override;
-    bool Idle(bool intr) override {return false;}
-    void InterruptRun() override;
+    HostX86Vcpu &Vcpu(int index) override {return *fVcpus[index];}
 };
 
 
@@ -101,49 +129,10 @@ static void sigalrm_handler(int sig)
 
 KvmX86Hypervisor::~KvmX86Hypervisor()
 {
-    if (fRun != nullptr)
-        munmap(fRun, fRunSize);
-    if (fVcpuFd >= 0)
-        close(fVcpuFd);
+    fVcpus.clear();
     if (fVmFd >= 0)
         close(fVmFd);
     close(fKvmFd);
-}
-
-
-void KvmX86Hypervisor::SetCpuid()
-{
-    struct kvm_cpuid2 *kvm_cpuid;
-    int n_ent_max, i;
-    struct kvm_cpuid_entry2 *ent;
-
-    n_ent_max = 128;
-    kvm_cpuid = static_cast<struct kvm_cpuid2 *>(
-        calloc(1, sizeof(struct kvm_cpuid2) +
-               n_ent_max * sizeof(kvm_cpuid->entries[0])));
-
-    kvm_cpuid->nent = n_ent_max;
-    if (ioctl(fKvmFd, KVM_GET_SUPPORTED_CPUID, kvm_cpuid) < 0) {
-        perror("KVM_GET_SUPPORTED_CPUID");
-        exit(1);
-    }
-
-    for(i = 0; i < kvm_cpuid->nent; i++) {
-        ent = &kvm_cpuid->entries[i];
-        /* remove the APIC (unless the machine has one) & ACPI to be in
-           sync with the emulator */
-        if (ent->function == 1 || ent->function == 0x80000001) {
-            ent->edx &= ~CPUID_ACPI;
-            if (!fLocalApic)
-                ent->edx &= ~CPUID_APIC;
-        }
-    }
-
-    if (ioctl(fVcpuFd, KVM_SET_CPUID2, kvm_cpuid) < 0) {
-        perror("KVM_SET_CPUID2");
-        exit(1);
-    }
-    free(kvm_cpuid);
 }
 
 
@@ -221,35 +210,15 @@ void KvmX86Hypervisor::Init()
         exit(1);
     }
 
-    fVcpuFd = ioctl(fVmFd, KVM_CREATE_VCPU, 0);
-    if (fVcpuFd < 0) {
-        perror("KVM_CREATE_VCPU");
-        exit(1);
-    }
-
-    SetCpuid();
-
-    /* map the kvm_run structure */
-    fRunSize = ioctl(fKvmFd, KVM_GET_VCPU_MMAP_SIZE, NULL);
-    if (fRunSize < 0) {
-        perror("KVM_GET_VCPU_MMAP_SIZE");
-        exit(1);
-    }
-
-    void *run = mmap(NULL, fRunSize, PROT_READ | PROT_WRITE, MAP_SHARED,
-                     fVcpuFd, 0);
-    if (run == MAP_FAILED) {
-        perror("mmap kvm_run");
-        exit(1);
-    }
-    fRun = static_cast<struct kvm_run *>(run);
+    for (int i = 0; i < fCpuCount; i++)
+        fVcpus.push_back(std::make_unique<KvmX86Vcpu>(*this, i));
 
     act.sa_handler = sigalrm_handler;
     sigemptyset(&act.sa_mask);
     act.sa_flags = 0;
     sigaction(SIGALRM, &act, NULL);
-    /* The timer signal is for the processor thread, which unblocks it. Every
-       thread started after this inherits the mask. */
+    /* The signal is for the vcpu threads, which unblock it. Every thread
+       started after this inherits the mask. */
     sigset_t set;
     sigemptyset(&set);
     sigaddset(&set, SIGALRM);
@@ -321,11 +290,84 @@ void KvmX86Hypervisor::SendMsi(uint64_t addr, uint32_t data)
 }
 
 
-void KvmX86Hypervisor::GetRegs(HostX86Regs *regs)
+KvmX86Vcpu::KvmX86Vcpu(KvmX86Hypervisor &owner, int index):
+    fOwner(owner)
+{
+    fFd = ioctl(fOwner.fVmFd, KVM_CREATE_VCPU, index);
+    if (fFd < 0) {
+        perror("KVM_CREATE_VCPU");
+        exit(1);
+    }
+
+    SetCpuid();
+
+    /* map the kvm_run structure */
+    fRunSize = ioctl(fOwner.fKvmFd, KVM_GET_VCPU_MMAP_SIZE, NULL);
+    if (fRunSize < 0) {
+        perror("KVM_GET_VCPU_MMAP_SIZE");
+        exit(1);
+    }
+
+    void *run = mmap(NULL, fRunSize, PROT_READ | PROT_WRITE, MAP_SHARED,
+                     fFd, 0);
+    if (run == MAP_FAILED) {
+        perror("mmap kvm_run");
+        exit(1);
+    }
+    fRun = static_cast<struct kvm_run *>(run);
+}
+
+
+KvmX86Vcpu::~KvmX86Vcpu()
+{
+    if (fRun != nullptr)
+        munmap(fRun, fRunSize);
+    if (fFd >= 0)
+        close(fFd);
+}
+
+
+void KvmX86Vcpu::SetCpuid()
+{
+    struct kvm_cpuid2 *kvm_cpuid;
+    int n_ent_max, i;
+    struct kvm_cpuid_entry2 *ent;
+
+    n_ent_max = 128;
+    kvm_cpuid = static_cast<struct kvm_cpuid2 *>(
+        calloc(1, sizeof(struct kvm_cpuid2) +
+               n_ent_max * sizeof(kvm_cpuid->entries[0])));
+
+    kvm_cpuid->nent = n_ent_max;
+    if (ioctl(fOwner.fKvmFd, KVM_GET_SUPPORTED_CPUID, kvm_cpuid) < 0) {
+        perror("KVM_GET_SUPPORTED_CPUID");
+        exit(1);
+    }
+
+    for(i = 0; i < kvm_cpuid->nent; i++) {
+        ent = &kvm_cpuid->entries[i];
+        /* remove the APIC (unless the machine has one) & ACPI to be in
+           sync with the emulator */
+        if (ent->function == 1 || ent->function == 0x80000001) {
+            ent->edx &= ~CPUID_ACPI;
+            if (!fOwner.fLocalApic)
+                ent->edx &= ~CPUID_APIC;
+        }
+    }
+
+    if (ioctl(fFd, KVM_SET_CPUID2, kvm_cpuid) < 0) {
+        perror("KVM_SET_CPUID2");
+        exit(1);
+    }
+    free(kvm_cpuid);
+}
+
+
+void KvmX86Vcpu::GetRegs(HostX86Regs *regs)
 {
     struct kvm_regs r;
 
-    if (ioctl(fVcpuFd, KVM_GET_REGS, &r) < 0) {
+    if (ioctl(fFd, KVM_GET_REGS, &r) < 0) {
         perror("KVM_GET_REGS");
         exit(1);
     }
@@ -342,11 +384,11 @@ void KvmX86Hypervisor::GetRegs(HostX86Regs *regs)
 }
 
 
-void KvmX86Hypervisor::SetRegs(const HostX86Regs &regs)
+void KvmX86Vcpu::SetRegs(const HostX86Regs &regs)
 {
     struct kvm_regs r;
 
-    if (ioctl(fVcpuFd, KVM_GET_REGS, &r) < 0) {
+    if (ioctl(fFd, KVM_GET_REGS, &r) < 0) {
         perror("KVM_GET_REGS");
         exit(1);
     }
@@ -360,22 +402,20 @@ void KvmX86Hypervisor::SetRegs(const HostX86Regs &regs)
     r.rdi = regs.gpr[7];
     r.rip = regs.rip;
     r.rflags = regs.rflags;
-    if (ioctl(fVcpuFd, KVM_SET_REGS, &r) < 0) {
+    if (ioctl(fFd, KVM_SET_REGS, &r) < 0) {
         perror("KVM_SET_REGS");
         exit(1);
     }
 }
 
 
-void KvmX86Hypervisor::SetFlatProtectedMode(uint32_t gdt_base,
-                                            uint16_t gdt_limit,
-                                            uint16_t code_sel,
-                                            uint16_t data_sel)
+void KvmX86Vcpu::SetFlatProtectedMode(uint32_t gdt_base, uint16_t gdt_limit,
+                                      uint16_t code_sel, uint16_t data_sel)
 {
     struct kvm_sregs sregs;
     struct kvm_segment seg;
 
-    if (ioctl(fVcpuFd, KVM_GET_SREGS, &sregs) < 0) {
+    if (ioctl(fFd, KVM_GET_SREGS, &sregs) < 0) {
         perror("KVM_GET_SREGS");
         exit(1);
     }
@@ -403,26 +443,28 @@ void KvmX86Hypervisor::SetFlatProtectedMode(uint32_t gdt_base,
     sregs.fs = seg;
     sregs.gs = seg;
 
-    if (ioctl(fVcpuFd, KVM_SET_SREGS, &sregs) < 0) {
+    if (ioctl(fFd, KVM_SET_SREGS, &sregs) < 0) {
         perror("KVM_SET_SREGS");
         exit(1);
     }
 }
 
 
-void KvmX86Hypervisor::ProcessorThreadStarted()
+void KvmX86Vcpu::ThreadStarted()
 {
     sigset_t set;
 
-    fVcpuThread = pthread_self();
+    fThread = pthread_self();
+    fThreadKnown.store(true);
     sigemptyset(&set);
     sigaddset(&set, SIGALRM);
     pthread_sigmask(SIG_UNBLOCK, &set, NULL);
 }
 
 
-void KvmX86Hypervisor::ExitIo()
+void KvmX86Vcpu::ExitIo()
 {
+    X86HypervisorTarget &target = fOwner.fTarget;
     struct kvm_run *run = fRun;
     uint8_t *ptr;
     int i;
@@ -433,13 +475,13 @@ void KvmX86Hypervisor::ExitIo()
         if (run->io.direction == KVM_EXIT_IO_OUT) {
             switch(run->io.size) {
             case 1:
-                fTarget.PortWrite(run->io.port, *(uint8_t *)ptr, 0);
+                target.PortWrite(run->io.port, *(uint8_t *)ptr, 0);
                 break;
             case 2:
-                fTarget.PortWrite(run->io.port, *(uint16_t *)ptr, 1);
+                target.PortWrite(run->io.port, *(uint16_t *)ptr, 1);
                 break;
             case 4:
-                fTarget.PortWrite(run->io.port, *(uint32_t *)ptr, 2);
+                target.PortWrite(run->io.port, *(uint32_t *)ptr, 2);
                 break;
             default:
                 abort();
@@ -447,13 +489,13 @@ void KvmX86Hypervisor::ExitIo()
         } else {
             switch(run->io.size) {
             case 1:
-                *(uint8_t *)ptr = fTarget.PortRead(run->io.port, 0);
+                *(uint8_t *)ptr = target.PortRead(run->io.port, 0);
                 break;
             case 2:
-                *(uint16_t *)ptr = fTarget.PortRead(run->io.port, 1);
+                *(uint16_t *)ptr = target.PortRead(run->io.port, 1);
                 break;
             case 4:
-                *(uint32_t *)ptr = fTarget.PortRead(run->io.port, 2);
+                *(uint32_t *)ptr = target.PortRead(run->io.port, 2);
                 break;
             default:
                 abort();
@@ -464,42 +506,30 @@ void KvmX86Hypervisor::ExitIo()
 }
 
 
-void KvmX86Hypervisor::ExitMmio()
+void KvmX86Vcpu::ExitMmio()
 {
+    X86HypervisorTarget &target = fOwner.fTarget;
     struct kvm_run *run = fRun;
 
     if (run->mmio.is_write) {
-        fTarget.MmioWrite(run->mmio.phys_addr, run->mmio.data, run->mmio.len);
+        target.MmioWrite(run->mmio.phys_addr, run->mmio.data, run->mmio.len);
     } else {
-        fTarget.MmioRead(run->mmio.phys_addr, run->mmio.data, run->mmio.len);
+        target.MmioRead(run->mmio.phys_addr, run->mmio.data, run->mmio.len);
     }
 }
 
 
-void KvmX86Hypervisor::Run(int64_t timeout_us)
+void KvmX86Vcpu::Run()
 {
     struct kvm_run *run = fRun;
-    struct itimerval ival;
     int ret;
 
-    /* Not efficient but simple: we use a timer to interrupt the
-       execution after a given time */
-    if (timeout_us <= 0 || timeout_us > 10 * 1000)
-        timeout_us = 10 * 1000; /* 10 ms max */
-    ival.it_interval.tv_sec = 0;
-    ival.it_interval.tv_usec = 0;
-    ival.it_value.tv_sec = 0;
-    ival.it_value.tv_usec = timeout_us;
-    setitimer(ITIMER_REAL, &ival, NULL);
-
-    ret = ioctl(fVcpuFd, KVM_RUN, 0);
+    ret = ioctl(fFd, KVM_RUN, 0);
     /* a request to return that came in while running has done its job */
     run->immediate_exit = 0;
     if (ret < 0) {
-        if (errno == EINTR || errno == EAGAIN) {
-            /* timeout */
+        if (errno == EINTR || errno == EAGAIN)
             return;
-        }
         perror("KVM_RUN");
         exit(1);
     }
@@ -507,12 +537,12 @@ void KvmX86Hypervisor::Run(int64_t timeout_us)
     case KVM_EXIT_HLT:
         break;
     case KVM_EXIT_IO: {
-        DeviceLocker locker(fLock);
+        DeviceLocker locker(fOwner.fLock);
         ExitIo();
         break;
     }
     case KVM_EXIT_MMIO: {
-        DeviceLocker locker(fLock);
+        DeviceLocker locker(fOwner.fLock);
         ExitMmio();
         break;
     }
@@ -531,11 +561,12 @@ void KvmX86Hypervisor::Run(int64_t timeout_us)
 }
 
 
-void KvmX86Hypervisor::InterruptRun()
+void KvmX86Vcpu::InterruptRun()
 {
     /* immediate_exit covers a signal that lands before KVM_RUN */
     fRun->immediate_exit = 1;
-    pthread_kill(fVcpuThread, SIGALRM);
+    if (fThreadKnown.load())
+        pthread_kill(fThread, SIGALRM);
 }
 
 
@@ -561,8 +592,8 @@ std::unique_ptr<HostX86Hypervisor> host_x86_hypervisor_open(
         return nullptr;
     }
 
-    auto kvm = std::make_unique<KvmX86Hypervisor>(target, lock,
-                                                  options.local_apic, kvm_fd);
+    auto kvm = std::make_unique<KvmX86Hypervisor>(target, lock, options,
+                                                  kvm_fd);
     kvm->Init();
     return kvm;
 }

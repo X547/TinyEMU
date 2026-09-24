@@ -24,6 +24,7 @@
 #include <string.h>
 #include <inttypes.h>
 
+#include <memory>
 #include <vector>
 
 #include <windows.h>
@@ -40,7 +41,8 @@
 #define CPUID_ACPI bit_at(22)
 #define RFLAGS_IF bit_at(9)
 
-/* Only as long as nothing else is due. */
+/* The longest a run lasts, in case the request to end it came just before
+   it started. */
 #define WHP_MAX_RUN_US (10 * 1000)
 
 static const WHV_REGISTER_NAME kGprNames[8] = {
@@ -50,27 +52,25 @@ static const WHV_REGISTER_NAME kGprNames[8] = {
 };
 
 
-/* The partition has no interrupt controller but, when asked, the local APIC:
-   the machine's 8259s raise INTR, and the vector goes in as a pending
-   interruption before a run; the machine's IOAPIC and MSIs reach the local
-   APIC through WHvRequestInterrupt(). */
-class WhpX86Hypervisor final: public HostX86Hypervisor {
+static void whp_fail(const char *what, HRESULT hr)
+{
+    fprintf(stderr, "WHP: %s failed: 0x%08lx\n", what, (unsigned long)hr);
+    exit(1);
+}
+
+
+class WhpX86Hypervisor;
+
+/* One virtual processor. The 8259s raise INTR for processor 0 only, and the
+   vector goes in as a pending interruption before a run. */
+class WhpX86Vcpu final: public HostX86Vcpu {
 private:
-    X86HypervisorTarget &fTarget;
-    DeviceLock &fLock;
-    /* the hypervisor emulates the local APIC */
-    bool fLocalApic;
-    WHV_PARTITION_HANDLE fPartition = nullptr;
-    bool fVpCreated = false;
+    WhpX86Hypervisor &fOwner;
+    WHV_PARTITION_HANDLE fPartition;
+    UINT32 fIndex;
     WHV_EMULATOR_HANDLE fEmulator = nullptr;
-    /* ends a run that has gone on for its timeout */
+    /* ends a run that has gone on too long */
     PTP_TIMER fTimer = nullptr;
-    /* where each slot is mapped; the platform knows ranges, not slots */
-    struct Slot {
-        uint64_t addr;
-        uint64_t size;
-    };
-    std::vector<Slot> fSlots;
 
     /* the interrupt state as of the last exit */
     uint64_t fRflags = 0x2;
@@ -80,7 +80,10 @@ private:
     /* stopped at HLT until an interrupt is taken */
     bool fHalted = false;
 
-    void Fail(const char *what, HRESULT hr);
+    void GetVpRegisters(const WHV_REGISTER_NAME *names, UINT32 count,
+                        WHV_REGISTER_VALUE *values);
+    void SetVpRegisters(const WHV_REGISTER_NAME *names, UINT32 count,
+                        const WHV_REGISTER_VALUE *values);
     bool InjectInterrupt();
     void ExitCpuid(const WHV_RUN_VP_EXIT_CONTEXT &ctx);
 
@@ -102,9 +105,47 @@ private:
                                        void *context, PTP_TIMER timer);
 
 public:
+    WhpX86Vcpu(WhpX86Hypervisor &owner, WHV_PARTITION_HANDLE partition,
+               int index);
+    ~WhpX86Vcpu() override;
+
+    void GetRegs(HostX86Regs *regs) override;
+    void SetRegs(const HostX86Regs &regs) override;
+    void SetFlatProtectedMode(uint32_t gdt_base, uint16_t gdt_limit,
+                              uint16_t code_sel, uint16_t data_sel) override;
+    void ThreadStarted() override {}
+    void Run() override;
+    bool Idle(bool intr) override;
+    void InterruptRun() override;
+};
+
+
+/* The partition has no interrupt controller but, when asked, the local
+   APICs: the machine's IOAPIC and MSIs reach them through
+   WHvRequestInterrupt(). */
+class WhpX86Hypervisor final: public HostX86Hypervisor {
+private:
+    friend class WhpX86Vcpu;
+
+    X86HypervisorTarget &fTarget;
+    DeviceLock &fLock;
+    /* the hypervisor emulates the local APICs */
+    bool fLocalApic;
+    int fCpuCount;
+    WHV_PARTITION_HANDLE fPartition = nullptr;
+    std::vector<std::unique_ptr<WhpX86Vcpu>> fVcpus;
+    /* where each slot is mapped; the platform knows ranges, not slots */
+    struct Slot {
+        uint64_t addr;
+        uint64_t size;
+    };
+    std::vector<Slot> fSlots;
+
+public:
     WhpX86Hypervisor(X86HypervisorTarget &target, DeviceLock &lock,
-                     bool local_apic):
-        fTarget(target), fLock(lock), fLocalApic(local_apic) {}
+                     const HostX86Options &options):
+        fTarget(target), fLock(lock), fLocalApic(options.local_apic),
+        fCpuCount(options.cpu_count) {}
     ~WhpX86Hypervisor() override;
 
     bool Init();
@@ -120,35 +161,13 @@ public:
     void GetDirtyLog(int slot, uint32_t *bitmap) override;
     void SetIRQ(int irq, int level) override;
     void SendMsi(uint64_t addr, uint32_t data) override;
-    void GetRegs(HostX86Regs *regs) override;
-    void SetRegs(const HostX86Regs &regs) override;
-    void SetFlatProtectedMode(uint32_t gdt_base, uint16_t gdt_limit,
-                              uint16_t code_sel, uint16_t data_sel) override;
-    void ProcessorThreadStarted() override {}
-    void Run(int64_t timeout_us) override;
-    bool Idle(bool intr) override;
-    void InterruptRun() override;
+    HostX86Vcpu &Vcpu(int index) override {return *fVcpus[index];}
 };
-
-
-void WhpX86Hypervisor::Fail(const char *what, HRESULT hr)
-{
-    fprintf(stderr, "WHP: %s failed: 0x%08lx\n", what, (unsigned long)hr);
-    exit(1);
-}
 
 
 WhpX86Hypervisor::~WhpX86Hypervisor()
 {
-    if (fTimer != nullptr) {
-        SetThreadpoolTimer(fTimer, nullptr, 0, 0);
-        WaitForThreadpoolTimerCallbacks(fTimer, TRUE);
-        CloseThreadpoolTimer(fTimer);
-    }
-    if (fEmulator != nullptr)
-        WHvEmulatorDestroyEmulator(fEmulator);
-    if (fVpCreated)
-        WHvDeleteVirtualProcessor(fPartition, 0);
+    fVcpus.clear();
     if (fPartition != nullptr)
         WHvDeletePartition(fPartition);
 }
@@ -165,12 +184,12 @@ bool WhpX86Hypervisor::Init()
         return false;
     }
 
-    UINT32 processor_count = 1;
+    UINT32 processor_count = fCpuCount;
     hr = WHvSetPartitionProperty(fPartition,
                                  WHvPartitionPropertyCodeProcessorCount,
                                  &processor_count, sizeof(processor_count));
     if (FAILED(hr))
-        Fail("setting the processor count", hr);
+        whp_fail("setting the processor count", hr);
 
     if (fLocalApic) {
         WHV_X64_LOCAL_APIC_EMULATION_MODE mode =
@@ -179,7 +198,7 @@ bool WhpX86Hypervisor::Init()
             fPartition, WHvPartitionPropertyCodeLocalApicEmulationMode,
             &mode, sizeof(mode));
         if (FAILED(hr))
-            Fail("enabling the local APIC", hr);
+            whp_fail("enabling the local APIC", hr);
     }
 
     /* CPUID comes to us for the leaves that report the APIC and ACPI, which
@@ -190,13 +209,13 @@ bool WhpX86Hypervisor::Init()
                                  WHvPartitionPropertyCodeExtendedVmExits,
                                  &exits, sizeof(exits));
     if (FAILED(hr))
-        Fail("enabling CPUID exits", hr);
+        whp_fail("enabling CPUID exits", hr);
     static const UINT32 cpuid_leaves[] = {1, 0x80000001};
     hr = WHvSetPartitionProperty(fPartition,
                                  WHvPartitionPropertyCodeCpuidExitList,
                                  cpuid_leaves, sizeof(cpuid_leaves));
     if (FAILED(hr))
-        Fail("setting the CPUID exit list", hr);
+        whp_fail("setting the CPUID exit list", hr);
 
     /* An MSR the hypervisor does not handle reads as 0 and ignores writes,
        rather than faulting a guest that probes it. */
@@ -205,31 +224,14 @@ bool WhpX86Hypervisor::Init()
                                  WHvPartitionPropertyCodeUnimplementedMsrAction,
                                  &msr_action, sizeof(msr_action));
     if (FAILED(hr))
-        Fail("setting the unimplemented MSR action", hr);
+        whp_fail("setting the unimplemented MSR action", hr);
 
     hr = WHvSetupPartition(fPartition);
     if (FAILED(hr))
-        Fail("WHvSetupPartition", hr);
+        whp_fail("WHvSetupPartition", hr);
 
-    hr = WHvCreateVirtualProcessor(fPartition, 0, 0);
-    if (FAILED(hr))
-        Fail("WHvCreateVirtualProcessor", hr);
-    fVpCreated = true;
-
-    WHV_EMULATOR_CALLBACKS callbacks {};
-    callbacks.Size = sizeof(callbacks);
-    callbacks.WHvEmulatorIoPortCallback = IoPortCallback;
-    callbacks.WHvEmulatorMemoryCallback = MemoryCallback;
-    callbacks.WHvEmulatorGetVirtualProcessorRegisters = GetRegistersCallback;
-    callbacks.WHvEmulatorSetVirtualProcessorRegisters = SetRegistersCallback;
-    callbacks.WHvEmulatorTranslateGvaPage = TranslateGvaCallback;
-    hr = WHvEmulatorCreateEmulator(&callbacks, &fEmulator);
-    if (FAILED(hr))
-        Fail("WHvEmulatorCreateEmulator", hr);
-
-    fTimer = CreateThreadpoolTimer(TimerCallback, this, nullptr);
-    if (fTimer == nullptr)
-        Fail("CreateThreadpoolTimer", HRESULT_FROM_WIN32(GetLastError()));
+    for (int i = 0; i < fCpuCount; i++)
+        fVcpus.push_back(std::make_unique<WhpX86Vcpu>(*this, fPartition, i));
     return true;
 }
 
@@ -246,7 +248,7 @@ void WhpX86Hypervisor::MapRam(int slot, uint64_t addr, uint64_t size,
     if (s.size != 0) {
         hr = WHvUnmapGpaRange(fPartition, s.addr, s.size);
         if (FAILED(hr))
-            Fail("WHvUnmapGpaRange", hr);
+            whp_fail("WHvUnmapGpaRange", hr);
         s.size = 0;
     }
     if (size == 0)
@@ -260,7 +262,7 @@ void WhpX86Hypervisor::MapRam(int slot, uint64_t addr, uint64_t size,
     hr = WHvMapGpaRange(fPartition, host_mem, addr, size,
                         (WHV_MAP_GPA_RANGE_FLAGS)flags);
     if (FAILED(hr))
-        Fail("WHvMapGpaRange", hr);
+        whp_fail("WHvMapGpaRange", hr);
     s.addr = addr;
     s.size = size;
 }
@@ -277,7 +279,7 @@ void WhpX86Hypervisor::GetDirtyLog(int slot, uint32_t *bitmap)
                                      reinterpret_cast<UINT64 *>(bitmap),
                                      bitmap_size);
     if (FAILED(hr))
-        Fail("WHvQueryGpaRangeDirtyBitmap", hr);
+        whp_fail("WHvQueryGpaRangeDirtyBitmap", hr);
 }
 
 
@@ -319,22 +321,76 @@ void WhpX86Hypervisor::SendMsi(uint64_t addr, uint32_t data)
     ic.Vector = get_bits(data, 0, 8);
     hr = WHvRequestInterrupt(fPartition, &ic, sizeof(ic));
     if (FAILED(hr))
-        Fail("WHvRequestInterrupt", hr);
+        whp_fail("WHvRequestInterrupt", hr);
 }
 
 
-void WhpX86Hypervisor::GetRegs(HostX86Regs *regs)
+WhpX86Vcpu::WhpX86Vcpu(WhpX86Hypervisor &owner,
+                       WHV_PARTITION_HANDLE partition, int index):
+    fOwner(owner), fPartition(partition), fIndex(index)
+{
+    HRESULT hr;
+
+    hr = WHvCreateVirtualProcessor(fPartition, fIndex, 0);
+    if (FAILED(hr))
+        whp_fail("WHvCreateVirtualProcessor", hr);
+
+    WHV_EMULATOR_CALLBACKS callbacks {};
+    callbacks.Size = sizeof(callbacks);
+    callbacks.WHvEmulatorIoPortCallback = IoPortCallback;
+    callbacks.WHvEmulatorMemoryCallback = MemoryCallback;
+    callbacks.WHvEmulatorGetVirtualProcessorRegisters = GetRegistersCallback;
+    callbacks.WHvEmulatorSetVirtualProcessorRegisters = SetRegistersCallback;
+    callbacks.WHvEmulatorTranslateGvaPage = TranslateGvaCallback;
+    hr = WHvEmulatorCreateEmulator(&callbacks, &fEmulator);
+    if (FAILED(hr))
+        whp_fail("WHvEmulatorCreateEmulator", hr);
+
+    fTimer = CreateThreadpoolTimer(TimerCallback, this, nullptr);
+    if (fTimer == nullptr)
+        whp_fail("CreateThreadpoolTimer", HRESULT_FROM_WIN32(GetLastError()));
+}
+
+
+WhpX86Vcpu::~WhpX86Vcpu()
+{
+    SetThreadpoolTimer(fTimer, nullptr, 0, 0);
+    WaitForThreadpoolTimerCallbacks(fTimer, TRUE);
+    CloseThreadpoolTimer(fTimer);
+    WHvEmulatorDestroyEmulator(fEmulator);
+    WHvDeleteVirtualProcessor(fPartition, fIndex);
+}
+
+
+void WhpX86Vcpu::GetVpRegisters(const WHV_REGISTER_NAME *names, UINT32 count,
+                                WHV_REGISTER_VALUE *values)
+{
+    HRESULT hr = WHvGetVirtualProcessorRegisters(fPartition, fIndex, names,
+                                                 count, values);
+    if (FAILED(hr))
+        whp_fail("WHvGetVirtualProcessorRegisters", hr);
+}
+
+
+void WhpX86Vcpu::SetVpRegisters(const WHV_REGISTER_NAME *names, UINT32 count,
+                                const WHV_REGISTER_VALUE *values)
+{
+    HRESULT hr = WHvSetVirtualProcessorRegisters(fPartition, fIndex, names,
+                                                 count, values);
+    if (FAILED(hr))
+        whp_fail("WHvSetVirtualProcessorRegisters", hr);
+}
+
+
+void WhpX86Vcpu::GetRegs(HostX86Regs *regs)
 {
     WHV_REGISTER_NAME names[10];
     WHV_REGISTER_VALUE values[10];
-    HRESULT hr;
 
     memcpy(names, kGprNames, sizeof(kGprNames));
     names[8] = WHvX64RegisterRip;
     names[9] = WHvX64RegisterRflags;
-    hr = WHvGetVirtualProcessorRegisters(fPartition, 0, names, 10, values);
-    if (FAILED(hr))
-        Fail("WHvGetVirtualProcessorRegisters", hr);
+    GetVpRegisters(names, 10, values);
     for (int i = 0; i < 8; i++)
         regs->gpr[i] = values[i].Reg64;
     regs->rip = values[8].Reg64;
@@ -342,11 +398,10 @@ void WhpX86Hypervisor::GetRegs(HostX86Regs *regs)
 }
 
 
-void WhpX86Hypervisor::SetRegs(const HostX86Regs &regs)
+void WhpX86Vcpu::SetRegs(const HostX86Regs &regs)
 {
     WHV_REGISTER_NAME names[10];
     WHV_REGISTER_VALUE values[10] {};
-    HRESULT hr;
 
     memcpy(names, kGprNames, sizeof(kGprNames));
     for (int i = 0; i < 8; i++)
@@ -355,17 +410,13 @@ void WhpX86Hypervisor::SetRegs(const HostX86Regs &regs)
     values[8].Reg64 = regs.rip;
     names[9] = WHvX64RegisterRflags;
     values[9].Reg64 = regs.rflags;
-    hr = WHvSetVirtualProcessorRegisters(fPartition, 0, names, 10, values);
-    if (FAILED(hr))
-        Fail("WHvSetVirtualProcessorRegisters", hr);
+    SetVpRegisters(names, 10, values);
     fRflags = regs.rflags;
 }
 
 
-void WhpX86Hypervisor::SetFlatProtectedMode(uint32_t gdt_base,
-                                            uint16_t gdt_limit,
-                                            uint16_t code_sel,
-                                            uint16_t data_sel)
+void WhpX86Vcpu::SetFlatProtectedMode(uint32_t gdt_base, uint16_t gdt_limit,
+                                      uint16_t code_sel, uint16_t data_sel)
 {
     static const WHV_REGISTER_NAME names[] = {
         WHvX64RegisterCr0, WHvX64RegisterGdtr, WHvX64RegisterCs,
@@ -373,11 +424,8 @@ void WhpX86Hypervisor::SetFlatProtectedMode(uint32_t gdt_base,
         WHvX64RegisterFs, WHvX64RegisterGs,
     };
     WHV_REGISTER_VALUE values[8] {};
-    HRESULT hr;
 
-    hr = WHvGetVirtualProcessorRegisters(fPartition, 0, names, 1, values);
-    if (FAILED(hr))
-        Fail("WHvGetVirtualProcessorRegisters", hr);
+    GetVpRegisters(names, 1, values);
     values[0].Reg64 |= 1; /* CR0_PE */
 
     values[1].Table.Base = gdt_base;
@@ -400,16 +448,15 @@ void WhpX86Hypervisor::SetFlatProtectedMode(uint32_t gdt_base,
     for (int i = 3; i < 8; i++)
         values[i].Segment = seg;
 
-    hr = WHvSetVirtualProcessorRegisters(fPartition, 0, names, 8, values);
-    if (FAILED(hr))
-        Fail("WHvSetVirtualProcessorRegisters", hr);
+    SetVpRegisters(names, 8, values);
 }
 
 
-HRESULT CALLBACK WhpX86Hypervisor::IoPortCallback(
+HRESULT CALLBACK WhpX86Vcpu::IoPortCallback(
     void *context, WHV_EMULATOR_IO_ACCESS_INFO *io)
 {
-    WhpX86Hypervisor *s = static_cast<WhpX86Hypervisor *>(context);
+    WhpX86Vcpu *v = static_cast<WhpX86Vcpu *>(context);
+    X86HypervisorTarget &target = v->fOwner.fTarget;
     int size_log2;
 
     switch (io->AccessSize) {
@@ -419,18 +466,19 @@ HRESULT CALLBACK WhpX86Hypervisor::IoPortCallback(
     default: return E_INVALIDARG;
     }
     if (io->Direction == 0) {
-        io->Data = s->fTarget.PortRead(io->Port, size_log2);
+        io->Data = target.PortRead(io->Port, size_log2);
     } else {
-        s->fTarget.PortWrite(io->Port, io->Data, size_log2);
+        target.PortWrite(io->Port, io->Data, size_log2);
     }
     return S_OK;
 }
 
 
-HRESULT CALLBACK WhpX86Hypervisor::MemoryCallback(
+HRESULT CALLBACK WhpX86Vcpu::MemoryCallback(
     void *context, WHV_EMULATOR_MEMORY_ACCESS_INFO *mem)
 {
-    WhpX86Hypervisor *s = static_cast<WhpX86Hypervisor *>(context);
+    WhpX86Vcpu *v = static_cast<WhpX86Vcpu *>(context);
+    X86HypervisorTarget &target = v->fOwner.fTarget;
 
     switch (mem->AccessSize) {
     case 1:
@@ -442,80 +490,78 @@ HRESULT CALLBACK WhpX86Hypervisor::MemoryCallback(
         return E_INVALIDARG;
     }
     if (mem->Direction == 0) {
-        s->fTarget.MmioRead(mem->GpaAddress, mem->Data, mem->AccessSize);
+        target.MmioRead(mem->GpaAddress, mem->Data, mem->AccessSize);
     } else {
-        s->fTarget.MmioWrite(mem->GpaAddress, mem->Data, mem->AccessSize);
+        target.MmioWrite(mem->GpaAddress, mem->Data, mem->AccessSize);
     }
     return S_OK;
 }
 
 
-HRESULT CALLBACK WhpX86Hypervisor::GetRegistersCallback(
+HRESULT CALLBACK WhpX86Vcpu::GetRegistersCallback(
     void *context, const WHV_REGISTER_NAME *names, UINT32 count,
     WHV_REGISTER_VALUE *values)
 {
-    WhpX86Hypervisor *s = static_cast<WhpX86Hypervisor *>(context);
+    WhpX86Vcpu *v = static_cast<WhpX86Vcpu *>(context);
 
-    return WHvGetVirtualProcessorRegisters(s->fPartition, 0, names, count,
-                                           values);
+    return WHvGetVirtualProcessorRegisters(v->fPartition, v->fIndex, names,
+                                           count, values);
 }
 
 
-HRESULT CALLBACK WhpX86Hypervisor::SetRegistersCallback(
+HRESULT CALLBACK WhpX86Vcpu::SetRegistersCallback(
     void *context, const WHV_REGISTER_NAME *names, UINT32 count,
     const WHV_REGISTER_VALUE *values)
 {
-    WhpX86Hypervisor *s = static_cast<WhpX86Hypervisor *>(context);
+    WhpX86Vcpu *v = static_cast<WhpX86Vcpu *>(context);
 
-    return WHvSetVirtualProcessorRegisters(s->fPartition, 0, names, count,
-                                           values);
+    return WHvSetVirtualProcessorRegisters(v->fPartition, v->fIndex, names,
+                                           count, values);
 }
 
 
-HRESULT CALLBACK WhpX86Hypervisor::TranslateGvaCallback(
+HRESULT CALLBACK WhpX86Vcpu::TranslateGvaCallback(
     void *context, WHV_GUEST_VIRTUAL_ADDRESS gva,
     WHV_TRANSLATE_GVA_FLAGS flags, WHV_TRANSLATE_GVA_RESULT_CODE *result,
     WHV_GUEST_PHYSICAL_ADDRESS *gpa)
 {
-    WhpX86Hypervisor *s = static_cast<WhpX86Hypervisor *>(context);
+    WhpX86Vcpu *v = static_cast<WhpX86Vcpu *>(context);
     WHV_TRANSLATE_GVA_RESULT res;
     HRESULT hr;
 
-    hr = WHvTranslateGva(s->fPartition, 0, gva, flags, &res, gpa);
+    hr = WHvTranslateGva(v->fPartition, v->fIndex, gva, flags, &res, gpa);
     *result = res.ResultCode;
     return hr;
 }
 
 
-void CALLBACK WhpX86Hypervisor::TimerCallback(PTP_CALLBACK_INSTANCE instance,
-                                              void *context, PTP_TIMER timer)
+void CALLBACK WhpX86Vcpu::TimerCallback(PTP_CALLBACK_INSTANCE instance,
+                                        void *context, PTP_TIMER timer)
 {
-    WhpX86Hypervisor *s = static_cast<WhpX86Hypervisor *>(context);
+    WhpX86Vcpu *v = static_cast<WhpX86Vcpu *>(context);
 
-    WHvCancelRunVirtualProcessor(s->fPartition, 0, 0);
+    WHvCancelRunVirtualProcessor(v->fPartition, v->fIndex, 0);
 }
 
 
 /* With the lock held, before a run: hands the processor the interrupt the
    8259s raise when it can take one, and otherwise asks to exit once it can.
    False while it stays halted. */
-bool WhpX86Hypervisor::InjectInterrupt()
+bool WhpX86Vcpu::InjectInterrupt()
 {
+    X86HypervisorTarget &target = fOwner.fTarget;
     WHV_REGISTER_NAME names[3];
     WHV_REGISTER_VALUE values[3] {};
     UINT32 count = 0;
-    bool intr = fTarget.InterruptRequested();
+    bool intr = fIndex == 0 && target.InterruptRequested();
 
     if (intr && !fInterruptionPending && !fInterruptShadow &&
         (fRflags & RFLAGS_IF)) {
         /* With the local APIC, HLT waits inside the hypervisor, and an
            injected interrupt does not end the wait by itself. */
-        if (fLocalApic) {
+        if (fOwner.fLocalApic) {
             WHV_REGISTER_NAME name = WHvRegisterInternalActivityState;
-            HRESULT hr = WHvGetVirtualProcessorRegisters(fPartition, 0, &name,
-                                                         1, &values[count]);
-            if (FAILED(hr))
-                Fail("WHvGetVirtualProcessorRegisters", hr);
+            GetVpRegisters(&name, 1, &values[count]);
             if (values[count].InternalActivity.HaltSuspend) {
                 values[count].InternalActivity.HaltSuspend = 0;
                 names[count] = name;
@@ -527,11 +573,11 @@ bool WhpX86Hypervisor::InjectInterrupt()
         values[count].PendingInterruption.InterruptionType =
             WHvX64PendingInterrupt;
         values[count].PendingInterruption.InterruptionVector =
-            fTarget.AcknowledgeInterrupt();
+            target.AcknowledgeInterrupt();
         count++;
         fInterruptionPending = true;
         fHalted = false;
-        intr = fTarget.InterruptRequested();
+        intr = target.InterruptRequested();
     }
     if (intr && !fWindowRequested) {
         names[count] = WHvX64RegisterDeliverabilityNotifications;
@@ -539,17 +585,13 @@ bool WhpX86Hypervisor::InjectInterrupt()
         count++;
         fWindowRequested = true;
     }
-    if (count != 0) {
-        HRESULT hr = WHvSetVirtualProcessorRegisters(fPartition, 0, names,
-                                                     count, values);
-        if (FAILED(hr))
-            Fail("WHvSetVirtualProcessorRegisters", hr);
-    }
+    if (count != 0)
+        SetVpRegisters(names, count, values);
     return !fHalted;
 }
 
 
-void WhpX86Hypervisor::ExitCpuid(const WHV_RUN_VP_EXIT_CONTEXT &ctx)
+void WhpX86Vcpu::ExitCpuid(const WHV_RUN_VP_EXIT_CONTEXT &ctx)
 {
     const WHV_X64_CPUID_ACCESS_CONTEXT &c = ctx.CpuidAccess;
     static const WHV_REGISTER_NAME names[] = {
@@ -557,7 +599,6 @@ void WhpX86Hypervisor::ExitCpuid(const WHV_RUN_VP_EXIT_CONTEXT &ctx)
         WHvX64RegisterRcx, WHvX64RegisterRdx,
     };
     WHV_REGISTER_VALUE values[5] {};
-    HRESULT hr;
 
     values[0].Reg64 = ctx.VpContext.Rip + ctx.VpContext.InstructionLength;
     values[1].Reg64 = c.DefaultResultRax;
@@ -568,41 +609,39 @@ void WhpX86Hypervisor::ExitCpuid(const WHV_RUN_VP_EXIT_CONTEXT &ctx)
        with the emulator */
     if (c.Rax == 1 || c.Rax == 0x80000001) {
         values[4].Reg64 &= ~(uint64_t)CPUID_ACPI;
-        if (!fLocalApic)
+        if (!fOwner.fLocalApic)
             values[4].Reg64 &= ~(uint64_t)CPUID_APIC;
     }
-    hr = WHvSetVirtualProcessorRegisters(fPartition, 0, names, 5, values);
-    if (FAILED(hr))
-        Fail("WHvSetVirtualProcessorRegisters", hr);
+    SetVpRegisters(names, 5, values);
 }
 
 
-void WhpX86Hypervisor::Run(int64_t timeout_us)
+void WhpX86Vcpu::Run()
 {
+    DeviceLock &lock = fOwner.fLock;
+    X86HypervisorTarget &target = fOwner.fTarget;
     WHV_RUN_VP_EXIT_CONTEXT ctx;
     WHV_EMULATOR_STATUS status;
     HRESULT hr;
 
     {
-        DeviceLocker locker(fLock);
+        DeviceLocker locker(lock);
         if (!InjectInterrupt())
             return;
     }
 
-    if (timeout_us < 0 || timeout_us > WHP_MAX_RUN_US)
-        timeout_us = WHP_MAX_RUN_US;
     ULARGE_INTEGER due;
-    due.QuadPart = (ULONGLONG)(-(LONGLONG)timeout_us * 10);
+    due.QuadPart = (ULONGLONG)(-(LONGLONG)WHP_MAX_RUN_US * 10);
     FILETIME due_time;
     due_time.dwLowDateTime = due.LowPart;
     due_time.dwHighDateTime = due.HighPart;
     SetThreadpoolTimer(fTimer, &due_time, 0, 0);
 
-    hr = WHvRunVirtualProcessor(fPartition, 0, &ctx, sizeof(ctx));
+    hr = WHvRunVirtualProcessor(fPartition, fIndex, &ctx, sizeof(ctx));
     /* a callback already under way at most ends the next run early */
     SetThreadpoolTimer(fTimer, nullptr, 0, 0);
     if (FAILED(hr))
-        Fail("WHvRunVirtualProcessor", hr);
+        whp_fail("WHvRunVirtualProcessor", hr);
 
     fRflags = ctx.VpContext.Rflags;
     fInterruptShadow = ctx.VpContext.ExecutionState.InterruptShadow;
@@ -610,7 +649,7 @@ void WhpX86Hypervisor::Run(int64_t timeout_us)
 
     switch (ctx.ExitReason) {
     case WHvRunVpExitReasonMemoryAccess: {
-        DeviceLocker locker(fLock);
+        DeviceLocker locker(lock);
         hr = WHvEmulatorTryMmioEmulation(fEmulator, this, &ctx.VpContext,
                                          &ctx.MemoryAccess, &status);
         if (FAILED(hr) || !status.EmulationSuccessful) {
@@ -623,7 +662,7 @@ void WhpX86Hypervisor::Run(int64_t timeout_us)
         break;
     }
     case WHvRunVpExitReasonX64IoPortAccess: {
-        DeviceLocker locker(fLock);
+        DeviceLocker locker(lock);
         hr = WHvEmulatorTryIoEmulation(fEmulator, this, &ctx.VpContext,
                                        &ctx.IoPortAccess, &status);
         if (FAILED(hr) || !status.EmulationSuccessful) {
@@ -642,8 +681,8 @@ void WhpX86Hypervisor::Run(int64_t timeout_us)
         fHalted = true;
         break;
     case WHvRunVpExitReasonX64ApicEoi: {
-        DeviceLocker locker(fLock);
-        fTarget.ApicEoi(ctx.ApicEoi.InterruptVector);
+        DeviceLocker locker(lock);
+        target.ApicEoi(ctx.ApicEoi.InterruptVector);
         break;
     }
     case WHvRunVpExitReasonX64InterruptWindow:
@@ -663,15 +702,15 @@ void WhpX86Hypervisor::Run(int64_t timeout_us)
 }
 
 
-bool WhpX86Hypervisor::Idle(bool intr)
+bool WhpX86Vcpu::Idle(bool intr)
 {
     return fHalted && !(intr && (fRflags & RFLAGS_IF));
 }
 
 
-void WhpX86Hypervisor::InterruptRun()
+void WhpX86Vcpu::InterruptRun()
 {
-    WHvCancelRunVirtualProcessor(fPartition, 0, 0);
+    WHvCancelRunVirtualProcessor(fPartition, fIndex, 0);
 }
 
 
@@ -699,8 +738,7 @@ std::unique_ptr<HostX86Hypervisor> host_x86_hypervisor_open(
         }
     }
 
-    auto whp = std::make_unique<WhpX86Hypervisor>(target, lock,
-                                                  options.local_apic);
+    auto whp = std::make_unique<WhpX86Hypervisor>(target, lock, options);
     if (!whp->Init())
         return nullptr;
     return whp;

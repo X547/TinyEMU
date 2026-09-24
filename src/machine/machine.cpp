@@ -804,6 +804,7 @@ void VirtMachine::ThreadLoop()
             delay = refresh_delay;
         fWakeup.Wait(delay);
     }
+    ProcessorThreadStopping();
 }
 
 void virt_machine_set_defaults(VirtMachineParams *p)

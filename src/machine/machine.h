@@ -187,8 +187,9 @@ protected:
        running. */
     bool OnProcessorThread() const;
 
-    /* On the processor thread. */
+    /* On the processor thread, as it starts and as it ends. */
     virtual void ProcessorThreadStarted() {}
+    virtual void ProcessorThreadStopping() {}
     /* With the device lock held: runs the timers that are due and returns
        the microseconds until the next one, or -1 if there is none. */
     virtual int64_t RunTimers() = 0;

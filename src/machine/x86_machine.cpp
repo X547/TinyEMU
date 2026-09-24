@@ -29,6 +29,8 @@
 #include <assert.h>
 
 #include <algorithm>
+#include <thread>
+#include <vector>
 
 #include "bits.h"
 #include "cutils.h"
@@ -1080,9 +1082,18 @@ public:
     std::unique_ptr<IOAPIC> fIoApic;
     PCIrqFanout fIrqFanout {*this};
     /* Otherwise the machine's: INTR as the 8259s drive it, read without the
-       lock, and how long the hypervisor may run before the PIT is due. */
+       lock. */
     std::atomic<bool> fCpuIrq {false};
-    int64_t fTimerDelayUs = -1;
+    /* With a hypervisor each processor runs on a thread of its own, which
+       waits on its wakeup while the processor is halted; the processor
+       thread keeps the timers and the screen. */
+    int fCpuCount = 1;
+    std::vector<std::thread> fVcpuThreads;
+    std::unique_ptr<HostWakeup[]> fVcpuWakeups;
+
+    void VcpuThread(int index);
+    /* Makes processor 'index' look at its interrupts again. Any thread. */
+    void KickVcpu(int index);
 
     /* fixed-function port stubs and the VMware backdoor port */
     uint32_t Port80Read(uint32_t offset, int size_log2);
@@ -1133,6 +1144,7 @@ public:
 
     /* VirtMachine */
     void ProcessorThreadStarted() override;
+    void ProcessorThreadStopping() override;
     int64_t RunTimers() override;
     bool Idle() override;
     void Interp(int max_exec_cycle) override;
@@ -1142,6 +1154,9 @@ public:
 /* Where a kernel boot routes PIRQA-D: two lines no ISA device of a PC
    owns, leaving 9 for the SCI and 12 for the PS/2 mouse. */
 static const uint8_t kKernelPciIrqs[4] = { 10, 11, 10, 11 };
+
+/* The processor the calling thread runs, or -1 on any other thread. */
+static thread_local int sCurrentVcpu = -1;
 
 static void copy_kernel(PCMachine *s, const uint8_t *buf, int buf_len,
                         const char *cmd_line);
@@ -1215,9 +1230,10 @@ uint32_t PCMachine::VmPortRead(uint32_t addr, int size_log2)
     uint32_t regs[6];
 
     if (s->hypervisor) {
+        HostX86Vcpu &vcpu = s->hypervisor->Vcpu(sCurrentVcpu);
         HostX86Regs r;
 
-        s->hypervisor->GetRegs(&r);
+        vcpu.GetRegs(&r);
         regs[REG_EAX] = r.gpr[0];
         regs[REG_EBX] = r.gpr[3];
         regs[REG_ECX] = r.gpr[1];
@@ -1237,7 +1253,7 @@ uint32_t PCMachine::VmPortRead(uint32_t addr, int size_log2)
             r.gpr[2] = regs[REG_EDX];
             r.gpr[6] = regs[REG_ESI];
             r.gpr[7] = regs[REG_EDI];
-            s->hypervisor->SetRegs(r);
+            vcpu.SetRegs(r);
         }
     } else {
         regs[REG_EAX] = x86_cpu_get_reg(s->cpu_state, 0);
@@ -1273,15 +1289,15 @@ void PCMachine::SetCPUIRQ(int level)
     if (hypervisor) {
         bool raised = level && !fCpuIrq.load();
         fCpuIrq.store(level != 0);
-        /* The processor thread looks at INTR before each run, so only a
-           request from elsewhere has to stop a run in progress. */
-        if (raised && !OnProcessorThread()) {
-            hypervisor->InterruptRun();
+        /* Processor 0 looks at INTR before each run, so only a request from
+           another thread has to stop a run in progress or end a wait. */
+        if (raised && sCurrentVcpu != 0) {
+            KickVcpu(0);
         }
     } else {
         x86_cpu_set_irq(cpu_state, level);
+        Kick();
     }
-    Kick();
 }
 
 int PCMachine::HardIntno()
@@ -1353,6 +1369,10 @@ void PCMachine::PortWrite(uint32_t port, uint32_t val, int size_log2)
         printf("write port=0x%x val=0x%x s=%d\n", port, val, 1 << size_log2);
 #endif
     port_map->IoWrite(port, val, size_log2);
+    /* Programming the PIT or the RTC can bring a timer the processor thread
+       sleeps on forward. */
+    if (hypervisor && (port - 0x40 < 4 || port - 0x70 < 2))
+        Kick();
 }
 
 uint32_t PCMachine::PortRead(uint32_t port, int size_log2)
@@ -1640,6 +1660,10 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
         return nullptr;
     }
     s->fLocalApic = options.local_apic;
+    if (s->hypervisor) {
+        s->fCpuCount = options.cpu_count;
+        s->fVcpuWakeups = std::make_unique<HostWakeup[]>(s->fCpuCount);
+    }
 
     if (s->hypervisor) {
         s->mem_map = new HypervisorPhysMemoryMap(*s->hypervisor);
@@ -2058,16 +2082,16 @@ static void start_flat_protected_mode(PCMachine *s, uint32_t gdt_addr,
     uint16_t gdt_limit = BOOT_GDT_ENTRIES * 8 - 1;
 
     if (s->hypervisor) {
+        HostX86Vcpu &vcpu = s->hypervisor->Vcpu(0);
         HostX86Regs regs;
 
-        s->hypervisor->SetFlatProtectedMode(gdt_addr, gdt_limit,
-                                            2 << 3, 3 << 3);
+        vcpu.SetFlatProtectedMode(gdt_addr, gdt_limit, 2 << 3, 3 << 3);
 
         memset(&regs, 0, sizeof(regs));
         regs.rip = entry;
         regs.gpr[reg] = reg_val;
         regs.rflags = 0x2;
-        s->hypervisor->SetRegs(regs);
+        vcpu.SetRegs(regs);
     } else {
         int i;
         X86CPUSeg sd;
@@ -2383,9 +2407,40 @@ static bool pvh_load(PCMachine *s, const uint8_t *buf, int buf_len,
 
 void PCMachine::ProcessorThreadStarted()
 {
-    if (hypervisor) {
-        hypervisor->ProcessorThreadStarted();
+    for (int i = 0; hypervisor && i < fCpuCount; i++)
+        fVcpuThreads.emplace_back([this, i]() {VcpuThread(i);});
+}
+
+void PCMachine::ProcessorThreadStopping()
+{
+    for (std::thread &thread : fVcpuThreads)
+        thread.join();
+    fVcpuThreads.clear();
+}
+
+/* The longest a halted processor waits without looking at its interrupts
+   again, should a kick go astray. */
+#define VCPU_MAX_WAIT_US 10000
+
+void PCMachine::VcpuThread(int index)
+{
+    HostX86Vcpu &vcpu = hypervisor->Vcpu(index);
+
+    sCurrentVcpu = index;
+    vcpu.ThreadStarted();
+    while (!StopRequested()) {
+        if (vcpu.Idle(index == 0 && fCpuIrq.load())) {
+            fVcpuWakeups[index].Wait(VCPU_MAX_WAIT_US);
+            continue;
+        }
+        vcpu.Run();
     }
+}
+
+void PCMachine::KickVcpu(int index)
+{
+    hypervisor->Vcpu(index).InterruptRun();
+    fVcpuWakeups[index].Kick();
 }
 
 /* The CMOS periodic interrupt is polled, so it has no deadline. */
@@ -2397,32 +2452,27 @@ int64_t PCMachine::RunTimers()
     /* the hypervisor has the PIT */
     if (s->fHypervisorIrqchip)
         return -1;
-    s->fTimerDelayUs = pit_update_irq(s->pit_state.get());
-    return s->fTimerDelayUs;
+    return pit_update_irq(s->pit_state.get());
 }
 
+/* The processors that run in the hypervisor are never the processor
+   thread's to run. */
 bool PCMachine::Idle()
 {
     if (hypervisor)
-        return hypervisor->Idle(fCpuIrq.load());
+        return true;
     return x86_cpu_get_power_down(cpu_state);
 }
 
 void PCMachine::Interp(int max_exec_cycles)
 {
-    PCMachine *s = this;
-    if (s->hypervisor) {
-        s->hypervisor->Run(s->fTimerDelayUs);
-    } else {
-        x86_cpu_interp(s->cpu_state, max_exec_cycles);
-    }
+    x86_cpu_interp(cpu_state, max_exec_cycles);
 }
 
 void PCMachine::InterruptExecution()
 {
-    if (hypervisor) {
-        hypervisor->InterruptRun();
-    }
+    for (int i = 0; hypervisor && i < fCpuCount; i++)
+        KickVcpu(i);
 }
 
 class PcMachineClass final: public VirtMachineClass {

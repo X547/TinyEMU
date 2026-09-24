@@ -42,6 +42,8 @@ struct HostX86Regs {
 struct HostX86Options {
     /* local APICs, reached by SendMsi() */
     bool local_apic = false;
+    /* processors, numbered from 0 */
+    int cpu_count = 1;
 };
 
 
@@ -59,7 +61,8 @@ public:
     virtual void MmioRead(uint64_t addr, uint8_t *data, int len) = 0;
     virtual void MmioWrite(uint64_t addr, const uint8_t *data, int len) = 0;
 
-    /* Whether the interrupt controller raises INTR. */
+    /* Whether the interrupt controller raises INTR, which only processor 0
+       takes. */
     virtual bool InterruptRequested() = 0;
     /* Acknowledges the request and returns its vector. */
     virtual int AcknowledgeInterrupt() = 0;
@@ -70,16 +73,43 @@ public:
 };
 
 
-/* One processor the host runs in hardware.
+/* One processor the host runs in hardware, on a host thread of its own.
+
+   ThreadStarted(), Run() and Idle() are called on that thread without the
+   device lock; Run() takes it around each call to the target. The register
+   methods are called with the lock held, either before the processor first
+   runs or on its thread. InterruptRun() is called from any thread. */
+class HostX86Vcpu {
+public:
+    virtual ~HostX86Vcpu() = default;
+
+    /* SetRegs() leaves the registers HostX86Regs does not hold alone. */
+    virtual void GetRegs(HostX86Regs *regs) = 0;
+    virtual void SetRegs(const HostX86Regs &regs) = 0;
+    /* Protected mode with CS and the data segments covering the whole 4 GB,
+       as a boot loader leaves it. */
+    virtual void SetFlatProtectedMode(uint32_t gdt_base, uint16_t gdt_limit,
+                                      uint16_t code_sel,
+                                      uint16_t data_sel) = 0;
+
+    /* Before the first Run(). */
+    virtual void ThreadStarted() = 0;
+    /* Runs until an access for the target, a halt, or InterruptRun(). */
+    virtual void Run() = 0;
+    /* Halted with no interrupt it could take while INTR is at 'intr'. Always
+       false when the hypervisor itself waits at HLT. */
+    virtual bool Idle(bool intr) = 0;
+    /* Makes Run() return soon. */
+    virtual void InterruptRun() = 0;
+};
+
+
+/* The machine the processors belong to.
 
    A hypervisor with interrupt controllers of its own provides the 8259s and
-   the 8254, takes the lines through SetIRQ() and waits in Run() while the
-   processor is halted. One without them takes interrupts from the target, and
-   the machine waits while Idle() says so.
-
-   Run(), ProcessorThreadStarted(), Idle() and InterruptRun() are called
-   without the device lock; Run() takes it around each call to the target. The
-   other methods are called with the lock held. */
+   the 8254 and takes the lines through SetIRQ(). One without them takes
+   interrupts from the target, and a processor waits while its Idle() says
+   so. These methods are called with the device lock held. */
 class HostX86Hypervisor {
 public:
     virtual ~HostX86Hypervisor() = default;
@@ -107,25 +137,8 @@ public:
        'data' to 'addr' in the 0xfee00000 page describes. Any thread. */
     virtual void SendMsi(uint64_t addr, uint32_t data) = 0;
 
-    /* SetRegs() leaves the registers HostX86Regs does not hold alone. */
-    virtual void GetRegs(HostX86Regs *regs) = 0;
-    virtual void SetRegs(const HostX86Regs &regs) = 0;
-    /* Protected mode with CS and the data segments covering the whole 4 GB,
-       as a boot loader leaves it. */
-    virtual void SetFlatProtectedMode(uint32_t gdt_base, uint16_t gdt_limit,
-                                      uint16_t code_sel,
-                                      uint16_t data_sel) = 0;
-
-    /* On the processor thread, before the first Run(). */
-    virtual void ProcessorThreadStarted() = 0;
-    /* Runs until an access for the target, a halt, or 'timeout_us'; -1 is
-       about 10 ms. */
-    virtual void Run(int64_t timeout_us) = 0;
-    /* Halted with no interrupt it could take while INTR is at 'intr'. Always
-       false with interrupt controllers of its own. */
-    virtual bool Idle(bool intr) = 0;
-    /* Any thread: makes Run() return soon. */
-    virtual void InterruptRun() = 0;
+    /* Processor 'index', below HostX86Options::cpu_count. */
+    virtual HostX86Vcpu &Vcpu(int index) = 0;
 };
 
 
