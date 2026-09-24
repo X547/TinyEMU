@@ -213,6 +213,9 @@ public:
 
     /* the first request decides the exit code */
     void RequestShutdown(int code);
+    /* What a guest asks for to reboot. No machine can reset itself, so it
+       ends, with the exit code a failure gives. Any thread. */
+    void RequestReset();
     bool ShutdownRequested() const;
 
     void Start();

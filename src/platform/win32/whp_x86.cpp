@@ -80,6 +80,8 @@ private:
     bool fWindowRequested = false;
     /* stopped at HLT until an interrupt is taken */
     bool fHalted = false;
+    /* shut down, until the machine ends */
+    bool fShutdown = false;
 
     void GetVpRegisters(const WHV_REGISTER_NAME *names, UINT32 count,
                         WHV_REGISTER_VALUE *values);
@@ -720,10 +722,14 @@ void WhpX86Vcpu::Run()
         break;
     case WHvRunVpExitReasonCanceled:
         break;
-    case WHvRunVpExitReasonUnrecoverableException:
-        fprintf(stderr, "WHP: unrecoverable exception at rip=0x%" PRIx64 "\n",
-                (uint64_t)ctx.VpContext.Rip);
-        exit(1);
+    case WHvRunVpExitReasonUnrecoverableException: {
+        DeviceLocker locker(lock);
+        fprintf(stderr, "WHP: processor %u shut down at rip=0x%" PRIx64 "\n",
+                fIndex, (uint64_t)ctx.VpContext.Rip);
+        fShutdown = true;
+        target.ProcessorShutdown();
+        break;
+    }
     default:
         fprintf(stderr, "WHP: unsupported exit reason 0x%x at rip=0x%"
                 PRIx64 "\n", ctx.ExitReason, (uint64_t)ctx.VpContext.Rip);
@@ -734,7 +740,7 @@ void WhpX86Vcpu::Run()
 
 bool WhpX86Vcpu::Idle(bool intr)
 {
-    return fHalted && !(intr && (fRflags & RFLAGS_IF));
+    return fShutdown || (fHalted && !(intr && (fRflags & RFLAGS_IF)));
 }
 
 

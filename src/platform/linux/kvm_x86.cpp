@@ -61,6 +61,8 @@ private:
     /* the thread that runs it, for signalling it out of KVM_RUN */
     pthread_t fThread {};
     std::atomic<bool> fThreadKnown {false};
+    /* shut down, until the machine ends */
+    bool fShutdown = false;
 
     void SetCpuid();
     void ExitIo();
@@ -76,7 +78,7 @@ public:
                               uint16_t code_sel, uint16_t data_sel) override;
     void ThreadStarted() override;
     void Run() override;
-    bool Idle(bool intr) override {return false;}
+    bool Idle(bool intr) override {return fShutdown;}
     void InterruptRun() override;
 };
 
@@ -544,6 +546,12 @@ void KvmX86Vcpu::Run()
     case KVM_EXIT_MMIO: {
         DeviceLocker locker(fOwner.fLock);
         ExitMmio();
+        break;
+    }
+    case KVM_EXIT_SHUTDOWN: {
+        DeviceLocker locker(fOwner.fLock);
+        fShutdown = true;
+        fOwner.fTarget.ProcessorShutdown();
         break;
     }
     case KVM_EXIT_FAIL_ENTRY:

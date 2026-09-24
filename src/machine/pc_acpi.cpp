@@ -510,10 +510,16 @@ static Bytes build_fadt(const PcAcpiConfig &config, uint32_t facs,
     put16(t, bit_at(0) | (config.i8042 ? bit_at(1) : 0));
     put8(t, 0); /* reserved */
     /* WBINVD, PROC_C1, PWR_BUTTON and SLP_BUTTON (neither is a fixed
-       feature here), TMR_VAL_EXT */
-    put32(t, bit_at(0) | bit_at(2) | bit_at(4) | bit_at(5) | bit_at(8));
-    t.resize(t.size() + 12); /* RESET_REG */
-    put8(t, 0); /* RESET_VALUE */
+       feature here), TMR_VAL_EXT, RESET_REG_SUP */
+    put32(t, bit_at(0) | bit_at(2) | bit_at(4) | bit_at(5) | bit_at(8) |
+          bit_at(10));
+    /* RESET_REG: the fast reset bit of port 0x92 */
+    put8(t, 1); /* system I/O */
+    put8(t, 8); /* bit width */
+    put8(t, 0); /* bit offset */
+    put8(t, 1); /* byte access */
+    put64(t, 0x92);
+    put8(t, 1); /* RESET_VALUE */
     put16(t, 0); /* ARM_BOOT_ARCH */
     put8(t, 0); /* FADT minor version */
     put64(t, 0); /* X_FIRMWARE_CTRL: FIRMWARE_CTRL holds it */

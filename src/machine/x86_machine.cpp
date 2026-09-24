@@ -1113,6 +1113,7 @@ public:
     bool InterruptRequested() override;
     int AcknowledgeInterrupt() override;
     void ApicEoi(int vector) override;
+    void ProcessorShutdown() override;
     /* PCIMsiTarget */
     void SendMsi(uint64_t addr, uint32_t data) override;
 
@@ -1201,11 +1202,13 @@ uint32_t PCMachine::Port80Read(uint32_t offset, int size_log2)
     return 0xff;
 }
 
+/* Bit 0 is the fast reset, which the FADT also names as the ACPI reset
+   register. */
 void PCMachine::Port92Write(uint32_t offset, uint32_t val, int size_log2)
 {
-    (void)offset;
-    (void)val;
     (void)size_log2;
+    if (offset == 0 && (val & 1))
+        RequestReset();
 }
 
 uint32_t PCMachine::Port92Read(uint32_t offset, int size_log2)
@@ -1475,6 +1478,12 @@ void PCIrqFanout::SetIRQ(int irq_num, int level)
     fMachine.pic_state->SetIRQ(irq_num, level);
     if (irq_num != 2)
         fMachine.fIoApic->SetIRQ(irq_num == 0 ? 2 : irq_num, level);
+}
+
+/* A PC resets on a triple fault. */
+void PCMachine::ProcessorShutdown()
+{
+    RequestReset();
 }
 
 void PCMachine::ApicEoi(int vector)

@@ -728,6 +728,13 @@ void VirtMachine::RequestShutdown(int code)
 }
 
 
+void VirtMachine::RequestReset()
+{
+    printf("\nReset.\n");
+    RequestShutdown(1);
+}
+
+
 bool VirtMachine::ShutdownRequested() const
 {
     return fRunControl->ShutdownRequested();

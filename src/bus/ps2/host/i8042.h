@@ -56,6 +56,8 @@ struct DeviceContext;
    controller without one (a memory mapped part on a board that never had a
    PC's history) simply passes the keyboard's own bytes through, which is why
    the translation lives here rather than in the keyboard. */
+class VirtMachine;
+
 class I8042Controller final {
 private:
     /* One port: the device plugged into it, and the two ends of the wire
@@ -98,6 +100,8 @@ private:
 
     IRQSignal *fKbdIrq = nullptr;
     IRQSignal *fAuxIrq = nullptr;
+    /* what the reset line pulls */
+    VirtMachine *fMachine;
 
     void UpdateIRQ();
     void Reply(uint8_t val, bool aux, bool timeout = false);
@@ -116,7 +120,8 @@ private:
 
 public:
     I8042Controller(PhysMemoryMap *port_map, IRQSignal *kbd_irq,
-                    IRQSignal *aux_irq, uint32_t io_base);
+                    IRQSignal *aux_irq, uint32_t io_base,
+                    VirtMachine *machine);
 
     /* 'port' counts from 0, as PS2BusTarget does. */
     int FindFreePort();

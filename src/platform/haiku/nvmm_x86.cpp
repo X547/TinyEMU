@@ -78,6 +78,8 @@ private:
     bool fWindowRequested = false;
     /* stopped at HLT until an interrupt is taken */
     bool fHalted = false;
+    /* shut down, until the machine ends */
+    bool fShutdown = false;
 
     void SetResetFpuState();
     bool InjectInterrupt();
@@ -549,9 +551,13 @@ void NvmmX86Vcpu::Run()
     case NVMM_VCPU_EXIT_MWAIT:
         InjectException(6); /* #UD, as on a processor without them */
         break;
-    case NVMM_VCPU_EXIT_SHUTDOWN:
+    case NVMM_VCPU_EXIT_SHUTDOWN: {
+        DeviceLocker locker(lock);
         fprintf(stderr, "NVMM: the guest shut down (triple fault)\n");
-        exit(1);
+        fShutdown = true;
+        fOwner.fTarget.ProcessorShutdown();
+        break;
+    }
     default:
         fprintf(stderr, "NVMM: unsupported exit reason 0x%" PRIx64 "\n",
                 (uint64_t)ctx->reason);
@@ -562,7 +568,7 @@ void NvmmX86Vcpu::Run()
 
 bool NvmmX86Vcpu::Idle(bool intr)
 {
-    return fHalted && !(intr && (fRflags & RFLAGS_IF));
+    return fShutdown || (fHalted && !(intr && (fRflags & RFLAGS_IF)));
 }
 
 

@@ -70,6 +70,8 @@ public:
     /* A local APIC the hypervisor emulates ended a level triggered
        interrupt with this vector, for the IOAPIC the machine may have. */
     virtual void ApicEoi(int vector) = 0;
+    /* A processor shut down, as on a triple fault; it runs no more. */
+    virtual void ProcessorShutdown() = 0;
 };
 
 

@@ -80,13 +80,6 @@
 #define KBD_PENDING_AUX (1 << I8042_PORT_AUX)
 
 
-static void qemu_system_reset_request(void)
-{
-    printf("system_reset_request\n");
-    exit(1);
-    /* XXX */
-}
-
 static void ioport_set_a20(int val)
 {
 }
@@ -100,9 +93,11 @@ static int ioport_get_a20(void)
 //#pragma mark - construction
 
 I8042Controller::I8042Controller(PhysMemoryMap *port_map, IRQSignal *kbd_irq,
-                                 IRQSignal *aux_irq, uint32_t io_base):
+                                 IRQSignal *aux_irq, uint32_t io_base,
+                                 VirtMachine *machine):
     fKbdIrq(kbd_irq),
-    fAuxIrq(aux_irq)
+    fAuxIrq(aux_irq),
+    fMachine(machine)
 {
     for (int i = 0; i < I8042_PORT_COUNT; i++) {
         fPorts[i].owner = this;
@@ -362,7 +357,8 @@ void I8042Controller::CommandWrite(uint32_t addr, uint32_t val, int size_log2)
         ioport_set_a20(0);
         break;
     case KBD_CCMD_RESET:
-        qemu_system_reset_request();
+        if (fMachine != nullptr)
+            fMachine->RequestReset();
         break;
     case 0xff:
         /* ignore that - I don't know what is its use */
@@ -429,8 +425,8 @@ void I8042Controller::DataWrite(uint32_t addr, uint32_t val, int size_log2)
         break;
     case KBD_CCMD_WRITE_OUTPORT:
         ioport_set_a20(get_bit(val, 1));
-        if (!(val & 1)) {
-            qemu_system_reset_request();
+        if (!(val & 1) && fMachine != nullptr) {
+            fMachine->RequestReset();
         }
         break;
     case KBD_CCMD_WRITE_MOUSE:
@@ -545,7 +541,8 @@ public:
 
         fController = std::make_unique<I8042Controller>(
             sys->PortMap(), sys->IrqSignalFor(fKbdIrqRes->base),
-            sys->IrqSignalFor(fAuxIrqRes->base), fDataRes->base);
+            sys->IrqSignalFor(fAuxIrqRes->base), fDataRes->base,
+            fCtx->machine);
         if (fVmmouse) {
             fCtx->vmport = &fInput;
             fCtx->vmport_base = fVmportRes->base;
