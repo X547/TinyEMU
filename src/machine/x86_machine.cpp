@@ -44,6 +44,7 @@
 #include "pci.h"
 #include "pci_host_i440fx.h"
 #include "pc_acpi.h"
+#include "ioapic.h"
 
 //#define DEBUG_BIOS
 //#define DUMP_IOPORT
@@ -1025,6 +1026,18 @@ public:
     void SetIRQ(int irq_num, int level) override;
 };
 
+/* With an IOAPIC, each line reaches both it and the 8259s, as on a PIIX,
+   and the PIT's IRQ 0 is IOAPIC input 2. */
+class PCIrqFanout final: public IRQTarget {
+private:
+    PCMachine &fMachine;
+
+public:
+    PCIrqFanout(PCMachine &machine): fMachine(machine) {}
+
+    void SetIRQ(int irq_num, int level) override;
+};
+
 class PCMachine final:
     public VirtMachine,
     public TlbFlushTarget,
@@ -1062,6 +1075,10 @@ public:
     /* the hypervisor has the 8259s and the 8254 rather than the machine */
     bool fHypervisorIrqchip = false;
     HypervisorIRQTarget fHypervisorIrqTarget {*this};
+    /* the machine's IOAPIC, when the local APICs are the hypervisor's and
+       the rest is the machine's */
+    std::unique_ptr<IOAPIC> fIoApic;
+    PCIrqFanout fIrqFanout {*this};
     /* Otherwise the machine's: INTR as the 8259s drive it, read without the
        lock, and how long the hypervisor may run before the PIT is due. */
     std::atomic<bool> fCpuIrq {false};
@@ -1084,6 +1101,7 @@ public:
     void MmioWrite(uint64_t addr, const uint8_t *data, int len) override;
     bool InterruptRequested() override;
     int AcknowledgeInterrupt() override;
+    void ApicEoi(int vector) override;
     /* PCIMsiTarget */
     void SendMsi(uint64_t addr, uint32_t data) override;
 
@@ -1432,6 +1450,19 @@ void HypervisorIRQTarget::SetIRQ(int irq_num, int level)
     fMachine.hypervisor->SetIRQ(irq_num, level);
 }
 
+void PCIrqFanout::SetIRQ(int irq_num, int level)
+{
+    fMachine.pic_state->SetIRQ(irq_num, level);
+    if (irq_num != 2)
+        fMachine.fIoApic->SetIRQ(irq_num == 0 ? 2 : irq_num, level);
+}
+
+void PCMachine::ApicEoi(int vector)
+{
+    if (fIoApic)
+        fIoApic->Eoi(vector);
+}
+
 void PCMachine::MmioWrite(uint64_t paddr, const uint8_t *data, int len)
 {
     PhysMemoryRange *pr;
@@ -1663,6 +1694,13 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     if (!s->fHypervisorIrqchip) {
         s->pic_state = pic2_init(s->port_map, 0x20, 0xa0,
                                  0x4d0, 0x4d1, s, s->pic_irq);
+        if (s->fLocalApic) {
+            s->fIoApic = std::make_unique<IOAPIC>(*s, 0);
+            s->mem_map->RegisterDevice(IOAPIC_ADDR, IOAPIC_SIZE,
+                                       s->fIoApic.get(), DEVIO_SIZE32);
+            for (int i = 0; i < PC_IRQ_COUNT; i++)
+                s->pic_irq[i].Init(&s->fIrqFanout, i);
+        }
         if (s->cpu_state) {
             x86_cpu_set_hard_intno_source(s->cpu_state, s);
         }
@@ -2079,6 +2117,7 @@ static void pc_acpi_setup(PCMachine *s)
     uint8_t *mem = get_ram_range_ptr(s, PC_ACPI_ADDR, PC_ACPI_SIZE);
 
     config.i8042 = s->port_map->FindRange(0x64) != nullptr;
+    config.apic = s->fLocalApic;
     config.pci_gsis = kKernelPciIrqs;
     /* the hole between RAM and the machine's own device window */
     config.pci_mmio_base = (s->ram_size + 0xfffff) & ~(uint64_t)0xfffff;

@@ -59,6 +59,7 @@ private:
     pthread_t fVcpuThread {};
 
     void SetCpuid();
+    void SetGsiRouting();
     void ExitIo();
     void ExitMmio();
 
@@ -146,6 +147,42 @@ void KvmX86Hypervisor::SetCpuid()
 }
 
 
+/* The IOAPIC wired as a PC has it, and as the machine's MADT describes it:
+   the 8254's GSI 0 arrives on input 2, and GSI 2 goes nowhere. */
+void KvmX86Hypervisor::SetGsiRouting()
+{
+    struct kvm_irq_routing *routing;
+    struct kvm_irq_routing_entry *e;
+    int n = 0;
+
+    routing = static_cast<struct kvm_irq_routing *>(
+        calloc(1, sizeof(*routing) + 40 * sizeof(routing->entries[0])));
+    for (int gsi = 0; gsi < 24; gsi++) {
+        if (gsi == 2)
+            continue;
+        if (gsi < 16) {
+            e = &routing->entries[n++];
+            e->gsi = gsi;
+            e->type = KVM_IRQ_ROUTING_IRQCHIP;
+            e->u.irqchip.irqchip = gsi < 8 ? KVM_IRQCHIP_PIC_MASTER :
+                KVM_IRQCHIP_PIC_SLAVE;
+            e->u.irqchip.pin = gsi & 7;
+        }
+        e = &routing->entries[n++];
+        e->gsi = gsi;
+        e->type = KVM_IRQ_ROUTING_IRQCHIP;
+        e->u.irqchip.irqchip = KVM_IRQCHIP_IOAPIC;
+        e->u.irqchip.pin = gsi == 0 ? 2 : gsi;
+    }
+    routing->nr = n;
+    if (ioctl(fVmFd, KVM_SET_GSI_ROUTING, routing) < 0) {
+        perror("KVM_SET_GSI_ROUTING");
+        exit(1);
+    }
+    free(routing);
+}
+
+
 void KvmX86Hypervisor::Init()
 {
     struct sigaction act;
@@ -174,6 +211,8 @@ void KvmX86Hypervisor::Init()
         perror("KVM_CREATE_IRQCHIP");
         exit(1);
     }
+    if (fLocalApic)
+        SetGsiRouting();
 
     memset(&pit_config, 0, sizeof(pit_config));
     pit_config.flags = KVM_PIT_SPEAKER_DUMMY;

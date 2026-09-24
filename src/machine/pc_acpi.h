@@ -59,6 +59,9 @@ public:
 
 
 struct PcAcpiConfig {
+    /* a MADT: the local APIC of each processor and the IOAPIC */
+    bool apic = false;
+    int cpu_count = 1;
     /* an i8042, which the FADT and the DSDT then report */
     bool i8042 = false;
     /* the GSI each of PIRQA-D is routed to */
@@ -74,6 +77,6 @@ struct PcAcpiConfig {
 #define PC_ACPI_ADDR 0xe0000
 #define PC_ACPI_SIZE 0x10000
 
-/* Writes the RSDP, RSDT, XSDT, FACS, FADT and DSDT to 'mem', which the
-   guest sees at PC_ACPI_ADDR. */
+/* Writes the RSDP, RSDT, XSDT, FACS, FADT, DSDT and, with APICs, the MADT
+   to 'mem', which the guest sees at PC_ACPI_ADDR. */
 void pc_acpi_build(uint8_t *mem, const PcAcpiConfig &config);

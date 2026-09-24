@@ -63,6 +63,10 @@ public:
     virtual bool InterruptRequested() = 0;
     /* Acknowledges the request and returns its vector. */
     virtual int AcknowledgeInterrupt() = 0;
+
+    /* A local APIC the hypervisor emulates ended a level triggered
+       interrupt with this vector, for the IOAPIC the machine may have. */
+    virtual void ApicEoi(int vector) = 0;
 };
 
 

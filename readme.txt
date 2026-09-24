@@ -154,9 +154,11 @@ Every machine keeps its CLINT for the timers. On the PC machine it chooses
 what the processor has besides the two 8259s:
 
   pic          nothing (the default)
-  apic         a local APIC, which also takes the MSI-X messages of the
-               devices behind the pci-host-i440fx; it needs a hypervisor with
-               one (WHP or KVM)
+  apic         a local APIC and an IOAPIC at 0xfec00000, which every line
+               of the 8259s also reaches; the local APIC takes the MSI-X
+               messages of the devices behind the pci-host-i440fx. It needs
+               a hypervisor with a local APIC (WHP or KVM), and a kernel
+               booted without firmware finds both in its ACPI tables
 
 The root bus of an FDT machine is declared as:
 

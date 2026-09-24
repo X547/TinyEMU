@@ -50,8 +50,10 @@ static const WHV_REGISTER_NAME kGprNames[8] = {
 };
 
 
-/* The partition has no interrupt controller: the machine's 8259s raise INTR,
-   and the vector goes in as a pending interruption before a run. */
+/* The partition has no interrupt controller but, when asked, the local APIC:
+   the machine's 8259s raise INTR, and the vector goes in as a pending
+   interruption before a run; the machine's IOAPIC and MSIs reach the local
+   APIC through WHvRequestInterrupt(). */
 class WhpX86Hypervisor final: public HostX86Hypervisor {
 private:
     X86HypervisorTarget &fTarget;
@@ -639,6 +641,11 @@ void WhpX86Hypervisor::Run(int64_t timeout_us)
     case WHvRunVpExitReasonX64Halt:
         fHalted = true;
         break;
+    case WHvRunVpExitReasonX64ApicEoi: {
+        DeviceLocker locker(fLock);
+        fTarget.ApicEoi(ctx.ApicEoi.InterruptVector);
+        break;
+    }
     case WHvRunVpExitReasonX64InterruptWindow:
         fWindowRequested = false;
         break;

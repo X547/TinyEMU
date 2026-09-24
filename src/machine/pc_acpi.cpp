@@ -29,6 +29,7 @@
 #include "bits.h"
 #include "cutils.h"
 #include "host_time.h"
+#include "ioapic.h"
 #include "machine.h"
 
 
@@ -406,6 +407,51 @@ static Bytes build_dsdt(const PcAcpiConfig &config)
     return t;
 }
 
+/* Where the 8259 inputs land on the IOAPIC differs from pin = IRQ for the
+   PIT only; the SCI is the level triggered, active high line ACPI says it
+   is. */
+static void madt_override(Bytes &t, int irq, int gsi, uint16_t flags)
+{
+    put8(t, 2); /* interrupt source override */
+    put8(t, 10);
+    put8(t, 0); /* ISA */
+    put8(t, irq);
+    put32(t, gsi);
+    put16(t, flags);
+}
+
+static Bytes build_madt(const PcAcpiConfig &config)
+{
+    Bytes t = table_header("APIC", 3);
+
+    put32(t, 0xfee00000); /* local APIC address */
+    put32(t, 1); /* PCAT_COMPAT: there are 8259s */
+    for (int i = 0; i < config.cpu_count; i++) {
+        put8(t, 0); /* processor local APIC */
+        put8(t, 8);
+        put8(t, i); /* processor UID */
+        put8(t, i); /* APIC ID */
+        put32(t, 1); /* enabled */
+    }
+    put8(t, 1); /* I/O APIC */
+    put8(t, 12);
+    put8(t, 0); /* ID */
+    put8(t, 0);
+    put32(t, IOAPIC_ADDR);
+    put32(t, 0); /* first GSI */
+    madt_override(t, 0, 2, 0);
+    madt_override(t, ACPI_SCI_IRQ, ACPI_SCI_IRQ,
+                  1 | (3 << 2)); /* active high, level */
+    /* NMI on LINT1 of every processor */
+    put8(t, 4);
+    put8(t, 6);
+    put8(t, 0xff);
+    put16(t, 0);
+    put8(t, 1);
+    table_finish(t);
+    return t;
+}
+
 static Bytes build_facs()
 {
     Bytes t;
@@ -535,6 +581,8 @@ void pc_acpi_build(uint8_t *mem, const PcAcpiConfig &config)
     uint32_t dsdt = place(build_dsdt(config), 16);
     std::vector<uint32_t> tables;
     tables.push_back(place(build_fadt(config, facs, dsdt), 16));
+    if (config.apic)
+        tables.push_back(place(build_madt(config), 16));
     uint32_t rsdt = place(build_rsdt(tables), 16);
     uint32_t xsdt = place(build_xsdt(tables), 16);
 
