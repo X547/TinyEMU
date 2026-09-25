@@ -160,20 +160,6 @@ static bool format_supported(uint32_t format)
 }
 
 
-static bool format_has_alpha(uint32_t format)
-{
-    switch (format) {
-    case VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM:
-    case VIRTIO_GPU_FORMAT_A8R8G8B8_UNORM:
-    case VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM:
-    case VIRTIO_GPU_FORMAT_A8B8G8R8_UNORM:
-        return true;
-    default:
-        return false;
-    }
-}
-
-
 /* Reorders 'count' pixels in place into B, G, R, A bytes. */
 static void convert_pixels(uint8_t *p, uint32_t count, uint32_t format)
 {
@@ -579,10 +565,11 @@ uint32_t VIRTIOGPUDevice::UpdateCursor(const uint8_t *cmd, bool move_only)
                 return VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
             if (res->width > MAX_CURSOR_SIZE || res->height > MAX_CURSOR_SIZE)
                 return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+            /* the alpha is taken whatever the format says: Linux makes its
+               cursor a dumb buffer, which is always created as xRGB */
             std::vector<uint32_t> pixels(res->width * res->height);
-            uint32_t opaque = format_has_alpha(res->format) ? 0 : 0xff000000;
             for (size_t i = 0; i < pixels.size(); i++)
-                pixels[i] = get_le32(res->data.get() + i * 4) | opaque;
+                pixels[i] = get_le32(res->data.get() + i * 4);
             int32_t hot_x = get_le32(cmd + 44);
             int32_t hot_y = get_le32(cmd + 48);
             screen->SetCursor(pixels.data(), res->width, res->height,
