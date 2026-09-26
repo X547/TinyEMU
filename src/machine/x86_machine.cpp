@@ -230,6 +230,10 @@ void CMOSState::Write(uint32_t offset, uint32_t data, int size_log2)
             s->cmos_data[s->cmos_index] = data;
             cmos_update_timer(s);
             break;
+        case RTC_REG_C:
+        case RTC_REG_D:
+            /* read only */
+            break;
         default:
             s->cmos_data[s->cmos_index] = data;
             break;
