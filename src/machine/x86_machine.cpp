@@ -2328,7 +2328,9 @@ static bool pvh_load(PCMachine *s, const uint8_t *buf, int buf_len,
     }
     elf64 = buf[4] == ELF_CLASS64;
     machine = get_le16(buf + 18);
-    if (machine != (elf64 ? ELF_EM_X86_64 : ELF_EM_386)) {
+    /* The PVH entry is 32 bit whatever the class, and a 64 bit image may
+       say i386 for it. */
+    if (machine != ELF_EM_386 && machine != ELF_EM_X86_64) {
         vm_error("pc: the kernel is not an x86 ELF file\n");
         return false;
     }
