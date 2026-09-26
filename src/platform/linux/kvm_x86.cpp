@@ -34,6 +34,7 @@
 #include <sys/mman.h>
 #include <linux/kvm.h>
 
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include <vector>
@@ -94,6 +95,8 @@ private:
     /* the in-kernel local APIC is shown to the guest */
     bool fLocalApic;
     int fCpuCount;
+    int fMaxPhysAddressBits;
+    int fPhysAddressBits = 36;
     int fKvmFd;
     int fVmFd = -1;
     std::vector<std::unique_ptr<KvmX86Vcpu>> fVcpus;
@@ -104,12 +107,14 @@ public:
     KvmX86Hypervisor(X86HypervisorTarget &target, DeviceLock &lock,
                      const HostX86Options &options, int kvm_fd):
         fTarget(target), fLock(lock), fLocalApic(options.local_apic),
-        fCpuCount(options.cpu_count), fKvmFd(kvm_fd) {}
+        fCpuCount(options.cpu_count),
+        fMaxPhysAddressBits(options.max_phys_address_bits), fKvmFd(kvm_fd) {}
     ~KvmX86Hypervisor() override;
 
     void Init();
 
     bool HasInterruptControllers() override {return true;}
+    int PhysAddressBits() override {return fPhysAddressBits;}
     uint8_t *AllocRam(size_t size) override {return host_ram_alloc(size);}
     void FreeRam(uint8_t *ptr, size_t size) override
     {
@@ -126,6 +131,25 @@ public:
 
 static void sigalrm_handler(int sig)
 {
+}
+
+
+/* The host's CPUID table as KVM would show it, for free(). */
+static struct kvm_cpuid2 *kvm_supported_cpuid(int kvm_fd)
+{
+    struct kvm_cpuid2 *kvm_cpuid;
+    int n_ent_max = 128;
+
+    kvm_cpuid = static_cast<struct kvm_cpuid2 *>(
+        calloc(1, sizeof(struct kvm_cpuid2) +
+               n_ent_max * sizeof(kvm_cpuid->entries[0])));
+
+    kvm_cpuid->nent = n_ent_max;
+    if (ioctl(kvm_fd, KVM_GET_SUPPORTED_CPUID, kvm_cpuid) < 0) {
+        perror("KVM_GET_SUPPORTED_CPUID");
+        exit(1);
+    }
+    return kvm_cpuid;
 }
 
 
@@ -204,6 +228,15 @@ void KvmX86Hypervisor::Init()
     }
     if (fLocalApic)
         SetGsiRouting();
+
+    /* before the vcpus, whose CPUID reports it */
+    struct kvm_cpuid2 *kvm_cpuid = kvm_supported_cpuid(fKvmFd);
+    for (uint32_t i = 0; i < kvm_cpuid->nent; i++) {
+        if (kvm_cpuid->entries[i].function == 0x80000008)
+            fPhysAddressBits = kvm_cpuid->entries[i].eax & 0xff;
+    }
+    free(kvm_cpuid);
+    fPhysAddressBits = std::min(fPhysAddressBits, fMaxPhysAddressBits);
 
     memset(&pit_config, 0, sizeof(pit_config));
     pit_config.flags = KVM_PIT_SPEAKER_DUMMY;
@@ -332,20 +365,10 @@ KvmX86Vcpu::~KvmX86Vcpu()
 void KvmX86Vcpu::SetCpuid(int index)
 {
     struct kvm_cpuid2 *kvm_cpuid;
-    int n_ent_max, i;
+    int i;
     struct kvm_cpuid_entry2 *ent;
 
-    n_ent_max = 128;
-    kvm_cpuid = static_cast<struct kvm_cpuid2 *>(
-        calloc(1, sizeof(struct kvm_cpuid2) +
-               n_ent_max * sizeof(kvm_cpuid->entries[0])));
-
-    kvm_cpuid->nent = n_ent_max;
-    if (ioctl(fOwner.fKvmFd, KVM_GET_SUPPORTED_CPUID, kvm_cpuid) < 0) {
-        perror("KVM_GET_SUPPORTED_CPUID");
-        exit(1);
-    }
-
+    kvm_cpuid = kvm_supported_cpuid(fOwner.fKvmFd);
     for(i = 0; i < kvm_cpuid->nent; i++) {
         ent = &kvm_cpuid->entries[i];
         /* remove the APIC (unless the machine has one) & ACPI to be in
@@ -367,6 +390,10 @@ void KvmX86Vcpu::SetCpuid(int index)
             break;
         case 0x8000001e:
             ent->eax = index;
+            break;
+        case 0x80000008:
+            /* the physical address width, with no separate guest width */
+            ent->eax = (ent->eax & ~0x00ff00ffu) | fOwner.fPhysAddressBits;
             break;
         }
     }

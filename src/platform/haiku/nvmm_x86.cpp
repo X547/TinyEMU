@@ -25,8 +25,11 @@
 #include <errno.h>
 #include <inttypes.h>
 
+#include <algorithm>
 #include <memory>
 #include <vector>
+
+#include <cpuid.h>
 
 extern "C" {
 #include <nvmm.h>
@@ -47,6 +50,17 @@ static void nvmm_fail(const char *what)
 {
     fprintf(stderr, "NVMM: %s failed: %s\n", what, strerror(errno));
     exit(1);
+}
+
+/* The host processor's physical address width, which the machine's
+   processor reports unless told otherwise. */
+static int host_phys_address_bits()
+{
+    unsigned int eax, ebx, ecx, edx;
+
+    if (!__get_cpuid(0x80000008, &eax, &ebx, &ecx, &edx))
+        return 36;
+    return eax & 0xff;
 }
 
 
@@ -112,6 +126,7 @@ private:
 
     X86HypervisorTarget &fTarget;
     DeviceLock &fLock;
+    int fPhysAddressBits;
     struct nvmm_machine fMach {};
     bool fMachCreated = false;
     std::unique_ptr<NvmmX86Vcpu> fVcpu;
@@ -124,13 +139,17 @@ private:
     std::vector<Slot> fSlots;
 
 public:
-    NvmmX86Hypervisor(X86HypervisorTarget &target, DeviceLock &lock):
-        fTarget(target), fLock(lock) {}
+    NvmmX86Hypervisor(X86HypervisorTarget &target, DeviceLock &lock,
+                      const HostX86Options &options):
+        fTarget(target), fLock(lock),
+        fPhysAddressBits(std::min(host_phys_address_bits(),
+                                  options.max_phys_address_bits)) {}
     ~NvmmX86Hypervisor() override;
 
     bool Init();
 
     bool HasInterruptControllers() override {return false;}
+    int PhysAddressBits() override {return fPhysAddressBits;}
     uint8_t *AllocRam(size_t size) override;
     void FreeRam(uint8_t *ptr, size_t size) override;
     void MapRam(int slot, uint64_t addr, uint64_t size, uint8_t *host_mem,
@@ -203,6 +222,18 @@ NvmmX86Vcpu::NvmmX86Vcpu(NvmmX86Hypervisor &owner, struct nvmm_machine *mach):
                                 &cpuid) == -1) {
             nvmm_fail("masking CPUID");
         }
+    }
+
+    /* the physical address width, with no separate guest width */
+    struct nvmm_vcpu_conf_cpuid cpuid;
+    memset(&cpuid, 0, sizeof(cpuid));
+    cpuid.mask = 1;
+    cpuid.leaf = 0x80000008;
+    cpuid.u.mask.del.eax = 0x00ff00ff;
+    cpuid.u.mask.set.eax = owner.fPhysAddressBits;
+    if (nvmm_vcpu_configure(fMach, &fVcpu.vcpu, NVMM_VCPU_CONF_CPUID,
+                            &cpuid) == -1) {
+        nvmm_fail("setting the physical address width");
     }
 }
 
@@ -589,7 +620,7 @@ std::unique_ptr<HostX86Hypervisor> host_x86_hypervisor_open(
         return nullptr;
     }
 
-    auto nvmm = std::make_unique<NvmmX86Hypervisor>(target, lock);
+    auto nvmm = std::make_unique<NvmmX86Hypervisor>(target, lock, options);
     if (!nvmm->Init())
         return nullptr;
     return nvmm;

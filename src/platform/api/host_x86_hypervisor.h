@@ -44,6 +44,9 @@ struct HostX86Options {
     bool local_apic = false;
     /* processors, numbered from 0 */
     int cpu_count = 1;
+    /* the widest physical address the processors report in CPUID
+       0x80000008, in bits */
+    int max_phys_address_bits = 40;
 };
 
 
@@ -117,6 +120,9 @@ public:
     virtual ~HostX86Hypervisor() = default;
 
     virtual bool HasInterruptControllers() = 0;
+    /* The physical address width the processors report: the host's, cut to
+       HostX86Options::max_phys_address_bits. */
+    virtual int PhysAddressBits() = 0;
 
     /* Memory for guest RAM, zeroed, as host_ram_alloc() gives it. It comes
        from here because a hypervisor may have to set it up before anything

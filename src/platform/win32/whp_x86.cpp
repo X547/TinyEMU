@@ -24,9 +24,11 @@
 #include <string.h>
 #include <inttypes.h>
 
+#include <algorithm>
 #include <memory>
 #include <vector>
 
+#include <cpuid.h>
 #include <windows.h>
 #include <winhvplatform.h>
 #include <winhvemulation.h>
@@ -57,6 +59,17 @@ static void whp_fail(const char *what, HRESULT hr)
 {
     fprintf(stderr, "WHP: %s failed: 0x%08lx\n", what, (unsigned long)hr);
     exit(1);
+}
+
+/* The host processor's physical address width, which the partition's
+   processors report unless told otherwise. */
+static int host_phys_address_bits()
+{
+    unsigned int eax, ebx, ecx, edx;
+
+    if (!__get_cpuid(0x80000008, &eax, &ebx, &ecx, &edx))
+        return 36;
+    return eax & 0xff;
 }
 
 
@@ -136,6 +149,7 @@ private:
     /* the hypervisor emulates the local APICs */
     bool fLocalApic;
     int fCpuCount;
+    int fPhysAddressBits;
     WHV_PARTITION_HANDLE fPartition = nullptr;
     std::vector<std::unique_ptr<WhpX86Vcpu>> fVcpus;
     /* where each slot is mapped; the platform knows ranges, not slots */
@@ -149,12 +163,15 @@ public:
     WhpX86Hypervisor(X86HypervisorTarget &target, DeviceLock &lock,
                      const HostX86Options &options):
         fTarget(target), fLock(lock), fLocalApic(options.local_apic),
-        fCpuCount(options.cpu_count) {}
+        fCpuCount(options.cpu_count),
+        fPhysAddressBits(std::min(host_phys_address_bits(),
+                                  options.max_phys_address_bits)) {}
     ~WhpX86Hypervisor() override;
 
     bool Init();
 
     bool HasInterruptControllers() override {return false;}
+    int PhysAddressBits() override {return fPhysAddressBits;}
     uint8_t *AllocRam(size_t size) override {return host_ram_alloc(size);}
     void FreeRam(uint8_t *ptr, size_t size) override
     {
@@ -206,7 +223,7 @@ bool WhpX86Hypervisor::Init()
     }
 
     /* CPUID comes to us for the leaves that report the APIC and ACPI, which
-       the machine may not have. */
+       the machine may not have, and for the physical address width. */
     WHV_EXTENDED_VM_EXITS exits {};
     exits.X64CpuidExit = 1;
     hr = WHvSetPartitionProperty(fPartition,
@@ -214,7 +231,7 @@ bool WhpX86Hypervisor::Init()
                                  &exits, sizeof(exits));
     if (FAILED(hr))
         whp_fail("enabling CPUID exits", hr);
-    static const UINT32 cpuid_leaves[] = {1, 0x80000001};
+    static const UINT32 cpuid_leaves[] = {1, 0x80000001, 0x80000008};
     hr = WHvSetPartitionProperty(fPartition,
                                  WHvPartitionPropertyCodeCpuidExitList,
                                  cpuid_leaves, sizeof(cpuid_leaves));
@@ -643,6 +660,11 @@ void WhpX86Vcpu::ExitCpuid(const WHV_RUN_VP_EXIT_CONTEXT &ctx)
         values[4].Reg64 &= ~(uint64_t)CPUID_ACPI;
         if (!fOwner.fLocalApic)
             values[4].Reg64 &= ~(uint64_t)CPUID_APIC;
+    }
+    /* the physical address width, with no separate guest width */
+    if (c.Rax == 0x80000008) {
+        values[1].Reg64 = (values[1].Reg64 & ~(uint64_t)0x00ff00ff) |
+            fOwner.fPhysAddressBits;
     }
     SetVpRegisters(names, 5, values);
 }
