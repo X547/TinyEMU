@@ -37,6 +37,12 @@
    the line; the low bits name the PIC input it lands on. */
 #define PIIX3_PIRQ_ROUTE 0x60
 
+#define CLOUDHV_DEVICE_ID 0x0d57
+/* Cloud Hypervisor's 32 bit aperture, which its EDK2 build does not look
+   up */
+#define CLOUDHV_MMIO_BASE 0xc0000000
+#define CLOUDHV_MMIO_END 0xf8000000
+
 static const uint32_t val_ones[3] = { 0xff, 0xffff, 0xffffffff };
 
 struct I440FXState: public IRQTarget {
@@ -144,14 +150,30 @@ private:
     std::unique_ptr<Bus> fChildBus;
     Resource *fAddrRes = nullptr;
     Resource *fDataRes = nullptr;
-    uint16_t fVendorId;
-    uint16_t fDeviceId;
+    Resource *fMmioRes = nullptr;
+    Resource *fMmio64Res = nullptr;
+    I440FXVariant fVariant;
+    PcPciApertures fSpace;
 
 public:
-    I440FXDevice(const char *name, uint16_t vendor_id, uint16_t device_id):
-        Device(name), fVendorId(vendor_id), fDeviceId(device_id) {}
+    I440FXDevice(const char *name, I440FXVariant variant,
+                 const PcPciApertures &space):
+        Device(name), fVariant(variant), fSpace(space) {}
 
     I440FXState *State() const {return fState.get();}
+
+    PcPciApertures Apertures() const
+    {
+        PcPciApertures a;
+
+        a.mmio_base = fMmioRes->base;
+        a.mmio_end = fMmioRes->End();
+        if (fMmio64Res != nullptr) {
+            a.mmio64_base = fMmio64Res->base;
+            a.mmio64_end = fMmio64Res->End();
+        }
+        return a;
+    }
 
     bool Prepare() override
     {
@@ -167,6 +189,28 @@ public:
         fDataRes = AddFixedResource(RES_IO, 0xcfc, 4);
         if (fAddrRes == nullptr || fDataRes == nullptr) {
             return false;
+        }
+
+        /* The apertures the BARs go in. The devices map their BARs
+           themselves, so these are only reserved. */
+        uint64_t mmio_base = fSpace.mmio_base;
+        uint64_t mmio_end = fSpace.mmio_end;
+        if (fVariant == I440FX_CLOUD_HYPERVISOR) {
+            mmio_base = CLOUDHV_MMIO_BASE;
+            mmio_end = CLOUDHV_MMIO_END;
+        }
+        fMmioRes = AddFixedResource(RES_MMIO, mmio_base,
+                                    mmio_end - mmio_base);
+        if (fMmioRes == nullptr) {
+            return false;
+        }
+        if (fSpace.mmio64_end > fSpace.mmio64_base) {
+            fMmio64Res = AddFixedResource(RES_MMIO, fSpace.mmio64_base,
+                                          fSpace.mmio64_end -
+                                          fSpace.mmio64_base);
+            if (fMmio64Res == nullptr) {
+                return false;
+            }
         }
 
         fState = std::make_unique<I440FXState>();
@@ -189,8 +233,10 @@ public:
             pci_bus_set_irq(fPciBus.get(), i, &sig);
         }
 
+        uint16_t device_id = fVariant == I440FX_CLOUD_HYPERVISOR ?
+            CLOUDHV_DEVICE_ID : 0x1237;
         fState->pci_dev = pci_register_device(fPciBus.get(), "i440FX", 0,
-                                              fVendorId, fDeviceId, 0x02,
+                                              0x8086, device_id, 0x02,
                                               0x0600);
         /* Red Hat, Inc. / QEMU virtual machine, which is the pair guests
            recognise. */
@@ -225,10 +271,10 @@ public:
 };
 
 
-Device *i440fx_node_create(const char *name, uint16_t vendor_id,
-                           uint16_t device_id)
+Device *i440fx_node_create(const char *name, I440FXVariant variant,
+                           const PcPciApertures &space)
 {
-    return new I440FXDevice(name, vendor_id, device_id);
+    return new I440FXDevice(name, variant, space);
 }
 
 
@@ -237,6 +283,14 @@ I440FXState *i440fx_node_state(Device *dev)
     I440FXDevice *node = dynamic_cast<I440FXDevice *>(dev);
 
     return node != nullptr ? node->State() : nullptr;
+}
+
+
+PcPciApertures i440fx_node_apertures(Device *dev)
+{
+    I440FXDevice *node = dynamic_cast<I440FXDevice *>(dev);
+
+    return node != nullptr ? node->Apertures() : PcPciApertures();
 }
 
 /* in case no BIOS is used, map the interrupts. */

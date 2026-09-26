@@ -1098,6 +1098,11 @@ public:
     PCIrqFanout fIrqFanout {*this};
     /* the configuration's HPET, if it has one */
     HPET *fHpet = nullptr;
+    /* what the host bridge decodes, if there is one */
+    PcPciApertures fPciApertures;
+    /* the physical address width the processors report; the interpreter's
+       is 32 bits */
+    int fPhysAddressBits = 32;
     /* Otherwise the machine's: INTR as the 8259s drive it, read without the
        lock. */
     std::atomic<bool> fCpuIrq {false};
@@ -1370,10 +1375,10 @@ int64_t PCMachine::Ticks()
 
 /* Where a device that wants host address space rather than ports is placed.
    A PC has almost nothing of the kind -- the framebuffer of a machine booting
-   a kernel without firmware is the one thing -- so the window is the hole
-   below the BIOS and nothing else is expected to compete for it. */
-#define FRAMEBUFFER_BASE_ADDR 0xf0400000
-#define PC_DEVICE_WINDOW_SIZE 0x08000000 /* 128 MB */
+   a kernel without firmware is the one thing -- so the window is what is
+   left between the PCI hole and the IOAPIC. */
+#define PC_DEVICE_WINDOW_BASE 0xf8000000
+#define PC_DEVICE_WINDOW_SIZE (IOAPIC_ADDR - PC_DEVICE_WINDOW_BASE)
 
 /* RAM beyond this goes above 4 GB, leaving the rest of the 32 bit space to
    PCI and the platform devices. */
@@ -1629,25 +1634,31 @@ void PCMachine::FlushTlbWriteRange(uint8_t *ram_addr, size_t ram_size)
     x86_cpu_flush_tlb_write_range_ram(cpu_state, ram_addr, ram_size);
 }
 
-/* The PCI hole starts where low RAM ends and runs up to the device window. */
-static uint64_t pc_pci_hole_base(PCMachine *s)
+/* What a host bridge may decode: from the end of low RAM up to the device
+   window, and above RAM as far as the processors address. */
+static PcPciApertures pc_pci_space(PCMachine *s)
 {
-    return (s->fLowRamSize + 0xfffff) & ~(uint64_t)0xfffff;
+    PcPciApertures space;
+
+    space.mmio_base = (s->fLowRamSize + 0xfffff) & ~(uint64_t)0xfffff;
+    space.mmio_end = PC_DEVICE_WINDOW_BASE;
+    space.mmio64_base = PC_HIGH_RAM_BASE + s->fHighRamSize;
+    space.mmio64_end = std::max(space.mmio64_base,
+                                (uint64_t)1 << s->fPhysAddressBits);
+    return space;
 }
 
 /* The addresses and lines the chipset above holds. They are reserved so that
    a device the configuration declares cannot be placed on top of one of
-   them. PCI BARs stay inside the hole and are not tracked. */
+   them. A host bridge reserves its apertures itself. */
 static bool pc_claim_fixed_ranges(PCMachine *s, bool acpi, uint32_t bios_size)
 {
     RangeAllocator &mmio = s->bus->MmioAlloc();
     RangeAllocator &io = s->bus->IoAlloc();
     RangeAllocator &irq = s->bus->IrqAlloc();
-    uint64_t hole = pc_pci_hole_base(s);
 
     return mmio.Claim(0, 0x100000, "low memory") &&
         mmio.Claim(0x100000, s->fLowRamSize - 0x100000, "ram") &&
-        mmio.Claim(hole, FRAMEBUFFER_BASE_ADDR - hole, "pci") &&
         mmio.Claim(IOAPIC_ADDR, IOAPIC_SIZE, "ioapic") &&
         mmio.Claim(PC_LOCAL_APIC_ADDR, PC_LOCAL_APIC_SIZE, "local apic") &&
         mmio.Claim(PC_HIGH_RAM_BASE - bios_size, bios_size, "bios") &&
@@ -1737,6 +1748,7 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     if (s->hypervisor) {
         s->fCpuCount = options.cpu_count;
         s->fVcpuWakeups = std::make_unique<HostWakeup[]>(s->fCpuCount);
+        s->fPhysAddressBits = s->hypervisor->PhysAddressBits();
     }
 
     if (s->hypervisor) {
@@ -1836,7 +1848,7 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     if (s->fLocalApic)
         s->bus->SetMsiTarget(s);
     s->bus->IoAlloc().SetWindow(0, PC_IO_SPACE_SIZE);
-    s->bus->MmioAlloc().SetWindow(FRAMEBUFFER_BASE_ADDR,
+    s->bus->MmioAlloc().SetWindow(PC_DEVICE_WINDOW_BASE,
                                   PC_DEVICE_WINDOW_SIZE);
     /* A kernel booted without firmware gets its ACPI tables from here. */
     bool acpi = p->files[VM_FILE_KERNEL].buf != nullptr;
@@ -1844,9 +1856,11 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
         return nullptr;
     }
 
+    PcPciApertures pci_space = pc_pci_space(s);
     ctx.params = p;
     ctx.platform = p->platform;
     ctx.machine = s;
+    ctx.pc_pci_space = &pci_space;
 
     if (!device_build_tree(s->bus, p->root_devices, &ctx) ||
         !s->bus->AllocateAll() || !s->bus->RealizeAll()) {
@@ -1866,11 +1880,13 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     }
 
     /* With no firmware to program the PIRQ registers, copy_kernel() routes
-       the INTx lines itself, which needs the bridge the tree built. */
+       the INTx lines itself, which needs the bridge the tree built. Its
+       apertures go in the ACPI tables. */
     for (int i = 0; i < s->bus->DeviceCount(); i++) {
         I440FXState *fx = i440fx_node_state(s->bus->DeviceAt(i));
         if (fx != NULL) {
             s->i440fx_state = fx;
+            s->fPciApertures = i440fx_node_apertures(s->bus->DeviceAt(i));
             break;
         }
     }
@@ -2258,9 +2274,7 @@ static void pc_acpi_setup(PCMachine *s)
     config.cpu_count = s->fCpuCount;
     config.hpet_block_id = s->fHpet ? s->fHpet->BlockId() : 0;
     config.pci_gsis = kKernelPciIrqs;
-    /* the hole between RAM and the machine's own device window */
-    config.pci_mmio_base = pc_pci_hole_base(s);
-    config.pci_mmio_end = FRAMEBUFFER_BASE_ADDR;
+    config.pci_apertures = s->fPciApertures;
     assert(mem != NULL);
     memset(mem, 0, PC_ACPI_SIZE);
     pc_acpi_build(mem, config);

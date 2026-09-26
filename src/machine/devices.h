@@ -31,6 +31,8 @@
 #include "uart.h"
 #include "virtio.h"
 
+struct PcPciApertures;
+
 
 /* The machine-level objects a device may attach to, and the back references
    the machine collects while the tree is realized. Passed to every factory so
@@ -41,6 +43,8 @@ struct DeviceContext {
     VirtMachine *machine = nullptr;
     /* the host objects devices connect to */
     Platform *platform = nullptr;
+    /* what a PC leaves free for its host bridge's apertures */
+    const PcPciApertures *pc_pci_space = nullptr;
 
     /* Filled in as devices are realized, then connected to the platform.
        Console input goes to a virtio console when there is one, and to the

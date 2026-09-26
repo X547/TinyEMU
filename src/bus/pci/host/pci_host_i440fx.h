@@ -28,18 +28,39 @@
 
 typedef struct I440FXState I440FXState;
 
-/* The "pci-host-i440fx" configuration node: the host bridge of a PC. It
-   decodes the CF8/CFC configuration ports, carries the i440FX function and
-   the PIIX3 ISA bridge whose PIRQ registers route the four INTx lines onto
-   the PIC, and provides the PCI bus the machine's devices hang from. The
-   i440FX function answers with 'vendor_id' and 'device_id'. */
-Device *i440fx_node_create(const char *name, uint16_t vendor_id,
-                           uint16_t device_id);
+/* Memory ranges a host bridge forwards to its PCI devices, [base, end) below
+   4 GB and above RAM. */
+struct PcPciApertures {
+    uint64_t mmio_base = 0;
+    uint64_t mmio_end = 0;
+    uint64_t mmio64_base = 0;
+    uint64_t mmio64_end = 0;
+};
+
+enum I440FXVariant {
+    I440FX_PC,
+    /* the host bridge of Cloud Hypervisor, whose EDK2 build fixes the 32
+       bit aperture and takes the 64 bit one above RAM */
+    I440FX_CLOUD_HYPERVISOR,
+};
+
+/* The "pci-host-i440fx" and "pci-host-cloudhv" configuration nodes: the host
+   bridge of a PC. It decodes the CF8/CFC configuration ports and the
+   apertures, carries the host bridge function and the PIIX3 ISA bridge whose
+   PIRQ registers route the four INTx lines onto the PIC, and provides the PCI
+   bus the machine's devices hang from. 'space' is what the machine leaves
+   free: below 4 GB from the end of RAM to its device window, and above RAM
+   up to what the processors can address. */
+Device *i440fx_node_create(const char *name, I440FXVariant variant,
+                           const PcPciApertures &space);
 
 /* The bridge a realized node built, or null for any other device. The
    machine's no-BIOS path needs it: with no firmware to program the PIRQ
    registers it has to route the INTx lines itself. */
 I440FXState *i440fx_node_state(Device *dev);
+
+/* What a realized node decodes, for the machine to describe. */
+PcPciApertures i440fx_node_apertures(Device *dev);
 
 /* In case no BIOS is used, map the interrupts. */
 void i440fx_map_interrupts(I440FXState *s, uint8_t *elcr,

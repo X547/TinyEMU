@@ -356,8 +356,22 @@ static void dword_memory(Bytes &r, uint32_t min, uint32_t max)
     put32(r, max - min + 1);
 }
 
+static void qword_memory(Bytes &r, uint64_t min, uint64_t max)
+{
+    put8(r, 0x8a); /* qword address space descriptor */
+    put16(r, 43);
+    put8(r, 0); /* memory */
+    put8(r, 0x0c);
+    put8(r, 1); /* read/write, not cacheable */
+    put64(r, 0); /* granularity */
+    put64(r, min);
+    put64(r, max);
+    put64(r, 0); /* translation */
+    put64(r, max - min + 1);
+}
+
 /* What the host bridge decodes: every bus, the port space but for the
-   configuration ports, the VGA hole and the window above RAM. */
+   configuration ports, the VGA hole and its apertures. */
 static Bytes pci0_resources(const PcAcpiConfig &config)
 {
     Bytes r;
@@ -371,9 +385,12 @@ static Bytes pci0_resources(const PcAcpiConfig &config)
     put8(r, 8);
     word_space(r, 1, 3, 0x0000, 0x0cf7);
     word_space(r, 1, 3, 0x0d00, 0xffff);
+    const PcPciApertures &a = config.pci_apertures;
     dword_memory(r, 0xa0000, 0xbffff);
-    if (config.pci_mmio_end > config.pci_mmio_base)
-        dword_memory(r, config.pci_mmio_base, config.pci_mmio_end - 1);
+    if (a.mmio_end > a.mmio_base)
+        dword_memory(r, a.mmio_base, a.mmio_end - 1);
+    if (a.mmio64_end > a.mmio64_base)
+        qword_memory(r, a.mmio64_base, a.mmio64_end - 1);
     put8(r, 0x79); /* end tag */
     put8(r, 0);
     return aml_buffer(r);

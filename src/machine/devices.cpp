@@ -414,20 +414,16 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
         return i8042_node_create(ctx, vmmouse != 0);
     }
 
-    if (strcmp(type, "pci-host-i440fx") == 0) {
-        int vendor_id, device_id;
-        if (!node_int_opt(node, "vendor_id", &vendor_id, 0x8086) ||
-            !node_int_opt(node, "device_id", &device_id, 0x1237)) {
+    if (strcmp(type, "pci-host-i440fx") == 0 ||
+        strcmp(type, "pci-host-cloudhv") == 0) {
+        if (ctx->pc_pci_space == nullptr) {
+            vm_error("%s: only the pc machine has one\n", type);
             return nullptr;
         }
-        if (vendor_id < 0 || vendor_id > 0xffff ||
-            device_id < 0 || device_id > 0xffff) {
-            vm_error("%s: 'vendor_id' and 'device_id' must be between 0 "
-                     "and 0xffff\n", type);
-            return nullptr;
-        }
-        return i440fx_node_create(node->IdOr("i440fx"), vendor_id,
-                                  device_id);
+        I440FXVariant variant = strcmp(type, "pci-host-cloudhv") == 0 ?
+            I440FX_CLOUD_HYPERVISOR : I440FX_PC;
+        return i440fx_node_create(node->IdOr("i440fx"), variant,
+                                  *ctx->pc_pci_space);
     }
 
     if (strcmp(type, "hpet") == 0) {

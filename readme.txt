@@ -221,11 +221,15 @@ Device types:
   pci-host-i440fx        the host bridge of the PC machine: the CF8/CFC
                          configuration ports, the i440FX function and the
                          PIIX3 ISA bridge that routes the four INTx lines
-                         onto the PIC, and a nested PCI bus. "vendor_id"
-                         and "device_id" (default 0x8086 and 0x1237) are
-                         what the i440FX function answers with: EDK2's
-                         Cloud Hypervisor build, booted as a PVH kernel,
-                         wants device_id 0x0d57
+                         onto the PIC, and a nested PCI bus. Its apertures
+                         are the space from the end of the RAM below 4 GB
+                         to 0xf8000000, and above the RAM up to the
+                         physical address width
+  pci-host-cloudhv       the same bridge as Cloud Hypervisor presents it,
+                         which EDK2's Cloud Hypervisor build, booted as a
+                         PVH kernel, needs: the host bridge function is
+                         8086:0d57 and the aperture below 4 GB is fixed at
+                         0xc0000000-0xf7ffffff
   vga                    the standard VGA on a PCI bus, which is also what
                          decodes the legacy VGA and VBE ports; "width" and
                          "height" are the largest mode it offers and the
@@ -836,13 +840,20 @@ kernel needs a hypervisor. Either kind of kernel finds ACPI tables at
 0xe0000 describing the PCI host bridge and its interrupt routing, the i8042,
 the HPET and a PM timer, and can power the machine off through ACPI.
 
+RAM up to 3 GB starts at address 0; the rest is placed from 4 GB, which
+needs a hypervisor, since the interpreter has no PAE. Between the two are the
+host bridge's aperture, a window for devices that want host address space,
+the IOAPIC, the local APIC and the BIOS. With a hypervisor the processors
+report a physical address width of at most 40 bits, and the host bridge's
+second aperture runs from the end of RAM up to that width.
+
 The PC is built from the configuration's device tree, as every machine is.
 What it has before any device is declared is the part a PC cannot be without:
 RAM, the two interrupt controllers, the timer and the clock. Everything else
 -- the host bridge, the display, the keyboard controller, the disks -- is
 declared, and where a device may sit is decided by the hierarchy: a PCI device
-only works inside a "pci-host-i440fx", and only "i8042", "ns16550a" and
-"hpet" go straight on the pc bus.
+only works inside a "pci-host-i440fx" or "pci-host-cloudhv", and only
+"i8042", "ns16550a" and "hpet" go straight on the pc bus.
 
 The x86 emulator comes from my JS/Linux project (2011) which was one
 of the first emulator running Linux fully implemented in

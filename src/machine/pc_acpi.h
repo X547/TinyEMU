@@ -25,6 +25,7 @@
 #include <stdint.h>
 
 #include "iomem.h"
+#include "pci_host_i440fx.h"
 
 class VirtMachine;
 
@@ -69,9 +70,8 @@ struct PcAcpiConfig {
     uint32_t hpet_block_id = 0;
     /* the GSI each of PIRQA-D is routed to */
     const uint8_t *pci_gsis = nullptr;
-    /* where the OS may place memory BARs: [base, end) */
-    uint32_t pci_mmio_base = 0;
-    uint32_t pci_mmio_end = 0;
+    /* where the OS may place memory BARs */
+    PcPciApertures pci_apertures;
 };
 
 
