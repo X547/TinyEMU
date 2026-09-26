@@ -249,6 +249,18 @@ PhysMemoryRange *PhysMemoryMap::RegisterDevice(uint64_t addr, uint64_t size,
 }
 
 
+PhysMemoryRange *PhysMemoryMap::RegisterRomDevice(uint64_t addr, uint64_t size,
+                                                  DeviceIO *io, int devio_flags,
+                                                  int devram_flags)
+{
+    PhysMemoryRange *pr = RegisterRam(addr, size,
+                                      devram_flags | DEVRAM_FLAG_ROM);
+    pr->io = io;
+    pr->devio_flags = devio_flags;
+    return pr;
+}
+
+
 uint32_t PhysMemoryMap::IoRead(uint64_t addr, int size_log2)
 {
     assert(DeviceLock::IsHeld());

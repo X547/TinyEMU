@@ -113,7 +113,8 @@ struct PhysMemoryRange {
     uint32_t *dirty_bits; /* nullptr if not used */
     std::unique_ptr<uint32_t[]> dirty_bits_tab[2];
     int dirty_bits_index; /* 0-1 */
-    /* the following is used for I/O access */
+    /* the following is used for I/O access, and on a ROM range, if set, for
+       the writes to it */
     DeviceIO *io;
     int devio_flags;
 
@@ -180,6 +181,11 @@ public:
 
     PhysMemoryRange *RegisterDevice(uint64_t addr, uint64_t size, DeviceIO *io,
                                     int devio_flags);
+    /* ROM read directly, whose writes go to 'io': a flash array taking its
+       commands. Only the RISC-V processor delivers the writes. */
+    PhysMemoryRange *RegisterRomDevice(uint64_t addr, uint64_t size,
+                                       DeviceIO *io, int devio_flags,
+                                       int devram_flags);
 
     /* Perform one access against whichever device range covers 'addr'. A
        range that does not take the width is served as two byte accesses when

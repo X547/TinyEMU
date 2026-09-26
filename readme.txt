@@ -195,6 +195,17 @@ Device types:
                          "syscon" block and a "syscon-poweroff" node, which
                          OpenSBI and Linux use to power off; see 4.3 for the
                          exit status
+  cfi-flash              parallel NOR flash on the FDT bus, read in place and
+                         programmed with the Intel command set through a 32
+                         bit bank of two 16 bit chips, as on QEMU's virt
+                         machines; "file" (its contents, rounded up to a
+                         power of two with erased blocks; what the guest
+                         programs is written back as to a disk), "base" (its
+                         address; placed by the bus if absent), "block_size"
+                         (erase block in KB, default 256) and "read_only".
+                         EDK2's RISC-V virt build runs from one at
+                         0x20000000 and keeps its variables in one at
+                         0x22000000
   pci-host-ecam-generic  ECAM PCIe host bridge; "bus_count" (ECAM window
                          size in MB, default 16), "mmio_size" (aperture size
                          in MB, default 256), "mmio64_size" (size in MB of a

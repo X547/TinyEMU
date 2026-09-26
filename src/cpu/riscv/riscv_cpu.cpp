@@ -489,12 +489,37 @@ int target_read_slow(RISCVCPUState *s, mem_uint_t *pval,
     return 0;
 }
 
+static void device_write(RISCVCPUState *s, PhysMemoryRange *pr,
+                         target_ulong offset, mem_uint_t val, int size_log2)
+{
+    DeviceLocker locker(*s->device_lock);
+    if (get_bit(pr->devio_flags, size_log2)) {
+        pr->io->DeviceWrite(offset, val, size_log2);
+    }
+#if MLEN >= 64
+    else if ((pr->devio_flags & DEVIO_SIZE32) && size_log2 == 3) {
+        /* emulate 64 bit access */
+        pr->io->DeviceWrite(offset,
+                       get_bits(val, 0, 32), 2);
+        pr->io->DeviceWrite(offset + 4,
+                       get_bits(val, 32, 32), 2);
+    }
+#endif
+    else {
+#ifdef DUMP_INVALID_MEM_ACCESS
+        printf("unsupported device write access: addr=0x");
+        print_target_ulong(pr->addr + offset);
+        printf(" width=%d bits\n", 1 << (3 + size_log2));
+#endif
+    }
+}
+
 /* return 0 if OK, != 0 if exception */
 int target_write_slow(RISCVCPUState *s, target_ulong addr,
                       mem_uint_t val, int size_log2)
 {
     int size, i, tlb_idx, err;
-    target_ulong paddr, offset;
+    target_ulong paddr;
     uint8_t *ptr;
     PhysMemoryRange *pr;
     
@@ -525,6 +550,10 @@ int target_write_slow(RISCVCPUState *s, target_ulong addr,
             s->pending_tval = addr;
             s->pending_exception = CAUSE_FAULT_STORE;
             return -1;
+        } else if (pr->is_ram && (pr->devram_flags & DEVRAM_FLAG_ROM)) {
+            if (pr->io != nullptr) {
+                device_write(s, pr, paddr - pr->addr, val, size_log2);
+            }
         } else if (pr->is_ram) {
             pr->SetDirtyBit(paddr - pr->addr);
             tlb_idx = get_bits(addr, PG_SHIFT, TLB_BITS);
@@ -555,27 +584,7 @@ int target_write_slow(RISCVCPUState *s, target_ulong addr,
                 abort();
             }
         } else {
-            DeviceLocker locker(*s->device_lock);
-            offset = paddr - pr->addr;
-            if (get_bit(pr->devio_flags, size_log2)) {
-                pr->io->DeviceWrite(offset, val, size_log2);
-            }
-#if MLEN >= 64
-            else if ((pr->devio_flags & DEVIO_SIZE32) && size_log2 == 3) {
-                /* emulate 64 bit access */
-                pr->io->DeviceWrite(offset,
-                               get_bits(val, 0, 32), 2);
-                pr->io->DeviceWrite(offset + 4,
-                               get_bits(val, 32, 32), 2);
-            }
-#endif
-            else {
-#ifdef DUMP_INVALID_MEM_ACCESS
-                printf("unsupported device write access: addr=0x");
-                print_target_ulong(paddr);
-                printf(" width=%d bits\n", 1 << (3 + size_log2));
-#endif
-            }
+            device_write(s, pr, paddr - pr->addr, val, size_log2);
         }
     }
     return 0;
@@ -664,24 +673,32 @@ static void tlb_flush_vaddr(RISCVCPUState *s, target_ulong vaddr)
     tlb_flush_all(s);
 }
 
-/* XXX: inefficient but not critical as long as it is seldom used */
+static void tlb_flush_ram_range(TLBEntry *tlb, uint8_t *ram_ptr,
+                                uint8_t *ram_end)
+{
+    for (int i = 0; i < TLB_SIZE; i++) {
+        if (tlb[i].vaddr != -1) {
+            uint8_t *ptr = (uint8_t *)(tlb[i].mem_addend +
+                                       (uintptr_t)tlb[i].vaddr);
+            if (ptr >= ram_ptr && ptr < ram_end) {
+                tlb[i].vaddr = -1;
+            }
+        }
+    }
+}
+
+/* Reads and fetches go too, since a range that moves or is unmapped must no
+   longer be read through them. XXX: inefficient but not critical as long as
+   it is seldom used */
 static void glue(riscv_cpu_flush_tlb_write_range_ram,
                  MAX_XLEN)(RISCVCPUState *s,
                            uint8_t *ram_ptr, size_t ram_size)
 {
-    uint8_t *ptr, *ram_end;
-    int i;
-    
-    ram_end = ram_ptr + ram_size;
-    for(i = 0; i < TLB_SIZE; i++) {
-        if (s->tlb_write[i].vaddr != -1) {
-            ptr = (uint8_t *)(s->tlb_write[i].mem_addend +
-                              (uintptr_t)s->tlb_write[i].vaddr);
-            if (ptr >= ram_ptr && ptr < ram_end) {
-                s->tlb_write[i].vaddr = -1;
-            }
-        }
-    }
+    uint8_t *ram_end = ram_ptr + ram_size;
+
+    tlb_flush_ram_range(s->tlb_write, ram_ptr, ram_end);
+    tlb_flush_ram_range(s->tlb_read, ram_ptr, ram_end);
+    tlb_flush_ram_range(s->tlb_code, ram_ptr, ram_end);
 }
 
 

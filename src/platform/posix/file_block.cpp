@@ -60,7 +60,6 @@ private:
     /* deferred requests, oldest first */
     std::deque<Request> fQueue;
 
-    int Read(uint64_t sector_num, uint8_t *buf, int n);
     int Write(uint64_t sector_num, const uint8_t *buf, int n);
     int Defer(bool is_write, uint64_t sector_num, uint8_t *buf, int n,
               BlockCompletion *completion);
@@ -82,6 +81,7 @@ public:
     int WriteAsync(uint64_t sector_num, const uint8_t *buf, int n,
                    BlockCompletion *completion) override;
     void Cancel(BlockCompletion *completion) override;
+    int Read(uint64_t sector_num, uint8_t *buf, int n) override;
 
     /* PollSource */
     void Prepare(WaitSet &ws) override;

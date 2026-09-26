@@ -29,6 +29,7 @@
 #include "ata.h"
 #include "ata_pci.h"
 #include "banshee.h"
+#include "cfi_flash.h"
 #include "cutils.h"
 #include "dw_i2c.h"
 #include "dw_mmc.h"
@@ -403,6 +404,31 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
 
     if (strcmp(type, "syscon-poweroff") == 0) {
         return syscon_poweroff_node_create(ctx);
+    }
+
+    if (strcmp(type, "cfi-flash") == 0) {
+        int base, block_kb, read_only;
+        /* Without a base the bus places the flash; firmware run in place
+           from it needs the address it was built for. */
+        if (!node_int_opt(node, "base", &base, -1) ||
+            !node_int_opt(node, "block_size", &block_kb,
+                          CFI_FLASH_DEFAULT_BLOCK_SIZE >> 10) ||
+            !node_int_opt(node, "read_only", &read_only, 0)) {
+            return nullptr;
+        }
+        if (block_kb < 4 || block_kb > 32768 ||
+            (block_kb & (block_kb - 1)) != 0) {
+            vm_error("cfi-flash: 'block_size' must be a power of two between "
+                     "4 and 32768 KB\n");
+            return nullptr;
+        }
+        auto bs = node_open_block(node, ctx);
+        if (bs == nullptr) {
+            return nullptr;
+        }
+        return cfi_flash_node_create(node->IdOr("cfi-flash"), std::move(bs),
+                                     base, (uint32_t)block_kb << 10,
+                                     read_only != 0);
     }
 
 #ifdef CONFIG_X86EMU

@@ -54,4 +54,15 @@ public:
     /* Drop the request 'completion' waits for: it is not notified and its
        buffer is not touched again. Nothing happens if none is in flight. */
     virtual void Cancel(BlockCompletion *completion) {(void)completion;}
+
+    /* Read and wait for the data, for a device that needs its contents before
+       the machine runs. Returns 0, or -1 on error or if the back end cannot
+       wait. */
+    virtual int Read(uint64_t sector_num, uint8_t *buf, int n)
+    {
+        (void)sector_num;
+        (void)buf;
+        (void)n;
+        return -1;
+    }
 };

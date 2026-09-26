@@ -76,6 +76,7 @@ public:
     int WriteAsync(uint64_t sector_num, const uint8_t *buf, int n,
                    BlockCompletion *completion) override;
     void Cancel(BlockCompletion *completion) override;
+    int Read(uint64_t sector_num, uint8_t *buf, int n) override;
 
     /* PollSource */
     void Prepare(WaitSet &ws) override {(void)ws;}
@@ -207,6 +208,40 @@ int BlockDeviceFile::WriteAsync(uint64_t sector_num, const uint8_t *buf, int n,
     req->data.reset(new uint8_t[(size_t)n * SECTOR_SIZE]);
     memcpy(req->data.get(), buf, (size_t)n * SECTOR_SIZE);
     return Start(std::move(req));
+}
+
+
+int BlockDeviceFile::Read(uint64_t sector_num, uint8_t *buf, int n)
+{
+    if (n <= 0 || sector_num + n > (uint64_t)fSectorCount)
+        return -1;
+
+    HANDLE event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (event == nullptr)
+        return -1;
+
+    FileRequest req;
+    uint64_t offset = sector_num * SECTOR_SIZE;
+    DWORD len = n * SECTOR_SIZE;
+    req.sector_num = sector_num;
+    req.n = n;
+    req.buf = buf;
+    req.data.reset(new uint8_t[len]);
+    req.ov.Offset = (DWORD)offset;
+    req.ov.OffsetHigh = (DWORD)(offset >> 32);
+    /* the low bit keeps the completion off the event loop's port */
+    req.ov.hEvent = (HANDLE)((uintptr_t)event | 1);
+
+    DWORD bytes = 0;
+    BOOL ok = ReadFile(fFile, req.data.get(), len, nullptr, &req.ov);
+    if (!ok && GetLastError() == ERROR_IO_PENDING) {
+        WaitForSingleObject(event, INFINITE);
+        ok = TRUE;
+    }
+    if (ok)
+        ok = GetOverlappedResult(fFile, &req.ov, &bytes, FALSE);
+    CloseHandle(event);
+    return Finish(&req, ok, bytes);
 }
 
 
