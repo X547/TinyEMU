@@ -36,11 +36,14 @@
 
 //#pragma mark - operand sizes
 
-/* Encoded as log2 of the byte count, like DeviceIO sizes. */
+/* Encoded as log2 of the byte count, like DeviceIO sizes. The general
+   registers go up to SIZE32; the wider ones are vector operands. */
 enum {
     SIZE8,
     SIZE16,
     SIZE32,
+    SIZE64,
+    SIZE128,
 };
 
 static inline int size_bytes(int size)
@@ -149,6 +152,8 @@ enum {
     CR4_PAE = 5,
     CR4_PGE = 7,
     CR4_PCE = 8,
+    CR4_OSFXSR = 9,
+    CR4_OSXMMEXCPT = 10,
 };
 
 enum {
@@ -177,6 +182,7 @@ enum {
     EXCP_PF = 14,
     EXCP_MF = 16,
     EXCP_AC = 17,
+    EXCP_XM = 19,
 };
 
 /* Segment attribute word: byte 5 of a descriptor and the flag nibble of
@@ -294,8 +300,15 @@ enum {
     CC_OP_MUL,    /* src is nonzero on overflow */
 };
 
+/* An x87 register as the part holds it. An MMX register is the
+   significand. */
+struct Fx80 {
+    uint64_t mant;
+    uint16_t sexp;       /* sign and 15 bit exponent */
+};
+
 struct X87State {
-    long double st[8];   /* indexed by physical register */
+    Fx80 st[8];          /* indexed by physical register */
     uint16_t control;
     uint16_t status;     /* TOP is bits 11-13 */
     uint8_t empty;       /* one bit per physical register */
@@ -305,6 +318,38 @@ struct X87State {
     uint32_t fip;
     uint32_t fdp;
 };
+
+/* An MMX (8 bytes) or XMM (16 bytes) register. Lanes are host integers in
+   the guest's little endian order, lane 0 lowest; see lane(). */
+template <int N>
+struct VecReg {
+    alignas(N) uint8_t bytes[N];
+};
+
+typedef VecReg<8> MmxReg;
+typedef VecReg<16> XmmReg;
+
+/* 16 in 64 bit mode; the others see the first 8. */
+#define XMM_COUNT 16
+
+enum {
+    MXCSR_IE = 0,  /* exception flags, bits 0-5 */
+    MXCSR_DE = 1,
+    MXCSR_ZE = 2,
+    MXCSR_OE = 3,
+    MXCSR_UE = 4,
+    MXCSR_PE = 5,
+    MXCSR_DAZ = 6,
+    MXCSR_IM = 7,  /* exception masks, bits 7-12, in the order of the flags */
+    MXCSR_OM = 10,
+    MXCSR_UM = 11,
+    MXCSR_RC = 13, /* 2 bits */
+    MXCSR_FZ = 15,
+};
+
+static const uint32_t MXCSR_RESET = 0x1f80;
+/* The bits MXCSR implements, as FXSAVE reports them. */
+static const uint32_t MXCSR_MASK = 0xffff;
 
 struct X86CPUState {
     uint32_t regs[8];
@@ -336,6 +381,7 @@ struct X86CPUState {
     /* P6 performance counters; they hold what was written and never count */
     uint32_t pmc_evtsel[2];
     uint64_t pmc_ctr[2];
+    uint32_t misc_enable;
 
     /* derived state, see cpu_update_mode() */
     uint8_t cpl;
@@ -344,6 +390,8 @@ struct X86CPUState {
     bool ss32;
 
     X87State fpu;
+    XmmReg xmm[XMM_COUNT];
+    uint32_t mxcsr;
 
     std::atomic<bool> irq_level; /* set from any thread */
     bool irq_inhibit;    /* for one instruction after STI or a load of SS */
@@ -377,6 +425,37 @@ static inline void set_edx_eax(X86CPUState *s, uint64_t val)
     s->regs[REG_EAX] = get_bits(val, 0, 32);
     s->regs[REG_EDX] = get_bits(val, 32, 32);
 }
+
+
+//#pragma mark - decoded instructions
+
+/* The r/m operand of a ModRM byte. */
+struct Operand {
+    bool is_reg;
+    uint8_t reg;
+    uint8_t seg;
+    uint32_t ea;
+};
+
+/* The mandatory prefix of a vector instruction. */
+enum {
+    SIMD_NONE,
+    SIMD_66,
+    SIMD_F3,
+    SIMD_F2,
+};
+
+/* A 0F xx vector instruction, decoded up to its immediate byte. */
+struct SimdInsn {
+    uint8_t opcode;      /* the byte after 0F */
+    uint8_t prefix;
+    uint8_t reg;         /* ModRM.reg */
+    uint8_t imm;
+    Operand rm;
+    /* where MASKMOVQ and MASKMOVDQU store */
+    uint8_t data_seg;
+    uint32_t addr_mask;
+};
 
 
 //#pragma mark - cross-file functions
@@ -430,9 +509,16 @@ void fpu_reset(X86CPUState *s);
 void fpu_exec(X86CPUState *s, uint8_t opcode, uint8_t modrm, uint32_t lin,
               uint32_t ea, int ea_seg, int opsize);
 void fpu_check_pending(X86CPUState *s);
+void fpu_fxsave(X86CPUState *s, uint32_t lin);
+void fpu_fxrstor(X86CPUState *s, uint32_t lin);
 
 /* x86_interp.cpp */
 void x86_exec(X86CPUState *s);
+
+/* x86_simd.cpp */
+void simd_reset(X86CPUState *s);
+bool simd_has_imm8(uint8_t opcode);
+void simd_exec(X86CPUState *s, const SimdInsn &insn);
 
 
 //#pragma mark - memory access
@@ -526,6 +612,45 @@ static inline void sys_write(X86CPUState *s, uint32_t lin, uint32_t val,
                              int size)
 {
     mem_write_mmu(s, lin, val, size, MMU_SUPERVISOR);
+}
+
+/* Operands of any size, SIZE128 included, as byte images. Wider ones are
+   split into 32 bit accesses off the fast path. */
+static inline void mem_read_bytes(X86CPUState *s, uint32_t lin, void *buf,
+                                  int size)
+{
+    uint8_t *p = (uint8_t *)buf;
+    X86TLBEntry *e = tlb_entry(s, s->mmu_idx, lin);
+    if (likely(tlb_hit(e->read, lin, size))) {
+        memcpy(p, (uint8_t *)(e->addend + lin), size_bytes(size));
+        return;
+    }
+    int chunk = size < SIZE32 ? size : SIZE32;
+    for (int i = 0; i < size_bytes(size); i += size_bytes(chunk)) {
+        uint32_t val = mem_read(s, lin + i, chunk);
+        memcpy(p + i, &val, size_bytes(chunk));
+    }
+}
+
+/* Both pages are checked before either is written. */
+static inline void mem_write_bytes(X86CPUState *s, uint32_t lin,
+                                   const void *buf, int size)
+{
+    const uint8_t *p = (const uint8_t *)buf;
+    X86TLBEntry *e = tlb_entry(s, s->mmu_idx, lin);
+    if (likely(tlb_hit(e->write, lin, size))) {
+        memcpy((uint8_t *)(e->addend + lin), p, size_bytes(size));
+        return;
+    }
+    int chunk = size < SIZE32 ? size : SIZE32;
+    if (size > SIZE32) {
+        mem_probe_write(s, lin, size);
+    }
+    for (int i = 0; i < size_bytes(size); i += size_bytes(chunk)) {
+        uint32_t val = 0;
+        memcpy(&val, p + i, size_bytes(chunk));
+        mem_write(s, lin + i, val, chunk);
+    }
 }
 
 

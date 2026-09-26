@@ -66,14 +66,8 @@ struct Decoder {
     int seg_override;    /* -1 if none */
     int rep;
     bool lock;
+    bool prefix_66;      /* a mandatory prefix for vector instructions */
     uint32_t esp_addend; /* POP computes its operand with ESP popped */
-};
-
-struct Operand {
-    bool is_reg;
-    uint8_t reg;
-    uint8_t seg;
-    uint32_t ea;
 };
 
 }
@@ -141,6 +135,7 @@ static void decode_prefix(X86CPUState *s, Decoder &d, uint8_t b)
         break;
     case 0x66:
         d.opsize = s->code32 ? SIZE16 : SIZE32;
+        d.prefix_66 = true;
         break;
     case 0x67:
         d.addr32 = !s->code32;
@@ -1030,6 +1025,32 @@ static void exec_fpu(X86CPUState *s, Decoder &d, uint8_t b)
     fpu_exec(s, b, modrm, lin, ea, seg, d.opsize);
 }
 
+/* MMX, SSE and SSE2. With F2 or F3 the last of them selects the form, and
+   66 only without either. */
+static void exec_simd(X86CPUState *s, Decoder &d, uint8_t b)
+{
+    SimdInsn insn;
+    insn.opcode = b;
+    if (d.rep == REP_Z) {
+        insn.prefix = SIMD_F3;
+    } else if (d.rep == REP_NZ) {
+        insn.prefix = SIMD_F2;
+    } else {
+        insn.prefix = d.prefix_66 ? SIMD_66 : SIMD_NONE;
+    }
+    insn.reg = 0;
+    insn.rm = {};
+    if (b != 0x77) { /* EMMS */
+        uint8_t modrm;
+        insn.rm = fetch_modrm(s, d, &modrm);
+        insn.reg = modrm_reg(modrm);
+    }
+    insn.imm = simd_has_imm8(b) ? fetch8(s, d) : 0;
+    insn.data_seg = data_seg(d);
+    insn.addr_mask = addr_mask(d);
+    simd_exec(s, insn);
+}
+
 /* Two byte opcodes. Returns false if the instruction set EIP itself. */
 static bool exec_0f(X86CPUState *s, Decoder &d)
 {
@@ -1065,6 +1086,15 @@ static bool exec_0f(X86CPUState *s, Decoder &d)
     case 0x08: /* INVD */
     case 0x09: /* WBINVD */
         require_cpl0(s);
+        break;
+    case 0x10 ... 0x17:
+    case 0x28 ... 0x2f:
+    case 0x50 ... 0x7f:
+    case 0xae:
+    case 0xc2:
+    case 0xc4 ... 0xc6:
+    case 0xd0 ... 0xff:
+        exec_simd(s, d, b);
         break;
     case 0x18 ... 0x1f: /* hint NOPs */
         fetch_modrm(s, d, &modrm);
@@ -1288,6 +1318,13 @@ static bool exec_0f(X86CPUState *s, Decoder &d)
         }
         break;
     }
+    case 0xc3: /* MOVNTI */
+        op = fetch_modrm(s, d, &modrm);
+        if (op.is_reg || d.prefix_66 || d.rep != REP_NONE) {
+            raise_exception(s, EXCP_UD);
+        }
+        rm_write(s, op, s->regs[modrm_reg(modrm)], SIZE32);
+        break;
     case 0xc7: { /* CMPXCHG8B */
         op = fetch_modrm(s, d, &modrm);
         if (modrm_reg(modrm) != 1 || op.is_reg) {
@@ -1339,6 +1376,7 @@ static force_inline void exec_insn(X86CPUState *s)
     d.seg_override = -1;
     d.rep = REP_NONE;
     d.lock = false;
+    d.prefix_66 = false;
     d.esp_addend = 0;
 
     if (unlikely(!s->seg_fast[SEG_CS]) && s->eip > s->segs[SEG_CS].limit) {

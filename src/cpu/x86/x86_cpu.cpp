@@ -30,8 +30,8 @@
 
 //#define DUMP_EXCEPTIONS
 
-/* A Pentium II: family 6, model 5, stepping 2. */
-#define CPUID_SIGNATURE 0x652
+/* A Pentium M (Dothan): family 6, model 13, stepping 8. */
+#define CPUID_SIGNATURE 0x6d8
 
 enum {
     CPUID_FPU = 0,
@@ -43,7 +43,15 @@ enum {
     CPUID_SEP = 11,
     CPUID_PGE = 13,
     CPUID_CMOV = 15,
+    CPUID_CLFSH = 19,
+    CPUID_MMX = 23,
+    CPUID_FXSR = 24,
+    CPUID_SSE = 25,
+    CPUID_SSE2 = 26,
 };
+
+/* CPUID 1 EBX bits 8-15: the CLFLUSH line size in 8 byte units */
+static const uint32_t CPUID_CLFLUSH_SIZE = 64 / 8;
 
 enum {
     MSR_TSC = 0x10,
@@ -56,10 +64,25 @@ enum {
     MSR_SYSENTER_EIP = 0x176,
     MSR_EVNTSEL0 = 0x186,
     MSR_EVNTSEL1 = 0x187,
+    MSR_MISC_ENABLE = 0x1a0,
 };
 
 /* P6 counters are 40 bits wide */
 static const int PMC_BITS = 40;
+
+enum {
+    MISC_ENABLE_FAST_STRING = 0,
+    MISC_ENABLE_PERFMON = 7,      /* performance monitoring available */
+    MISC_ENABLE_BTS_UNAVAIL = 11,
+    MISC_ENABLE_PEBS_UNAVAIL = 12,
+    MISC_ENABLE_LIMIT_CPUID = 22, /* no effect: the highest leaf is 1 */
+};
+
+static const uint32_t MISC_ENABLE_RESET = bit_at(MISC_ENABLE_FAST_STRING) |
+    bit_at(MISC_ENABLE_PERFMON) | bit_at(MISC_ENABLE_BTS_UNAVAIL) |
+    bit_at(MISC_ENABLE_PEBS_UNAVAIL);
+static const uint32_t MISC_ENABLE_WRITABLE = bit_at(MISC_ENABLE_FAST_STRING) |
+    bit_at(MISC_ENABLE_LIMIT_CPUID);
 
 static const uint32_t CR0_VALID_MASK = bit_at(CR0_PE) | bit_at(CR0_MP) |
     bit_at(CR0_EM) | bit_at(CR0_TS) | bit_at(CR0_ET) | bit_at(CR0_NE) |
@@ -67,7 +90,8 @@ static const uint32_t CR0_VALID_MASK = bit_at(CR0_PE) | bit_at(CR0_MP) |
     bit_at(CR0_PG);
 
 static const uint32_t CR4_VALID_MASK = bit_at(CR4_TSD) | bit_at(CR4_DE) |
-    bit_at(CR4_PSE) | bit_at(CR4_PGE) | bit_at(CR4_PCE);
+    bit_at(CR4_PSE) | bit_at(CR4_PGE) | bit_at(CR4_PCE) | bit_at(CR4_OSFXSR) |
+    bit_at(CR4_OSXMMEXCPT);
 
 
 static void cpu_dump_state(X86CPUState *s)
@@ -494,6 +518,7 @@ static void cpu_reset(X86CPUState *s)
     s->tsc_offset = 0;
     memset(s->pmc_evtsel, 0, sizeof(s->pmc_evtsel));
     memset(s->pmc_ctr, 0, sizeof(s->pmc_ctr));
+    s->misc_enable = MISC_ENABLE_RESET;
 
     s->cpl = 0;
     for (int seg = 0; seg < SEG_COUNT; seg++) {
@@ -510,6 +535,7 @@ static void cpu_reset(X86CPUState *s)
     s->power_down = false;
     s->old_exception = -1;
     fpu_reset(s);
+    simd_reset(s);
     tlb_flush_all(s);
     cpu_update_mode(s);
 }
@@ -537,9 +563,12 @@ void cpu_cpuid(X86CPUState *s)
         break;
     case 1:
         a = CPUID_SIGNATURE;
+        b = set_bits(0, 8, 8, CPUID_CLFLUSH_SIZE);
         d = bit_at(CPUID_FPU) | bit_at(CPUID_DE) | bit_at(CPUID_PSE) |
             bit_at(CPUID_TSC) | bit_at(CPUID_MSR) | bit_at(CPUID_CX8) |
-            bit_at(CPUID_SEP) | bit_at(CPUID_PGE) | bit_at(CPUID_CMOV);
+            bit_at(CPUID_SEP) | bit_at(CPUID_PGE) | bit_at(CPUID_CMOV) |
+            bit_at(CPUID_CLFSH) | bit_at(CPUID_MMX) | bit_at(CPUID_FXSR) |
+            bit_at(CPUID_SSE) | bit_at(CPUID_SSE2);
         break;
     case 0x80000000:
         a = 0x80000004;
@@ -599,6 +628,9 @@ void cpu_rdmsr(X86CPUState *s)
     case MSR_EVNTSEL1:
         val = s->pmc_evtsel[s->regs[REG_ECX] - MSR_EVNTSEL0];
         break;
+    case MSR_MISC_ENABLE:
+        val = s->misc_enable;
+        break;
     default:
         raise_exception(s, EXCP_GP, 0);
     }
@@ -639,6 +671,11 @@ void cpu_wrmsr(X86CPUState *s)
             raise_exception(s, EXCP_GP, 0);
         }
         s->pmc_evtsel[s->regs[REG_ECX] - MSR_EVNTSEL0] = val;
+        break;
+    case MSR_MISC_ENABLE:
+        /* the other bits report what the part has and keep their value */
+        s->misc_enable = (s->misc_enable & ~MISC_ENABLE_WRITABLE) |
+            (val & MISC_ENABLE_WRITABLE);
         break;
     default:
         raise_exception(s, EXCP_GP, 0);

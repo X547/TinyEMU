@@ -197,6 +197,18 @@ static void ld_to_fx80(long double v, uint64_t *mant, uint16_t *sexp)
 
 #endif
 
+static long double reg_value(const Fx80 &r)
+{
+    return fx80_to_ld(r.mant, r.sexp);
+}
+
+static Fx80 make_reg(long double v)
+{
+    Fx80 r;
+    ld_to_fx80(v, &r.mant, &r.sexp);
+    return r;
+}
+
 static long double default_nan()
 {
     return fx80_to_ld(UINT64_C(0xc000000000000000), 0xffff);
@@ -252,13 +264,13 @@ static long double st_get(X87State *f, int i)
         fpu_raise(f, bit_at(FPUS_IE) | bit_at(FPUS_SF));
         return default_nan();
     }
-    return f->st[reg];
+    return reg_value(f->st[reg]);
 }
 
 static void st_set(X87State *f, int i, long double v)
 {
     int reg = st_reg(f, i);
-    f->st[reg] = v;
+    f->st[reg] = make_reg(v);
     f->empty = set_bit(f->empty, reg, false);
 }
 
@@ -271,7 +283,7 @@ static void fpu_push(X87State *f, long double v)
         fpu_raise(f, bit_at(FPUS_IE) | bit_at(FPUS_SF));
         v = default_nan();
     }
-    f->st[top] = v;
+    f->st[top] = make_reg(v);
     f->empty = set_bit(f->empty, top, false);
 }
 
@@ -282,26 +294,24 @@ static void fpu_pop(X87State *f)
     fpu_set_top(f, top + 1);
 }
 
+static int fpu_tag(const Fx80 &r)
+{
+    int exp = get_bits(r.sexp, 0, 15);
+    if (exp == 0x7fff) {
+        return TAG_SPECIAL;
+    }
+    if (exp == 0) {
+        return r.mant == 0 ? TAG_ZERO : TAG_SPECIAL;
+    }
+    /* an unnormal lacks the integer bit */
+    return get_bit(r.mant, 63) ? TAG_VALID : TAG_SPECIAL;
+}
+
 static uint16_t fpu_tag_word(X87State *f)
 {
     uint16_t tags = 0;
     for (int i = 0; i < 8; i++) {
-        int tag;
-        if (get_bit(f->empty, i)) {
-            tag = TAG_EMPTY;
-        } else {
-            switch (std::fpclassify(f->st[i])) {
-            case FP_ZERO:
-                tag = TAG_ZERO;
-                break;
-            case FP_NORMAL:
-                tag = TAG_VALID;
-                break;
-            default:
-                tag = TAG_SPECIAL;
-                break;
-            }
-        }
+        int tag = get_bit(f->empty, i) ? TAG_EMPTY : fpu_tag(f->st[i]);
         tags = set_bits(tags, 2 * i, 2, tag);
     }
     return tags;
@@ -494,7 +504,7 @@ static void fpu_remainder(X87State *f, bool ieee)
 static void fpu_examine(X87State *f)
 {
     int reg = st_reg(f, 0);
-    long double v = f->st[reg];
+    long double v = reg_value(f->st[reg]);
     bool c0 = false, c2 = false, c3 = false;
 
     if (get_bit(f->empty, reg)) {
@@ -742,12 +752,11 @@ static void fpu_save(X86CPUState *s, uint32_t lin, int opsize)
 
     mem_probe_write(s, reg_base + 8 * 10 - 4, SIZE32);
     fpu_store_env(s, lin, opsize);
+    /* the images are copied as they are, MMX values included */
     for (int i = 0; i < 8; i++) {
-        uint64_t mant;
-        uint16_t sexp;
-        ld_to_fx80(f->st[st_reg(f, i)], &mant, &sexp);
-        write64(s, reg_base + i * 10, mant);
-        mem_write(s, reg_base + i * 10 + 8, sexp, SIZE16);
+        const Fx80 &r = f->st[st_reg(f, i)];
+        write64(s, reg_base + i * 10, r.mant);
+        mem_write(s, reg_base + i * 10 + 8, r.sexp, SIZE16);
     }
     fpu_init(f);
 }
@@ -756,15 +765,82 @@ static void fpu_restore(X86CPUState *s, uint32_t lin, int opsize)
 {
     X87State *f = &s->fpu;
     uint32_t reg_base = lin + env_size(opsize);
-    long double st[8];
+    Fx80 st[8];
 
     for (int i = 0; i < 8; i++) {
-        st[i] = fpu_load(s, reg_base + i * 10, FMT_F80);
+        st[i].mant = read64(s, reg_base + i * 10);
+        st[i].sexp = mem_read(s, reg_base + i * 10 + 8, SIZE16);
     }
     fpu_load_env(s, lin, opsize);
     for (int i = 0; i < 8; i++) {
         f->st[st_reg(f, i)] = st[i];
     }
+}
+
+/* The part of the FXSAVE area outside 64 bit mode: up to XMM7. */
+static const int FXSAVE_SIZE = 288;
+static const int FXSAVE_ST = 32;
+static const int FXSAVE_XMM = 160;
+
+/* The area must be 16 byte aligned, so no 16 byte access crosses a page. */
+void fpu_fxsave(X86CPUState *s, uint32_t lin)
+{
+    X87State *f = &s->fpu;
+    uint8_t image[FXSAVE_SIZE] = {};
+
+    put_le16(image, f->control);
+    put_le16(image + 2, f->status);
+    image[4] = ~f->empty; /* one bit per physical register in use */
+    put_le16(image + 6, f->opcode);
+    put_le32(image + 8, f->fip);
+    put_le16(image + 12, f->fcs);
+    put_le32(image + 16, f->fdp);
+    put_le16(image + 20, f->fds);
+    put_le32(image + 24, s->mxcsr);
+    put_le32(image + 28, MXCSR_MASK);
+    for (int i = 0; i < 8; i++) {
+        const Fx80 &r = f->st[st_reg(f, i)];
+        put_le64(image + FXSAVE_ST + 16 * i, r.mant);
+        put_le16(image + FXSAVE_ST + 16 * i + 8, r.sexp);
+    }
+    memcpy(image + FXSAVE_XMM, s->xmm, 8 * sizeof(XmmReg));
+
+    mem_probe_write(s, lin, SIZE128);
+    mem_probe_write(s, lin + FXSAVE_SIZE - 16, SIZE128);
+    for (int i = 0; i < FXSAVE_SIZE; i += 16) {
+        mem_write_bytes(s, lin + i, image + i, SIZE128);
+    }
+}
+
+void fpu_fxrstor(X86CPUState *s, uint32_t lin)
+{
+    X87State *f = &s->fpu;
+    uint8_t image[FXSAVE_SIZE];
+
+    for (int i = 0; i < FXSAVE_SIZE; i += 16) {
+        mem_read_bytes(s, lin + i, image + i, SIZE128);
+    }
+    uint32_t mxcsr = get_le32(image + 24);
+    if (mxcsr & ~MXCSR_MASK) {
+        raise_exception(s, EXCP_GP, 0);
+    }
+
+    f->control = get_le16(image);
+    f->status = get_le16(image + 2);
+    f->empty = ~image[4];
+    f->opcode = get_bits(get_le16(image + 6), 0, 11);
+    f->fip = get_le32(image + 8);
+    f->fcs = get_le16(image + 12);
+    f->fdp = get_le32(image + 16);
+    f->fds = get_le16(image + 20);
+    fpu_update_summary(f);
+    for (int i = 0; i < 8; i++) {
+        Fx80 &r = f->st[st_reg(f, i)];
+        r.mant = get_le64(image + FXSAVE_ST + 16 * i);
+        r.sexp = get_le16(image + FXSAVE_ST + 16 * i + 8);
+    }
+    s->mxcsr = mxcsr;
+    memcpy(s->xmm, image + FXSAVE_XMM, 8 * sizeof(XmmReg));
 }
 
 

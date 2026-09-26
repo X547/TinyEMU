@@ -14,7 +14,7 @@ TinyEMU System Emulator by Fabrice Bellard
   - dynamic XLEN change
 
 - x86 system emulator based on KVM, with an i686 interpreter (x87 FPU,
-  no SSE) when KVM is not available
+  MMX, SSE, SSE2) when KVM is not available
 
 - VirtIO console, network, block device, input, 2D GPU and 9P filesystem
 
@@ -828,8 +828,8 @@ OpenSBI, powers off through this device instead.
 
 A small x86 emulator is included. When the Linux KVM API is available it
 runs the x86 code at near native performance. Otherwise, or with
--no-accel, an interpreter takes its place: a 32 bit i686 with an x87 FPU
-and no SSE, which is slower but needs nothing from the host. The x86
+-no-accel, an interpreter takes its place: a 32 bit i686 with an x87 FPU,
+MMX, SSE and SSE2, which is slower but needs nothing from the host. The x86
 emulator uses the same set of VirtIO devices as the RISCV emulator and is
 able to run many operating systems.
 
