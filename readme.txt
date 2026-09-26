@@ -221,7 +221,11 @@ Device types:
   pci-host-i440fx        the host bridge of the PC machine: the CF8/CFC
                          configuration ports, the i440FX function and the
                          PIIX3 ISA bridge that routes the four INTx lines
-                         onto the PIC, and a nested PCI bus
+                         onto the PIC, and a nested PCI bus. "vendor_id"
+                         and "device_id" (default 0x8086 and 0x1237) are
+                         what the i440FX function answers with: EDK2's
+                         Cloud Hypervisor build, booted as a PVH kernel,
+                         wants device_id 0x0d57
   vga                    the standard VGA on a PCI bus, which is also what
                          decodes the legacy VGA and VBE ports; "width" and
                          "height" are the largest mode it offers and the

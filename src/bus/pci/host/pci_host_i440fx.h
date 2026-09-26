@@ -31,8 +31,10 @@ typedef struct I440FXState I440FXState;
 /* The "pci-host-i440fx" configuration node: the host bridge of a PC. It
    decodes the CF8/CFC configuration ports, carries the i440FX function and
    the PIIX3 ISA bridge whose PIRQ registers route the four INTx lines onto
-   the PIC, and provides the PCI bus the machine's devices hang from. */
-Device *i440fx_node_create(const char *name);
+   the PIC, and provides the PCI bus the machine's devices hang from. The
+   i440FX function answers with 'vendor_id' and 'device_id'. */
+Device *i440fx_node_create(const char *name, uint16_t vendor_id,
+                           uint16_t device_id);
 
 /* The bridge a realized node built, or null for any other device. The
    machine's no-BIOS path needs it: with no firmware to program the PIRQ

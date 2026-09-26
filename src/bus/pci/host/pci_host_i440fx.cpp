@@ -144,9 +144,12 @@ private:
     std::unique_ptr<Bus> fChildBus;
     Resource *fAddrRes = nullptr;
     Resource *fDataRes = nullptr;
+    uint16_t fVendorId;
+    uint16_t fDeviceId;
 
 public:
-    I440FXDevice(const char *name): Device(name) {}
+    I440FXDevice(const char *name, uint16_t vendor_id, uint16_t device_id):
+        Device(name), fVendorId(vendor_id), fDeviceId(device_id) {}
 
     I440FXState *State() const {return fState.get();}
 
@@ -187,7 +190,8 @@ public:
         }
 
         fState->pci_dev = pci_register_device(fPciBus.get(), "i440FX", 0,
-                                              0x8086, 0x1237, 0x02, 0x0600);
+                                              fVendorId, fDeviceId, 0x02,
+                                              0x0600);
         /* Red Hat, Inc. / QEMU virtual machine, which is the pair guests
            recognise. */
         pci_device_set_config16(fState->pci_dev, PCI_SUBSYSTEM_VENDOR_ID,
@@ -221,9 +225,10 @@ public:
 };
 
 
-Device *i440fx_node_create(const char *name)
+Device *i440fx_node_create(const char *name, uint16_t vendor_id,
+                           uint16_t device_id)
 {
-    return new I440FXDevice(name);
+    return new I440FXDevice(name, vendor_id, device_id);
 }
 
 
