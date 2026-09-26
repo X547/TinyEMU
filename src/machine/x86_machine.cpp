@@ -38,6 +38,7 @@
 #include "host_x86_hypervisor.h"
 #include "iomem.h"
 #include "devices.h"
+#include "hpet.h"
 #include "simplefb.h"
 #include "virtio.h"
 #include "uart.h"
@@ -190,8 +191,9 @@ static void cmos_update_timer(CMOSState *s)
 }
 
 /* XXX: could return a delay, but we don't need high precision
-   (Windows 2000 uses it for delay calibration) */
-static void cmos_update_irq(CMOSState *s)
+   (Windows 2000 uses it for delay calibration)
+   Without 'deliver' the flags are set but the line is left alone. */
+static void cmos_update_irq(CMOSState *s, bool deliver)
 {
     uint32_t d;
     if (s->cmos_data[RTC_REG_B] & REG_B_PIE) {
@@ -200,7 +202,8 @@ static void cmos_update_irq(CMOSState *s)
             /* this is not what the real RTC does. Here we sent the IRQ
                immediately */
             s->cmos_data[RTC_REG_C] |= 0xc0;
-            s->irq->Set(1);
+            if (deliver)
+                s->irq->Set(1);
             /* update for the next irq */
             s->irq_timeout += s->irq_period;
         }
@@ -946,8 +949,10 @@ uint32_t PITState::SpeakerRead(uint32_t offset, int size_log2)
 }
 
 /* set the IRQ if necessary and return the delay in us until the next
-   IRQ. Note: The code does not handle all the PIT configurations. */
-static int64_t pit_update_irq(PITState *pit)
+   IRQ. Note: The code does not handle all the PIT configurations.
+   Without 'deliver' the line is someone else's: the counting goes on, the
+   interrupts are dropped. */
+static int64_t pit_update_irq(PITState *pit, bool deliver)
 {
     PITChannel *s;
     int64_t d, delay;
@@ -966,8 +971,10 @@ static int64_t pit_update_irq(PITState *pit)
         if (s->last_irq_time == 0) {
             delay = s->count - d;
             if (delay <= 0) {
-                pit->irq->Set(1);
-                pit->irq->Set(0);
+                if (deliver) {
+                    pit->irq->Set(1);
+                    pit->irq->Set(0);
+                }
                 s->last_irq_time = d;
             }
         }
@@ -976,8 +983,10 @@ static int64_t pit_update_irq(PITState *pit)
     case 3:
         delay = s->last_irq_time + s->count - d;
         if (delay <= 0) {
-            pit->irq->Set(1);
-            pit->irq->Set(0);
+            if (deliver) {
+                pit->irq->Set(1);
+                pit->irq->Set(0);
+            }
             s->last_irq_time += s->count;
         }
         break;
@@ -1081,6 +1090,8 @@ public:
        the rest is the machine's */
     std::unique_ptr<IOAPIC> fIoApic;
     PCIrqFanout fIrqFanout {*this};
+    /* the configuration's HPET, if it has one */
+    HPET *fHpet = nullptr;
     /* Otherwise the machine's: INTR as the 8259s drive it, read without the
        lock. */
     std::atomic<bool> fCpuIrq {false};
@@ -1813,6 +1824,25 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
         }
     }
 
+    /* The HPET's legacy replacement lines are the PIT's and the RTC's.
+       Routed, it may use the IOAPIC inputs no ISA line reaches, when the
+       guest is told of an IOAPIC. */
+    for (int i = 0; i < s->bus->DeviceCount(); i++) {
+        HPET *hpet = hpet_node_state(s->bus->DeviceAt(i));
+        if (hpet == nullptr)
+            continue;
+        IRQTarget *ioapic = nullptr;
+        if (s->fIoApic)
+            ioapic = s->fIoApic.get();
+        else if (s->fHypervisorIrqchip && s->fLocalApic)
+            ioapic = &s->fHypervisorIrqTarget;
+        hpet->SetOutputs(&s->pic_irq[0], &s->pic_irq[8], ioapic,
+                         ioapic ? field_mask(PC_IRQ_COUNT,
+                                             IOAPIC_PINS - PC_IRQ_COUNT) : 0);
+        s->fHpet = hpet;
+        break;
+    }
+
     if (acpi) {
         pc_acpi_setup(s);
     }
@@ -2162,6 +2192,7 @@ static void pc_acpi_setup(PCMachine *s)
     config.i8042 = s->port_map->FindRange(0x64) != nullptr;
     config.apic = s->fLocalApic;
     config.cpu_count = s->fCpuCount;
+    config.hpet_block_id = s->fHpet ? s->fHpet->BlockId() : 0;
     config.pci_gsis = kKernelPciIrqs;
     /* the hole between RAM and the machine's own device window */
     config.pci_mmio_base = (s->ram_size + 0xfffff) & ~(uint64_t)0xfffff;
@@ -2463,16 +2494,25 @@ void PCMachine::KickVcpu(int index)
     fVcpuWakeups[index].Kick();
 }
 
-/* The CMOS periodic interrupt is polled, so it has no deadline. */
+/* The CMOS periodic interrupt is polled, so it has no deadline. The HPET's
+   legacy replacement mode takes the PIT's and the RTC's lines over, except
+   from a PIT the hypervisor has. */
 int64_t PCMachine::RunTimers()
 {
     PCMachine *s = this;
+    bool legacy = s->fHpet && s->fHpet->LegacyReplacement();
+    int64_t delay = -1;
 
-    cmos_update_irq(s->cmos_state.get());
+    cmos_update_irq(s->cmos_state.get(), !legacy);
+    if (s->fHpet)
+        delay = s->fHpet->RunTimers();
     /* the hypervisor has the PIT */
-    if (s->fHypervisorIrqchip)
-        return -1;
-    return pit_update_irq(s->pit_state.get());
+    if (!s->fHypervisorIrqchip) {
+        int64_t pit_delay = pit_update_irq(s->pit_state.get(), !legacy);
+        if (delay < 0 || pit_delay < delay)
+            delay = pit_delay;
+    }
+    return delay;
 }
 
 /* The processors that run in the hypervisor are never the processor

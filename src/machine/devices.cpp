@@ -56,6 +56,7 @@
 /* The PC's own parts. They are built only with the x86 machine, because none
    of them models anything a device tree machine has. */
 #ifdef CONFIG_X86EMU
+#include "hpet.h"
 #include "i8042.h"
 #include "pci_host_i440fx.h"
 #include "vga.h"
@@ -415,6 +416,10 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
 
     if (strcmp(type, "pci-host-i440fx") == 0) {
         return i440fx_node_create(node->IdOr("i440fx"));
+    }
+
+    if (strcmp(type, "hpet") == 0) {
+        return hpet_node_create(ctx);
     }
 #endif
 

@@ -29,6 +29,7 @@
 #include "bits.h"
 #include "cutils.h"
 #include "host_time.h"
+#include "hpet.h"
 #include "ioapic.h"
 #include "machine.h"
 
@@ -310,6 +311,21 @@ static Bytes aml_isa_resources(std::initializer_list<uint16_t> ports,
     return aml_buffer(r);
 }
 
+/* A resource template of one fixed read/write memory range. */
+static Bytes aml_memory_resources(uint32_t base, uint32_t size)
+{
+    Bytes r;
+
+    put8(r, 0x86); /* 32 bit fixed memory range descriptor */
+    put16(r, 9);
+    put8(r, 1); /* read/write */
+    put32(r, base);
+    put32(r, size);
+    put8(r, 0x79); /* end tag */
+    put8(r, 0);
+    return aml_buffer(r);
+}
+
 /* Address space descriptors, flagged fixed at both ends. */
 static void word_space(Bytes &r, int type, int type_flags, uint16_t min,
                        uint16_t max)
@@ -395,6 +411,15 @@ static Bytes build_dsdt(const PcAcpiConfig &config)
         append(sb, aml_device("MOU_", mou));
     }
 
+    /* what reserves the HPET's registers */
+    if (config.hpet_block_id != 0) {
+        Bytes hpet = aml_name("_HID", aml_eisaid("PNP0103"));
+        append(hpet, aml_name("_UID", aml_int(0)));
+        append(hpet, aml_name("_CRS", aml_memory_resources(HPET_ADDR,
+                                                           HPET_SIZE)));
+        append(sb, aml_device("HPET", hpet));
+    }
+
     Bytes scope;
     put_str(scope, "\\_SB_", 5);
     append(scope, sb);
@@ -448,6 +473,24 @@ static Bytes build_madt(const PcAcpiConfig &config)
     put8(t, 0xff);
     put16(t, 0);
     put8(t, 1);
+    table_finish(t);
+    return t;
+}
+
+static Bytes build_hpet(const PcAcpiConfig &config)
+{
+    Bytes t = table_header("HPET", 1);
+
+    put32(t, config.hpet_block_id);
+    /* the registers, as a generic address */
+    put8(t, 0); /* system memory */
+    put8(t, 64); /* bit width */
+    put8(t, 0); /* bit offset */
+    put8(t, 0); /* access size: undefined */
+    put64(t, HPET_ADDR);
+    put8(t, 0); /* HPET number */
+    put16(t, 0); /* minimum periodic tick: no minimum */
+    put8(t, 0); /* page protection: none */
     table_finish(t);
     return t;
 }
@@ -589,6 +632,8 @@ void pc_acpi_build(uint8_t *mem, const PcAcpiConfig &config)
     tables.push_back(place(build_fadt(config, facs, dsdt), 16));
     if (config.apic)
         tables.push_back(place(build_madt(config), 16));
+    if (config.hpet_block_id != 0)
+        tables.push_back(place(build_hpet(config), 16));
     uint32_t rsdt = place(build_rsdt(tables), 16);
     uint32_t xsdt = place(build_xsdt(tables), 16);
 

@@ -243,6 +243,11 @@ Device types:
                          adds the VMware backdoor port the absolute pointer
                          protocol is read through, and a nested PS/2 bus
                          carrying up to two devices
+  hpet                   the PC's HPET at 0xfed00000: a 100 MHz counter and
+                         three timers, which in legacy replacement mode take
+                         over the lines of the PIT and the RTC and otherwise
+                         go to IOAPIC inputs 16 to 23. A firmware or a kernel
+                         booted without one finds it in the ACPI tables
   ps2-keyboard           PS/2 keyboard; "port" (0 or 1, default the first
                          free one)
   ps2-mouse              PS/2 pointer; "port" as above. Any order works: a
@@ -344,9 +349,10 @@ are separate parts:
 
     pc bus -> pci-host-i440fx -> PCI bus -> pci-ide -> ATA bus -> ata-disk
 
-Only "i8042" and "ns16550a" go straight on the pc bus; everything else a PC
-carries is a PCI device and belongs inside the bridge. sample-pc.cfg is a
-commented example of a whole PC, as sample-riscv64.cfg is of an FDT machine.
+Only "i8042", "ns16550a" and "hpet" go straight on the pc bus; everything
+else a PC carries is a PCI device and belongs inside the bridge. sample-pc.cfg
+is a commented example of a whole PC, as sample-riscv64.cfg is of an FDT
+machine.
 
 The USB stack nests the same way everything else does, and the whole path from
 the PCI bus down to the image file is spelled out in the file:
@@ -823,16 +829,16 @@ The x86 emulator accepts a Linux kernel image (bzImage), or an ELF kernel
 with a PVH entry point (a Linux vmlinux built with CONFIG_PVH), which also
 gets the "initrd" and the memory map. No BIOS image is necessary. A 64 bit
 kernel needs a hypervisor. Either kind of kernel finds ACPI tables at
-0xe0000 describing the PCI host bridge and its interrupt routing, the i8042
-and a PM timer, and can power the machine off through ACPI.
+0xe0000 describing the PCI host bridge and its interrupt routing, the i8042,
+the HPET and a PM timer, and can power the machine off through ACPI.
 
 The PC is built from the configuration's device tree, as every machine is.
 What it has before any device is declared is the part a PC cannot be without:
 RAM, the two interrupt controllers, the timer and the clock. Everything else
 -- the host bridge, the display, the keyboard controller, the disks -- is
 declared, and where a device may sit is decided by the hierarchy: a PCI device
-only works inside a "pci-host-i440fx", and only "i8042" and "ns16550a" go
-straight on the pc bus.
+only works inside a "pci-host-i440fx", and only "i8042", "ns16550a" and
+"hpet" go straight on the pc bus.
 
 The x86 emulator comes from my JS/Linux project (2011) which was one
 of the first emulator running Linux fully implemented in

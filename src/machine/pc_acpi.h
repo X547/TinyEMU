@@ -64,6 +64,9 @@ struct PcAcpiConfig {
     int cpu_count = 1;
     /* an i8042, which the FADT and the DSDT then report */
     bool i8042 = false;
+    /* an HPET, described by its capabilities' low half; 0 when there is
+       none */
+    uint32_t hpet_block_id = 0;
     /* the GSI each of PIRQA-D is routed to */
     const uint8_t *pci_gsis = nullptr;
     /* where the OS may place memory BARs: [base, end) */
@@ -77,6 +80,6 @@ struct PcAcpiConfig {
 #define PC_ACPI_ADDR 0xe0000
 #define PC_ACPI_SIZE 0x10000
 
-/* Writes the RSDP, RSDT, XSDT, FACS, FADT, DSDT and, with APICs, the MADT
-   to 'mem', which the guest sees at PC_ACPI_ADDR. */
+/* Writes the RSDP, RSDT, XSDT, FACS, FADT, DSDT, with APICs the MADT and
+   with an HPET its table to 'mem', which the guest sees at PC_ACPI_ADDR. */
 void pc_acpi_build(uint8_t *mem, const PcAcpiConfig &config);
