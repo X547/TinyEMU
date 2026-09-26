@@ -1063,7 +1063,9 @@ class PCMachine final:
     public X86HypervisorTarget,
     public PCIMsiTarget {
 public:
-    uint64_t ram_size;
+    /* RAM from 0 up to the PCI hole, and the rest from 4 GB */
+    uint64_t fLowRamSize;
+    uint64_t fHighRamSize;
     PhysMemoryMap *mem_map;
     PhysMemoryMap *port_map;
     
@@ -1174,8 +1176,17 @@ static const uint8_t kKernelPciIrqs[4] = { 10, 11, 10, 11 };
 /* The processor the calling thread runs, or -1 on any other thread. */
 static thread_local int sCurrentVcpu = -1;
 
+struct PcMemoryRange {
+    uint64_t addr;
+    uint64_t size;
+    uint32_t type; /* E820_* */
+};
+#define PC_MEMORY_RANGES_MAX 5
+
 static void copy_kernel(PCMachine *s, const uint8_t *buf, int buf_len,
-                        const char *cmd_line);
+                        const char *cmd_line, uint32_t bios_size);
+static int pc_memory_ranges(PCMachine *s, uint32_t bios_size,
+                            PcMemoryRange *ranges);
 static void pc_acpi_setup(PCMachine *s);
 static uint8_t *get_ram_range_ptr(PCMachine *s, uint64_t addr, uint64_t len);
 static void set_flat_gdt(uint8_t *gdt);
@@ -1363,6 +1374,13 @@ int64_t PCMachine::Ticks()
    below the BIOS and nothing else is expected to compete for it. */
 #define FRAMEBUFFER_BASE_ADDR 0xf0400000
 #define PC_DEVICE_WINDOW_SIZE 0x08000000 /* 128 MB */
+
+/* RAM beyond this goes above 4 GB, leaving the rest of the 32 bit space to
+   PCI and the platform devices. */
+#define PC_LOW_RAM_MAX 0xc0000000ULL
+#define PC_HIGH_RAM_BASE 0x100000000ULL
+#define PC_LOCAL_APIC_ADDR 0xfee00000
+#define PC_LOCAL_APIC_SIZE 0x100000 /* with the MSI addresses */
 
 static uint8_t *get_ram_ptr(PCMachine *s, uint64_t paddr)
 {
@@ -1611,15 +1629,30 @@ void PCMachine::FlushTlbWriteRange(uint8_t *ram_addr, size_t ram_size)
     x86_cpu_flush_tlb_write_range_ram(cpu_state, ram_addr, ram_size);
 }
 
+/* The PCI hole starts where low RAM ends and runs up to the device window. */
+static uint64_t pc_pci_hole_base(PCMachine *s)
+{
+    return (s->fLowRamSize + 0xfffff) & ~(uint64_t)0xfffff;
+}
+
 /* The addresses and lines the chipset above holds. They are reserved so that
    a device the configuration declares cannot be placed on top of one of
-   them. */
-static bool pc_claim_fixed_ranges(PCMachine *s, bool acpi)
+   them. PCI BARs stay inside the hole and are not tracked. */
+static bool pc_claim_fixed_ranges(PCMachine *s, bool acpi, uint32_t bios_size)
 {
+    RangeAllocator &mmio = s->bus->MmioAlloc();
     RangeAllocator &io = s->bus->IoAlloc();
     RangeAllocator &irq = s->bus->IrqAlloc();
+    uint64_t hole = pc_pci_hole_base(s);
 
-    return (!acpi || io.Claim(ACPI_PM_BASE, ACPI_PM_SIZE, "acpi")) &&
+    return mmio.Claim(0, 0x100000, "low memory") &&
+        mmio.Claim(0x100000, s->fLowRamSize - 0x100000, "ram") &&
+        mmio.Claim(hole, FRAMEBUFFER_BASE_ADDR - hole, "pci") &&
+        mmio.Claim(IOAPIC_ADDR, IOAPIC_SIZE, "ioapic") &&
+        mmio.Claim(PC_LOCAL_APIC_ADDR, PC_LOCAL_APIC_SIZE, "local apic") &&
+        mmio.Claim(PC_HIGH_RAM_BASE - bios_size, bios_size, "bios") &&
+        mmio.Claim(PC_HIGH_RAM_BASE, s->fHighRamSize, "high ram") &&
+        (!acpi || io.Claim(ACPI_PM_BASE, ACPI_PM_SIZE, "acpi")) &&
         io.Claim(0x20, 2, "pic") && io.Claim(0xa0, 2, "pic") &&
         io.Claim(0x4d0, 2, "elcr") &&
         io.Claim(0x40, 4, "pit") && io.Claim(0x61, 1, "pit") &&
@@ -1680,8 +1713,9 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     s = owned.get();
     s->SetHost(p);
     s->vmc = p->vmc;
-    s->ram_size = p->ram_size;
-    
+    s->fLowRamSize = std::min<uint64_t>(p->ram_size, PC_LOW_RAM_MAX);
+    s->fHighRamSize = p->ram_size - s->fLowRamSize;
+
     s->port_map = new PhysMemoryMap();
 
     if (p->accel_enable) {
@@ -1691,6 +1725,12 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     /* the interpreter has no local APIC */
     if (options.local_apic && !s->hypervisor) {
         vm_error("pc: interrupt_controller \"apic\" needs a hypervisor\n");
+        return nullptr;
+    }
+    /* nor PAE, so nothing above 4 GB */
+    if (s->fHighRamSize != 0 && !s->hypervisor) {
+        vm_error("pc: more than %llu MB of RAM needs a hypervisor\n",
+                 PC_LOW_RAM_MAX >> 20);
         return nullptr;
     }
     s->fLocalApic = options.local_apic;
@@ -1719,8 +1759,10 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     }
 
     /* set the RAM mapping and leave the VGA addresses empty */
-    s->mem_map->RegisterRam(0xc0000, p->ram_size - 0xc0000, 0);
+    s->mem_map->RegisterRam(0xc0000, s->fLowRamSize - 0xc0000, 0);
     s->mem_map->RegisterRam(0, 0xa0000, 0);
+    if (s->fHighRamSize != 0)
+        s->mem_map->RegisterRam(PC_HIGH_RAM_BASE, s->fHighRamSize, 0);
     
     /* devices */
     s->port_map->RegisterDevice(0x80, 2, &s->fPort80Io, DEVIO_SIZE8);
@@ -1772,12 +1814,17 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     {
         int size;
         /* memory size */
-        size = min_int((s->ram_size - (1 << 20)) >> 10, 65535);
+        size = min_int((s->fLowRamSize - (1 << 20)) >> 10, 65535);
         put_le16(s->cmos_state->cmos_data + 0x30, size);
-        if (s->ram_size >= (16 << 20)) {
-            size = min_int((s->ram_size - (16 << 20)) >> 16, 65535);
+        if (s->fLowRamSize >= (16 << 20)) {
+            size = min_int((s->fLowRamSize - (16 << 20)) >> 16, 65535);
             put_le16(s->cmos_state->cmos_data + 0x34, size);
         }
+        /* above 4 GB, in 64 KB units */
+        uint64_t high = s->fHighRamSize >> 16;
+        s->cmos_state->cmos_data[0x5b] = high;
+        s->cmos_state->cmos_data[0x5c] = high >> 8;
+        s->cmos_state->cmos_data[0x5d] = high >> 16;
         s->cmos_state->cmos_data[0x14] = 0x06; /* mouse + FPU present */
     }
     
@@ -1793,7 +1840,7 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
                                   PC_DEVICE_WINDOW_SIZE);
     /* A kernel booted without firmware gets its ACPI tables from here. */
     bool acpi = p->files[VM_FILE_KERNEL].buf != nullptr;
-    if (!pc_claim_fixed_ranges(s, acpi)) {
+    if (!pc_claim_fixed_ranges(s, acpi, p->files[VM_FILE_BIOS].len)) {
         return nullptr;
     }
 
@@ -1863,7 +1910,8 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
             }
         } else {
             copy_kernel(s, kernel.buf, kernel.len,
-                        p->cmdline ? p->cmdline : "");
+                        p->cmdline ? p->cmdline : "",
+                        p->files[VM_FILE_BIOS].len);
         }
     }
 
@@ -1995,7 +2043,7 @@ struct  __attribute__ ((packed)) linux_params {
 #define E820_RESERVED 2
 #define E820_ACPI 3 /* usable as RAM once ACPI tables have been read */
 #define E820_NVS  4
-  struct {
+  struct __attribute__ ((packed)) {
     uint64_t addr;
     uint64_t size;
     uint32_t type;
@@ -2014,10 +2062,13 @@ struct  __attribute__ ((packed)) linux_params {
   uint64_t gdt_table[4];
 };
 
+static_assert(offsetof(struct linux_params, commandline) == 0x800,
+              "the boot parameters do not match the boot protocol");
+
 #define KERNEL_PARAMS_ADDR 0x00090000
 
 static void copy_kernel(PCMachine *s, const uint8_t *buf, int buf_len,
-                        const char *cmd_line)
+                        const char *cmd_line, uint32_t bios_size)
 {
     uint8_t *ram_ptr;
     int setup_sects, header_len, copy_len, setup_hdr_start, setup_hdr_end;
@@ -2054,7 +2105,7 @@ static void copy_kernel(PCMachine *s, const uint8_t *buf, int buf_len,
         exit(1);
     }
     copy_len = buf_len - header_len;
-    if (copy_len > (s->ram_size - load_address)) {
+    if (copy_len > (s->fLowRamSize - load_address)) {
         fprintf(stderr, "Not enough RAM\n");
         exit(1);
     }
@@ -2073,8 +2124,17 @@ static void copy_kernel(PCMachine *s, const uint8_t *buf, int buf_len,
     params->mount_root_rdonly = 0;
     params->cmd_line_ptr = KERNEL_PARAMS_ADDR +
         offsetof(struct linux_params, commandline);
-    params->alt_mem_k = (s->ram_size / 1024) - 1024;
+    params->alt_mem_k = (s->fLowRamSize / 1024) - 1024;
     params->loader_type = 0x01;
+
+    PcMemoryRange ranges[PC_MEMORY_RANGES_MAX];
+    int n = pc_memory_ranges(s, bios_size, ranges);
+    for (int i = 0; i < n; i++) {
+        params->e820map[i].addr = ranges[i].addr;
+        params->e820map[i].size = ranges[i].size;
+        params->e820map[i].type = ranges[i].type;
+    }
+    params->e820map_entries = n;
 #if 0
     if (initrd_size > 0) {
         params->initrd_start = INITRD_LOAD_ADDR;
@@ -2199,7 +2259,7 @@ static void pc_acpi_setup(PCMachine *s)
     config.hpet_block_id = s->fHpet ? s->fHpet->BlockId() : 0;
     config.pci_gsis = kKernelPciIrqs;
     /* the hole between RAM and the machine's own device window */
-    config.pci_mmio_base = (s->ram_size + 0xfffff) & ~(uint64_t)0xfffff;
+    config.pci_mmio_base = pc_pci_hole_base(s);
     config.pci_mmio_end = FRAMEBUFFER_BASE_ADDR;
     assert(mem != NULL);
     memset(mem, 0, PC_ACPI_SIZE);
@@ -2260,6 +2320,28 @@ struct PvhBootData {
 #define PVH_BOOT_DATA_ADDR 0x9f000
 static_assert(sizeof(PvhBootData) <= 0xa0000 - PVH_BOOT_DATA_ADDR,
               "the PVH boot data does not fit below the VGA hole");
+static_assert(PC_MEMORY_RANGES_MAX <= PVH_MEMMAP_MAX,
+              "the memory map does not fit in the PVH boot data");
+
+/* The RAM there is, less the boot data page, the VGA hole and the BIOS
+   area. A kernel booted without firmware is given this map. */
+static int pc_memory_ranges(PCMachine *s, uint32_t bios_size,
+                            PcMemoryRange *ranges)
+{
+    int n = 0;
+    auto add = [ranges, &n](uint64_t addr, uint64_t size, uint32_t type) {
+        assert(n < PC_MEMORY_RANGES_MAX);
+        ranges[n++] = {addr, size, type};
+    };
+    add(0, PVH_BOOT_DATA_ADDR, E820_RAM);
+    add(PVH_BOOT_DATA_ADDR, 0x100000 - PVH_BOOT_DATA_ADDR, E820_RESERVED);
+    add(0x100000, s->fLowRamSize - 0x100000, E820_RAM);
+    if (bios_size != 0)
+        add(PC_HIGH_RAM_BASE - bios_size, bios_size, E820_RESERVED);
+    if (s->fHighRamSize != 0)
+        add(PC_HIGH_RAM_BASE, s->fHighRamSize, E820_RAM);
+    return n;
+}
 
 #define ELF_CLASS32 1
 #define ELF_CLASS64 2
@@ -2415,12 +2497,12 @@ static bool pvh_load(PCMachine *s, const uint8_t *buf, int buf_len,
     strcpy(bd->cmdline, cmd_line);
     si->cmdline_paddr = PVH_BOOT_DATA_ADDR + offsetof(PvhBootData, cmdline);
 
-    /* the initrd at the top of RAM */
+    /* the initrd at the top of the RAM below 4 GB */
     if (initrd_len > 0) {
-        uint64_t addr = (s->ram_size - initrd_len) & ~(uint64_t)0xfff;
+        uint64_t addr = (s->fLowRamSize - initrd_len) & ~(uint64_t)0xfff;
         uint8_t *ptr = NULL;
 
-        if ((uint64_t)initrd_len < s->ram_size &&
+        if ((uint64_t)initrd_len < s->fLowRamSize &&
             addr >= ((kernel_end + 0xfff) & ~(uint64_t)0xfff))
             ptr = get_ram_range_ptr(s, addr, initrd_len);
         if (ptr == NULL) {
@@ -2435,22 +2517,13 @@ static bool pvh_load(PCMachine *s, const uint8_t *buf, int buf_len,
             offsetof(PvhBootData, modules);
     }
 
-    /* The RAM there is, less the boot data page, the VGA hole and the BIOS
-       area. */
-    int n = 0;
-    auto add_range = [bd, &n](uint64_t addr, uint64_t size, uint32_t type) {
-        assert(n < PVH_MEMMAP_MAX);
-        bd->memmap[n].addr = addr;
-        bd->memmap[n].size = size;
-        bd->memmap[n].type = type;
-        n++;
-    };
-    add_range(0, PVH_BOOT_DATA_ADDR, E820_RAM);
-    add_range(PVH_BOOT_DATA_ADDR, 0x100000 - PVH_BOOT_DATA_ADDR,
-              E820_RESERVED);
-    add_range(0x100000, s->ram_size - 0x100000, E820_RAM);
-    if (bios_size != 0)
-        add_range(0x100000000ULL - bios_size, bios_size, E820_RESERVED);
+    PcMemoryRange ranges[PC_MEMORY_RANGES_MAX];
+    int n = pc_memory_ranges(s, bios_size, ranges);
+    for (int i = 0; i < n; i++) {
+        bd->memmap[i].addr = ranges[i].addr;
+        bd->memmap[i].size = ranges[i].size;
+        bd->memmap[i].type = ranges[i].type;
+    }
     si->memmap_paddr = PVH_BOOT_DATA_ADDR + offsetof(PvhBootData, memmap);
     si->memmap_entries = n;
 
