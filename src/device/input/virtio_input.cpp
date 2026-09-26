@@ -108,7 +108,7 @@ static int virtio_input_queue_event(VIRTIODevice *s,
     put_le32(buf + 4, value);
     buf_len = 8;
     
-    avail_idx = virtio_read16(s, qs->avail_addr + 2);
+    avail_idx = virtio_avail_idx(s, queue_idx);
     if (qs->last_avail_idx == avail_idx)
         return -1;
     desc_idx = virtio_read16(s, qs->avail_addr + 4 + 

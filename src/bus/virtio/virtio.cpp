@@ -27,6 +27,7 @@
 #include <inttypes.h>
 #include <assert.h>
 #include <stdarg.h>
+#include <atomic>
 
 #include "cutils.h"
 #include "devices.h"
@@ -332,6 +333,14 @@ uint16_t virtio_read16(VIRTIODevice *s, virtio_phys_addr_t addr)
     return *(uint16_t *)ptr;
 }
 
+/* The ring entries below the index are read only after it. */
+uint16_t virtio_avail_idx(VIRTIODevice *s, int queue_idx)
+{
+    uint16_t idx = virtio_read16(s, s->queue[queue_idx].avail_addr + 2);
+    std::atomic_thread_fence(std::memory_order_acquire);
+    return idx;
+}
+
 static void virtio_write16(VIRTIODevice *s, virtio_phys_addr_t addr,
                            uint16_t val)
 {
@@ -493,13 +502,16 @@ void virtio_consume_desc(VIRTIODevice *s,
     virtio_phys_addr_t addr;
     uint32_t index;
 
-    addr = qs->used_addr + 2;
-    index = virtio_read16(s, addr);
-    virtio_write16(s, addr, index + 1);
+    index = virtio_read16(s, qs->used_addr + 2);
 
     addr = qs->used_addr + 4 + (index & (qs->num - 1)) * 8;
     virtio_write32(s, addr, desc_idx);
     virtio_write32(s, addr + 4, desc_len);
+
+    /* Another processor may be reading the ring right now: the element has
+       to be there before the index that hands it over. */
+    std::atomic_thread_fence(std::memory_order_release);
+    virtio_write16(s, qs->used_addr + 2, index + 1);
 
     virtio_raise_irq(s, VIRTIO_INT_USED_RING, qs->msix_vector);
 }
@@ -553,7 +565,7 @@ void queue_notify(VIRTIODevice *s, int queue_idx)
         return;
     }
 
-    avail_idx = virtio_read16(s, qs->avail_addr + 2);
+    avail_idx = virtio_avail_idx(s, queue_idx);
     while (qs->last_avail_idx != avail_idx) {
         desc_idx = virtio_read16(s, qs->avail_addr + 4 + 
                                  (qs->last_avail_idx & (qs->num - 1)) * 2);

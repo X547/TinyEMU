@@ -124,6 +124,7 @@ void virtio_init(VIRTIODevice *s, VIRTIOBusDef *bus, uint32_t device_id,
                  int config_space_size);
 
 uint16_t virtio_read16(VIRTIODevice *s, virtio_phys_addr_t addr);
+uint16_t virtio_avail_idx(VIRTIODevice *s, int queue_idx);
 int memcpy_to_queue(VIRTIODevice *s, int queue_idx, int desc_idx, int offset,
                     const void *buf, int count);
 int memcpy_from_queue(VIRTIODevice *s, void *buf, int queue_idx, int desc_idx,

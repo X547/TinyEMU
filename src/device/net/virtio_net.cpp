@@ -105,7 +105,7 @@ bool VIRTIONetDevice::CanWritePacket()
 
     if (!qs->ready)
         return false;
-    avail_idx = virtio_read16(s, qs->avail_addr + 2);
+    avail_idx = virtio_avail_idx(s, 0);
     return qs->last_avail_idx != avail_idx;
 }
 
@@ -122,7 +122,7 @@ void VIRTIONetDevice::WritePacket(const uint8_t *buf, int buf_len)
 
     if (!qs->ready)
         return;
-    avail_idx = virtio_read16(s, qs->avail_addr + 2);
+    avail_idx = virtio_avail_idx(s, queue_idx);
     if (qs->last_avail_idx == avail_idx)
         return;
     desc_idx = virtio_read16(s, qs->avail_addr + 4 + 
