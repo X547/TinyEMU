@@ -278,7 +278,9 @@ void virtio_init(VIRTIODevice *s, VIRTIOBusDef *bus,
                                          0x1af4, pci_device_id, 0x01,
                                          class_id);
         pci_device_set_config16(s->pci_dev, 0x2c, 0x1af4);
-        pci_device_set_config16(s->pci_dev, 0x2e, device_id);
+        /* The type is in the identifier. A non-transitional device should
+           have a subsystem of 0x40 or above, and some drivers insist. */
+        pci_device_set_config16(s->pci_dev, 0x2e, 0x1100);
         pci_device_set_config8(s->pci_dev, PCI_INTERRUPT_PIN, 1);
 
         bar_num = 4;
