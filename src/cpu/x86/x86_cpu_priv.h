@@ -419,6 +419,7 @@ struct X86CPUState {
     uint32_t pmc_evtsel[2];
     uint64_t pmc_ctr[2];
     uint32_t misc_enable;
+    uint64_t pat;
 
     /* derived state, see cpu_update_mode() */
     uint8_t cpl;

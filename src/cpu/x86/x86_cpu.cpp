@@ -44,6 +44,7 @@ enum {
     CPUID_SEP = 11,
     CPUID_PGE = 13,
     CPUID_CMOV = 15,
+    CPUID_PAT = 16,
     CPUID_CLFSH = 19,
     CPUID_MMX = 23,
     CPUID_FXSR = 24,
@@ -51,10 +52,21 @@ enum {
     CPUID_SSE2 = 26,
 };
 
-/* CPUID 0x80000001 EDX */
+/* CPUID 1 ECX */
 enum {
-    CPUID_EXT_NX = 20,
+    CPUID_CX16 = 13,
 };
+
+/* CPUID 0x80000001 ECX and EDX */
+enum {
+    CPUID_EXT_LAHF_LM = 0,  /* LAHF and SAHF in 64 bit mode */
+    CPUID_EXT_SYSCALL = 11,
+    CPUID_EXT_NX = 20,
+    CPUID_EXT_LM = 29,
+};
+
+/* the linear address width 0x80000008 reports */
+static const int LINEAR_ADDRESS_BITS = 48;
 
 /* CPUID 1 EBX bits 8-15: the CLFLUSH line size in 8 byte units */
 static const uint32_t CPUID_CLFLUSH_SIZE = 64 / 8;
@@ -71,6 +83,7 @@ enum {
     MSR_EVNTSEL0 = 0x186,
     MSR_EVNTSEL1 = 0x187,
     MSR_MISC_ENABLE = 0x1a0,
+    MSR_PAT = 0x277,
     MSR_EFER = 0xc0000080,
     MSR_STAR = 0xc0000081,
     MSR_LSTAR = 0xc0000082,
@@ -80,6 +93,9 @@ enum {
     MSR_GS_BASE = 0xc0000101,
     MSR_KERNEL_GS_BASE = 0xc0000102,
 };
+
+/* write back, write through, uncached minus, uncached, twice */
+static const uint64_t PAT_RESET = 0x0007040600070406;
 
 /* P6 counters are 40 bits wide */
 static const int PMC_BITS = 40;
@@ -754,6 +770,7 @@ static void cpu_reset(X86CPUState *s)
     memset(s->pmc_evtsel, 0, sizeof(s->pmc_evtsel));
     memset(s->pmc_ctr, 0, sizeof(s->pmc_ctr));
     s->misc_enable = MISC_ENABLE_RESET;
+    s->pat = PAT_RESET;
 
     s->cpl = 0;
     s->code64 = false;
@@ -786,7 +803,7 @@ static uint32_t cpuid_chars(const char *str)
 
 void cpu_cpuid(X86CPUState *s)
 {
-    static const char brand[48] = "TinyEMU i686 CPU";
+    static const char brand[48] = "TinyEMU x86-64 CPU";
     uint32_t leaf = s->regs[REG_EAX];
     uint32_t a = 0, b = 0, c = 0, d = 0;
 
@@ -800,27 +817,35 @@ void cpu_cpuid(X86CPUState *s)
     case 1:
         a = CPUID_SIGNATURE;
         b = set_bits(0, 8, 8, CPUID_CLFLUSH_SIZE);
+        c = bit_at(CPUID_CX16);
         d = bit_at(CPUID_FPU) | bit_at(CPUID_DE) | bit_at(CPUID_PSE) |
             bit_at(CPUID_TSC) | bit_at(CPUID_MSR) | bit_at(CPUID_PAE) |
             bit_at(CPUID_CX8) | bit_at(CPUID_SEP) | bit_at(CPUID_PGE) |
-            bit_at(CPUID_CMOV) | bit_at(CPUID_CLFSH) | bit_at(CPUID_MMX) |
-            bit_at(CPUID_FXSR) | bit_at(CPUID_SSE) | bit_at(CPUID_SSE2);
+            bit_at(CPUID_CMOV) | bit_at(CPUID_PAT) | bit_at(CPUID_CLFSH) |
+            bit_at(CPUID_MMX) | bit_at(CPUID_FXSR) | bit_at(CPUID_SSE) |
+            bit_at(CPUID_SSE2);
         break;
     case 0x80000000:
-        a = 0x80000004;
+        a = 0x80000008;
         break;
     case 0x80000001:
-        d = bit_at(CPUID_EXT_NX);
+        c = bit_at(CPUID_EXT_LAHF_LM);
+        d = bit_at(CPUID_EXT_SYSCALL) | bit_at(CPUID_EXT_NX) |
+            bit_at(CPUID_EXT_LM);
         break;
     case 0x80000002:
     case 0x80000003:
     case 0x80000004: {
-        const char *str = brand + (leaf - 0x80000002) * 12;
+        const char *str = brand + (leaf - 0x80000002) * 16;
         a = cpuid_chars(str);
         b = cpuid_chars(str + 4);
         c = cpuid_chars(str + 8);
+        d = cpuid_chars(str + 12);
         break;
     }
+    case 0x80000008:
+        a = X86_CPU_PHYS_ADDRESS_BITS | LINEAR_ADDRESS_BITS << 8;
+        break;
     }
     s->regs[REG_EAX] = a;
     s->regs[REG_EBX] = b;
@@ -869,6 +894,9 @@ void cpu_rdmsr(X86CPUState *s)
         break;
     case MSR_MISC_ENABLE:
         val = s->misc_enable;
+        break;
+    case MSR_PAT:
+        val = s->pat;
         break;
     case MSR_EFER:
         val = s->efer;
@@ -948,6 +976,17 @@ void cpu_wrmsr(X86CPUState *s)
         /* the other bits report what the part has and keep their value */
         s->misc_enable = (s->misc_enable & ~MISC_ENABLE_WRITABLE) |
             (val & MISC_ENABLE_WRITABLE);
+        break;
+    case MSR_PAT:
+        /* kept for reading back: there is no cache to apply it to; types
+           2 and 3 are reserved */
+        for (int i = 0; i < 8; i++) {
+            uint32_t type = get_bits(val, 8 * i, 8);
+            if (type > 7 || type == 2 || type == 3) {
+                raise_exception(s, EXCP_GP, 0);
+            }
+        }
+        s->pat = val;
         break;
     case MSR_EFER:
         cpu_set_efer(s, val);

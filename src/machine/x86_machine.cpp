@@ -2431,11 +2431,6 @@ static bool pvh_load(PCMachine *s, const uint8_t *buf, int buf_len,
         vm_error("pc: the kernel is not an x86 ELF file\n");
         return false;
     }
-    /* the interpreter is an i686 */
-    if (elf64 && !s->hypervisor) {
-        vm_error("pc: a 64 bit kernel needs a hypervisor\n");
-        return false;
-    }
     if (elf64) {
         phoff = get_le64(buf + 32);
         phentsize = get_le16(buf + 54);
