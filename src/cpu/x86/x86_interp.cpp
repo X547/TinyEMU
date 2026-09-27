@@ -1417,7 +1417,7 @@ static bool exec_0f(X86CPUState *s, Decoder &d)
             case 2: val = s->cr2; break;
             case 3: val = s->cr3; break;
             case 4: val = s->cr4; break;
-            case 8: val = s->cr8; break;
+            case 8: val = cpu_get_cr8(s); break;
             default: raise_exception(s, EXCP_UD);
             }
             s->regs[rm] = val;
@@ -1443,10 +1443,7 @@ static bool exec_0f(X86CPUState *s, Decoder &d)
                 cpu_set_cr3(s, val);
                 break;
             case 8:
-                if (val > 15) {
-                    raise_exception(s, EXCP_GP, 0);
-                }
-                s->cr8 = val;
+                cpu_set_cr8(s, val);
                 break;
             default:
                 raise_exception(s, EXCP_UD);

@@ -41,6 +41,7 @@ enum {
     CPUID_MSR = 5,
     CPUID_PAE = 6,
     CPUID_CX8 = 8,
+    CPUID_APIC = 9,
     CPUID_SEP = 11,
     CPUID_PGE = 13,
     CPUID_CMOV = 15,
@@ -74,6 +75,7 @@ static const uint32_t CPUID_CLFLUSH_SIZE = 64 / 8;
 enum {
     MSR_TSC = 0x10,
     MSR_PLATFORM_ID = 0x17,
+    MSR_APIC_BASE = 0x1b,
     MSR_UCODE_REV = 0x8b,
     MSR_PERFCTR0 = 0xc1,
     MSR_PERFCTR1 = 0xc2,
@@ -120,8 +122,8 @@ static const uint32_t CR0_VALID_MASK = bit_at(CR0_PE) | bit_at(CR0_MP) |
     bit_at(CR0_PG);
 
 static const uint32_t CR4_VALID_MASK = bit_at(CR4_TSD) | bit_at(CR4_DE) |
-    bit_at(CR4_PSE) | bit_at(CR4_PAE) | bit_at(CR4_PGE) | bit_at(CR4_PCE) |
-    bit_at(CR4_OSFXSR) | bit_at(CR4_OSXMMEXCPT);
+    bit_at(CR4_PSE) | bit_at(CR4_PAE) | bit_at(CR4_MCE) | bit_at(CR4_PGE) |
+    bit_at(CR4_PCE) | bit_at(CR4_OSFXSR) | bit_at(CR4_OSXMMEXCPT);
 
 static const uint64_t EFER_VALID_MASK = bit_at(EFER_SCE) | bit_at(EFER_LME) |
     bit_at(EFER_LMA) | bit_at(EFER_NXE);
@@ -722,6 +724,30 @@ void cpu_set_cr4(X86CPUState *s, uint32_t val)
     s->cr4 = val;
 }
 
+/* CR8 is the local APIC's task priority, or a plain register without
+   one. */
+uint64_t cpu_get_cr8(X86CPUState *s)
+{
+    if (s->local_apic == nullptr) {
+        return s->cr8;
+    }
+    DeviceLocker locker(*s->device_lock);
+    return s->local_apic->TaskPriority();
+}
+
+void cpu_set_cr8(X86CPUState *s, uint64_t val)
+{
+    if (val > 15) {
+        raise_exception(s, EXCP_GP, 0);
+    }
+    if (s->local_apic == nullptr) {
+        s->cr8 = val;
+        return;
+    }
+    DeviceLocker locker(*s->device_lock);
+    s->local_apic->SetTaskPriority(val);
+}
+
 static void cpu_set_efer(X86CPUState *s, uint64_t val)
 {
     if ((val & ~EFER_VALID_MASK) ||
@@ -824,6 +850,11 @@ void cpu_cpuid(X86CPUState *s)
             bit_at(CPUID_CMOV) | bit_at(CPUID_PAT) | bit_at(CPUID_CLFSH) |
             bit_at(CPUID_MMX) | bit_at(CPUID_FXSR) | bit_at(CPUID_SSE) |
             bit_at(CPUID_SSE2);
+        if (s->local_apic != nullptr) {
+            DeviceLocker locker(*s->device_lock);
+            d |= bit_at(CPUID_APIC);
+            b = set_bits(b, 24, 8, s->local_apic->ApicId());
+        }
         break;
     case 0x80000000:
         a = 0x80000008;
@@ -874,6 +905,15 @@ void cpu_rdmsr(X86CPUState *s)
     case MSR_PLATFORM_ID:
     case MSR_UCODE_REV:
         val = 0;
+        break;
+    case MSR_APIC_BASE:
+        if (s->local_apic == nullptr) {
+            raise_exception(s, EXCP_GP, 0);
+        }
+        {
+            DeviceLocker locker(*s->device_lock);
+            val = s->local_apic->ApicBase();
+        }
         break;
     case MSR_PERFCTR0:
     case MSR_PERFCTR1:
@@ -950,6 +990,17 @@ void cpu_wrmsr(X86CPUState *s)
         break;
     case MSR_UCODE_REV:
         break;
+    case MSR_APIC_BASE: {
+        bool ok = false;
+        if (s->local_apic != nullptr) {
+            DeviceLocker locker(*s->device_lock);
+            ok = s->local_apic->SetApicBase(val);
+        }
+        if (!ok) {
+            raise_exception(s, EXCP_GP, 0);
+        }
+        break;
+    }
     case MSR_PERFCTR0:
     case MSR_PERFCTR1:
         /* the upper bits come from bit 31, not from EDX */
@@ -1169,6 +1220,11 @@ void x86_cpu_set_seg(X86CPUState *s, int seg, const X86CPUSeg *sd)
 void x86_cpu_set_hard_intno_source(X86CPUState *s, X86HardIntnoSource *source)
 {
     s->hard_intno_source = source;
+}
+
+void x86_cpu_set_local_apic(X86CPUState *s, X86LocalApicTarget *apic)
+{
+    s->local_apic = apic;
 }
 
 void x86_cpu_set_tsc_source(X86CPUState *s, X86TscSource *source)

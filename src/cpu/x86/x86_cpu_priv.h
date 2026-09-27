@@ -154,6 +154,7 @@ enum {
     CR4_DE = 3,
     CR4_PSE = 4,
     CR4_PAE = 5,
+    CR4_MCE = 6,   /* machine checks are never raised */
     CR4_PGE = 7,
     CR4_PCE = 8,
     CR4_OSFXSR = 9,
@@ -456,6 +457,7 @@ struct X86CPUState {
     DeviceLock *device_lock; /* taken around every device access */
     DeviceIO *port_io;
     X86HardIntnoSource *hard_intno_source;
+    X86LocalApicTarget *local_apic; /* null without one */
     X86TscSource *tsc_source;
 };
 
@@ -524,6 +526,8 @@ void cpu_set_cr0(X86CPUState *s, uint32_t val);
 void cpu_set_cr3(X86CPUState *s, uint64_t val);
 void cpu_set_cr4(X86CPUState *s, uint32_t val);
 void cpu_cpuid(X86CPUState *s);
+uint64_t cpu_get_cr8(X86CPUState *s);
+void cpu_set_cr8(X86CPUState *s, uint64_t val);
 void cpu_rdmsr(X86CPUState *s);
 void cpu_wrmsr(X86CPUState *s);
 void cpu_rdpmc(X86CPUState *s);

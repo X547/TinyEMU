@@ -77,7 +77,23 @@ public:
     virtual uint64_t Tsc() = 0;
 };
 
+/* Implemented by the machine when the processor has a local APIC, which
+   CPUID then reports. Called with the device lock held. */
+class X86LocalApicTarget {
+public:
+    virtual ~X86LocalApicTarget() = default;
+
+    virtual uint32_t ApicId() = 0;
+    /* IA32_APIC_BASE; SetApicBase() is false for a value to refuse */
+    virtual uint64_t ApicBase() = 0;
+    virtual bool SetApicBase(uint64_t val) = 0;
+    /* CR8 */
+    virtual int TaskPriority() = 0;
+    virtual void SetTaskPriority(int val) = 0;
+};
+
 void x86_cpu_set_hard_intno_source(X86CPUState *s, X86HardIntnoSource *source);
+void x86_cpu_set_local_apic(X86CPUState *s, X86LocalApicTarget *apic);
 void x86_cpu_set_tsc_source(X86CPUState *s, X86TscSource *source);
 void x86_cpu_set_port_io(X86CPUState *s, DeviceIO *port_io);
 /* taken around every device access and interrupt acknowledge */

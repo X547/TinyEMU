@@ -48,6 +48,7 @@
 #include "pci_host_i440fx.h"
 #include "pc_acpi.h"
 #include "ioapic.h"
+#include "lapic.h"
 
 //#define DEBUG_BIOS
 //#define DUMP_IOPORT
@@ -1061,7 +1062,9 @@ class PCMachine final:
     public X86HardIntnoSource,
     public X86TscSource,
     public X86HypervisorTarget,
-    public PCIMsiTarget {
+    public PCIMsiTarget,
+    public LocalApicHost,
+    public X86LocalApicTarget {
 public:
     /* RAM from 0 up to the PCI hole, and the rest from 4 GB */
     uint64_t fLowRamSize;
@@ -1095,6 +1098,9 @@ public:
     /* the machine's IOAPIC, when the local APICs are the hypervisor's and
        the rest is the machine's */
     std::unique_ptr<IOAPIC> fIoApic;
+    /* the interpreter's local APIC, when there is no hypervisor to have
+       one */
+    std::unique_ptr<LocalApic> fLapic;
     PCIrqFanout fIrqFanout {*this};
     /* the configuration's HPET, if it has one */
     HPET *fHpet = nullptr;
@@ -1137,6 +1143,14 @@ public:
     void ProcessorShutdown() override;
     /* PCIMsiTarget */
     void SendMsi(uint64_t addr, uint32_t data) override;
+    /* LocalApicHost; ApicEoi() above serves both */
+    void SetApicInterrupt(bool pending) override;
+    /* X86LocalApicTarget */
+    uint32_t ApicId() override {return fLapic->Id();}
+    uint64_t ApicBase() override {return fLapic->Base();}
+    bool SetApicBase(uint64_t val) override {return fLapic->SetBase(val);}
+    int TaskPriority() override {return fLapic->TaskPriority();}
+    void SetTaskPriority(int val) override {fLapic->SetTaskPriority(val);}
 
     DeviceIOAdapter<PCMachine, &PCMachine::Port80Read,
                     &PCMachine::Port80Write> fPort80Io {*this};
@@ -1327,14 +1341,27 @@ void PCMachine::SetCPUIRQ(int level)
         if (raised && sCurrentVcpu != 0) {
             KickVcpu(0);
         }
+    } else if (fLapic) {
+        fLapic->SetLint0(level);
     } else {
         x86_cpu_set_irq(cpu_state, level);
         Kick();
     }
 }
 
+void PCMachine::SetApicInterrupt(bool pending)
+{
+    x86_cpu_set_irq(cpu_state, pending);
+    Kick();
+}
+
 int PCMachine::HardIntno()
 {
+    if (fLapic) {
+        int vector = fLapic->Acknowledge();
+        if (vector != LAPIC_EXTINT)
+            return vector;
+    }
     return pic2_get_hard_intno(pic_state.get());
 }
 
@@ -1352,9 +1379,12 @@ int PCMachine::AcknowledgeInterrupt()
    the memory write an MSI really is. */
 void PCMachine::SendMsi(uint64_t addr, uint32_t data)
 {
-    if ((addr >> 20) == 0xfee)
-        hypervisor->SendMsi(addr, data);
-    else
+    if ((addr >> 20) == 0xfee) {
+        if (hypervisor)
+            hypervisor->SendMsi(addr, data);
+        else if (fLapic)
+            fLapic->Deliver(addr, data);
+    } else
         mem_map->IoWrite(addr, data, 2);
 }
 
@@ -1732,9 +1762,9 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
         s->hypervisor = host_x86_hypervisor_open(*s, *p->device_lock,
                                                  options);
     }
-    /* the interpreter has no local APIC */
-    if (options.local_apic && !s->hypervisor) {
-        vm_error("pc: interrupt_controller \"apic\" needs a hypervisor\n");
+    /* the interpreter runs one processor */
+    if (options.cpu_count > 1 && !s->hypervisor) {
+        vm_error("pc: more than one processor needs a hypervisor\n");
         return nullptr;
     }
     s->fLocalApic = options.local_apic;
@@ -1813,6 +1843,13 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
                                        s->fIoApic.get(), DEVIO_SIZE32);
             for (int i = 0; i < PC_IRQ_COUNT; i++)
                 s->pic_irq[i].Init(&s->fIrqFanout, i);
+        }
+        /* the 8259s then reach the processor through its LINT0 */
+        if (s->fLocalApic && s->cpu_state) {
+            s->fLapic = std::make_unique<LocalApic>(*s, 0);
+            s->mem_map->RegisterDevice(LAPIC_BASE, LAPIC_SIZE, s->fLapic.get(),
+                                       DEVIO_SIZE32);
+            x86_cpu_set_local_apic(s->cpu_state, s);
         }
         if (s->cpu_state) {
             x86_cpu_set_hard_intno_source(s->cpu_state, s);
@@ -2600,6 +2637,11 @@ int64_t PCMachine::RunTimers()
         int64_t pit_delay = pit_update_irq(s->pit_state.get(), !legacy);
         if (delay < 0 || pit_delay < delay)
             delay = pit_delay;
+    }
+    if (s->fLapic) {
+        int64_t apic_delay = s->fLapic->RunTimer();
+        if (apic_delay >= 0 && (delay < 0 || apic_delay < delay))
+            delay = apic_delay;
     }
     return delay;
 }
