@@ -72,6 +72,13 @@ enum {
     MSR_EVNTSEL1 = 0x187,
     MSR_MISC_ENABLE = 0x1a0,
     MSR_EFER = 0xc0000080,
+    MSR_STAR = 0xc0000081,
+    MSR_LSTAR = 0xc0000082,
+    MSR_CSTAR = 0xc0000083,
+    MSR_SFMASK = 0xc0000084,
+    MSR_FS_BASE = 0xc0000100,
+    MSR_GS_BASE = 0xc0000101,
+    MSR_KERNEL_GS_BASE = 0xc0000102,
 };
 
 /* P6 counters are 40 bits wide */
@@ -100,7 +107,8 @@ static const uint32_t CR4_VALID_MASK = bit_at(CR4_TSD) | bit_at(CR4_DE) |
     bit_at(CR4_PSE) | bit_at(CR4_PAE) | bit_at(CR4_PGE) | bit_at(CR4_PCE) |
     bit_at(CR4_OSFXSR) | bit_at(CR4_OSXMMEXCPT);
 
-static const uint64_t EFER_VALID_MASK = bit_at(EFER_NXE);
+static const uint64_t EFER_VALID_MASK = bit_at(EFER_SCE) | bit_at(EFER_LME) |
+    bit_at(EFER_LMA) | bit_at(EFER_NXE);
 
 
 static void cpu_dump_state(X86CPUState *s)
@@ -112,16 +120,26 @@ static void cpu_dump_state(X86CPUState *s)
         "ES", "CS", "SS", "DS", "FS", "GS"
     };
 
-    for (int i = 0; i < 8; i++) {
-        fprintf(stderr, "%s=%08x%s", reg_names[i], (uint32_t)s->regs[i],
-                i % 4 == 3 ? "\n" : " ");
+    if (get_bit(s->efer, EFER_LMA)) {
+        for (int i = 0; i < GPR_COUNT; i++) {
+            fprintf(stderr, "R%-2d=%016" PRIx64 "%s", i, s->regs[i],
+                    i % 4 == 3 ? "\n" : " ");
+        }
+        fprintf(stderr, "RIP=%016" PRIx64 " EFL=%08x CPL=%d CR0=%08x "
+                "CR2=%016" PRIx64 " CR3=%016" PRIx64 "\n", s->rip,
+                get_eflags(s), s->cpl, s->cr0, s->cr2, s->cr3);
+    } else {
+        for (int i = 0; i < 8; i++) {
+            fprintf(stderr, "%s=%08x%s", reg_names[i], (uint32_t)s->regs[i],
+                    i % 4 == 3 ? "\n" : " ");
+        }
+        fprintf(stderr, "EIP=%08x EFL=%08x CPL=%d CR0=%08x CR2=%08x "
+                "CR3=%08x\n", (uint32_t)s->rip, get_eflags(s), s->cpl, s->cr0,
+                (uint32_t)s->cr2, (uint32_t)s->cr3);
     }
-    fprintf(stderr, "EIP=%08x EFL=%08x CPL=%d CR0=%08x CR2=%08x CR3=%08x\n",
-            (uint32_t)s->rip, get_eflags(s), s->cpl, s->cr0,
-            (uint32_t)s->cr2, (uint32_t)s->cr3);
     for (int i = 0; i < SEG_COUNT; i++) {
-        fprintf(stderr, "%s=%04x %08x %08x %04x\n", seg_names[i],
-                s->segs[i].sel, (uint32_t)s->segs[i].base, s->segs[i].limit,
+        fprintf(stderr, "%s=%04x %016" PRIx64 " %08x %04x\n", seg_names[i],
+                s->segs[i].sel, s->segs[i].base, s->segs[i].limit,
                 s->segs[i].flags);
     }
 }
@@ -290,6 +308,11 @@ static const uint64_t PAE_HIGH_RSVD_MASK =
                          64 - X86_CPU_PHYS_ADDRESS_BITS);
 static const uint64_t PDPTE_RSVD_MASK = PAE_HIGH_RSVD_MASK |
     field_mask<uint64_t>(1, 2) | field_mask<uint64_t>(5, 4);
+/* 4-level entries leave bits 52-62 to software */
+static const uint64_t LONG_RSVD_MASK =
+    field_mask<uint64_t>(X86_CPU_PHYS_ADDRESS_BITS,
+                         52 - X86_CPU_PHYS_ADDRESS_BITS) |
+    bit_at<uint64_t>(PTE_XD);
 /* below the frame of a 2 MB page, above PAT */
 static const uint64_t PAE_LARGE_RSVD_MASK = field_mask<uint64_t>(13, 8);
 
@@ -319,6 +342,7 @@ static uint64_t page_walk(X86CPUState *s, uint64_t lin, int access,
     bool is_user = mmu_idx == MMU_USER;
     bool is_write = access == ACCESS_WRITE;
     bool pae = get_bit(s->cr4, CR4_PAE);
+    bool lma = get_bit(s->efer, EFER_LMA);
     int entry_size = pae ? SIZE64 : SIZE32;
     int index_bits = pae ? 9 : 10;
     uint64_t addr_mask = pae ? PAE_ADDR_MASK :
@@ -326,53 +350,65 @@ static uint64_t page_walk(X86CPUState *s, uint64_t lin, int access,
     /* XD is reserved unless NX is enabled */
     uint64_t rsvd = 0;
     if (pae) {
-        rsvd = PAE_HIGH_RSVD_MASK;
+        rsvd = lma ? LONG_RSVD_MASK : PAE_HIGH_RSVD_MASK;
         if (get_bit(s->efer, EFER_NXE)) {
             rsvd = set_bit(rsvd, PTE_XD, false);
         }
     }
 
-    uint64_t pde_addr;
-    if (pae) {
+    /* Level 0 holds the page table entries; PAE starts from its page
+       directory pointer registers rather than from memory. */
+    int level;
+    uint64_t table;
+    if (lma) {
+        level = 3;
+        table = s->cr3 & PAE_ADDR_MASK;
+    } else if (pae) {
         uint64_t pdpte = s->pdpte[get_bits(lin, 30, 2)];
         if (!get_bit(pdpte, PTE_P)) {
             page_fault(s, lin, access, mmu_idx, 0);
         }
-        pde_addr = (pdpte & PAE_ADDR_MASK) + get_bits(lin, 21, 9) * 8;
+        level = 1;
+        table = pdpte & PAE_ADDR_MASK;
     } else {
-        pde_addr = page_base(get_bits(s->cr3, 0, 32)) +
-            get_bits(lin, 22, 10) * 4;
-    }
-    uint64_t pde = phys_read(s, pde_addr, entry_size);
-    if (!get_bit(pde, PTE_P)) {
-        page_fault(s, lin, access, mmu_idx, 0);
+        level = 1;
+        table = page_base(get_bits(s->cr3, 0, 32));
     }
 
-    /* PAE always has large pages, of 2 MB rather than 4 MB */
-    bool large = get_bit(pde, PTE_PS) && (pae || get_bit(s->cr4, CR4_PSE));
-    if (pde & (large && pae ? rsvd | PAE_LARGE_RSVD_MASK : rsvd)) {
-        page_fault(s, lin, access, mmu_idx, bit_at(PF_P) | bit_at(PF_RSVD));
-    }
-    uint64_t pte_addr, pte, perms, phys;
-    if (large) {
-        pte_addr = pde_addr;
-        pte = pde;
-        perms = pde;
-        phys = set_bits(pde & addr_mask, 0, PAGE_BITS + index_bits, lin);
-    } else {
-        pte_addr = (pde & addr_mask) +
-            (get_bits(lin, PAGE_BITS, index_bits) << entry_size);
-        pte = phys_read(s, pte_addr, entry_size);
-        if (!get_bit(pte, PTE_P)) {
+    uint64_t entry_addr[4], entry[4];
+    uint64_t perms = UINT64_MAX;
+    int top = level, shift;
+    for (;; level--) {
+        shift = PAGE_BITS + level * index_bits;
+        entry_addr[level] = table +
+            (get_bits(lin, shift, index_bits) << entry_size);
+        uint64_t e = phys_read(s, entry_addr[level], entry_size);
+        entry[level] = e;
+        if (!get_bit(e, PTE_P)) {
             page_fault(s, lin, access, mmu_idx, 0);
         }
-        if (pte & rsvd) {
+        /* large pages are 2 MB with PAE, 4 MB without; there are no 1 GB
+           ones */
+        bool large = level == 1 && get_bit(e, PTE_PS) &&
+            (pae || get_bit(s->cr4, CR4_PSE));
+        uint64_t e_rsvd = rsvd;
+        if (pae && level == 1 && large) {
+            e_rsvd |= PAE_LARGE_RSVD_MASK;
+        } else if (pae && level >= 2) {
+            e_rsvd |= bit_at<uint64_t>(PTE_PS);
+        }
+        if (e & e_rsvd) {
             page_fault(s, lin, access, mmu_idx,
                        bit_at(PF_P) | bit_at(PF_RSVD));
         }
-        perms = pde & pte;
-        phys = (pte & addr_mask) | page_offset(lin);
+        perms &= e;
+        if (level == 0 || large) {
+            break;
+        }
+        table = e & addr_mask;
     }
+    uint64_t leaf = entry[level];
+    uint64_t phys = set_bits(leaf & addr_mask, 0, shift, lin);
 
     if (is_user && !get_bit(perms, PTE_US)) {
         page_fault(s, lin, access, mmu_idx, bit_at(PF_P));
@@ -382,25 +418,31 @@ static uint64_t page_walk(X86CPUState *s, uint64_t lin, int access,
     if (is_write && !rw) {
         page_fault(s, lin, access, mmu_idx, bit_at(PF_P));
     }
-    bool nx = get_bit(pde | pte, PTE_XD);
+    bool nx = false;
+    for (int i = level; i <= top; i++) {
+        nx = nx || get_bit(entry[i], PTE_XD);
+    }
     if (access == ACCESS_CODE && nx) {
         page_fault(s, lin, access, mmu_idx, bit_at(PF_P));
     }
 
-    if (!large && !get_bit(pde, PTE_A)) {
-        phys_write(s, pde_addr, set_bit(pde, PTE_A, true), entry_size);
+    for (int i = top; i > level; i--) {
+        if (!get_bit(entry[i], PTE_A)) {
+            phys_write(s, entry_addr[i], set_bit(entry[i], PTE_A, true),
+                       entry_size);
+        }
     }
-    uint64_t new_pte = set_bit(pte, PTE_A, true);
+    uint64_t new_leaf = set_bit(leaf, PTE_A, true);
     if (is_write) {
-        new_pte = set_bit(new_pte, PTE_D, true);
+        new_leaf = set_bit(new_leaf, PTE_D, true);
     }
-    if (new_pte != pte) {
-        phys_write(s, pte_addr, new_pte, entry_size);
+    if (new_leaf != leaf) {
+        phys_write(s, entry_addr[level], new_leaf, entry_size);
     }
-    if (large) {
+    if (level != 0) {
         s->tlb_large_pages = true;
     }
-    *writable = rw && get_bit(new_pte, PTE_D);
+    *writable = rw && get_bit(new_leaf, PTE_D);
     *executable = !nx;
     return phys;
 }
@@ -429,11 +471,24 @@ static bool crosses_page(uint64_t lin, int size)
     return page_offset(lin) > (uint32_t)(PAGE_SIZE - size_bytes(size));
 }
 
-/* The slow paths wrap the linear address, which the fast ones leave to a
-   TLB miss. */
+/* The slow paths wrap the linear address at 4 GB, or refuse a non-canonical
+   one in IA-32e mode, which the fast ones leave to a TLB miss. Compatibility
+   mode does not wrap: only a segment base that carries an offset past 4 GB
+   would tell. */
+static uint64_t wrap_linear(X86CPUState *s, uint64_t lin)
+{
+    if (s->lin_mask != UINT64_MAX) {
+        return lin & s->lin_mask;
+    }
+    if (!is_canonical(lin)) {
+        raise_exception(s, EXCP_GP, 0);
+    }
+    return lin;
+}
+
 uint64_t mem_read_slow(X86CPUState *s, uint64_t lin, int size, int mmu_idx)
 {
-    lin &= s->lin_mask;
+    lin = wrap_linear(s, lin);
     if (crosses_page(lin, size)) {
         uint64_t val = 0;
         for (int i = 0; i < size_bytes(size); i++) {
@@ -462,7 +517,7 @@ uint64_t mem_read_slow(X86CPUState *s, uint64_t lin, int size, int mmu_idx)
 static void probe_write(X86CPUState *s, uint64_t lin, int mmu_idx)
 {
     bool writable, executable;
-    lin &= s->lin_mask;
+    lin = wrap_linear(s, lin);
     uint64_t phys = page_walk(s, lin, ACCESS_WRITE, mmu_idx, &writable,
                               &executable);
     PhysMemoryRange *pr = s->mem_map->FindRange(phys);
@@ -475,7 +530,7 @@ static void probe_write(X86CPUState *s, uint64_t lin, int mmu_idx)
 
 void mem_probe_write(X86CPUState *s, uint64_t lin, int size)
 {
-    lin &= s->lin_mask;
+    lin = wrap_linear(s, lin);
     if (tlb_hit(tlb_entry(s, s->mmu_idx, lin)->write, lin, size)) {
         return;
     }
@@ -488,12 +543,12 @@ void mem_probe_write(X86CPUState *s, uint64_t lin, int size)
 void mem_write_slow(X86CPUState *s, uint64_t lin, uint64_t val, int size,
                     int mmu_idx)
 {
-    lin &= s->lin_mask;
+    lin = wrap_linear(s, lin);
     if (crosses_page(lin, size)) {
         /* both pages must be writable before any byte is */
         bool writable, executable;
         page_walk(s, lin, ACCESS_WRITE, mmu_idx, &writable, &executable);
-        page_walk(s, (lin + size_bytes(size) - 1) & s->lin_mask,
+        page_walk(s, wrap_linear(s, lin + size_bytes(size) - 1),
                   ACCESS_WRITE, mmu_idx, &writable, &executable);
         for (int i = 0; i < size_bytes(size); i++) {
             mem_write_mmu(s, lin + i, get_bits(val, 8 * i, 8), SIZE8,
@@ -524,7 +579,7 @@ void mem_write_slow(X86CPUState *s, uint64_t lin, uint64_t val, int size,
 uint8_t fetch_slow(X86CPUState *s, uint64_t lin)
 {
     int mmu_idx = s->mmu_idx;
-    lin &= s->lin_mask;
+    lin = wrap_linear(s, lin);
     X86TLBEntry *e = tlb_entry(s, mmu_idx, lin);
     if (e->code != page_base(lin)) {
         bool writable, executable;
@@ -549,9 +604,30 @@ uint8_t fetch_slow(X86CPUState *s, uint64_t lin)
 
 void cpu_update_mode(X86CPUState *s)
 {
+    bool lma = get_bit(s->efer, EFER_LMA);
+    bool code64 = lma && get_bit(s->segs[SEG_CS].flags, DESC_L);
+    if (code64 != s->code64) {
+        s->code64 = code64;
+        /* 64 bit mode uses the bases of FS and GS only */
+        if (code64) {
+            s->segs[SEG_ES].base = 0;
+            s->segs[SEG_SS].base = 0;
+            s->segs[SEG_DS].base = 0;
+        }
+        for (int seg = 0; seg < SEG_COUNT; seg++) {
+            seg_update_fast(s, seg);
+        }
+    }
+    if (code64) {
+        s->segs[SEG_CS].base = 0;
+    }
     s->code32 = get_bit(s->segs[SEG_CS].flags, DESC_DB);
-    s->ss32 = get_bit(s->segs[SEG_SS].flags, DESC_DB);
-    s->lin_mask = UINT32_MAX;
+    s->code_opsize = s->code32 || code64 ? SIZE32 : SIZE16;
+    s->code_addr_size = code64 ? SIZE64 : s->code_opsize;
+    s->eip_mask = size_mask(s->code_addr_size);
+    s->sp_mask = code64 ? UINT64_MAX :
+        get_bit(s->segs[SEG_SS].flags, DESC_DB) ? UINT32_MAX : 0xffff;
+    s->lin_mask = lma ? UINT64_MAX : UINT32_MAX;
     int mmu_idx = s->cpl == 3 ? MMU_USER : MMU_SUPERVISOR;
     if (mmu_idx != s->mmu_idx) {
         s->mmu_idx = mmu_idx;
@@ -570,7 +646,23 @@ void cpu_set_cr0(X86CPUState *s, uint32_t val)
 {
     val = set_bit(val & CR0_VALID_MASK, CR0_ET, true);
     uint32_t changed = s->cr0 ^ val;
-    if (get_bit(val, CR0_PG) && get_bit(s->cr4, CR4_PAE) &&
+    bool pg = get_bit(val, CR0_PG);
+    bool lme = get_bit(s->efer, EFER_LME);
+    if (pg && !get_bit(val, CR0_PE)) {
+        raise_exception(s, EXCP_GP, 0);
+    }
+    /* IA-32e mode starts with paging, from a 32 bit code segment with PAE
+       on, and 64 bit mode cannot turn paging off */
+    if (get_bit(changed, CR0_PG)) {
+        if (pg && lme && (!get_bit(s->cr4, CR4_PAE) ||
+                          get_bit(s->segs[SEG_CS].flags, DESC_L))) {
+            raise_exception(s, EXCP_GP, 0);
+        }
+        if (!pg && s->code64) {
+            raise_exception(s, EXCP_GP, 0);
+        }
+    }
+    if (pg && !lme && get_bit(s->cr4, CR4_PAE) &&
         (changed & (bit_at(CR0_PG) | bit_at(CR0_CD) | bit_at(CR0_NW)))) {
         load_pdptes(s, s->cr3);
     }
@@ -578,6 +670,7 @@ void cpu_set_cr0(X86CPUState *s, uint32_t val)
         tlb_flush_all(s);
     }
     s->cr0 = val;
+    s->efer = set_bit(s->efer, EFER_LMA, pg && lme);
     if (!get_bit(val, CR0_PE)) {
         s->cpl = 0;
     }
@@ -586,7 +679,11 @@ void cpu_set_cr0(X86CPUState *s, uint32_t val)
 
 void cpu_set_cr3(X86CPUState *s, uint64_t val)
 {
-    if (get_bit(s->cr0, CR0_PG) && get_bit(s->cr4, CR4_PAE)) {
+    if (get_bit(s->efer, EFER_LMA)) {
+        if (val & ~bit_mask<uint64_t>(X86_CPU_PHYS_ADDRESS_BITS)) {
+            raise_exception(s, EXCP_GP, 0);
+        }
+    } else if (get_bit(s->cr0, CR0_PG) && get_bit(s->cr4, CR4_PAE)) {
         load_pdptes(s, val);
     }
     s->cr3 = val;
@@ -596,16 +693,33 @@ void cpu_set_cr3(X86CPUState *s, uint64_t val)
 void cpu_set_cr4(X86CPUState *s, uint32_t val)
 {
     uint32_t paging = bit_at(CR4_PSE) | bit_at(CR4_PAE) | bit_at(CR4_PGE);
-    if (val & ~CR4_VALID_MASK) {
+    bool lma = get_bit(s->efer, EFER_LMA);
+    if ((val & ~CR4_VALID_MASK) || (lma && !get_bit(val, CR4_PAE))) {
         raise_exception(s, EXCP_GP, 0);
     }
     if ((s->cr4 ^ val) & paging) {
-        if (get_bit(s->cr0, CR0_PG) && get_bit(val, CR4_PAE)) {
+        if (get_bit(s->cr0, CR0_PG) && get_bit(val, CR4_PAE) && !lma) {
             load_pdptes(s, s->cr3);
         }
         tlb_flush_all(s);
     }
     s->cr4 = val;
+}
+
+static void cpu_set_efer(X86CPUState *s, uint64_t val)
+{
+    if ((val & ~EFER_VALID_MASK) ||
+        (get_bit(s->cr0, CR0_PG) &&
+         get_bit(val ^ s->efer, EFER_LME))) {
+        raise_exception(s, EXCP_GP, 0);
+    }
+    /* LMA follows LME and paging; NXE decides which PAE entry bits are
+       reserved */
+    val = set_bit(val, EFER_LMA, get_bit(s->efer, EFER_LMA));
+    if (val != s->efer) {
+        tlb_flush_all(s);
+    }
+    s->efer = val;
 }
 
 static void cpu_reset(X86CPUState *s)
@@ -622,6 +736,7 @@ static void cpu_reset(X86CPUState *s)
     s->cr2 = 0;
     s->cr3 = 0;
     s->cr4 = 0;
+    s->cr8 = 0;
     s->efer = 0;
     memset(s->pdpte, 0, sizeof(s->pdpte));
     memset(s->dr, 0, sizeof(s->dr));
@@ -630,12 +745,18 @@ static void cpu_reset(X86CPUState *s)
     s->sysenter_cs = 0;
     s->sysenter_esp = 0;
     s->sysenter_eip = 0;
+    s->star = 0;
+    s->lstar = 0;
+    s->cstar = 0;
+    s->sfmask = 0;
+    s->kernel_gs_base = 0;
     s->tsc_offset = 0;
     memset(s->pmc_evtsel, 0, sizeof(s->pmc_evtsel));
     memset(s->pmc_ctr, 0, sizeof(s->pmc_ctr));
     s->misc_enable = MISC_ENABLE_RESET;
 
     s->cpl = 0;
+    s->code64 = false;
     for (int seg = 0; seg < SEG_COUNT; seg++) {
         load_seg_cache(s, seg, 0, 0, 0xffff, data_flags);
     }
@@ -752,10 +873,40 @@ void cpu_rdmsr(X86CPUState *s)
     case MSR_EFER:
         val = s->efer;
         break;
+    case MSR_STAR:
+        val = s->star;
+        break;
+    case MSR_LSTAR:
+        val = s->lstar;
+        break;
+    case MSR_CSTAR:
+        val = s->cstar;
+        break;
+    case MSR_SFMASK:
+        val = s->sfmask;
+        break;
+    case MSR_FS_BASE:
+        val = s->segs[SEG_FS].base;
+        break;
+    case MSR_GS_BASE:
+        val = s->segs[SEG_GS].base;
+        break;
+    case MSR_KERNEL_GS_BASE:
+        val = s->kernel_gs_base;
+        break;
     default:
         raise_exception(s, EXCP_GP, 0);
     }
     set_edx_eax(s, val);
+}
+
+/* An MSR that holds an address takes only a canonical one. */
+static uint64_t canonical_msr(X86CPUState *s, uint64_t val)
+{
+    if (!is_canonical(val)) {
+        raise_exception(s, EXCP_GP, 0);
+    }
+    return val;
 }
 
 void cpu_wrmsr(X86CPUState *s)
@@ -781,11 +932,10 @@ void cpu_wrmsr(X86CPUState *s)
         s->sysenter_cs = get_bits(val, 0, 16);
         break;
     case MSR_SYSENTER_ESP:
-        /* 32 bits wide on a processor without long mode */
-        s->sysenter_esp = get_bits(val, 0, 32);
+        s->sysenter_esp = canonical_msr(s, val);
         break;
     case MSR_SYSENTER_EIP:
-        s->sysenter_eip = get_bits(val, 0, 32);
+        s->sysenter_eip = canonical_msr(s, val);
         break;
     case MSR_EVNTSEL0:
     case MSR_EVNTSEL1:
@@ -800,14 +950,31 @@ void cpu_wrmsr(X86CPUState *s)
             (val & MISC_ENABLE_WRITABLE);
         break;
     case MSR_EFER:
-        if (val & ~EFER_VALID_MASK) {
+        cpu_set_efer(s, val);
+        break;
+    case MSR_STAR:
+        s->star = val;
+        break;
+    case MSR_LSTAR:
+        s->lstar = canonical_msr(s, val);
+        break;
+    case MSR_CSTAR:
+        s->cstar = canonical_msr(s, val);
+        break;
+    case MSR_SFMASK:
+        if (get_bits(val, 32, 32) != 0) {
             raise_exception(s, EXCP_GP, 0);
         }
-        /* NXE decides which PAE entry bits are reserved */
-        if (val != s->efer) {
-            tlb_flush_all(s);
-        }
-        s->efer = val;
+        s->sfmask = val;
+        break;
+    case MSR_FS_BASE:
+        s->segs[SEG_FS].base = canonical_msr(s, val);
+        break;
+    case MSR_GS_BASE:
+        s->segs[SEG_GS].base = canonical_msr(s, val);
+        break;
+    case MSR_KERNEL_GS_BASE:
+        s->kernel_gs_base = canonical_msr(s, val);
         break;
     default:
         raise_exception(s, EXCP_GP, 0);
@@ -840,9 +1007,9 @@ void raise_exception(X86CPUState *s, int intno, int error_code)
     int old = s->old_exception;
 
 #ifdef DUMP_EXCEPTIONS
-    fprintf(stderr, "x86: exception %d error=%04x at %04x:%08x cr2=%08x\n",
-            intno, error_code, s->segs[SEG_CS].sel, (uint32_t)s->rip,
-            (uint32_t)s->cr2);
+    fprintf(stderr, "x86: exception %d error=%04x at %04x:%08" PRIx64
+            " cr2=%08" PRIx64 "\n", intno, error_code, s->segs[SEG_CS].sel,
+            s->rip, s->cr2);
 #endif
     if (old == EXCP_DF) {
         fprintf(stderr, "x86: triple fault, resetting\n");

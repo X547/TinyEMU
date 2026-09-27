@@ -926,16 +926,18 @@ static void mmx_enter(X86CPUState *s)
     s->fpu.empty = 0;
 }
 
+/* There are 8 MMX registers, whatever REX says. */
 static MmxReg mmx_get(X86CPUState *s, int reg)
 {
     MmxReg v;
-    memcpy(v.bytes, &s->fpu.st[reg].mant, sizeof(v.bytes));
+    memcpy(v.bytes, &s->fpu.st[get_bits(reg, 0, 3)].mant, sizeof(v.bytes));
     return v;
 }
 
 /* A written MMX register reads as a NaN or an infinity on the x87 side. */
 static void mmx_set(X86CPUState *s, int reg, const MmxReg &v)
 {
+    reg = get_bits(reg, 0, 3);
     memcpy(&s->fpu.st[reg].mant, v.bytes, sizeof(v.bytes));
     s->fpu.st[reg].sexp = 0xffff;
 }
@@ -1019,23 +1021,23 @@ static void mem_store(X86CPUState *s, const SimdInsn &insn, const void *src,
                     size);
 }
 
-/* A general register or memory operand; 32 bits outside 64 bit mode. */
-static uint32_t gpr_rm_read(X86CPUState *s, const SimdInsn &insn)
+/* A general register or memory operand: 64 bits with REX.W, else 32. */
+static uint64_t gpr_rm_read(X86CPUState *s, const SimdInsn &insn)
 {
+    int size = insn.rex_w ? SIZE64 : SIZE32;
     if (insn.rm.is_reg) {
-        return s->regs[insn.rm.reg];
+        return trunc_size(s->regs[insn.rm.reg], size);
     }
-    return mem_read(s, simd_address(s, insn.rm, SIZE32, false, false),
-                    SIZE32);
+    return mem_read(s, simd_address(s, insn.rm, size, false, false), size);
 }
 
-static void gpr_rm_write(X86CPUState *s, const SimdInsn &insn, uint32_t val)
+static void gpr_rm_write(X86CPUState *s, const SimdInsn &insn, uint64_t val)
 {
+    int size = insn.rex_w ? SIZE64 : SIZE32;
     if (insn.rm.is_reg) {
-        s->regs[insn.rm.reg] = val;
+        s->regs[insn.rm.reg] = trunc_size(val, size);
     } else {
-        mem_write(s, simd_address(s, insn.rm, SIZE32, true, false), val,
-                  SIZE32);
+        mem_write(s, simd_address(s, insn.rm, size, true, false), val, size);
     }
 }
 
@@ -1218,13 +1220,17 @@ static void exec_cvt_from_int(X86CPUState *s, const SimdInsn &insn)
         break;
     }
     case SIMD_F3: { /* CVTSI2SS */
-        int32_t val = gpr_rm_read(s, insn);
-        set_lane<uint32_t>(r, 0, int_to_fp<F32>(fp, val));
+        uint64_t val = gpr_rm_read(s, insn);
+        set_lane<uint32_t>(r, 0, insn.rex_w ?
+                           int_to_fp<F32>(fp, (int64_t)val) :
+                           int_to_fp<F32>(fp, (int32_t)val));
         break;
     }
     default: { /* CVTSI2SD */
-        int32_t val = gpr_rm_read(s, insn);
-        set_lane<uint64_t>(r, 0, int_to_fp<F64>(fp, val));
+        uint64_t val = gpr_rm_read(s, insn);
+        set_lane<uint64_t>(r, 0, insn.rex_w ?
+                           int_to_fp<F64>(fp, (int64_t)val) :
+                           int_to_fp<F64>(fp, (int32_t)val));
         break;
     }
     }
@@ -1277,10 +1283,18 @@ static void exec_cvt_to_int(X86CPUState *s, const SimdInsn &insn)
         cvt_to_mmx<F64>(s, insn, truncate);
         break;
     case SIMD_F3:
-        cvt_to_gpr<F32, int32_t>(s, insn, truncate);
+        if (insn.rex_w) {
+            cvt_to_gpr<F32, int64_t>(s, insn, truncate);
+        } else {
+            cvt_to_gpr<F32, int32_t>(s, insn, truncate);
+        }
         break;
     default:
-        cvt_to_gpr<F64, int32_t>(s, insn, truncate);
+        if (insn.rex_w) {
+            cvt_to_gpr<F64, int64_t>(s, insn, truncate);
+        } else {
+            cvt_to_gpr<F64, int32_t>(s, insn, truncate);
+        }
         break;
     }
 }
@@ -1404,7 +1418,8 @@ static void exec_cvt_packed_int(X86CPUState *s, const SimdInsn &insn)
     s->xmm[insn.reg] = r;
 }
 
-/* 0F 6E and 7E: MOVD and MOVQ between vector and general registers. */
+/* 0F 6E and 7E: MOVD, and with REX.W MOVQ, between vector and general
+   registers. */
 static void exec_movd(X86CPUState *s, const SimdInsn &insn)
 {
     bool store = insn.opcode == 0x7e;
@@ -1413,10 +1428,10 @@ static void exec_movd(X86CPUState *s, const SimdInsn &insn)
     case SIMD_NONE:
         mmx_check(s);
         if (store) {
-            gpr_rm_write(s, insn, lane<uint32_t>(mmx_get(s, insn.reg), 0));
+            gpr_rm_write(s, insn, lane<uint64_t>(mmx_get(s, insn.reg), 0));
         } else {
             MmxReg r = {};
-            set_lane<uint32_t>(r, 0, gpr_rm_read(s, insn));
+            set_lane<uint64_t>(r, 0, gpr_rm_read(s, insn));
             mmx_set(s, insn.reg, r);
         }
         mmx_enter(s);
@@ -1424,10 +1439,10 @@ static void exec_movd(X86CPUState *s, const SimdInsn &insn)
     case SIMD_66:
         sse_check(s);
         if (store) {
-            gpr_rm_write(s, insn, lane<uint32_t>(s->xmm[insn.reg], 0));
+            gpr_rm_write(s, insn, lane<uint64_t>(s->xmm[insn.reg], 0));
         } else {
             XmmReg r = {};
-            set_lane<uint32_t>(r, 0, gpr_rm_read(s, insn));
+            set_lane<uint64_t>(r, 0, gpr_rm_read(s, insn));
             s->xmm[insn.reg] = r;
         }
         break;
@@ -1531,9 +1546,9 @@ static void exec_group15(X86CPUState *s, const SimdInsn &insn)
             raise_exception(s, EXCP_GP, 0);
         }
         if (insn.reg == 0) {
-            fpu_fxsave(s, lin);
+            fpu_fxsave(s, lin, insn.rex_w);
         } else {
-            fpu_fxrstor(s, lin);
+            fpu_fxrstor(s, lin, insn.rex_w);
         }
         break;
     }

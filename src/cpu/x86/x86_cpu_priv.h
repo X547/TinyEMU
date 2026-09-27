@@ -161,6 +161,9 @@ enum {
 };
 
 enum {
+    EFER_SCE = 0,   /* SYSCALL and SYSRET */
+    EFER_LME = 8,
+    EFER_LMA = 10,  /* IA-32e mode active: long mode enabled and paging on */
     EFER_NXE = 11,
 };
 
@@ -204,10 +207,14 @@ enum {
     DESC_S = 4,     /* code or data rather than system */
     DESC_DPL = 5,   /* 2 bits */
     DESC_P = 7,
+    DESC_L = 13,    /* 64 bit code */
     DESC_DB = 14,
     DESC_G = 15,
 };
 
+/* In IA-32e mode types 9, 11, 12, 14 and 15 are the 64 bit TSS and gates,
+   16 bytes long like an LDT descriptor, and the other system types are
+   invalid. */
 enum {
     SYS_TSS16 = 1,
     SYS_LDT = 2,
@@ -285,10 +292,16 @@ static inline uint32_t page_offset(uint64_t addr)
     return get_bits(addr, 0, PAGE_BITS);
 }
 
+/* Bits 48-63 repeat bit 47. */
+static inline bool is_canonical(uint64_t addr)
+{
+    return (uint64_t)sign_extend(addr, 48) == addr;
+}
+
 /* One page of the linear address space. The three tags say for which access
    kinds the host pointer may be used directly. Tags are addresses within
-   the linear address width (see lin_mask), so an address past its end
-   misses and is wrapped on the slow path. */
+   the linear address width (see lin_mask), and canonical, so an address
+   past its end misses and is wrapped or refused on the slow path. */
 struct X86TLBEntry {
     uint64_t read;
     uint64_t write;
@@ -326,8 +339,8 @@ struct X87State {
     uint16_t opcode;
     uint16_t fcs;
     uint16_t fds;
-    uint32_t fip;
-    uint32_t fdp;
+    uint64_t fip;
+    uint64_t fdp;
 };
 
 /* An MMX (8 bytes) or XMM (16 bytes) register. Lanes are host integers in
@@ -388,6 +401,7 @@ struct X86CPUState {
     uint64_t cr2;
     uint64_t cr3;
     uint32_t cr4;
+    uint8_t cr8;         /* the task priority, which nothing reads */
     uint64_t efer;
     /* the page directory pointers PAE paging loads along with CR3 */
     uint64_t pdpte[4];
@@ -395,6 +409,11 @@ struct X86CPUState {
     uint32_t sysenter_cs;
     uint64_t sysenter_esp;
     uint64_t sysenter_eip;
+    uint64_t star;       /* SYSCALL and SYSRET selectors */
+    uint64_t lstar;      /* SYSCALL entry from 64 bit mode */
+    uint64_t cstar;      /* from compatibility mode, never used */
+    uint32_t sfmask;     /* RFLAGS bits SYSCALL clears */
+    uint64_t kernel_gs_base; /* SWAPGS exchanges it with the GS base */
     uint64_t tsc_offset;
     /* P6 performance counters; they hold what was written and never count */
     uint32_t pmc_evtsel[2];
@@ -405,8 +424,15 @@ struct X86CPUState {
     uint8_t cpl;
     uint8_t mmu_idx;
     bool code32;
-    bool ss32;
-    uint64_t lin_mask;   /* the linear address width */
+    bool code64;         /* 64 bit mode: IA-32e and a 64 bit CS */
+    uint8_t code_opsize; /* the default operand and address sizes */
+    uint8_t code_addr_size;
+    uint64_t eip_mask;
+    uint64_t sp_mask;    /* the part of RSP the stack uses */
+    /* The linear address width: 32 bits, or 64 in IA-32e mode, where
+       addresses must be canonical instead. */
+    uint64_t lin_mask;
+    uint8_t rex;         /* the REX prefix of the instruction, 0 if none */
 
     X87State fpu;
     XmmReg xmm[XMM_COUNT];
@@ -469,8 +495,9 @@ enum {
 struct SimdInsn {
     uint8_t opcode;      /* the byte after 0F */
     uint8_t prefix;
-    uint8_t reg;         /* ModRM.reg */
+    uint8_t reg;         /* ModRM.reg, with REX.R; rm.reg has REX.B */
     uint8_t imm;
+    bool rex_w;          /* a general register operand is 64 bits */
     Operand rm;
     /* where MASKMOVQ and MASKMOVDQU store */
     uint8_t data_seg;
@@ -522,15 +549,17 @@ bool seg_access_rights(X86CPUState *s, uint32_t sel, uint32_t *val);
 bool seg_limit(X86CPUState *s, uint32_t sel, uint32_t *val);
 bool seg_verify(X86CPUState *s, uint32_t sel, bool write);
 void cpu_sysenter(X86CPUState *s);
-void cpu_sysexit(X86CPUState *s);
+void cpu_sysexit(X86CPUState *s, int opsize);
+void cpu_syscall(X86CPUState *s, uint64_t next_rip);
+void cpu_sysret(X86CPUState *s, int opsize);
 
 /* x86_fpu.cpp */
 void fpu_reset(X86CPUState *s);
 void fpu_exec(X86CPUState *s, uint8_t opcode, uint8_t modrm, uint64_t lin,
               uint64_t ea, int ea_seg, int opsize);
 void fpu_check_pending(X86CPUState *s);
-void fpu_fxsave(X86CPUState *s, uint64_t lin);
-void fpu_fxrstor(X86CPUState *s, uint64_t lin);
+void fpu_fxsave(X86CPUState *s, uint64_t lin, bool wide);
+void fpu_fxrstor(X86CPUState *s, uint64_t lin, bool wide);
 
 /* x86_interp.cpp */
 void x86_exec(X86CPUState *s);
@@ -710,6 +739,13 @@ static inline uint8_t seg_fast_access(const X86CPUSeg *seg)
     return SEG_FAST_READ | (get_bit(flags, DESC_RW) ? SEG_FAST_WRITE : 0);
 }
 
+/* 64 bit mode checks neither limits nor types. */
+static inline void seg_update_fast(X86CPUState *s, int seg)
+{
+    s->seg_fast[seg] = s->code64 ? SEG_FAST_READ | SEG_FAST_WRITE :
+        seg_fast_access(&s->segs[seg]);
+}
+
 /* The linear address of 'size' bytes at 'ea' in a segment register, after
    the limit and type checks. It may run past the linear address width,
    which the memory accesses wrap. */
@@ -752,7 +788,7 @@ static inline StackPtr current_stack(X86CPUState *s)
 {
     StackPtr st;
     st.ss = &s->segs[SEG_SS];
-    st.mask = s->ss32 ? UINT32_MAX : 0xffff;
+    st.mask = s->sp_mask;
     st.sp = s->regs[REG_ESP];
     st.mmu_idx = s->mmu_idx;
     st.fast = s->seg_fast[SEG_SS];

@@ -44,7 +44,12 @@ enum {
     TSS_CR3 = 0x1c,
     TSS_IOMAP = 0x66,
     TSS32_MIN_LIMIT = 0x67,
+    TSS64_RSP0 = 0x04,
+    TSS64_IST1 = 0x24,
 };
+
+/* where the stack pointer of an interrupt or call of IA-32e mode refers */
+const X86CPUSeg kFlatSeg = {};
 
 /* Where a TSS of either size keeps the state a task switch exchanges. The
    general registers and the segment selectors are stored in their usual
@@ -115,6 +120,11 @@ static bool is_protected(X86CPUState *s)
     return get_bit(s->cr0, CR0_PE) && !get_bit(s->eflags, EFLAGS_VM);
 }
 
+static bool is_long(X86CPUState *s)
+{
+    return get_bit(s->efer, EFER_LMA);
+}
+
 static uint32_t flat_flags(bool code, int dpl)
 {
     return bit_at(DESC_P) | bit_at(DESC_S) | bit_at(DESC_RW) | bit_at(DESC_A) |
@@ -122,15 +132,40 @@ static uint32_t flat_flags(bool code, int dpl)
         bit_at(DESC_DB) | bit_at(DESC_G);
 }
 
-static bool descriptor_address(X86CPUState *s, uint32_t sel, uint64_t *addr)
+static uint32_t flat64_code_flags(int dpl)
+{
+    return set_bit(set_bit(flat_flags(true, dpl), DESC_DB, false), DESC_L,
+                   true);
+}
+
+/* A 64 bit code segment: L set, and D clear, as L with D is reserved. */
+static bool is_code64(uint32_t flags)
+{
+    return get_bit(flags, DESC_L) && !get_bit(flags, DESC_DB);
+}
+
+static bool descriptor_address(X86CPUState *s, uint32_t sel, uint64_t *addr,
+                               int bytes = 8)
 {
     const X86CPUSeg *table = get_bit(sel, 2) ? &s->ldt : &s->gdt;
     uint32_t index = sel_error(set_bit(sel, 2, false));
-    if (index + 7 > table->limit) {
+    if (index + bytes - 1 > table->limit) {
         return false;
     }
     *addr = table->base + index;
     return true;
+}
+
+/* The upper half of a 16 byte descriptor of IA-32e mode: bits 32-63 of the
+   base or offset, then a word whose type field must be zero. */
+static bool load_descriptor_high(X86CPUState *s, uint32_t sel, uint32_t *high)
+{
+    uint64_t addr;
+    if (!descriptor_address(s, sel, &addr, 16)) {
+        return false;
+    }
+    *high = sys_read(s, addr + 8, SIZE32);
+    return get_bits(sys_read(s, addr + 12, SIZE32), 8, 5) == 0;
 }
 
 static bool load_descriptor(X86CPUState *s, uint32_t sel, Descriptor *d)
@@ -162,11 +197,16 @@ void load_seg_cache(X86CPUState *s, int seg, uint32_t sel, uint64_t base,
                     uint32_t limit, uint32_t flags)
 {
     X86CPUSeg *sc = &s->segs[seg];
+    /* 64 bit mode uses the bases of FS and GS only; cpu_update_mode() sees
+       to that of CS, which decides the mode */
+    if (s->code64 && (seg == SEG_ES || seg == SEG_SS || seg == SEG_DS)) {
+        base = 0;
+    }
     sc->sel = sel;
     sc->base = base;
     sc->limit = limit;
     sc->flags = flags;
-    s->seg_fast[seg] = seg_fast_access(sc);
+    seg_update_fast(s, seg);
     if (seg == SEG_CS || seg == SEG_SS) {
         cpu_update_mode(s);
     }
@@ -239,7 +279,8 @@ void load_seg(X86CPUState *s, int seg, uint32_t sel)
     int cpl = s->cpl;
     int rpl = sel_rpl(sel);
     if (sel_is_null(sel)) {
-        if (seg == SEG_SS) {
+        /* 64 bit mode below ring 3 runs with a null SS */
+        if (seg == SEG_SS && !(s->code64 && cpl != 3 && rpl == cpl)) {
             raise_exception(s, EXCP_GP, 0);
         }
         load_null_seg(s, seg, sel);
@@ -373,6 +414,10 @@ static void task_switch(X86CPUState *s, uint32_t sel, int source,
     int error = source == TASK_IRET ? EXCP_TS : EXCP_GP;
     Descriptor d;
 
+    /* IA-32e mode has no task switching */
+    if (is_long(s)) {
+        raise_exception(s, EXCP_GP, 0);
+    }
     sel = get_bits(sel, 0, 16);
     if (get_bit(sel, 2) || !load_descriptor(s, sel, &d)) {
         raise_exception(s, error, sel_error(sel));
@@ -647,11 +692,124 @@ static void do_interrupt_protected(X86CPUState *s, int intno, bool is_soft,
     s->rip = offset;
 }
 
+/* A stack pointer the 64 bit TSS holds: RSP0-2, or IST1-7. */
+static uint64_t tss64_stack(X86CPUState *s, uint32_t pos)
+{
+    if (pos + 7 > s->tr.limit) {
+        raise_exception(s, EXCP_TS, sel_error(s->tr.sel));
+    }
+    return sys_read(s, s->tr.base + pos, SIZE64);
+}
+
+/* The 64 bit stack an interrupt or a call to privilege level 'cpl' pushes
+   on, SS being flat or null. */
+static StackPtr long_stack(uint64_t rsp, int cpl)
+{
+    StackPtr st;
+    st.ss = &kFlatSeg;
+    st.mask = UINT64_MAX;
+    st.sp = rsp;
+    st.mmu_idx = cpl == 3 ? MMU_USER : MMU_SUPERVISOR;
+    st.fast = SEG_FAST_READ | SEG_FAST_WRITE;
+    return st;
+}
+
+/* A null SS, which 64 bit mode takes below ring 3. */
+static void load_null_ss(X86CPUState *s, int cpl)
+{
+    load_seg_cache(s, SEG_SS, cpl, 0, 0, set_bits(0, DESC_DPL, 2, cpl));
+}
+
+/* A 64 bit code segment for a gate of IA-32e mode, checked as an interrupt
+   or a call gate does. */
+static void load_gate_target(X86CPUState *s, uint32_t sel, Descriptor *code)
+{
+    load_code_descriptor(s, sel, code);
+    uint32_t cflags = descriptor_flags(*code);
+    if (desc_dpl(cflags) > s->cpl || !is_code64(cflags)) {
+        raise_exception(s, EXCP_GP, sel_error(sel));
+    }
+    check_present(s, sel, cflags);
+}
+
+/* IA-32e mode: 16 byte gates to 64 bit code, a 64 bit frame, SS:RSP
+   always pushed and the stack aligned to 16 bytes. */
+static void do_interrupt_long(X86CPUState *s, int intno, bool is_soft,
+                              bool has_error, int error_code, uint64_t ret_rip)
+{
+    uint32_t vector_error = intno * 8 + 2;
+    if ((uint32_t)intno * 16 + 15 > s->idt.limit) {
+        raise_exception(s, EXCP_GP, vector_error);
+    }
+    uint64_t entry = s->idt.base + intno * 16;
+    Descriptor gate;
+    gate.e1 = sys_read(s, entry, SIZE32);
+    gate.e2 = sys_read(s, entry + 4, SIZE32);
+    uint32_t offset_high = sys_read(s, entry + 8, SIZE32);
+    uint32_t gflags = descriptor_flags(gate);
+    int type = desc_type(gflags);
+    if (get_bit(gflags, DESC_S) ||
+        (type != SYS_INT_GATE32 && type != SYS_TRAP_GATE32)) {
+        raise_exception(s, EXCP_GP, vector_error);
+    }
+    if (is_soft && desc_dpl(gflags) < s->cpl) {
+        raise_exception(s, EXCP_GP, vector_error);
+    }
+    if (!get_bit(gflags, DESC_P)) {
+        raise_exception(s, EXCP_NP, vector_error);
+    }
+
+    uint32_t sel = gate_selector(gate);
+    uint64_t offset = concat_bits(offset_high, gate_offset(gate), 32);
+    int ist = get_bits(gate.e2, 0, 3);
+    Descriptor code;
+    load_gate_target(s, sel, &code);
+    uint32_t cflags = descriptor_flags(code);
+    int dpl = desc_dpl(cflags);
+    bool inner = !get_bit(cflags, DESC_CE) && dpl < s->cpl;
+    if (!inner) {
+        dpl = s->cpl;
+    }
+    uint64_t rsp = s->regs[REG_ESP];
+    if (ist != 0) {
+        rsp = tss64_stack(s, TSS64_IST1 + 8 * (ist - 1));
+    } else if (inner) {
+        rsp = tss64_stack(s, TSS64_RSP0 + 8 * dpl);
+    }
+
+    StackPtr st = long_stack(set_bits(rsp, 0, 4, 0), dpl);
+    stack_push(s, &st, s->segs[SEG_SS].sel, SIZE64);
+    stack_push(s, &st, s->regs[REG_ESP], SIZE64);
+    stack_push(s, &st, get_eflags(s), SIZE64);
+    stack_push(s, &st, s->segs[SEG_CS].sel, SIZE64);
+    stack_push(s, &st, ret_rip, SIZE64);
+    if (has_error) {
+        stack_push(s, &st, error_code, SIZE64);
+    }
+
+    s->eflags &= ~(bit_at(EFLAGS_TF) | bit_at(EFLAGS_RF) | bit_at(EFLAGS_NT));
+    if (type == SYS_INT_GATE32) {
+        s->eflags = set_bit(s->eflags, EFLAGS_IF, false);
+    }
+    s->cpl = dpl;
+    if (inner) {
+        load_null_ss(s, dpl);
+    }
+    s->regs[REG_ESP] = st.sp;
+    load_cs(s, sel, code, dpl);
+    s->rip = offset;
+}
+
 void do_interrupt(X86CPUState *s, int intno, bool is_soft, int error_code,
                   uint64_t ret_eip, bool is_hw)
 {
     if (!get_bit(s->cr0, CR0_PE)) {
         do_interrupt_real(s, intno, ret_eip);
+        return;
+    }
+    if (is_long(s)) {
+        bool has_error = !is_soft && !is_hw && exception_has_error_code(intno);
+        do_interrupt_long(s, intno, is_soft, has_error, error_code, ret_eip);
         return;
     }
     if (is_soft && get_bit(s->eflags, EFLAGS_VM) &&
@@ -664,6 +822,70 @@ void do_interrupt(X86CPUState *s, int intno, bool is_soft, int error_code,
 
 
 //#pragma mark - far transfers
+
+/* Where a far transfer to a code segment goes: in IA-32e mode a canonical
+   RIP for 64 bit code, 32 bits of it for compatibility mode. */
+static uint64_t far_target(X86CPUState *s, uint32_t sel, uint32_t flags,
+                           uint64_t offset)
+{
+    if (!is_long(s)) {
+        return offset;
+    }
+    if (get_bit(flags, DESC_L)) {
+        if (get_bit(flags, DESC_DB)) {
+            raise_exception(s, EXCP_GP, sel_error(sel));
+        }
+        if (!is_canonical(offset)) {
+            raise_exception(s, EXCP_GP, 0);
+        }
+        return offset;
+    }
+    return get_bits(offset, 0, 32);
+}
+
+/* JMP and CALL through a call gate of IA-32e mode: 16 bytes, to 64 bit
+   code, and a call to an inner level pushes a 64 bit frame on the stack
+   the TSS gives, with no parameters copied. */
+static void long_call_gate(X86CPUState *s, uint32_t sel, const Descriptor &d,
+                           bool call, uint64_t next_rip)
+{
+    uint32_t high;
+    if (desc_type(descriptor_flags(d)) != SYS_CALL_GATE32 ||
+        !load_descriptor_high(s, sel, &high)) {
+        raise_exception(s, EXCP_GP, sel_error(sel));
+    }
+    check_present(s, sel, descriptor_flags(d));
+    uint32_t csel = gate_selector(d);
+    uint64_t offset = concat_bits(high, gate_offset(d), 32);
+    Descriptor cd;
+    load_gate_target(s, csel, &cd);
+    uint32_t cflags = descriptor_flags(cd);
+    int cdpl = desc_dpl(cflags);
+    if (!is_canonical(offset)) {
+        raise_exception(s, EXCP_GP, 0);
+    }
+    if (!call) {
+        check_direct_code(s, csel, cflags, s->cpl);
+        load_cs(s, csel, cd, s->cpl);
+    } else if (!get_bit(cflags, DESC_CE) && cdpl < s->cpl) {
+        StackPtr st = long_stack(tss64_stack(s, TSS64_RSP0 + 8 * cdpl), cdpl);
+        stack_push(s, &st, s->segs[SEG_SS].sel, SIZE64);
+        stack_push(s, &st, s->regs[REG_ESP], SIZE64);
+        stack_push(s, &st, s->segs[SEG_CS].sel, SIZE64);
+        stack_push(s, &st, next_rip, SIZE64);
+        s->cpl = cdpl;
+        load_null_ss(s, cdpl);
+        s->regs[REG_ESP] = st.sp;
+        load_cs(s, csel, cd, cdpl);
+    } else {
+        StackPtr st = current_stack(s);
+        stack_push(s, &st, s->segs[SEG_CS].sel, SIZE64);
+        stack_push(s, &st, next_rip, SIZE64);
+        stack_commit(s, st);
+        load_cs(s, csel, cd, s->cpl);
+    }
+    s->rip = offset;
+}
 
 void far_jump(X86CPUState *s, uint32_t sel, uint64_t offset,
               uint64_t next_eip)
@@ -691,6 +913,7 @@ void far_jump(X86CPUState *s, uint32_t sel, uint64_t offset,
             raise_exception(s, EXCP_GP, sel_error(sel));
         }
         check_direct_code(s, sel, flags, rpl);
+        offset = far_target(s, sel, flags, offset);
         load_cs(s, sel, d, s->cpl);
         s->rip = offset;
         return;
@@ -709,6 +932,10 @@ void far_jump(X86CPUState *s, uint32_t sel, uint64_t offset,
     }
     if (dpl < s->cpl || dpl < rpl) {
         raise_exception(s, EXCP_GP, sel_error(sel));
+    }
+    if (is_long(s)) {
+        long_call_gate(s, sel, d, false, next_eip);
+        return;
     }
     check_present(s, sel, flags);
 
@@ -760,6 +987,7 @@ void far_call(X86CPUState *s, uint32_t sel, uint64_t offset, int opsize,
             raise_exception(s, EXCP_GP, sel_error(sel));
         }
         check_direct_code(s, sel, flags, rpl);
+        offset = far_target(s, sel, flags, offset);
         StackPtr st = current_stack(s);
         stack_push(s, &st, s->segs[SEG_CS].sel, opsize);
         stack_push(s, &st, next_eip, opsize);
@@ -782,6 +1010,10 @@ void far_call(X86CPUState *s, uint32_t sel, uint64_t offset, int opsize,
     }
     if (dpl < s->cpl || dpl < rpl) {
         raise_exception(s, EXCP_GP, sel_error(sel));
+    }
+    if (is_long(s)) {
+        long_call_gate(s, sel, d, true, next_eip);
+        return;
     }
     check_present(s, sel, flags);
 
@@ -857,6 +1089,20 @@ static void return_to_vm86(X86CPUState *s, StackPtr *st, uint32_t new_eip,
     s->rip = get_bits(new_eip, 0, 16);
 }
 
+/* Null the data segments the outer level 'rpl' may not use, after a return
+   to it. */
+static void null_inner_segs(X86CPUState *s, int rpl)
+{
+    static const int data_segs[4] = {SEG_ES, SEG_DS, SEG_FS, SEG_GS};
+    for (int seg : data_segs) {
+        uint32_t flags = s->segs[seg].flags;
+        bool conforming = desc_is_code(flags) && get_bit(flags, DESC_CE);
+        if (!conforming && desc_dpl(flags) < rpl) {
+            load_null_seg(s, seg, 0);
+        }
+    }
+}
+
 /* RETF and IRET in protected mode. */
 static void return_protected(X86CPUState *s, int opsize, bool is_iret,
                              uint32_t addend)
@@ -913,16 +1159,7 @@ static void return_protected(X86CPUState *s, int opsize, bool is_iret,
         StackPtr nst = current_stack(s);
         nst.sp = new_esp + addend;
         stack_commit(s, nst);
-
-        /* data segments the outer level may not use become null */
-        static const int data_segs[4] = {SEG_ES, SEG_DS, SEG_FS, SEG_GS};
-        for (int seg : data_segs) {
-            uint32_t flags = s->segs[seg].flags;
-            bool conforming = desc_is_code(flags) && get_bit(flags, DESC_CE);
-            if (!conforming && desc_dpl(flags) < rpl) {
-                load_null_seg(s, seg, 0);
-            }
-        }
+        null_inner_segs(s, rpl);
     }
     s->rip = new_eip;
 
@@ -940,8 +1177,96 @@ static void return_protected(X86CPUState *s, int opsize, bool is_iret,
     }
 }
 
+/* RETF and IRET in IA-32e mode, to 64 bit or compatibility code. IRET from
+   64 bit mode pops SS:RSP even at the same level, and 64 bit code below
+   ring 3 may return with a null SS. */
+static void return_long(X86CPUState *s, int opsize, bool is_iret,
+                        uint32_t addend)
+{
+    StackPtr st = current_stack(s);
+    uint64_t new_rip = stack_pop(s, &st, opsize);
+    uint32_t new_cs = get_bits(stack_pop(s, &st, opsize), 0, 16);
+    uint32_t new_eflags = 0;
+    if (is_iret) {
+        new_eflags = stack_pop(s, &st, opsize);
+        if (get_bit(new_eflags, EFLAGS_VM)) {
+            raise_exception(s, EXCP_GP, 0);
+        }
+    }
+
+    int cpl = s->cpl;
+    int rpl = sel_rpl(new_cs);
+    Descriptor cd;
+    load_code_descriptor(s, new_cs, &cd);
+    uint32_t cflags = descriptor_flags(cd);
+    if (rpl < cpl || (get_bit(cflags, DESC_CE) ? desc_dpl(cflags) > rpl :
+                      desc_dpl(cflags) != rpl)) {
+        raise_exception(s, EXCP_GP, sel_error(new_cs));
+    }
+    check_present(s, new_cs, cflags);
+    new_rip = far_target(s, new_cs, cflags, new_rip);
+
+    st.sp += addend;
+    if (rpl == cpl && !(is_iret && s->code64)) {
+        stack_commit(s, st);
+        load_cs(s, new_cs, cd, cpl);
+    } else {
+        uint64_t new_rsp = stack_pop(s, &st, opsize);
+        uint32_t new_ss = get_bits(stack_pop(s, &st, opsize), 0, 16);
+        Descriptor ss;
+        bool null_ss = sel_is_null(new_ss);
+        if (null_ss) {
+            if (!is_code64(cflags) || rpl == 3 || sel_rpl(new_ss) != rpl) {
+                raise_exception(s, EXCP_GP, 0);
+            }
+        } else {
+            if (!load_descriptor(s, new_ss, &ss)) {
+                raise_exception(s, EXCP_GP, sel_error(new_ss));
+            }
+            uint32_t ssflags = descriptor_flags(ss);
+            if (sel_rpl(new_ss) != rpl || !desc_is_data(ssflags) ||
+                !get_bit(ssflags, DESC_RW) || desc_dpl(ssflags) != rpl) {
+                raise_exception(s, EXCP_GP, sel_error(new_ss));
+            }
+            if (!get_bit(ssflags, DESC_P)) {
+                raise_exception(s, EXCP_SS, sel_error(new_ss));
+            }
+        }
+
+        s->cpl = rpl;
+        load_cs(s, new_cs, cd, rpl);
+        if (null_ss) {
+            load_null_ss(s, rpl);
+        } else {
+            load_ss(s, seg_cache(new_ss, ss));
+        }
+        s->regs[REG_ESP] = new_rsp + addend;
+        if (rpl != cpl) {
+            null_inner_segs(s, rpl);
+        }
+    }
+    s->rip = new_rip;
+
+    if (is_iret) {
+        uint32_t mask = EFLAGS_CC_MASK | bit_at(EFLAGS_TF) |
+            bit_at(EFLAGS_DF) | bit_at(EFLAGS_NT) | bit_at(EFLAGS_RF) |
+            bit_at(EFLAGS_AC) | bit_at(EFLAGS_ID);
+        if (cpl == 0) {
+            mask |= field_mask(EFLAGS_IOPL, 2);
+        }
+        if (cpl <= eflags_iopl(s->eflags)) {
+            mask = set_bit(mask, EFLAGS_IF, true);
+        }
+        cpu_set_eflags(s, new_eflags, trunc_size(mask, opsize));
+    }
+}
+
 void far_return(X86CPUState *s, int opsize, uint32_t addend)
 {
+    if (is_long(s)) {
+        return_long(s, opsize, false, addend);
+        return;
+    }
     if (is_protected(s)) {
         return_protected(s, opsize, false, addend);
         return;
@@ -957,6 +1282,13 @@ void far_return(X86CPUState *s, int opsize, uint32_t addend)
 
 void interrupt_return(X86CPUState *s, int opsize, uint64_t next_eip)
 {
+    if (is_long(s)) {
+        if (get_bit(s->eflags, EFLAGS_NT)) {
+            raise_exception(s, EXCP_GP, 0);
+        }
+        return_long(s, opsize, true, 0);
+        return;
+    }
     if (is_protected(s)) {
         if (get_bit(s->eflags, EFLAGS_NT)) {
             task_switch(s, sys_read(s, s->tr.base + TSS_BACK_LINK, SIZE16),
@@ -1011,6 +1343,25 @@ void check_io_permission(X86CPUState *s, uint32_t port, int size)
     }
 }
 
+/* The base of an LDT or TSS descriptor: 64 bits and canonical in IA-32e
+   mode, where the descriptor is 16 bytes long. */
+static uint64_t system_base(X86CPUState *s, uint32_t sel, const Descriptor &d)
+{
+    uint64_t base = descriptor_base(d);
+    if (!is_long(s)) {
+        return base;
+    }
+    uint32_t high;
+    if (!load_descriptor_high(s, sel, &high)) {
+        raise_exception(s, EXCP_GP, sel_error(sel));
+    }
+    base = concat_bits(high, base, 32);
+    if (!is_canonical(base)) {
+        raise_exception(s, EXCP_GP, sel_error(sel));
+    }
+    return base;
+}
+
 void load_ldt(X86CPUState *s, uint32_t sel)
 {
     sel = get_bits(sel, 0, 16);
@@ -1026,9 +1377,9 @@ void load_ldt(X86CPUState *s, uint32_t sel)
     if (get_bit(flags, DESC_S) || desc_type(flags) != SYS_LDT) {
         raise_exception(s, EXCP_GP, sel_error(sel));
     }
+    uint64_t base = system_base(s, sel, d);
     check_present(s, sel, flags);
-    s->ldt = {(uint16_t)sel, (uint16_t)flags, descriptor_base(d),
-              descriptor_limit(d)};
+    s->ldt = {(uint16_t)sel, (uint16_t)flags, base, descriptor_limit(d)};
 }
 
 void load_tr(X86CPUState *s, uint32_t sel)
@@ -1043,13 +1394,15 @@ void load_tr(X86CPUState *s, uint32_t sel)
     }
     uint32_t flags = descriptor_flags(d);
     int type = desc_type(flags);
-    if (get_bit(flags, DESC_S) || (type != SYS_TSS16 && type != SYS_TSS32)) {
+    if (get_bit(flags, DESC_S) || (type != SYS_TSS32 &&
+                                   (type != SYS_TSS16 || is_long(s)))) {
         raise_exception(s, EXCP_GP, sel_error(sel));
     }
+    uint64_t base = system_base(s, sel, d);
     check_present(s, sel, flags);
     set_tss_busy(s, sel, true);
-    s->tr = {(uint16_t)sel, (uint16_t)set_bit(flags, DESC_RW, true),
-             descriptor_base(d), descriptor_limit(d)};
+    s->tr = {(uint16_t)sel, (uint16_t)set_bit(flags, DESC_RW, true), base,
+             descriptor_limit(d)};
 }
 
 /* Whether the current privilege may see the descriptor, for LAR, LSL,
@@ -1067,6 +1420,28 @@ static bool load_visible_descriptor(X86CPUState *s, uint32_t sel,
     return conforming || (dpl >= s->cpl && dpl >= sel_rpl(sel));
 }
 
+/* The system descriptors LAR reports, or LSL if not 'gates': segments and,
+   for LAR, call and task gates. IA-32e mode has only the 64 bit ones. */
+static bool system_type_visible(X86CPUState *s, uint32_t flags, bool gates)
+{
+    switch (desc_type(flags)) {
+    case SYS_LDT:
+    case SYS_TSS32:
+    case SYS_TSS32_BUSY:
+        return true;
+    case SYS_TSS16:
+    case SYS_TSS16_BUSY:
+        return !is_long(s);
+    case SYS_CALL_GATE32:
+        return gates;
+    case SYS_CALL_GATE16:
+    case SYS_TASK_GATE:
+        return gates && !is_long(s);
+    default:
+        return false;
+    }
+}
+
 bool seg_access_rights(X86CPUState *s, uint32_t sel, uint32_t *val)
 {
     Descriptor d;
@@ -1074,20 +1449,8 @@ bool seg_access_rights(X86CPUState *s, uint32_t sel, uint32_t *val)
         return false;
     }
     uint32_t flags = descriptor_flags(d);
-    if (!get_bit(flags, DESC_S)) {
-        switch (desc_type(flags)) {
-        case SYS_TSS16:
-        case SYS_LDT:
-        case SYS_TSS16_BUSY:
-        case SYS_CALL_GATE16:
-        case SYS_TASK_GATE:
-        case SYS_TSS32:
-        case SYS_TSS32_BUSY:
-        case SYS_CALL_GATE32:
-            break;
-        default:
-            return false;
-        }
+    if (!get_bit(flags, DESC_S) && !system_type_visible(s, flags, true)) {
+        return false;
     }
     *val = set_bits(0, 8, 16, flags);
     return true;
@@ -1100,17 +1463,8 @@ bool seg_limit(X86CPUState *s, uint32_t sel, uint32_t *val)
         return false;
     }
     uint32_t flags = descriptor_flags(d);
-    if (!get_bit(flags, DESC_S)) {
-        switch (desc_type(flags)) {
-        case SYS_TSS16:
-        case SYS_LDT:
-        case SYS_TSS16_BUSY:
-        case SYS_TSS32:
-        case SYS_TSS32_BUSY:
-            break;
-        default:
-            return false;
-        }
+    if (!get_bit(flags, DESC_S) && !system_type_visible(s, flags, false)) {
+        return false;
     }
     *val = descriptor_limit(d);
     return true;
@@ -1132,33 +1486,83 @@ bool seg_verify(X86CPUState *s, uint32_t sel, bool write)
     return !write || get_bit(flags, DESC_RW);
 }
 
+/* SYSENTER enters 64 bit code in IA-32e mode, and the low halves of the
+   MSRs outside it. */
 void cpu_sysenter(X86CPUState *s)
 {
     if (!get_bit(s->cr0, CR0_PE) || sel_is_null(s->sysenter_cs)) {
         raise_exception(s, EXCP_GP, 0);
     }
+    bool lma = is_long(s);
     uint32_t sel = sel_error(s->sysenter_cs);
     s->eflags &= ~(bit_at(EFLAGS_VM) | bit_at(EFLAGS_IF) | bit_at(EFLAGS_RF));
     s->cpl = 0;
-    load_seg_cache(s, SEG_CS, sel, 0, UINT32_MAX, flat_flags(true, 0));
+    load_seg_cache(s, SEG_CS, sel, 0, UINT32_MAX,
+                   lma ? flat64_code_flags(0) : flat_flags(true, 0));
     load_seg_cache(s, SEG_SS, sel + 8, 0, UINT32_MAX, flat_flags(false, 0));
-    /* the low halves outside long mode */
-    s->regs[REG_ESP] = get_bits(s->sysenter_esp, 0, 32);
-    s->rip = get_bits(s->sysenter_eip, 0, 32);
+    s->regs[REG_ESP] = lma ? s->sysenter_esp :
+        get_bits(s->sysenter_esp, 0, 32);
+    s->rip = lma ? s->sysenter_eip : get_bits(s->sysenter_eip, 0, 32);
 }
 
-void cpu_sysexit(X86CPUState *s)
+/* SYSEXIT with REX.W returns to 64 bit code, through the selectors 16 bytes
+   above those of a return to 32 bit code. */
+void cpu_sysexit(X86CPUState *s, int opsize)
 {
     if (!get_bit(s->cr0, CR0_PE) || s->cpl != 0 ||
         sel_is_null(s->sysenter_cs)) {
         raise_exception(s, EXCP_GP, 0);
     }
-    uint32_t sel = sel_error(s->sysenter_cs);
+    bool to64 = opsize == SIZE64;
+    uint64_t rsp = s->regs[REG_ECX], rip = s->regs[REG_EDX];
+    if (to64 && (!is_canonical(rsp) || !is_canonical(rip))) {
+        raise_exception(s, EXCP_GP, 0);
+    }
+    uint32_t sel = sel_error(s->sysenter_cs) + (to64 ? 32 : 16);
     s->cpl = 3;
-    load_seg_cache(s, SEG_CS, set_bits(sel + 16, 0, 2, 3), 0, UINT32_MAX,
-                   flat_flags(true, 3));
-    load_seg_cache(s, SEG_SS, set_bits(sel + 24, 0, 2, 3), 0, UINT32_MAX,
+    load_seg_cache(s, SEG_CS, set_bits(sel, 0, 2, 3), 0, UINT32_MAX,
+                   to64 ? flat64_code_flags(3) : flat_flags(true, 3));
+    load_seg_cache(s, SEG_SS, set_bits(sel + 8, 0, 2, 3), 0, UINT32_MAX,
                    flat_flags(false, 3));
-    s->regs[REG_ESP] = s->regs[REG_ECX];
-    s->rip = s->regs[REG_EDX];
+    s->regs[REG_ESP] = to64 ? rsp : get_bits(rsp, 0, 32);
+    s->rip = to64 ? rip : get_bits(rip, 0, 32);
+}
+
+/* SYSCALL and SYSRET exist in 64 bit mode only, as on Intel parts. */
+void cpu_syscall(X86CPUState *s, uint64_t next_rip)
+{
+    if (!s->code64 || !get_bit(s->efer, EFER_SCE)) {
+        raise_exception(s, EXCP_UD);
+    }
+    uint32_t sel = sel_error(get_bits(s->star, 32, 16));
+    s->regs[REG_ECX] = next_rip;
+    s->regs[11] = get_eflags(s);
+    cpu_set_eflags(s, 0, s->sfmask | bit_at(EFLAGS_RF));
+    s->cpl = 0;
+    load_seg_cache(s, SEG_CS, sel, 0, UINT32_MAX, flat64_code_flags(0));
+    load_seg_cache(s, SEG_SS, sel + 8, 0, UINT32_MAX, flat_flags(false, 0));
+    s->rip = s->lstar;
+}
+
+/* To 64 bit code with REX.W, through the selectors 16 bytes above those of
+   a return to 32 bit code. */
+void cpu_sysret(X86CPUState *s, int opsize)
+{
+    if (!s->code64 || !get_bit(s->efer, EFER_SCE)) {
+        raise_exception(s, EXCP_UD);
+    }
+    bool to64 = opsize == SIZE64;
+    uint64_t rip = s->regs[REG_ECX];
+    if (s->cpl != 0 || (to64 && !is_canonical(rip))) {
+        raise_exception(s, EXCP_GP, 0);
+    }
+    uint32_t sel = get_bits(s->star, 48, 16);
+    cpu_set_eflags(s, s->regs[11], ~(bit_at(EFLAGS_RF) | bit_at(EFLAGS_VM)));
+    s->cpl = 3;
+    load_seg_cache(s, SEG_CS, set_bits(sel + (to64 ? 16 : 0), 0, 2, 3), 0,
+                   UINT32_MAX, to64 ? flat64_code_flags(3) :
+                   flat_flags(true, 3));
+    load_seg_cache(s, SEG_SS, set_bits(sel + 8, 0, 2, 3), 0, UINT32_MAX,
+                   flat_flags(false, 3));
+    s->rip = to64 ? rip : get_bits(rip, 0, 32);
 }

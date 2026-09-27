@@ -707,8 +707,8 @@ static void fpu_store_env(X86CPUState *s, uint64_t lin, int opsize)
 {
     X87State *f = &s->fpu;
     uint32_t fields[7] = {
-        f->control, f->status, fpu_tag_word(f), f->fip,
-        set_bits(f->fcs, 16, 11, f->opcode), f->fdp, f->fds
+        f->control, f->status, fpu_tag_word(f), (uint32_t)f->fip,
+        set_bits(f->fcs, 16, 11, f->opcode), (uint32_t)f->fdp, f->fds
     };
     int size = opsize == SIZE32 ? SIZE32 : SIZE16;
 
@@ -777,25 +777,40 @@ static void fpu_restore(X86CPUState *s, uint64_t lin, int opsize)
     }
 }
 
-/* The part of the FXSAVE area outside 64 bit mode: up to XMM7. */
-static const int FXSAVE_SIZE = 288;
+/* The part of the FXSAVE area in use: up to XMM7, or XMM15 in 64 bit
+   mode. */
 static const int FXSAVE_ST = 32;
 static const int FXSAVE_XMM = 160;
+static const int FXSAVE_MAX = FXSAVE_XMM + XMM_COUNT * 16;
 
-/* The area must be 16 byte aligned, so no 16 byte access crosses a page. */
-void fpu_fxsave(X86CPUState *s, uint64_t lin)
+static int fxsave_xmm_count(X86CPUState *s)
+{
+    return s->code64 ? XMM_COUNT : 8;
+}
+
+/* The area must be 16 byte aligned, so no 16 byte access crosses a page.
+   With REX.W the instruction and data pointers are 64 bit offsets without
+   selectors. */
+void fpu_fxsave(X86CPUState *s, uint64_t lin, bool wide)
 {
     X87State *f = &s->fpu;
-    uint8_t image[FXSAVE_SIZE] = {};
+    int xmm_count = fxsave_xmm_count(s);
+    int size = FXSAVE_XMM + 16 * xmm_count;
+    uint8_t image[FXSAVE_MAX] = {};
 
     put_le16(image, f->control);
     put_le16(image + 2, f->status);
     image[4] = ~f->empty; /* one bit per physical register in use */
     put_le16(image + 6, f->opcode);
-    put_le32(image + 8, f->fip);
-    put_le16(image + 12, f->fcs);
-    put_le32(image + 16, f->fdp);
-    put_le16(image + 20, f->fds);
+    if (wide) {
+        put_le64(image + 8, f->fip);
+        put_le64(image + 16, f->fdp);
+    } else {
+        put_le32(image + 8, f->fip);
+        put_le16(image + 12, f->fcs);
+        put_le32(image + 16, f->fdp);
+        put_le16(image + 20, f->fds);
+    }
     put_le32(image + 24, s->mxcsr);
     put_le32(image + 28, MXCSR_MASK);
     for (int i = 0; i < 8; i++) {
@@ -803,21 +818,23 @@ void fpu_fxsave(X86CPUState *s, uint64_t lin)
         put_le64(image + FXSAVE_ST + 16 * i, r.mant);
         put_le16(image + FXSAVE_ST + 16 * i + 8, r.sexp);
     }
-    memcpy(image + FXSAVE_XMM, s->xmm, 8 * sizeof(XmmReg));
+    memcpy(image + FXSAVE_XMM, s->xmm, xmm_count * sizeof(XmmReg));
 
     mem_probe_write(s, lin, SIZE128);
-    mem_probe_write(s, lin + FXSAVE_SIZE - 16, SIZE128);
-    for (int i = 0; i < FXSAVE_SIZE; i += 16) {
+    mem_probe_write(s, lin + size - 16, SIZE128);
+    for (int i = 0; i < size; i += 16) {
         mem_write_bytes(s, lin + i, image + i, SIZE128);
     }
 }
 
-void fpu_fxrstor(X86CPUState *s, uint64_t lin)
+void fpu_fxrstor(X86CPUState *s, uint64_t lin, bool wide)
 {
     X87State *f = &s->fpu;
-    uint8_t image[FXSAVE_SIZE];
+    int xmm_count = fxsave_xmm_count(s);
+    int size = FXSAVE_XMM + 16 * xmm_count;
+    uint8_t image[FXSAVE_MAX];
 
-    for (int i = 0; i < FXSAVE_SIZE; i += 16) {
+    for (int i = 0; i < size; i += 16) {
         mem_read_bytes(s, lin + i, image + i, SIZE128);
     }
     uint32_t mxcsr = get_le32(image + 24);
@@ -829,10 +846,17 @@ void fpu_fxrstor(X86CPUState *s, uint64_t lin)
     f->status = get_le16(image + 2);
     f->empty = ~image[4];
     f->opcode = get_bits(get_le16(image + 6), 0, 11);
-    f->fip = get_le32(image + 8);
-    f->fcs = get_le16(image + 12);
-    f->fdp = get_le32(image + 16);
-    f->fds = get_le16(image + 20);
+    if (wide) {
+        f->fip = get_le64(image + 8);
+        f->fcs = 0;
+        f->fdp = get_le64(image + 16);
+        f->fds = 0;
+    } else {
+        f->fip = get_le32(image + 8);
+        f->fcs = get_le16(image + 12);
+        f->fdp = get_le32(image + 16);
+        f->fds = get_le16(image + 20);
+    }
     fpu_update_summary(f);
     for (int i = 0; i < 8; i++) {
         Fx80 &r = f->st[st_reg(f, i)];
@@ -840,7 +864,7 @@ void fpu_fxrstor(X86CPUState *s, uint64_t lin)
         r.sexp = get_le16(image + FXSAVE_ST + 16 * i + 8);
     }
     s->mxcsr = mxcsr;
-    memcpy(s->xmm, image + FXSAVE_XMM, 8 * sizeof(XmmReg));
+    memcpy(s->xmm, image + FXSAVE_XMM, xmm_count * sizeof(XmmReg));
 }
 
 
