@@ -37,7 +37,7 @@
 //#pragma mark - operand sizes
 
 /* Encoded as log2 of the byte count, like DeviceIO sizes. The general
-   registers go up to SIZE32; the wider ones are vector operands. */
+   registers go up to SIZE64; SIZE128 is a vector operand. */
 enum {
     SIZE8,
     SIZE16,
@@ -56,27 +56,31 @@ static inline int size_bits(int size)
     return 8 << size;
 }
 
-static inline uint32_t size_mask(int size)
+/* A table keeps the many truncations small enough to inline. */
+static inline uint64_t size_mask(int size)
 {
-    return bit_mask(size_bits(size));
+    static const uint64_t masks[4] = {
+        UINT8_MAX, UINT16_MAX, UINT32_MAX, UINT64_MAX
+    };
+    return masks[size];
 }
 
-static inline uint32_t trunc_size(uint32_t val, int size)
+static inline uint64_t trunc_size(uint64_t val, int size)
 {
     return val & size_mask(size);
 }
 
-static inline bool msb(uint32_t val, int size)
+static inline bool msb(uint64_t val, int size)
 {
     return get_bit(val, size_bits(size) - 1);
 }
 
-static inline uint32_t sign_bit(int size)
+static inline uint64_t sign_bit(int size)
 {
-    return bit_at(size_bits(size) - 1);
+    return bit_at<uint64_t>(size_bits(size) - 1);
 }
 
-static inline int32_t sext_size(uint32_t val, int size)
+static inline int64_t sext_size(uint64_t val, int size)
 {
     return sign_extend(val, size_bits(size));
 }
@@ -264,24 +268,26 @@ enum {
 #define TLB_BITS 10
 #define TLB_SIZE (1 << TLB_BITS)
 /* Page tags have their offset bits clear, so this matches no address. */
-#define TLB_INVALID UINT32_MAX
+#define TLB_INVALID UINT64_MAX
 
-static inline uint32_t page_base(uint32_t addr)
+static inline uint64_t page_base(uint64_t addr)
 {
     return set_bits(addr, 0, PAGE_BITS, 0);
 }
 
-static inline uint32_t page_offset(uint32_t addr)
+static inline uint32_t page_offset(uint64_t addr)
 {
     return get_bits(addr, 0, PAGE_BITS);
 }
 
 /* One page of the linear address space. The three tags say for which access
-   kinds the host pointer may be used directly. */
+   kinds the host pointer may be used directly. Tags are addresses within
+   the linear address width (see lin_mask), so an address past its end
+   misses and is wrapped on the slow path. */
 struct X86TLBEntry {
-    uint32_t read;
-    uint32_t write;
-    uint32_t code;
+    uint64_t read;
+    uint64_t write;
+    uint64_t code;
     uintptr_t addend; /* host pointer minus linear address */
 };
 
@@ -351,16 +357,20 @@ static const uint32_t MXCSR_RESET = 0x1f80;
 /* The bits MXCSR implements, as FXSAVE reports them. */
 static const uint32_t MXCSR_MASK = 0xffff;
 
+/* The general registers of 64 bit mode. Outside it only the first 8 exist,
+   and their upper halves stay zero: 32 bit writes zero extend. */
+#define GPR_COUNT 16
+
 struct X86CPUState {
-    uint32_t regs[8];
-    uint32_t eip;
+    uint64_t regs[GPR_COUNT];
+    uint64_t rip;
     uint32_t eflags;
 
     uint8_t cc_op;
     uint8_t cc_size;
     bool cc_carry;       /* carry in of ADC and SBB */
-    uint32_t cc_src;
-    uint32_t cc_dst;     /* the result */
+    uint64_t cc_src;
+    uint64_t cc_dst;     /* the result */
 
     X86CPUSeg segs[SEG_COUNT];
     uint8_t seg_fast[SEG_COUNT]; /* see seg_fast_access() */
@@ -370,13 +380,13 @@ struct X86CPUState {
     X86CPUSeg idt;
 
     uint32_t cr0;
-    uint32_t cr2;
-    uint32_t cr3;
+    uint64_t cr2;
+    uint64_t cr3;
     uint32_t cr4;
-    uint32_t dr[8];
+    uint64_t dr[8];
     uint32_t sysenter_cs;
-    uint32_t sysenter_esp;
-    uint32_t sysenter_eip;
+    uint64_t sysenter_esp;
+    uint64_t sysenter_eip;
     uint64_t tsc_offset;
     /* P6 performance counters; they hold what was written and never count */
     uint32_t pmc_evtsel[2];
@@ -388,6 +398,7 @@ struct X86CPUState {
     uint8_t mmu_idx;
     bool code32;
     bool ss32;
+    uint64_t lin_mask;   /* the linear address width */
 
     X87State fpu;
     XmmReg xmm[XMM_COUNT];
@@ -403,7 +414,7 @@ struct X86CPUState {
 
     X86TLBEntry tlb[MMU_COUNT][TLB_SIZE];
     bool tlb_large_pages;
-    uint32_t code_tag;   /* the page the fetch shortcut points into */
+    uint64_t code_tag;   /* the page the fetch shortcut points into */
     uintptr_t code_addend;
 
     PhysMemoryMap *mem_map;
@@ -417,7 +428,8 @@ struct X86CPUState {
 /* The 64 bit value RDTSC, RDMSR, WRMSR and RDPMC pass in EDX:EAX. */
 static inline uint64_t get_edx_eax(X86CPUState *s)
 {
-    return concat_bits(s->regs[REG_EDX], s->regs[REG_EAX], 32);
+    return concat_bits(get_bits(s->regs[REG_EDX], 0, 32), s->regs[REG_EAX],
+                       32);
 }
 
 static inline void set_edx_eax(X86CPUState *s, uint64_t val)
@@ -434,7 +446,7 @@ struct Operand {
     bool is_reg;
     uint8_t reg;
     uint8_t seg;
-    uint32_t ea;
+    uint64_t ea;
 };
 
 /* The mandatory prefix of a vector instruction. */
@@ -454,7 +466,7 @@ struct SimdInsn {
     Operand rm;
     /* where MASKMOVQ and MASKMOVDQU store */
     uint8_t data_seg;
-    uint32_t addr_mask;
+    uint64_t addr_mask;
 };
 
 
@@ -463,17 +475,17 @@ struct SimdInsn {
 /* x86_cpu.cpp */
 [[noreturn]] void raise_exception(X86CPUState *s, int intno,
                                   int error_code = 0);
-uint32_t mem_read_slow(X86CPUState *s, uint32_t lin, int size, int mmu_idx);
-void mem_write_slow(X86CPUState *s, uint32_t lin, uint32_t val, int size,
+uint64_t mem_read_slow(X86CPUState *s, uint64_t lin, int size, int mmu_idx);
+void mem_write_slow(X86CPUState *s, uint64_t lin, uint64_t val, int size,
                     int mmu_idx);
-void mem_probe_write(X86CPUState *s, uint32_t lin, int size);
-uint8_t fetch_slow(X86CPUState *s, uint32_t lin);
+void mem_probe_write(X86CPUState *s, uint64_t lin, int size);
+uint8_t fetch_slow(X86CPUState *s, uint64_t lin);
 void tlb_flush_all(X86CPUState *s);
-void tlb_flush_page(X86CPUState *s, uint32_t lin);
+void tlb_flush_page(X86CPUState *s, uint64_t lin);
 void cpu_update_mode(X86CPUState *s);
 void cpu_set_eflags(X86CPUState *s, uint32_t val, uint32_t mask);
 void cpu_set_cr0(X86CPUState *s, uint32_t val);
-void cpu_set_cr3(X86CPUState *s, uint32_t val);
+void cpu_set_cr3(X86CPUState *s, uint64_t val);
 void cpu_set_cr4(X86CPUState *s, uint32_t val);
 void cpu_cpuid(X86CPUState *s);
 void cpu_rdmsr(X86CPUState *s);
@@ -482,19 +494,19 @@ void cpu_rdpmc(X86CPUState *s);
 uint64_t cpu_get_tsc(X86CPUState *s);
 
 /* x86_seg.cpp */
-uint32_t seg_address_slow(X86CPUState *s, const X86CPUSeg *seg, int excp,
-                          uint32_t ea, int size, bool write);
-void load_seg_cache(X86CPUState *s, int seg, uint32_t sel, uint32_t base,
+uint64_t seg_address_slow(X86CPUState *s, const X86CPUSeg *seg, int excp,
+                          uint64_t ea, int size, bool write);
+void load_seg_cache(X86CPUState *s, int seg, uint32_t sel, uint64_t base,
                     uint32_t limit, uint32_t flags);
 void load_seg(X86CPUState *s, int seg, uint32_t sel);
 void do_interrupt(X86CPUState *s, int intno, bool is_soft, int error_code,
-                  uint32_t ret_eip, bool is_hw);
-void far_jump(X86CPUState *s, uint32_t sel, uint32_t offset,
-              uint32_t next_eip);
-void far_call(X86CPUState *s, uint32_t sel, uint32_t offset, int opsize,
-              uint32_t next_eip);
+                  uint64_t ret_eip, bool is_hw);
+void far_jump(X86CPUState *s, uint32_t sel, uint64_t offset,
+              uint64_t next_eip);
+void far_call(X86CPUState *s, uint32_t sel, uint64_t offset, int opsize,
+              uint64_t next_eip);
 void far_return(X86CPUState *s, int opsize, uint32_t addend);
-void interrupt_return(X86CPUState *s, int opsize, uint32_t next_eip);
+void interrupt_return(X86CPUState *s, int opsize, uint64_t next_eip);
 void check_io_permission(X86CPUState *s, uint32_t port, int size);
 void load_ldt(X86CPUState *s, uint32_t sel);
 void load_tr(X86CPUState *s, uint32_t sel);
@@ -506,11 +518,11 @@ void cpu_sysexit(X86CPUState *s);
 
 /* x86_fpu.cpp */
 void fpu_reset(X86CPUState *s);
-void fpu_exec(X86CPUState *s, uint8_t opcode, uint8_t modrm, uint32_t lin,
-              uint32_t ea, int ea_seg, int opsize);
+void fpu_exec(X86CPUState *s, uint8_t opcode, uint8_t modrm, uint64_t lin,
+              uint64_t ea, int ea_seg, int opsize);
 void fpu_check_pending(X86CPUState *s);
-void fpu_fxsave(X86CPUState *s, uint32_t lin);
-void fpu_fxrstor(X86CPUState *s, uint32_t lin);
+void fpu_fxsave(X86CPUState *s, uint64_t lin);
+void fpu_fxrstor(X86CPUState *s, uint64_t lin);
 
 /* x86_interp.cpp */
 void x86_exec(X86CPUState *s);
@@ -523,7 +535,7 @@ void simd_exec(X86CPUState *s, const SimdInsn &insn);
 
 //#pragma mark - memory access
 
-static inline uint32_t host_load(const uint8_t *ptr, int size)
+static inline uint64_t host_load(const uint8_t *ptr, int size)
 {
     switch (size) {
     case SIZE8:
@@ -533,15 +545,20 @@ static inline uint32_t host_load(const uint8_t *ptr, int size)
         memcpy(&val, ptr, sizeof(val));
         return val;
     }
-    default: {
+    case SIZE32: {
         uint32_t val;
+        memcpy(&val, ptr, sizeof(val));
+        return val;
+    }
+    default: {
+        uint64_t val;
         memcpy(&val, ptr, sizeof(val));
         return val;
     }
     }
 }
 
-static inline void host_store(uint8_t *ptr, uint32_t val, int size)
+static inline void host_store(uint8_t *ptr, uint64_t val, int size)
 {
     switch (size) {
     case SIZE8:
@@ -552,25 +569,31 @@ static inline void host_store(uint8_t *ptr, uint32_t val, int size)
         memcpy(ptr, &v, sizeof(v));
         break;
     }
+    case SIZE32: {
+        uint32_t v = val;
+        memcpy(ptr, &v, sizeof(v));
+        break;
+    }
     default:
         memcpy(ptr, &val, sizeof(val));
         break;
     }
 }
 
-static inline X86TLBEntry *tlb_entry(X86CPUState *s, int mmu_idx, uint32_t lin)
+static inline X86TLBEntry *tlb_entry(X86CPUState *s, int mmu_idx, uint64_t lin)
 {
     return &s->tlb[mmu_idx][get_bits(lin, PAGE_BITS, TLB_BITS)];
 }
 
 /* True if an access of 'size' at 'lin' stays in the page the tag names. */
-static inline bool tlb_hit(uint32_t tag, uint32_t lin, int size)
+static inline bool tlb_hit(uint64_t tag, uint64_t lin, int size)
 {
     return tag == page_base(lin) &&
         page_offset(lin) <= (uint32_t)(PAGE_SIZE - size_bytes(size));
 }
 
-static inline uint32_t mem_read_mmu(X86CPUState *s, uint32_t lin, int size,
+/* General register sized accesses, up to SIZE64. */
+static inline uint64_t mem_read_mmu(X86CPUState *s, uint64_t lin, int size,
                                     int mmu_idx)
 {
     X86TLBEntry *e = tlb_entry(s, mmu_idx, lin);
@@ -580,7 +603,7 @@ static inline uint32_t mem_read_mmu(X86CPUState *s, uint32_t lin, int size,
     return mem_read_slow(s, lin, size, mmu_idx);
 }
 
-static inline void mem_write_mmu(X86CPUState *s, uint32_t lin, uint32_t val,
+static inline void mem_write_mmu(X86CPUState *s, uint64_t lin, uint64_t val,
                                  int size, int mmu_idx)
 {
     X86TLBEntry *e = tlb_entry(s, mmu_idx, lin);
@@ -591,24 +614,24 @@ static inline void mem_write_mmu(X86CPUState *s, uint32_t lin, uint32_t val,
     mem_write_slow(s, lin, val, size, mmu_idx);
 }
 
-static inline uint32_t mem_read(X86CPUState *s, uint32_t lin, int size)
+static inline uint64_t mem_read(X86CPUState *s, uint64_t lin, int size)
 {
     return mem_read_mmu(s, lin, size, s->mmu_idx);
 }
 
-static inline void mem_write(X86CPUState *s, uint32_t lin, uint32_t val,
+static inline void mem_write(X86CPUState *s, uint64_t lin, uint64_t val,
                              int size)
 {
     mem_write_mmu(s, lin, val, size, s->mmu_idx);
 }
 
 /* Descriptor tables and the TSS are accessed with supervisor rights. */
-static inline uint32_t sys_read(X86CPUState *s, uint32_t lin, int size)
+static inline uint64_t sys_read(X86CPUState *s, uint64_t lin, int size)
 {
     return mem_read_mmu(s, lin, size, MMU_SUPERVISOR);
 }
 
-static inline void sys_write(X86CPUState *s, uint32_t lin, uint32_t val,
+static inline void sys_write(X86CPUState *s, uint64_t lin, uint64_t val,
                              int size)
 {
     mem_write_mmu(s, lin, val, size, MMU_SUPERVISOR);
@@ -616,7 +639,7 @@ static inline void sys_write(X86CPUState *s, uint32_t lin, uint32_t val,
 
 /* Operands of any size, SIZE128 included, as byte images. Wider ones are
    split into 32 bit accesses off the fast path. */
-static inline void mem_read_bytes(X86CPUState *s, uint32_t lin, void *buf,
+static inline void mem_read_bytes(X86CPUState *s, uint64_t lin, void *buf,
                                   int size)
 {
     uint8_t *p = (uint8_t *)buf;
@@ -633,7 +656,7 @@ static inline void mem_read_bytes(X86CPUState *s, uint32_t lin, void *buf,
 }
 
 /* Both pages are checked before either is written. */
-static inline void mem_write_bytes(X86CPUState *s, uint32_t lin,
+static inline void mem_write_bytes(X86CPUState *s, uint64_t lin,
                                    const void *buf, int size)
 {
     const uint8_t *p = (const uint8_t *)buf;
@@ -653,8 +676,6 @@ static inline void mem_write_bytes(X86CPUState *s, uint32_t lin,
     }
 }
 
-
-//#pragma mark - stack
 
 //#pragma mark - segments
 
@@ -682,8 +703,9 @@ static inline uint8_t seg_fast_access(const X86CPUSeg *seg)
 }
 
 /* The linear address of 'size' bytes at 'ea' in a segment register, after
-   the limit and type checks. */
-static inline uint32_t seg_address(X86CPUState *s, int seg, uint32_t ea,
+   the limit and type checks. It may run past the linear address width,
+   which the memory accesses wrap. */
+static inline uint64_t seg_address(X86CPUState *s, int seg, uint64_t ea,
                                    int size, bool write)
 {
     if (likely(get_bit(s->seg_fast[seg], write))) {
@@ -701,13 +723,13 @@ static inline uint32_t seg_address(X86CPUState *s, int seg, uint32_t ea,
    part way through leaves ESP untouched. */
 struct StackPtr {
     const X86CPUSeg *ss;
-    uint32_t mask;
-    uint32_t sp;
+    uint64_t mask;
+    uint64_t sp;
     int mmu_idx;
     uint8_t fast;
 };
 
-static inline StackPtr make_stack(const X86CPUSeg *ss, uint32_t sp, int cpl)
+static inline StackPtr make_stack(const X86CPUSeg *ss, uint64_t sp, int cpl)
 {
     StackPtr st;
     st.ss = ss;
@@ -729,17 +751,17 @@ static inline StackPtr current_stack(X86CPUState *s)
     return st;
 }
 
-static inline uint32_t stack_address(X86CPUState *s, const StackPtr *st,
+static inline uint64_t stack_address(X86CPUState *s, const StackPtr *st,
                                      int size, bool write)
 {
-    uint32_t offset = st->sp & st->mask;
+    uint64_t offset = st->sp & st->mask;
     if (likely(get_bit(st->fast, write))) {
         return st->ss->base + offset;
     }
     return seg_address_slow(s, st->ss, EXCP_SS, offset, size, write);
 }
 
-static inline void stack_push(X86CPUState *s, StackPtr *st, uint32_t val,
+static inline void stack_push(X86CPUState *s, StackPtr *st, uint64_t val,
                               int size)
 {
     st->sp -= size_bytes(size);
@@ -747,9 +769,9 @@ static inline void stack_push(X86CPUState *s, StackPtr *st, uint32_t val,
                   st->mmu_idx);
 }
 
-static inline uint32_t stack_pop(X86CPUState *s, StackPtr *st, int size)
+static inline uint64_t stack_pop(X86CPUState *s, StackPtr *st, int size)
 {
-    uint32_t val = mem_read_mmu(s, stack_address(s, st, size, false), size,
+    uint64_t val = mem_read_mmu(s, stack_address(s, st, size, false), size,
                                 st->mmu_idx);
     st->sp += size_bytes(size);
     return val;
@@ -763,8 +785,8 @@ static inline void stack_commit(X86CPUState *s, const StackPtr &st)
 
 //#pragma mark - condition codes
 
-static inline void set_cc(X86CPUState *s, int op, int size, uint32_t src,
-                          uint32_t dst)
+static inline void set_cc(X86CPUState *s, int op, int size, uint64_t src,
+                          uint64_t dst)
 {
     s->cc_op = op;
     s->cc_size = size;
@@ -772,8 +794,8 @@ static inline void set_cc(X86CPUState *s, int op, int size, uint32_t src,
     s->cc_dst = trunc_size(dst, size);
 }
 
-static inline void set_cc_carry(X86CPUState *s, int op, int size, uint32_t src,
-                                uint32_t dst, bool carry)
+static inline void set_cc_carry(X86CPUState *s, int op, int size, uint64_t src,
+                                uint64_t dst, bool carry)
 {
     set_cc(s, op, size, src, dst);
     s->cc_carry = carry;
@@ -787,9 +809,9 @@ static inline void set_cc_eflags(X86CPUState *s, uint32_t flags)
 }
 
 /* The left operand of the last add or subtract. */
-static inline uint32_t cc_first_operand(X86CPUState *s)
+static force_inline uint64_t cc_first_operand(X86CPUState *s)
 {
-    uint32_t src = s->cc_src, dst = s->cc_dst;
+    uint64_t src = s->cc_src, dst = s->cc_dst;
     switch (s->cc_op) {
     case CC_OP_ADD:
         return trunc_size(dst - src, s->cc_size);
@@ -804,9 +826,9 @@ static inline uint32_t cc_first_operand(X86CPUState *s)
     }
 }
 
-static inline bool cc_carry(X86CPUState *s)
+static force_inline bool cc_carry(X86CPUState *s)
 {
-    uint32_t src = s->cc_src, dst = s->cc_dst;
+    uint64_t src = s->cc_src, dst = s->cc_dst;
     switch (s->cc_op) {
     case CC_OP_EFLAGS:
         return get_bit(s->eflags, EFLAGS_CF);
@@ -835,7 +857,7 @@ static inline bool cc_carry(X86CPUState *s)
 
 static inline bool cc_overflow(X86CPUState *s)
 {
-    uint32_t src = s->cc_src, dst = s->cc_dst, a;
+    uint64_t src = s->cc_src, dst = s->cc_dst, a;
     int size = s->cc_size;
     switch (s->cc_op) {
     case CC_OP_EFLAGS:
@@ -931,7 +953,7 @@ static inline bool test_condition(X86CPUState *s, int cc)
 {
     bool result;
     bool sub = s->cc_op == CC_OP_SUB;
-    uint32_t a = sub ? cc_first_operand(s) : 0;
+    uint64_t a = sub ? cc_first_operand(s) : 0;
     int size = s->cc_size;
 
     switch (get_bits(cc, 1, 3)) {

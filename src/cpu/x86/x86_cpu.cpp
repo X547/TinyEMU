@@ -104,14 +104,15 @@ static void cpu_dump_state(X86CPUState *s)
     };
 
     for (int i = 0; i < 8; i++) {
-        fprintf(stderr, "%s=%08x%s", reg_names[i], s->regs[i],
+        fprintf(stderr, "%s=%08x%s", reg_names[i], (uint32_t)s->regs[i],
                 i % 4 == 3 ? "\n" : " ");
     }
     fprintf(stderr, "EIP=%08x EFL=%08x CPL=%d CR0=%08x CR2=%08x CR3=%08x\n",
-            s->eip, get_eflags(s), s->cpl, s->cr0, s->cr2, s->cr3);
+            (uint32_t)s->rip, get_eflags(s), s->cpl, s->cr0,
+            (uint32_t)s->cr2, (uint32_t)s->cr3);
     for (int i = 0; i < SEG_COUNT; i++) {
         fprintf(stderr, "%s=%04x %08x %08x %04x\n", seg_names[i],
-                s->segs[i].sel, s->segs[i].base, s->segs[i].limit,
+                s->segs[i].sel, (uint32_t)s->segs[i].base, s->segs[i].limit,
                 s->segs[i].flags);
     }
 }
@@ -119,7 +120,7 @@ static void cpu_dump_state(X86CPUState *s)
 
 //#pragma mark - physical memory
 
-static uint32_t device_read(PhysMemoryRange *pr, uint32_t offset, int size)
+static uint64_t device_read(PhysMemoryRange *pr, uint32_t offset, int size)
 {
     if (get_bit(pr->devio_flags, size)) {
         return trunc_size(pr->io->DeviceRead(offset, size), size);
@@ -127,8 +128,8 @@ static uint32_t device_read(PhysMemoryRange *pr, uint32_t offset, int size)
     /* compose from narrower accesses */
     if (size > SIZE8 && (pr->devio_flags & bit_mask(size)) != 0) {
         int half = size - 1;
-        uint32_t low = device_read(pr, offset, half);
-        uint32_t high = device_read(pr, offset + size_bytes(half), half);
+        uint64_t low = device_read(pr, offset, half);
+        uint64_t high = device_read(pr, offset + size_bytes(half), half);
         return set_bits(low, size_bits(half), size_bits(half), high);
     }
     /* extract from a wider access */
@@ -143,7 +144,7 @@ static uint32_t device_read(PhysMemoryRange *pr, uint32_t offset, int size)
     return size_mask(size);
 }
 
-static void device_write(PhysMemoryRange *pr, uint32_t offset, uint32_t val,
+static void device_write(PhysMemoryRange *pr, uint32_t offset, uint64_t val,
                          int size)
 {
     if (get_bit(pr->devio_flags, size)) {
@@ -161,7 +162,7 @@ static void device_write(PhysMemoryRange *pr, uint32_t offset, uint32_t val,
 
 /* The entries into device code, which hold the device lock. Nothing in them
    raises an exception, so no longjmp() leaves the lock held. */
-static uint32_t locked_device_read(X86CPUState *s, PhysMemoryRange *pr,
+static uint64_t locked_device_read(X86CPUState *s, PhysMemoryRange *pr,
                                    uint32_t offset, int size)
 {
     DeviceLocker locker(*s->device_lock);
@@ -169,13 +170,13 @@ static uint32_t locked_device_read(X86CPUState *s, PhysMemoryRange *pr,
 }
 
 static void locked_device_write(X86CPUState *s, PhysMemoryRange *pr,
-                                uint32_t offset, uint32_t val, int size)
+                                uint32_t offset, uint64_t val, int size)
 {
     DeviceLocker locker(*s->device_lock);
     device_write(pr, offset, val, size);
 }
 
-static uint32_t phys_read(X86CPUState *s, uint32_t phys, int size)
+static uint64_t phys_read(X86CPUState *s, uint64_t phys, int size)
 {
     PhysMemoryRange *pr = s->mem_map->FindRange(phys);
     if (pr == nullptr) {
@@ -187,7 +188,7 @@ static uint32_t phys_read(X86CPUState *s, uint32_t phys, int size)
     return locked_device_read(s, pr, phys - pr->addr, size);
 }
 
-static void phys_write(X86CPUState *s, uint32_t phys, uint32_t val, int size)
+static void phys_write(X86CPUState *s, uint64_t phys, uint64_t val, int size)
 {
     PhysMemoryRange *pr = s->mem_map->FindRange(phys);
     if (pr == nullptr) {
@@ -214,15 +215,16 @@ void tlb_flush_all(X86CPUState *s)
     s->code_tag = TLB_INVALID;
 }
 
-void tlb_flush_page(X86CPUState *s, uint32_t lin)
+void tlb_flush_page(X86CPUState *s, uint64_t lin)
 {
+    lin &= s->lin_mask;
     /* entries are per 4 KiB page, so a large page cannot be found from one
        address */
     if (s->tlb_large_pages) {
         tlb_flush_all(s);
         return;
     }
-    uint32_t tag = page_base(lin);
+    uint64_t tag = page_base(lin);
     for (int mmu_idx = 0; mmu_idx < MMU_COUNT; mmu_idx++) {
         X86TLBEntry *e = tlb_entry(s, mmu_idx, lin);
         if (e->read == tag || e->write == tag || e->code == tag) {
@@ -234,14 +236,14 @@ void tlb_flush_page(X86CPUState *s, uint32_t lin)
     }
 }
 
-/* Map the page of 'lin' onto RAM range 'pr' and return the host pointer
-   for 'lin'. */
-static uint8_t *tlb_fill(X86CPUState *s, uint32_t lin, PhysMemoryRange *pr,
-                         uint32_t phys, bool writable, int mmu_idx)
+/* Map the page of 'lin', within the linear address width, onto RAM range
+   'pr' and return the host pointer for 'lin'. */
+static uint8_t *tlb_fill(X86CPUState *s, uint64_t lin, PhysMemoryRange *pr,
+                         uint64_t phys, bool writable, int mmu_idx)
 {
     uint32_t offset = phys - pr->addr;
     uint8_t *ptr = pr->phys_mem + offset;
-    uint32_t tag = page_base(lin);
+    uint64_t tag = page_base(lin);
     X86TLBEntry *e = tlb_entry(s, mmu_idx, lin);
 
     e->addend = (uintptr_t)ptr - lin;
@@ -261,7 +263,7 @@ static uint8_t *tlb_fill(X86CPUState *s, uint32_t lin, PhysMemoryRange *pr,
 
 //#pragma mark - paging
 
-[[noreturn]] static void page_fault(X86CPUState *s, uint32_t lin, int access,
+[[noreturn]] static void page_fault(X86CPUState *s, uint64_t lin, int access,
                                     int mmu_idx, bool protection)
 {
     uint32_t error_code = set_bit(0, 0, protection) |
@@ -271,9 +273,10 @@ static uint8_t *tlb_fill(X86CPUState *s, uint32_t lin, PhysMemoryRange *pr,
     raise_exception(s, EXCP_PF, error_code);
 }
 
-/* Translate a linear address, updating the accessed and dirty bits.
-   'writable' tells whether a write through the mapping needs no walk. */
-static uint32_t page_walk(X86CPUState *s, uint32_t lin, int access,
+/* Translate a linear address, within the linear address width, updating
+   the accessed and dirty bits. 'writable' tells whether a write through the
+   mapping needs no walk. */
+static uint64_t page_walk(X86CPUState *s, uint64_t lin, int access,
                           int mmu_idx, bool *writable)
 {
     if (!get_bit(s->cr0, CR0_PG)) {
@@ -284,14 +287,16 @@ static uint32_t page_walk(X86CPUState *s, uint32_t lin, int access,
     bool is_user = mmu_idx == MMU_USER;
     bool is_write = access == ACCESS_WRITE;
 
-    uint32_t pde_addr = page_base(s->cr3) + get_bits(lin, 22, 10) * 4;
+    uint64_t pde_addr = page_base(get_bits(s->cr3, 0, 32)) +
+        get_bits(lin, 22, 10) * 4;
     uint32_t pde = phys_read(s, pde_addr, SIZE32);
     if (!get_bit(pde, PTE_P)) {
         page_fault(s, lin, access, mmu_idx, false);
     }
 
     bool large = get_bit(pde, PTE_PS) && get_bit(s->cr4, CR4_PSE);
-    uint32_t pte_addr, pte, perms, phys;
+    uint64_t pte_addr, phys;
+    uint32_t pte, perms;
     if (large) {
         pte_addr = pde_addr;
         pte = pde;
@@ -336,15 +341,18 @@ static uint32_t page_walk(X86CPUState *s, uint32_t lin, int access,
 
 //#pragma mark - virtual memory
 
-static bool crosses_page(uint32_t lin, int size)
+static bool crosses_page(uint64_t lin, int size)
 {
     return page_offset(lin) > (uint32_t)(PAGE_SIZE - size_bytes(size));
 }
 
-uint32_t mem_read_slow(X86CPUState *s, uint32_t lin, int size, int mmu_idx)
+/* The slow paths wrap the linear address, which the fast ones leave to a
+   TLB miss. */
+uint64_t mem_read_slow(X86CPUState *s, uint64_t lin, int size, int mmu_idx)
 {
+    lin &= s->lin_mask;
     if (crosses_page(lin, size)) {
-        uint32_t val = 0;
+        uint64_t val = 0;
         for (int i = 0; i < size_bytes(size); i++) {
             val = set_bits(val, 8 * i, 8,
                            mem_read_mmu(s, lin + i, SIZE8, mmu_idx));
@@ -353,7 +361,7 @@ uint32_t mem_read_slow(X86CPUState *s, uint32_t lin, int size, int mmu_idx)
     }
 
     bool writable;
-    uint32_t phys = page_walk(s, lin, ACCESS_READ, mmu_idx, &writable);
+    uint64_t phys = page_walk(s, lin, ACCESS_READ, mmu_idx, &writable);
     PhysMemoryRange *pr = s->mem_map->FindRange(phys);
     if (pr == nullptr) {
         return size_mask(size);
@@ -366,10 +374,11 @@ uint32_t mem_read_slow(X86CPUState *s, uint32_t lin, int size, int mmu_idx)
 
 /* Translate for writing and prepare the TLB, so that the write that follows
    cannot fault. */
-static void probe_write(X86CPUState *s, uint32_t lin, int mmu_idx)
+static void probe_write(X86CPUState *s, uint64_t lin, int mmu_idx)
 {
     bool writable;
-    uint32_t phys = page_walk(s, lin, ACCESS_WRITE, mmu_idx, &writable);
+    lin &= s->lin_mask;
+    uint64_t phys = page_walk(s, lin, ACCESS_WRITE, mmu_idx, &writable);
     PhysMemoryRange *pr = s->mem_map->FindRange(phys);
     if (pr != nullptr && pr->is_ram &&
         !(pr->devram_flags & DEVRAM_FLAG_ROM)) {
@@ -378,8 +387,9 @@ static void probe_write(X86CPUState *s, uint32_t lin, int mmu_idx)
     }
 }
 
-void mem_probe_write(X86CPUState *s, uint32_t lin, int size)
+void mem_probe_write(X86CPUState *s, uint64_t lin, int size)
 {
+    lin &= s->lin_mask;
     if (tlb_hit(tlb_entry(s, s->mmu_idx, lin)->write, lin, size)) {
         return;
     }
@@ -389,15 +399,16 @@ void mem_probe_write(X86CPUState *s, uint32_t lin, int size)
     }
 }
 
-void mem_write_slow(X86CPUState *s, uint32_t lin, uint32_t val, int size,
+void mem_write_slow(X86CPUState *s, uint64_t lin, uint64_t val, int size,
                     int mmu_idx)
 {
+    lin &= s->lin_mask;
     if (crosses_page(lin, size)) {
         /* both pages must be writable before any byte is */
         bool writable;
         page_walk(s, lin, ACCESS_WRITE, mmu_idx, &writable);
-        page_walk(s, lin + size_bytes(size) - 1, ACCESS_WRITE, mmu_idx,
-                  &writable);
+        page_walk(s, (lin + size_bytes(size) - 1) & s->lin_mask,
+                  ACCESS_WRITE, mmu_idx, &writable);
         for (int i = 0; i < size_bytes(size); i++) {
             mem_write_mmu(s, lin + i, get_bits(val, 8 * i, 8), SIZE8,
                           mmu_idx);
@@ -406,7 +417,7 @@ void mem_write_slow(X86CPUState *s, uint32_t lin, uint32_t val, int size,
     }
 
     bool writable;
-    uint32_t phys = page_walk(s, lin, ACCESS_WRITE, mmu_idx, &writable);
+    uint64_t phys = page_walk(s, lin, ACCESS_WRITE, mmu_idx, &writable);
     PhysMemoryRange *pr = s->mem_map->FindRange(phys);
     if (pr == nullptr) {
         return;
@@ -422,13 +433,14 @@ void mem_write_slow(X86CPUState *s, uint32_t lin, uint32_t val, int size,
     locked_device_write(s, pr, phys - pr->addr, val, size);
 }
 
-uint8_t fetch_slow(X86CPUState *s, uint32_t lin)
+uint8_t fetch_slow(X86CPUState *s, uint64_t lin)
 {
     int mmu_idx = s->mmu_idx;
+    lin &= s->lin_mask;
     X86TLBEntry *e = tlb_entry(s, mmu_idx, lin);
     if (e->code != page_base(lin)) {
         bool writable;
-        uint32_t phys = page_walk(s, lin, ACCESS_CODE, mmu_idx, &writable);
+        uint64_t phys = page_walk(s, lin, ACCESS_CODE, mmu_idx, &writable);
         PhysMemoryRange *pr = s->mem_map->FindRange(phys);
         if (pr == nullptr) {
             return 0xff;
@@ -450,6 +462,7 @@ void cpu_update_mode(X86CPUState *s)
 {
     s->code32 = get_bit(s->segs[SEG_CS].flags, DESC_DB);
     s->ss32 = get_bit(s->segs[SEG_SS].flags, DESC_DB);
+    s->lin_mask = UINT32_MAX;
     int mmu_idx = s->cpl == 3 ? MMU_USER : MMU_SUPERVISOR;
     if (mmu_idx != s->mmu_idx) {
         s->mmu_idx = mmu_idx;
@@ -478,7 +491,7 @@ void cpu_set_cr0(X86CPUState *s, uint32_t val)
     cpu_update_mode(s);
 }
 
-void cpu_set_cr3(X86CPUState *s, uint32_t val)
+void cpu_set_cr3(X86CPUState *s, uint64_t val)
 {
     s->cr3 = val;
     tlb_flush_all(s);
@@ -502,7 +515,7 @@ static void cpu_reset(X86CPUState *s)
 
     memset(s->regs, 0, sizeof(s->regs));
     s->regs[REG_EDX] = CPUID_SIGNATURE;
-    s->eip = 0xfff0;
+    s->rip = 0xfff0;
     s->eflags = bit_at(1);
     s->cc_op = CC_OP_EFLAGS;
     s->cr0 = bit_at(CR0_ET) | bit_at(CR0_NW) | bit_at(CR0_CD);
@@ -660,10 +673,11 @@ void cpu_wrmsr(X86CPUState *s)
         s->sysenter_cs = get_bits(val, 0, 16);
         break;
     case MSR_SYSENTER_ESP:
-        s->sysenter_esp = val;
+        /* 32 bits wide on a processor without long mode */
+        s->sysenter_esp = get_bits(val, 0, 32);
         break;
     case MSR_SYSENTER_EIP:
-        s->sysenter_eip = val;
+        s->sysenter_eip = get_bits(val, 0, 32);
         break;
     case MSR_EVNTSEL0:
     case MSR_EVNTSEL1:
@@ -701,7 +715,7 @@ static bool exception_is_contributory(int intno)
 }
 
 /* Deliver a fault or trap and resume at the instruction loop. The return
-   address is s->eip: the faulting instruction, or the next one for a trap
+   address is s->rip: the faulting instruction, or the next one for a trap
    raised once the instruction is complete. */
 void raise_exception(X86CPUState *s, int intno, int error_code)
 {
@@ -709,7 +723,8 @@ void raise_exception(X86CPUState *s, int intno, int error_code)
 
 #ifdef DUMP_EXCEPTIONS
     fprintf(stderr, "x86: exception %d error=%04x at %04x:%08x cr2=%08x\n",
-            intno, error_code, s->segs[SEG_CS].sel, s->eip, s->cr2);
+            intno, error_code, s->segs[SEG_CS].sel, (uint32_t)s->rip,
+            (uint32_t)s->cr2);
 #endif
     if (old == EXCP_DF) {
         fprintf(stderr, "x86: triple fault, resetting\n");
@@ -724,7 +739,7 @@ void raise_exception(X86CPUState *s, int intno, int error_code)
         error_code = 0;
     }
     s->old_exception = intno;
-    do_interrupt(s, intno, false, error_code, s->eip, false);
+    do_interrupt(s, intno, false, error_code, s->rip, false);
     s->old_exception = -1;
     longjmp(s->jmp_env, 1);
 }
@@ -768,7 +783,7 @@ void x86_cpu_set_reg(X86CPUState *s, int reg, uint32_t val)
 {
     switch (reg) {
     case X86_CPU_REG_EIP:
-        s->eip = val;
+        s->rip = val;
         break;
     case X86_CPU_REG_CR0:
         cpu_set_cr0(s, val);
@@ -788,7 +803,7 @@ uint32_t x86_cpu_get_reg(X86CPUState *s, int reg)
 {
     switch (reg) {
     case X86_CPU_REG_EIP:
-        return s->eip;
+        return s->rip;
     case X86_CPU_REG_CR0:
         return s->cr0;
     case X86_CPU_REG_CR2:

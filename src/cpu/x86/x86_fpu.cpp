@@ -565,20 +565,20 @@ static bool fpu_trig_argument(X87State *f, long double v, bool pushes)
 
 //#pragma mark - memory operands
 
-static uint64_t read64(X86CPUState *s, uint32_t lin)
+static uint64_t read64(X86CPUState *s, uint64_t lin)
 {
     uint32_t low = mem_read(s, lin, SIZE32);
     return concat_bits(mem_read(s, lin + 4, SIZE32), low, 32);
 }
 
-static void write64(X86CPUState *s, uint32_t lin, uint64_t val)
+static void write64(X86CPUState *s, uint64_t lin, uint64_t val)
 {
     mem_probe_write(s, lin + 4, SIZE32);
     mem_write(s, lin, get_bits(val, 0, 32), SIZE32);
     mem_write(s, lin + 4, get_bits(val, 32, 32), SIZE32);
 }
 
-static long double fpu_load(X86CPUState *s, uint32_t lin, int fmt)
+static long double fpu_load(X86CPUState *s, uint64_t lin, int fmt)
 {
     switch (fmt) {
     case FMT_F32: {
@@ -606,7 +606,7 @@ static long double fpu_load(X86CPUState *s, uint32_t lin, int fmt)
     }
 }
 
-static void fpu_store(X86CPUState *s, uint32_t lin, long double v, int fmt,
+static void fpu_store(X86CPUState *s, uint64_t lin, long double v, int fmt,
                       bool truncate)
 {
     X87State *f = &s->fpu;
@@ -657,7 +657,7 @@ static void fpu_store(X86CPUState *s, uint32_t lin, long double v, int fmt,
     }
 }
 
-static void fpu_load_bcd(X86CPUState *s, uint32_t lin)
+static void fpu_load_bcd(X86CPUState *s, uint64_t lin)
 {
     long double v = 0;
     for (int i = 8; i >= 0; i--) {
@@ -670,7 +670,7 @@ static void fpu_load_bcd(X86CPUState *s, uint32_t lin)
     fpu_push(&s->fpu, v);
 }
 
-static void fpu_store_bcd(X86CPUState *s, uint32_t lin)
+static void fpu_store_bcd(X86CPUState *s, uint64_t lin)
 {
     X87State *f = &s->fpu;
     long double v = fpu_round(f, st_get(f, 0));
@@ -703,7 +703,7 @@ static int env_size(int opsize)
 }
 
 /* The protected mode layouts are used in every mode. */
-static void fpu_store_env(X86CPUState *s, uint32_t lin, int opsize)
+static void fpu_store_env(X86CPUState *s, uint64_t lin, int opsize)
 {
     X87State *f = &s->fpu;
     uint32_t fields[7] = {
@@ -725,7 +725,7 @@ static void fpu_store_env(X86CPUState *s, uint32_t lin, int opsize)
     }
 }
 
-static void fpu_load_env(X86CPUState *s, uint32_t lin, int opsize)
+static void fpu_load_env(X86CPUState *s, uint64_t lin, int opsize)
 {
     X87State *f = &s->fpu;
     int size = opsize == SIZE32 ? SIZE32 : SIZE16;
@@ -745,10 +745,10 @@ static void fpu_load_env(X86CPUState *s, uint32_t lin, int opsize)
     fpu_update_summary(f);
 }
 
-static void fpu_save(X86CPUState *s, uint32_t lin, int opsize)
+static void fpu_save(X86CPUState *s, uint64_t lin, int opsize)
 {
     X87State *f = &s->fpu;
-    uint32_t reg_base = lin + env_size(opsize);
+    uint64_t reg_base = lin + env_size(opsize);
 
     mem_probe_write(s, reg_base + 8 * 10 - 4, SIZE32);
     fpu_store_env(s, lin, opsize);
@@ -761,10 +761,10 @@ static void fpu_save(X86CPUState *s, uint32_t lin, int opsize)
     fpu_init(f);
 }
 
-static void fpu_restore(X86CPUState *s, uint32_t lin, int opsize)
+static void fpu_restore(X86CPUState *s, uint64_t lin, int opsize)
 {
     X87State *f = &s->fpu;
-    uint32_t reg_base = lin + env_size(opsize);
+    uint64_t reg_base = lin + env_size(opsize);
     Fx80 st[8];
 
     for (int i = 0; i < 8; i++) {
@@ -783,7 +783,7 @@ static const int FXSAVE_ST = 32;
 static const int FXSAVE_XMM = 160;
 
 /* The area must be 16 byte aligned, so no 16 byte access crosses a page. */
-void fpu_fxsave(X86CPUState *s, uint32_t lin)
+void fpu_fxsave(X86CPUState *s, uint64_t lin)
 {
     X87State *f = &s->fpu;
     uint8_t image[FXSAVE_SIZE] = {};
@@ -812,7 +812,7 @@ void fpu_fxsave(X86CPUState *s, uint32_t lin)
     }
 }
 
-void fpu_fxrstor(X86CPUState *s, uint32_t lin)
+void fpu_fxrstor(X86CPUState *s, uint64_t lin)
 {
     X87State *f = &s->fpu;
     uint8_t image[FXSAVE_SIZE];
@@ -846,7 +846,7 @@ void fpu_fxrstor(X86CPUState *s, uint32_t lin)
 
 //#pragma mark - instructions
 
-static void fpu_exec_mem(X86CPUState *s, int op, int reg, uint32_t lin,
+static void fpu_exec_mem(X86CPUState *s, int op, int reg, uint64_t lin,
                          int opsize)
 {
     static const int arith_formats[4] = {FMT_F32, FMT_I32, FMT_F64, FMT_I16};
@@ -1275,8 +1275,8 @@ void fpu_check_pending(X86CPUState *s)
     }
 }
 
-void fpu_exec(X86CPUState *s, uint8_t opcode, uint8_t modrm, uint32_t lin,
-              uint32_t ea, int ea_seg, int opsize)
+void fpu_exec(X86CPUState *s, uint8_t opcode, uint8_t modrm, uint64_t lin,
+              uint64_t ea, int ea_seg, int opsize)
 {
     X87State *f = &s->fpu;
     int op = get_bits(opcode, 0, 3);
@@ -1284,7 +1284,7 @@ void fpu_exec(X86CPUState *s, uint8_t opcode, uint8_t modrm, uint32_t lin,
 
     if (!fpu_is_control(op, modrm, is_mem)) {
         fpu_check_pending(s);
-        f->fip = s->eip;
+        f->fip = s->rip;
         f->fcs = s->segs[SEG_CS].sel;
         f->opcode = set_bits(modrm, 8, 3, op);
         if (is_mem) {

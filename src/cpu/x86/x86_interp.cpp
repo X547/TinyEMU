@@ -57,10 +57,11 @@ enum {
 /* String iterations run before interrupts are looked at again. */
 const int STRING_BATCH = 4096;
 
+/* EIP and its mask are kept apart: a compiler that loads them together
+   in one vector load stalls on the store of EIP just before. */
 struct Decoder {
-    uint32_t eip;        /* offset of the next byte */
-    uint32_t eip_mask;
-    uint32_t cs_base;
+    uint64_t eip;        /* offset of the next byte */
+    uint64_t cs_base;
     int opsize;
     bool addr32;
     int seg_override;    /* -1 if none */
@@ -68,6 +69,7 @@ struct Decoder {
     bool lock;
     bool prefix_66;      /* a mandatory prefix for vector instructions */
     uint32_t esp_addend; /* POP computes its operand with ESP popped */
+    uint64_t eip_mask;
 };
 
 }
@@ -90,9 +92,11 @@ static inline int modrm_rm(uint8_t modrm)
     return get_bits(modrm, 0, 3);
 }
 
+/* Fetches rely on the code tag to miss for an address past the linear
+   address width; fetch_slow() wraps it. */
 static inline uint8_t fetch8(X86CPUState *s, Decoder &d)
 {
-    uint32_t lin = d.cs_base + (d.eip & d.eip_mask);
+    uint64_t lin = d.cs_base + (d.eip & d.eip_mask);
     d.eip++;
     if (likely(page_base(lin) == s->code_tag)) {
         return *(uint8_t *)(s->code_addend + lin);
@@ -102,7 +106,7 @@ static inline uint8_t fetch8(X86CPUState *s, Decoder &d)
 
 static inline uint32_t fetch_imm(X86CPUState *s, Decoder &d, int size)
 {
-    uint32_t lin = d.cs_base + (d.eip & d.eip_mask);
+    uint64_t lin = d.cs_base + (d.eip & d.eip_mask);
     if (likely(page_base(lin) == s->code_tag &&
                page_offset(lin) <= (uint32_t)(PAGE_SIZE - size_bytes(size)))) {
         d.eip += size_bytes(size);
@@ -195,22 +199,15 @@ static bool lock_allowed(X86CPUState *s, const Decoder &d, uint8_t b)
     return modrm_mod(modrm) != 3 && reg >= reg_min && reg <= reg_max;
 }
 
-static Operand decode_modrm(X86CPUState *s, Decoder &d, uint8_t modrm)
+/* The offset and segment of a memory operand. Returning the offset alone
+   keeps it in a register whatever the ABI. */
+static uint64_t decode_ea(X86CPUState *s, Decoder &d, uint8_t modrm,
+                          int *seg_out)
 {
-    Operand op;
     int mod = modrm_mod(modrm);
     int rm = modrm_rm(modrm);
-
-    op.reg = rm;
-    op.seg = SEG_DS;
-    op.ea = 0;
-    op.is_reg = mod == 3;
-    if (op.is_reg) {
-        return op;
-    }
-
     int seg = SEG_DS;
-    uint32_t ea = 0;
+    uint64_t ea = 0;
     if (d.addr32) {
         int base = rm;
         if (rm == REG_ESP) {
@@ -222,7 +219,7 @@ static Operand decode_modrm(X86CPUState *s, Decoder &d, uint8_t modrm)
             }
         }
         if (base == REG_EBP && mod == 0) {
-            ea += fetch_imm(s, d, SIZE32);
+            ea += fetch_simm(s, d, SIZE32);
         } else {
             ea += s->regs[base];
             if (base == REG_ESP) {
@@ -235,8 +232,9 @@ static Operand decode_modrm(X86CPUState *s, Decoder &d, uint8_t modrm)
         if (mod == 1) {
             ea += fetch_simm(s, d, SIZE8);
         } else if (mod == 2) {
-            ea += fetch_imm(s, d, SIZE32);
+            ea += fetch_simm(s, d, SIZE32);
         }
+        ea = get_bits(ea, 0, 32);
     } else {
         static const uint8_t base_reg[8] = {
             REG_EBX, REG_EBX, REG_EBP, REG_EBP, REG_ESI, REG_EDI, REG_EBP,
@@ -263,8 +261,23 @@ static Operand decode_modrm(X86CPUState *s, Decoder &d, uint8_t modrm)
         }
         ea = get_bits(ea, 0, 16);
     }
-    op.seg = d.seg_override >= 0 ? d.seg_override : seg;
-    op.ea = ea;
+    *seg_out = d.seg_override >= 0 ? d.seg_override : seg;
+    return ea;
+}
+
+static force_inline Operand decode_modrm(X86CPUState *s, Decoder &d,
+                                         uint8_t modrm)
+{
+    Operand op;
+    op.reg = modrm_rm(modrm);
+    op.is_reg = modrm_mod(modrm) == 3;
+    op.seg = SEG_DS;
+    op.ea = 0;
+    if (!op.is_reg) {
+        int seg;
+        op.ea = decode_ea(s, d, modrm, &seg);
+        op.seg = seg;
+    }
     return op;
 }
 
@@ -274,7 +287,7 @@ static inline Operand fetch_modrm(X86CPUState *s, Decoder &d, uint8_t *modrm)
     return decode_modrm(s, d, *modrm);
 }
 
-static inline uint32_t addr_mask(const Decoder &d)
+static inline uint64_t addr_mask(const Decoder &d)
 {
     return d.addr32 ? UINT32_MAX : 0xffff;
 }
@@ -284,12 +297,12 @@ static inline int data_seg(const Decoder &d)
     return d.seg_override >= 0 ? d.seg_override : SEG_DS;
 }
 
-static inline uint32_t next_eip(const Decoder &d)
+static inline uint64_t next_eip(const Decoder &d)
 {
     return d.eip & d.eip_mask;
 }
 
-static inline void jump_rel(Decoder &d, uint32_t rel)
+static inline void jump_rel(Decoder &d, int64_t rel)
 {
     d.eip = trunc_size(d.eip + rel, d.opsize);
 }
@@ -297,7 +310,7 @@ static inline void jump_rel(Decoder &d, uint32_t rel)
 
 //#pragma mark - operands
 
-static inline uint32_t reg_read(X86CPUState *s, int reg, int size)
+static force_inline uint64_t reg_read(X86CPUState *s, int reg, int size)
 {
     switch (size) {
     case SIZE8:
@@ -305,21 +318,27 @@ static inline uint32_t reg_read(X86CPUState *s, int reg, int size)
                         get_bit(reg, 2) ? 8 : 0, 8);
     case SIZE16:
         return get_bits(s->regs[reg], 0, 16);
+    case SIZE32:
+        return get_bits(s->regs[reg], 0, 32);
     default:
         return s->regs[reg];
     }
 }
 
-static inline void reg_write(X86CPUState *s, int reg, uint32_t val, int size)
+/* A 32 bit write zero extends; narrower ones merge. */
+static inline void reg_write(X86CPUState *s, int reg, uint64_t val, int size)
 {
     switch (size) {
     case SIZE8: {
-        uint32_t *r = &s->regs[get_bits(reg, 0, 2)];
+        uint64_t *r = &s->regs[get_bits(reg, 0, 2)];
         *r = set_bits(*r, get_bit(reg, 2) ? 8 : 0, 8, val);
         break;
     }
     case SIZE16:
         s->regs[reg] = set_bits(s->regs[reg], 0, 16, val);
+        break;
+    case SIZE32:
+        s->regs[reg] = get_bits(val, 0, 32);
         break;
     default:
         s->regs[reg] = val;
@@ -327,20 +346,21 @@ static inline void reg_write(X86CPUState *s, int reg, uint32_t val, int size)
     }
 }
 
-static inline void reg_add_masked(X86CPUState *s, int reg, int32_t delta,
-                                  uint32_t mask)
+static inline void reg_add_masked(X86CPUState *s, int reg, int64_t delta,
+                                  uint64_t mask)
 {
     s->regs[reg] = (s->regs[reg] & ~mask) | ((s->regs[reg] + delta) & mask);
 }
 
 /* The linear address of 'size' bytes 'disp' bytes into a memory operand. */
-static inline uint32_t op_address(X86CPUState *s, const Operand &op,
-                                  uint32_t disp, int size, bool write)
+static inline uint64_t op_address(X86CPUState *s, const Operand &op,
+                                  uint64_t disp, int size, bool write)
 {
     return seg_address(s, op.seg, op.ea + disp, size, write);
 }
 
-static inline uint32_t rm_read(X86CPUState *s, const Operand &op, int size)
+static force_inline uint64_t rm_read(X86CPUState *s, const Operand &op,
+                                       int size)
 {
     if (op.is_reg) {
         return reg_read(s, op.reg, size);
@@ -348,7 +368,7 @@ static inline uint32_t rm_read(X86CPUState *s, const Operand &op, int size)
     return mem_read(s, op_address(s, op, 0, size, false), size);
 }
 
-static inline void rm_write(X86CPUState *s, const Operand &op, uint32_t val,
+static inline void rm_write(X86CPUState *s, const Operand &op, uint64_t val,
                             int size)
 {
     if (op.is_reg) {
@@ -358,7 +378,7 @@ static inline void rm_write(X86CPUState *s, const Operand &op, uint32_t val,
     }
 }
 
-static inline uint32_t mem_read_modify(X86CPUState *s, uint32_t lin, int size)
+static inline uint64_t mem_read_modify(X86CPUState *s, uint64_t lin, int size)
 {
     X86TLBEntry *e = tlb_entry(s, s->mmu_idx, lin);
     if (likely(tlb_hit(e->write, lin, size))) {
@@ -369,7 +389,7 @@ static inline uint32_t mem_read_modify(X86CPUState *s, uint32_t lin, int size)
 }
 
 /* Read an operand that is written back afterwards. */
-static inline uint32_t rm_read_modify(X86CPUState *s, const Operand &op,
+static inline uint64_t rm_read_modify(X86CPUState *s, const Operand &op,
                                       int size)
 {
     if (op.is_reg) {
@@ -378,17 +398,17 @@ static inline uint32_t rm_read_modify(X86CPUState *s, const Operand &op,
     return mem_read_modify(s, op_address(s, op, 0, size, true), size);
 }
 
-static inline void push(X86CPUState *s, uint32_t val, int size)
+static inline void push(X86CPUState *s, uint64_t val, int size)
 {
     StackPtr st = current_stack(s);
     stack_push(s, &st, val, size);
     stack_commit(s, st);
 }
 
-static inline uint32_t pop(X86CPUState *s, int size)
+static inline uint64_t pop(X86CPUState *s, int size)
 {
     StackPtr st = current_stack(s);
-    uint32_t val = stack_pop(s, &st, size);
+    uint64_t val = stack_pop(s, &st, size);
     stack_commit(s, st);
     return val;
 }
@@ -442,9 +462,9 @@ static void port_out(X86CPUState *s, uint32_t port, uint32_t val, int size)
 
 //#pragma mark - arithmetic
 
-static uint32_t alu(X86CPUState *s, int op, uint32_t a, uint32_t b, int size)
+static uint64_t alu(X86CPUState *s, int op, uint64_t a, uint64_t b, int size)
 {
-    uint32_t r;
+    uint64_t r;
     bool carry;
 
     switch (op) {
@@ -482,15 +502,16 @@ static uint32_t alu(X86CPUState *s, int op, uint32_t a, uint32_t b, int size)
     return trunc_size(r, size);
 }
 
-static uint32_t inc_dec(X86CPUState *s, uint32_t val, bool dec, int size)
+static force_inline uint64_t inc_dec(X86CPUState *s, uint64_t val, bool dec,
+                                      int size)
 {
     bool carry = cc_carry(s);
-    uint32_t r = dec ? val - 1 : val + 1;
+    uint64_t r = dec ? val - 1 : val + 1;
     set_cc(s, dec ? CC_OP_DEC : CC_OP_INC, size, carry, r);
     return trunc_size(r, size);
 }
 
-static uint32_t rotate(uint32_t val, unsigned count, int bits, bool left)
+static uint64_t rotate(uint64_t val, unsigned count, int bits, bool left)
 {
     count %= bits;
     if (count == 0) {
@@ -499,14 +520,15 @@ static uint32_t rotate(uint32_t val, unsigned count, int bits, bool left)
     if (!left) {
         count = bits - count;
     }
-    return ((val << count) | (val >> (bits - count))) & bit_mask(bits);
+    return ((val << count) | (val >> (bits - count))) &
+        bit_mask<uint64_t>(bits);
 }
 
-static uint32_t shift(X86CPUState *s, int op, uint32_t val, unsigned count,
+static uint64_t shift(X86CPUState *s, int op, uint64_t val, unsigned count,
                       int size)
 {
     int bits = size_bits(size);
-    uint32_t r;
+    uint64_t r;
     bool cf;
 
     count = get_bits(count, 0, 5);
@@ -543,7 +565,7 @@ static uint32_t shift(X86CPUState *s, int op, uint32_t val, unsigned count,
         set_cc(s, CC_OP_SAR, size, val >> (count - 1), val >> count);
         return trunc_size(val >> count, size);
     case SHIFT_SAR: {
-        int32_t sval = sext_size(val, size);
+        int64_t sval = sext_size(val, size);
         set_cc(s, CC_OP_SAR, size, sval >> (count - 1), sval >> count);
         return trunc_size(sval >> count, size);
     }
@@ -560,8 +582,8 @@ static uint32_t shift(X86CPUState *s, int op, uint32_t val, unsigned count,
     return r;
 }
 
-static uint32_t shift_double(X86CPUState *s, bool left, uint32_t dst,
-                             uint32_t src, unsigned count, int size)
+static uint64_t shift_double(X86CPUState *s, bool left, uint64_t dst,
+                             uint64_t src, unsigned count, int size)
 {
     int bits = size_bits(size);
 
@@ -571,34 +593,34 @@ static uint32_t shift_double(X86CPUState *s, bool left, uint32_t dst,
     }
     if (left) {
         uint64_t wide = concat_bits(dst, src, bits);
-        uint32_t r = get_bits(wide << count, bits, bits);
+        uint64_t r = get_bits(wide << count, bits, bits);
         set_cc(s, CC_OP_SHL, size, get_bits(wide << (count - 1), bits, bits),
                r);
         return r;
     }
     uint64_t wide = concat_bits(src, dst, bits);
-    uint32_t r = trunc_size(wide >> count, size);
+    uint64_t r = trunc_size(wide >> count, size);
     set_cc(s, CC_OP_SAR, size, wide >> (count - 1), r);
     return r;
 }
 
-static uint32_t imul(X86CPUState *s, uint32_t a, uint32_t b, int size)
+static uint64_t imul(X86CPUState *s, uint64_t a, uint64_t b, int size)
 {
-    int64_t r = (int64_t)sext_size(a, size) * sext_size(b, size);
-    uint32_t low = trunc_size(r, size);
+    int64_t r = sext_size(a, size) * sext_size(b, size);
+    uint64_t low = trunc_size(r, size);
     set_cc(s, CC_OP_MUL, size, r != sext_size(low, size), low);
     return low;
 }
 
 /* MUL, IMUL, DIV and IDIV of the accumulator, by group 3 index. */
-static void mul_div(X86CPUState *s, int op, uint32_t val, int size)
+static void mul_div(X86CPUState *s, int op, uint64_t val, int size)
 {
     int bits = size_bits(size);
     int high_reg = size == SIZE8 ? 4 /* AH */ : REG_EDX;
     uint64_t low = reg_read(s, REG_EAX, size);
     uint64_t high = reg_read(s, high_reg, size);
-    uint32_t mask = size_mask(size);
-    uint32_t res_low, res_high;
+    uint64_t mask = size_mask(size);
+    uint64_t res_low, res_high;
 
     switch (op) {
     case 4: {
@@ -609,7 +631,7 @@ static void mul_div(X86CPUState *s, int op, uint32_t val, int size)
         break;
     }
     case 5: {
-        int64_t r = (int64_t)sext_size(low, size) * sext_size(val, size);
+        int64_t r = sext_size(low, size) * sext_size(val, size);
         res_low = get_bits(r, 0, bits);
         res_high = get_bits(r, bits, bits);
         set_cc(s, CC_OP_MUL, size, r != sext_size(res_low, size), res_low);
@@ -643,8 +665,8 @@ static void mul_div(X86CPUState *s, int op, uint32_t val, int size)
     reg_write(s, high_reg, res_high, size);
 }
 
-static uint32_t bit_test(X86CPUState *s, int op, uint32_t val,
-                         uint32_t offset, int size)
+static uint64_t bit_test(X86CPUState *s, int op, uint64_t val,
+                         uint64_t offset, int size)
 {
     int pos = get_bits(offset, 0, 3 + size);
     bool bit = get_bit(val, pos);
@@ -662,7 +684,7 @@ static uint32_t bit_test(X86CPUState *s, int op, uint32_t val,
 }
 
 /* Flags of a result, with CF and AF given. */
-static void set_result_flags(X86CPUState *s, uint32_t val, int size, bool cf,
+static void set_result_flags(X86CPUState *s, uint64_t val, int size, bool cf,
                              bool af)
 {
     set_cc(s, CC_OP_LOGIC, size, 0, val);
@@ -715,9 +737,9 @@ static void exec_alu(X86CPUState *s, Decoder &d, uint8_t b)
     case 0:
     case 1: {
         Operand dst = fetch_modrm(s, d, &modrm);
-        uint32_t a = op == ALU_CMP ? rm_read(s, dst, size) :
+        uint64_t a = op == ALU_CMP ? rm_read(s, dst, size) :
             rm_read_modify(s, dst, size);
-        uint32_t r = alu(s, op, a, reg_read(s, modrm_reg(modrm), size), size);
+        uint64_t r = alu(s, op, a, reg_read(s, modrm_reg(modrm), size), size);
         if (op != ALU_CMP) {
             rm_write(s, dst, r, size);
         }
@@ -727,7 +749,7 @@ static void exec_alu(X86CPUState *s, Decoder &d, uint8_t b)
     case 3: {
         Operand src = fetch_modrm(s, d, &modrm);
         int reg = modrm_reg(modrm);
-        uint32_t r = alu(s, op, reg_read(s, reg, size), rm_read(s, src, size),
+        uint64_t r = alu(s, op, reg_read(s, reg, size), rm_read(s, src, size),
                          size);
         if (op != ALU_CMP) {
             reg_write(s, reg, r, size);
@@ -735,8 +757,8 @@ static void exec_alu(X86CPUState *s, Decoder &d, uint8_t b)
         break;
     }
     default: {
-        uint32_t imm = fetch_imm(s, d, size);
-        uint32_t r = alu(s, op, reg_read(s, REG_EAX, size), imm, size);
+        uint64_t imm = fetch_imm(s, d, size);
+        uint64_t r = alu(s, op, reg_read(s, REG_EAX, size), imm, size);
         if (op != ALU_CMP) {
             reg_write(s, REG_EAX, r, size);
         }
@@ -751,10 +773,10 @@ static void exec_group1(X86CPUState *s, Decoder &d, uint8_t b)
     uint8_t modrm;
     Operand dst = fetch_modrm(s, d, &modrm);
     int op = modrm_reg(modrm);
-    uint32_t imm = b == 0x83 ? fetch_simm(s, d, SIZE8) : fetch_imm(s, d, size);
-    uint32_t a = op == ALU_CMP ? rm_read(s, dst, size) :
+    uint64_t imm = b == 0x83 ? fetch_simm(s, d, SIZE8) : fetch_imm(s, d, size);
+    uint64_t a = op == ALU_CMP ? rm_read(s, dst, size) :
         rm_read_modify(s, dst, size);
-    uint32_t r = alu(s, op, a, trunc_size(imm, size), size);
+    uint64_t r = alu(s, op, a, trunc_size(imm, size), size);
     if (op != ALU_CMP) {
         rm_write(s, dst, r, size);
     }
@@ -773,7 +795,7 @@ static void exec_shift_group(X86CPUState *s, Decoder &d, uint8_t b)
     } else {
         count = reg_read(s, REG_ECX, SIZE8);
     }
-    uint32_t val = rm_read_modify(s, dst, size);
+    uint64_t val = rm_read_modify(s, dst, size);
     rm_write(s, dst, shift(s, modrm_reg(modrm), val, count, size), size);
 }
 
@@ -783,7 +805,7 @@ static void exec_group3(X86CPUState *s, Decoder &d, uint8_t b)
     uint8_t modrm;
     Operand dst = fetch_modrm(s, d, &modrm);
     int op = modrm_reg(modrm);
-    uint32_t val;
+    uint64_t val;
 
     switch (op) {
     case 0:
@@ -808,7 +830,7 @@ static void exec_group3(X86CPUState *s, Decoder &d, uint8_t b)
 
 static void exec_string(X86CPUState *s, Decoder &d, int kind, int size)
 {
-    uint32_t amask = addr_mask(d);
+    uint64_t amask = addr_mask(d);
     int32_t step = get_bit(s->eflags, EFLAGS_DF) ? -size_bytes(size) :
         size_bytes(size);
     int src_seg = data_seg(d);
@@ -829,11 +851,11 @@ static void exec_string(X86CPUState *s, Decoder &d, int kind, int size)
             }
             if (count == STRING_BATCH) {
                 /* come back to it after looking at interrupts */
-                d.eip = s->eip;
+                d.eip = s->rip;
                 break;
             }
         }
-        uint32_t src = 0, dst = 0;
+        uint64_t src = 0, dst = 0;
         if (uses_src) {
             src = seg_address(s, src_seg, s->regs[REG_ESI] & amask, size,
                               false);
@@ -847,7 +869,7 @@ static void exec_string(X86CPUState *s, Decoder &d, int kind, int size)
             mem_write(s, dst, mem_read(s, src, size), size);
             break;
         case STR_CMPS: {
-            uint32_t a = mem_read(s, src, size);
+            uint64_t a = mem_read(s, src, size);
             alu(s, ALU_CMP, a, mem_read(s, dst, size), size);
             break;
         }
@@ -970,8 +992,8 @@ static void exec_group7(X86CPUState *s, Decoder &d)
     switch (reg) {
     case 0: /* SGDT */
     case 1: /* SIDT */ {
-        uint32_t lin = op_address(s, op, 0, SIZE16, true);
-        uint32_t lin_base = op_address(s, op, 2, SIZE32, true);
+        uint64_t lin = op_address(s, op, 0, SIZE16, true);
+        uint64_t lin_base = op_address(s, op, 2, SIZE32, true);
         uint32_t base = d.opsize == SIZE16 ? get_bits(table->base, 0, 24) :
             table->base;
         mem_probe_write(s, lin_base, SIZE32);
@@ -1013,7 +1035,7 @@ static void exec_fpu(X86CPUState *s, Decoder &d, uint8_t b)
         raise_exception(s, EXCP_NM);
     }
     uint8_t modrm = fetch8(s, d);
-    uint32_t lin = 0, ea = 0;
+    uint64_t lin = 0, ea = 0;
     int seg = SEG_DS;
     if (modrm_mod(modrm) != 3) {
         Operand op = decode_modrm(s, d, modrm);
@@ -1057,7 +1079,7 @@ static bool exec_0f(X86CPUState *s, Decoder &d)
     uint8_t b = fetch8(s, d);
     uint8_t modrm;
     Operand op;
-    uint32_t val;
+    uint64_t val;
 
     switch (b) {
     case 0x00:
@@ -1071,10 +1093,11 @@ static bool exec_0f(X86CPUState *s, Decoder &d)
         require_protected_mode(s);
         op = fetch_modrm(s, d, &modrm);
         uint32_t sel = rm_read(s, op, SIZE16);
-        bool ok = b == 0x02 ? seg_access_rights(s, sel, &val) :
-            seg_limit(s, sel, &val);
+        uint32_t info;
+        bool ok = b == 0x02 ? seg_access_rights(s, sel, &info) :
+            seg_limit(s, sel, &info);
         if (ok) {
-            reg_write(s, modrm_reg(modrm), val, d.opsize);
+            reg_write(s, modrm_reg(modrm), info, d.opsize);
         }
         set_zero_flag(s, ok);
         break;
@@ -1173,7 +1196,7 @@ static bool exec_0f(X86CPUState *s, Decoder &d)
         }
         break;
     case 0x80 ... 0x8f: /* Jcc */
-        val = fetch_imm(s, d, d.opsize);
+        val = fetch_simm(s, d, d.opsize);
         if (test_condition(s, get_bits(b, 0, 4))) {
             jump_rel(d, val);
         }
@@ -1199,10 +1222,10 @@ static bool exec_0f(X86CPUState *s, Decoder &d)
     case 0xbb: /* BTC */ {
         int bt = get_bits(b, 3, 2);
         op = fetch_modrm(s, d, &modrm);
-        uint32_t offset = reg_read(s, modrm_reg(modrm), d.opsize);
+        uint64_t offset = reg_read(s, modrm_reg(modrm), d.opsize);
         if (!op.is_reg) {
             /* the offset reaches outside the operand */
-            int32_t disp = (sext_size(offset, d.opsize) >> (3 + d.opsize)) *
+            int64_t disp = (sext_size(offset, d.opsize) >> (3 + d.opsize)) *
                 size_bytes(d.opsize);
             op.ea = (op.ea + disp) & addr_mask(d);
         }
@@ -1220,7 +1243,7 @@ static bool exec_0f(X86CPUState *s, Decoder &d)
             raise_exception(s, EXCP_UD);
         }
         int bt = modrm_reg(modrm) - 4;
-        uint32_t offset = fetch8(s, d);
+        uint64_t offset = fetch8(s, d);
         val = bt == BT_TEST ? rm_read(s, op, d.opsize) :
             rm_read_modify(s, op, d.opsize);
         val = bit_test(s, bt, val, offset, d.opsize);
@@ -1255,8 +1278,8 @@ static bool exec_0f(X86CPUState *s, Decoder &d)
     case 0xb1: {
         int size = get_bit(b, 0) ? d.opsize : SIZE8;
         op = fetch_modrm(s, d, &modrm);
-        uint32_t dst = rm_read_modify(s, op, size);
-        uint32_t acc = reg_read(s, REG_EAX, size);
+        uint64_t dst = rm_read_modify(s, op, size);
+        uint64_t acc = reg_read(s, REG_EAX, size);
         alu(s, ALU_CMP, acc, dst, size);
         if (acc == dst) {
             rm_write(s, op, reg_read(s, modrm_reg(modrm), size), size);
@@ -1297,7 +1320,8 @@ static bool exec_0f(X86CPUState *s, Decoder &d)
         val = rm_read(s, op, d.opsize);
         if (val != 0) {
             reg_write(s, modrm_reg(modrm),
-                      b == 0xbc ? __builtin_ctz(val) : 31 - __builtin_clz(val),
+                      b == 0xbc ? __builtin_ctzll(val) :
+                      63 - __builtin_clzll(val),
                       d.opsize);
         }
         set_zero_flag(s, val == 0);
@@ -1307,8 +1331,8 @@ static bool exec_0f(X86CPUState *s, Decoder &d)
         int size = get_bit(b, 0) ? d.opsize : SIZE8;
         op = fetch_modrm(s, d, &modrm);
         int reg = modrm_reg(modrm);
-        uint32_t dst = rm_read_modify(s, op, size);
-        uint32_t sum = alu(s, ALU_ADD, dst, reg_read(s, reg, size), size);
+        uint64_t dst = rm_read_modify(s, op, size);
+        uint64_t sum = alu(s, ALU_ADD, dst, reg_read(s, reg, size), size);
         if (op.is_reg) {
             reg_write(s, reg, dst, size);
             reg_write(s, op.reg, sum, size);
@@ -1330,7 +1354,7 @@ static bool exec_0f(X86CPUState *s, Decoder &d)
         if (modrm_reg(modrm) != 1 || op.is_reg) {
             raise_exception(s, EXCP_UD);
         }
-        uint32_t lin = op_address(s, op, 0, SIZE32, true);
+        uint64_t lin = op_address(s, op, 0, SIZE32, true);
         op_address(s, op, 4, SIZE32, true);
         uint32_t low = mem_read_modify(s, lin, SIZE32);
         uint32_t high = mem_read_modify(s, lin + 4, SIZE32);
@@ -1350,7 +1374,7 @@ static bool exec_0f(X86CPUState *s, Decoder &d)
     case 0xc8 ... 0xcf: /* BSWAP */ {
         int reg = get_bits(b, 0, 3);
         if (d.opsize == SIZE32) {
-            s->regs[reg] = __builtin_bswap32(s->regs[reg]);
+            s->regs[reg] = __builtin_bswap32(get_bits(s->regs[reg], 0, 32));
         } else {
             reg_write(s, reg, 0, SIZE16);
         }
@@ -1369,7 +1393,7 @@ static force_inline void exec_insn(X86CPUState *s)
 {
     Decoder d;
     d.cs_base = s->segs[SEG_CS].base;
-    d.eip = s->eip;
+    d.eip = s->rip;
     d.eip_mask = s->code32 ? UINT32_MAX : 0xffff;
     d.opsize = s->code32 ? SIZE32 : SIZE16;
     d.addr32 = s->code32;
@@ -1379,7 +1403,7 @@ static force_inline void exec_insn(X86CPUState *s)
     d.prefix_66 = false;
     d.esp_addend = 0;
 
-    if (unlikely(!s->seg_fast[SEG_CS]) && s->eip > s->segs[SEG_CS].limit) {
+    if (unlikely(!s->seg_fast[SEG_CS]) && s->rip > s->segs[SEG_CS].limit) {
         raise_exception(s, EXCP_GP, 0);
     }
 
@@ -1388,7 +1412,7 @@ static force_inline void exec_insn(X86CPUState *s)
     int size;
     uint8_t modrm;
     Operand op;
-    uint32_t val;
+    uint64_t val;
 
 next_byte:
     b = fetch8(s, d);
@@ -1524,7 +1548,7 @@ next_byte:
     case 0x69: /* IMUL Gv, Ev, Iz */
     case 0x6b: /* IMUL Gv, Ev, Ib */ {
         op = fetch_modrm(s, d, &modrm);
-        uint32_t imm = b == 0x69 ? fetch_imm(s, d, d.opsize) :
+        uint64_t imm = b == 0x69 ? fetch_imm(s, d, d.opsize) :
             fetch_simm(s, d, SIZE8);
         val = imul(s, rm_read(s, op, d.opsize), imm, d.opsize);
         reg_write(s, modrm_reg(modrm), val, d.opsize);
@@ -1630,7 +1654,7 @@ next_byte:
         reg_write(s, REG_EAX, val, d.opsize);
         break;
     case 0x99: /* CWD, CDQ */
-        val = msb(reg_read(s, REG_EAX, d.opsize), d.opsize) ? UINT32_MAX : 0;
+        val = msb(reg_read(s, REG_EAX, d.opsize), d.opsize) ? UINT64_MAX : 0;
         reg_write(s, REG_EDX, val, d.opsize);
         break;
     case 0x9a: { /* CALL Ap */
@@ -1682,7 +1706,7 @@ next_byte:
     case 0xa0 ... 0xa3: { /* MOV with a direct address */
         uint32_t addr = fetch_imm(s, d, d.addr32 ? SIZE32 : SIZE16);
         bool store = get_bit(b, 1);
-        uint32_t lin = seg_address(s, data_seg(d), addr, size, store);
+        uint64_t lin = seg_address(s, data_seg(d), addr, size, store);
         if (store) {
             mem_write(s, lin, reg_read(s, REG_EAX, size), size);
         } else {
@@ -1842,7 +1866,7 @@ next_byte:
     case 0xe1: /* LOOPZ */
     case 0xe2: { /* LOOP */
         val = fetch_simm(s, d, SIZE8);
-        uint32_t amask = addr_mask(d);
+        uint64_t amask = addr_mask(d);
         reg_add_masked(s, REG_ECX, -1, amask);
         bool taken = (s->regs[REG_ECX] & amask) != 0;
         if (b != 0xe2) {
@@ -1872,13 +1896,13 @@ next_byte:
         break;
     }
     case 0xe8: { /* CALL Jz */
-        uint32_t rel = fetch_imm(s, d, d.opsize);
+        int64_t rel = fetch_simm(s, d, d.opsize);
         push(s, d.eip, d.opsize);
         jump_rel(d, rel);
         break;
     }
     case 0xe9: /* JMP Jz */
-        val = fetch_imm(s, d, d.opsize);
+        val = fetch_simm(s, d, d.opsize);
         jump_rel(d, val);
         break;
     case 0xea: { /* JMP Ap */
@@ -1946,7 +1970,7 @@ next_byte:
             if (op.is_reg) {
                 raise_exception(s, EXCP_UD);
             }
-            uint32_t offset = mem_read(
+            uint64_t offset = mem_read(
                 s, op_address(s, op, 0, d.opsize, false), d.opsize);
             uint32_t sel = mem_read(
                 s, op_address(s, op, size_bytes(d.opsize), SIZE16, false),
@@ -1972,7 +1996,7 @@ next_byte:
     default:
         raise_exception(s, EXCP_UD);
     }
-    s->eip = d.eip & d.eip_mask;
+    s->rip = d.eip & d.eip_mask;
 }
 
 void x86_exec(X86CPUState *s)
@@ -1987,7 +2011,7 @@ void x86_exec(X86CPUState *s)
                 DeviceLocker locker(*s->device_lock);
                 intno = s->hard_intno_source->HardIntno();
             }
-            do_interrupt(s, intno, false, 0, s->eip, true);
+            do_interrupt(s, intno, false, 0, s->rip, true);
         }
         bool single_step = get_bit(s->eflags, EFLAGS_TF);
         exec_insn(s);

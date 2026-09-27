@@ -976,10 +976,10 @@ static void require_mem(X86CPUState *s, const SimdInsn &insn)
 
 /* A 16 byte operand must be aligned unless the instruction says
    otherwise. */
-static uint32_t simd_address(X86CPUState *s, const Operand &op, int size,
+static uint64_t simd_address(X86CPUState *s, const Operand &op, int size,
                              bool write, bool aligned)
 {
-    uint32_t lin = seg_address(s, op.seg, op.ea, size, write);
+    uint64_t lin = seg_address(s, op.seg, op.ea, size, write);
     if (aligned && get_bits(lin, 0, size) != 0) {
         raise_exception(s, EXCP_GP, 0);
     }
@@ -995,7 +995,7 @@ static XmmReg xmm_rm(X86CPUState *s, const SimdInsn &insn, int size,
         return s->xmm[insn.rm.reg];
     }
     XmmReg v = {};
-    uint32_t lin = simd_address(s, insn.rm, size, false,
+    uint64_t lin = simd_address(s, insn.rm, size, false,
                                 aligned && size == SIZE128);
     mem_read_bytes(s, lin, v.bytes, size);
     return v;
@@ -1261,7 +1261,7 @@ static void cvt_to_gpr(X86CPUState *s, const SimdInsn &insn, bool truncate)
     SimdFp fp(s);
     I r = fp_to_int<F, I>(fp, lane<typename F::Bits>(src, 0), truncate);
     fp_finish(s, fp);
-    s->regs[insn.reg] = r;
+    s->regs[insn.reg] = (std::make_unsigned_t<I>)r;
 }
 
 /* 0F 2C and 2D: to integers. */
@@ -1525,7 +1525,7 @@ static void exec_group15(X86CPUState *s, const SimdInsn &insn)
             raise_exception(s, EXCP_NM);
         }
         /* 512 bytes */
-        uint32_t lin = seg_address(s, insn.rm.seg, insn.rm.ea, 9,
+        uint64_t lin = seg_address(s, insn.rm.seg, insn.rm.ea, 9,
                                    insn.reg == 0);
         if (get_bits(lin, 0, 4) != 0) {
             raise_exception(s, EXCP_GP, 0);
@@ -1570,7 +1570,7 @@ static void mask_move(X86CPUState *s, const SimdInsn &insn,
     if (sign_mask<uint8_t>(mask) == 0) {
         return;
     }
-    uint32_t lin = seg_address(s, insn.data_seg,
+    uint64_t lin = seg_address(s, insn.data_seg,
                                s->regs[REG_EDI] & insn.addr_mask, size, true);
     for (int i = 0; i < N; i++) {
         if (get_bit(mask.bytes[i], 7)) {

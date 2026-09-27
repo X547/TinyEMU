@@ -122,7 +122,7 @@ static uint32_t flat_flags(bool code, int dpl)
         bit_at(DESC_DB) | bit_at(DESC_G);
 }
 
-static bool descriptor_address(X86CPUState *s, uint32_t sel, uint32_t *addr)
+static bool descriptor_address(X86CPUState *s, uint32_t sel, uint64_t *addr)
 {
     const X86CPUSeg *table = get_bit(sel, 2) ? &s->ldt : &s->gdt;
     uint32_t index = sel_error(set_bit(sel, 2, false));
@@ -135,7 +135,7 @@ static bool descriptor_address(X86CPUState *s, uint32_t sel, uint32_t *addr)
 
 static bool load_descriptor(X86CPUState *s, uint32_t sel, Descriptor *d)
 {
-    uint32_t addr;
+    uint64_t addr;
     if (!descriptor_address(s, sel, &addr)) {
         return false;
     }
@@ -148,7 +148,7 @@ static bool load_descriptor(X86CPUState *s, uint32_t sel, Descriptor *d)
 static void set_descriptor_flag(X86CPUState *s, uint32_t sel, int flag,
                                 bool on)
 {
-    uint32_t addr;
+    uint64_t addr;
     if (descriptor_address(s, sel, &addr)) {
         uint32_t e2 = sys_read(s, addr + 4, SIZE32);
         sys_write(s, addr + 4, set_bit(e2, 8 + flag, on), SIZE32);
@@ -158,7 +158,7 @@ static void set_descriptor_flag(X86CPUState *s, uint32_t sel, int flag,
 
 //#pragma mark - segment loading
 
-void load_seg_cache(X86CPUState *s, int seg, uint32_t sel, uint32_t base,
+void load_seg_cache(X86CPUState *s, int seg, uint32_t sel, uint64_t base,
                     uint32_t limit, uint32_t flags)
 {
     X86CPUSeg *sc = &s->segs[seg];
@@ -191,8 +191,8 @@ static void load_seg_real(X86CPUState *s, int seg, uint32_t sel)
     load_seg_cache(s, seg, sel, sel * 16, 0xffff, flags);
 }
 
-uint32_t seg_address_slow(X86CPUState *s, const X86CPUSeg *seg, int excp,
-                          uint32_t ea, int size, bool write)
+uint64_t seg_address_slow(X86CPUState *s, const X86CPUSeg *seg, int excp,
+                          uint64_t ea, int size, bool write)
 {
     uint32_t flags = seg->flags;
     bool code = get_bit(flags, DESC_CODE);
@@ -206,7 +206,7 @@ uint32_t seg_address_slow(X86CPUState *s, const X86CPUSeg *seg, int excp,
             raise_exception(s, EXCP_GP, 0);
         }
     }
-    uint32_t last = ea + size_bytes(size) - 1;
+    uint64_t last = ea + size_bytes(size) - 1;
     if (last < ea) {
         raise_exception(s, excp, 0);
     }
@@ -368,7 +368,7 @@ static void set_tss_busy(X86CPUState *s, uint32_t sel, bool busy)
 }
 
 static void task_switch(X86CPUState *s, uint32_t sel, int source,
-                        uint32_t next_eip)
+                        uint64_t next_eip)
 {
     int error = source == TASK_IRET ? EXCP_TS : EXCP_GP;
     Descriptor d;
@@ -452,8 +452,10 @@ static void task_switch(X86CPUState *s, uint32_t sel, int source,
     if (nl.size == SIZE32) {
         cpu_set_cr3(s, new_cr3);
     }
-    memcpy(s->regs, new_regs, sizeof(s->regs));
-    s->eip = new_eip;
+    for (int i = 0; i < 8; i++) {
+        s->regs[i] = new_regs[i];
+    }
+    s->rip = new_eip;
     cpu_set_eflags(s, new_eflags, UINT32_MAX);
 
     if (sel_is_null(new_ldt)) {
@@ -520,7 +522,7 @@ static bool exception_has_error_code(int intno)
     }
 }
 
-static void do_interrupt_real(X86CPUState *s, int intno, uint32_t ret_eip)
+static void do_interrupt_real(X86CPUState *s, int intno, uint64_t ret_eip)
 {
     uint32_t entry = s->idt.base + intno * 4;
     uint32_t offset = sys_read(s, entry, SIZE16);
@@ -535,12 +537,12 @@ static void do_interrupt_real(X86CPUState *s, int intno, uint32_t ret_eip)
     s->eflags &= ~(bit_at(EFLAGS_IF) | bit_at(EFLAGS_TF) | bit_at(EFLAGS_AC) |
                    bit_at(EFLAGS_RF));
     load_seg_real(s, SEG_CS, sel);
-    s->eip = offset;
+    s->rip = offset;
 }
 
 static void do_interrupt_protected(X86CPUState *s, int intno, bool is_soft,
                                    bool has_error, int error_code,
-                                   uint32_t ret_eip)
+                                   uint64_t ret_eip)
 {
     uint32_t vector_error = intno * 8 + 2;
     if ((uint32_t)intno * 8 + 7 > s->idt.limit) {
@@ -642,11 +644,11 @@ static void do_interrupt_protected(X86CPUState *s, int intno, bool is_soft,
     }
     stack_commit(s, st);
     load_cs(s, sel, code, dpl);
-    s->eip = offset;
+    s->rip = offset;
 }
 
 void do_interrupt(X86CPUState *s, int intno, bool is_soft, int error_code,
-                  uint32_t ret_eip, bool is_hw)
+                  uint64_t ret_eip, bool is_hw)
 {
     if (!get_bit(s->cr0, CR0_PE)) {
         do_interrupt_real(s, intno, ret_eip);
@@ -663,13 +665,13 @@ void do_interrupt(X86CPUState *s, int intno, bool is_soft, int error_code,
 
 //#pragma mark - far transfers
 
-void far_jump(X86CPUState *s, uint32_t sel, uint32_t offset,
-              uint32_t next_eip)
+void far_jump(X86CPUState *s, uint32_t sel, uint64_t offset,
+              uint64_t next_eip)
 {
     sel = get_bits(sel, 0, 16);
     if (!is_protected(s)) {
         load_seg_real(s, SEG_CS, sel);
-        s->eip = offset;
+        s->rip = offset;
         return;
     }
 
@@ -690,7 +692,7 @@ void far_jump(X86CPUState *s, uint32_t sel, uint32_t offset,
         }
         check_direct_code(s, sel, flags, rpl);
         load_cs(s, sel, d, s->cpl);
-        s->eip = offset;
+        s->rip = offset;
         return;
     }
 
@@ -724,12 +726,12 @@ void far_jump(X86CPUState *s, uint32_t sel, uint32_t offset,
     load_code_descriptor(s, csel, &cd);
     check_direct_code(s, csel, descriptor_flags(cd), s->cpl);
     load_cs(s, csel, cd, s->cpl);
-    s->eip = trunc_size(gate_offset(d),
+    s->rip = trunc_size(gate_offset(d),
                         type == SYS_CALL_GATE32 ? SIZE32 : SIZE16);
 }
 
-void far_call(X86CPUState *s, uint32_t sel, uint32_t offset, int opsize,
-              uint32_t next_eip)
+void far_call(X86CPUState *s, uint32_t sel, uint64_t offset, int opsize,
+              uint64_t next_eip)
 {
     sel = get_bits(sel, 0, 16);
     if (!is_protected(s)) {
@@ -738,7 +740,7 @@ void far_call(X86CPUState *s, uint32_t sel, uint32_t offset, int opsize,
         stack_push(s, &st, next_eip, opsize);
         stack_commit(s, st);
         load_seg_real(s, SEG_CS, sel);
-        s->eip = offset;
+        s->rip = offset;
         return;
     }
 
@@ -763,7 +765,7 @@ void far_call(X86CPUState *s, uint32_t sel, uint32_t offset, int opsize,
         stack_push(s, &st, next_eip, opsize);
         stack_commit(s, st);
         load_cs(s, sel, d, s->cpl);
-        s->eip = offset;
+        s->rip = offset;
         return;
     }
 
@@ -830,7 +832,7 @@ void far_call(X86CPUState *s, uint32_t sel, uint32_t offset, int opsize,
         stack_commit(s, st);
         load_cs(s, csel, cd, s->cpl);
     }
-    s->eip = trunc_size(gate_offset(d), size);
+    s->rip = trunc_size(gate_offset(d), size);
 }
 
 static void return_to_vm86(X86CPUState *s, StackPtr *st, uint32_t new_eip,
@@ -852,7 +854,7 @@ static void return_to_vm86(X86CPUState *s, StackPtr *st, uint32_t new_eip,
         load_seg_real(s, seg_order[i], sels[i]);
     }
     s->regs[REG_ESP] = new_esp;
-    s->eip = get_bits(new_eip, 0, 16);
+    s->rip = get_bits(new_eip, 0, 16);
 }
 
 /* RETF and IRET in protected mode. */
@@ -922,7 +924,7 @@ static void return_protected(X86CPUState *s, int opsize, bool is_iret,
             }
         }
     }
-    s->eip = new_eip;
+    s->rip = new_eip;
 
     if (is_iret) {
         uint32_t mask = EFLAGS_CC_MASK | bit_at(EFLAGS_TF) |
@@ -950,10 +952,10 @@ void far_return(X86CPUState *s, int opsize, uint32_t addend)
     st.sp += addend;
     stack_commit(s, st);
     load_seg_real(s, SEG_CS, new_cs);
-    s->eip = new_eip;
+    s->rip = new_eip;
 }
 
-void interrupt_return(X86CPUState *s, int opsize, uint32_t next_eip)
+void interrupt_return(X86CPUState *s, int opsize, uint64_t next_eip)
 {
     if (is_protected(s)) {
         if (get_bit(s->eflags, EFLAGS_NT)) {
@@ -981,7 +983,7 @@ void interrupt_return(X86CPUState *s, int opsize, uint32_t next_eip)
     }
     stack_commit(s, st);
     load_seg_real(s, SEG_CS, new_cs);
-    s->eip = new_eip;
+    s->rip = new_eip;
     cpu_set_eflags(s, new_eflags, trunc_size(mask, opsize));
 }
 
@@ -1140,8 +1142,9 @@ void cpu_sysenter(X86CPUState *s)
     s->cpl = 0;
     load_seg_cache(s, SEG_CS, sel, 0, UINT32_MAX, flat_flags(true, 0));
     load_seg_cache(s, SEG_SS, sel + 8, 0, UINT32_MAX, flat_flags(false, 0));
-    s->regs[REG_ESP] = s->sysenter_esp;
-    s->eip = s->sysenter_eip;
+    /* the low halves outside long mode */
+    s->regs[REG_ESP] = get_bits(s->sysenter_esp, 0, 32);
+    s->rip = get_bits(s->sysenter_eip, 0, 32);
 }
 
 void cpu_sysexit(X86CPUState *s)
@@ -1157,5 +1160,5 @@ void cpu_sysexit(X86CPUState *s)
     load_seg_cache(s, SEG_SS, set_bits(sel + 24, 0, 2, 3), 0, UINT32_MAX,
                    flat_flags(false, 3));
     s->regs[REG_ESP] = s->regs[REG_ECX];
-    s->eip = s->regs[REG_EDX];
+    s->rip = s->regs[REG_EDX];
 }

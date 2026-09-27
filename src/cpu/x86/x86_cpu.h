@@ -46,7 +46,7 @@ typedef struct X86CPUState X86CPUState;
 typedef struct {
     uint16_t sel;
     uint16_t flags;
-    uint32_t base;
+    uint64_t base;
     uint32_t limit;
 } X86CPUSeg;
 
