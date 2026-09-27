@@ -1090,15 +1090,17 @@ static void return_to_vm86(X86CPUState *s, StackPtr *st, uint32_t new_eip,
 }
 
 /* Null the data segments the outer level 'rpl' may not use, after a return
-   to it. */
+   to it. Only the selector changes and the segment becomes unusable: the
+   base stays, which 64 bit mode goes on using for FS and GS. */
 static void null_inner_segs(X86CPUState *s, int rpl)
 {
     static const int data_segs[4] = {SEG_ES, SEG_DS, SEG_FS, SEG_GS};
     for (int seg : data_segs) {
-        uint32_t flags = s->segs[seg].flags;
-        bool conforming = desc_is_code(flags) && get_bit(flags, DESC_CE);
-        if (!conforming && desc_dpl(flags) < rpl) {
-            load_null_seg(s, seg, 0);
+        const X86CPUSeg &sc = s->segs[seg];
+        bool conforming = desc_is_code(sc.flags) && get_bit(sc.flags, DESC_CE);
+        if (!sel_is_null(sc.sel) && !conforming && desc_dpl(sc.flags) < rpl) {
+            load_seg_cache(s, seg, 0, sc.base, sc.limit,
+                           set_bit(sc.flags, DESC_P, false));
         }
     }
 }
