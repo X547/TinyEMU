@@ -1100,9 +1100,8 @@ public:
     HPET *fHpet = nullptr;
     /* what the host bridge decodes, if there is one */
     PcPciApertures fPciApertures;
-    /* the physical address width the processors report; the interpreter's
-       is 32 bits */
-    int fPhysAddressBits = 32;
+    /* the physical address width the processors report */
+    int fPhysAddressBits = X86_CPU_PHYS_ADDRESS_BITS;
     /* Otherwise the machine's: INTR as the 8259s drive it, read without the
        lock. */
     std::atomic<bool> fCpuIrq {false};
@@ -1738,17 +1737,19 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
         vm_error("pc: interrupt_controller \"apic\" needs a hypervisor\n");
         return nullptr;
     }
-    /* nor PAE, so nothing above 4 GB */
-    if (s->fHighRamSize != 0 && !s->hypervisor) {
-        vm_error("pc: more than %llu MB of RAM needs a hypervisor\n",
-                 PC_LOW_RAM_MAX >> 20);
-        return nullptr;
-    }
     s->fLocalApic = options.local_apic;
     if (s->hypervisor) {
         s->fCpuCount = options.cpu_count;
         s->fVcpuWakeups = std::make_unique<HostWakeup[]>(s->fCpuCount);
         s->fPhysAddressBits = s->hypervisor->PhysAddressBits();
+    }
+    if (s->fHighRamSize != 0 && PC_HIGH_RAM_BASE + s->fHighRamSize >
+        (uint64_t)1 << s->fPhysAddressBits) {
+        vm_error("pc: %llu MB of RAM is beyond the processors' %d bit "
+                 "physical addresses\n",
+                 (unsigned long long)(p->ram_size >> 20),
+                 s->fPhysAddressBits);
+        return nullptr;
     }
 
     if (s->hypervisor) {

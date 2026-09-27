@@ -27,6 +27,9 @@
 
 typedef struct X86CPUState X86CPUState;
 
+/* the physical address width, that of PAE paging */
+#define X86_CPU_PHYS_ADDRESS_BITS 36
+
 /* get_reg/set_reg additional constants */
 #define X86_CPU_REG_EIP 8
 #define X86_CPU_REG_CR0 9

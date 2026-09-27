@@ -161,12 +161,17 @@ enum {
 };
 
 enum {
+    EFER_NXE = 11,
+};
+
+enum {
     PTE_P = 0,
     PTE_RW = 1,
     PTE_US = 2,
     PTE_A = 5,
     PTE_D = 6,
     PTE_PS = 7,
+    PTE_XD = 63,  /* PAE entries only */
 };
 
 enum {
@@ -383,6 +388,9 @@ struct X86CPUState {
     uint64_t cr2;
     uint64_t cr3;
     uint32_t cr4;
+    uint64_t efer;
+    /* the page directory pointers PAE paging loads along with CR3 */
+    uint64_t pdpte[4];
     uint64_t dr[8];
     uint32_t sysenter_cs;
     uint64_t sysenter_esp;

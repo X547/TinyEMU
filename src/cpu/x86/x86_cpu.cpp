@@ -39,6 +39,7 @@ enum {
     CPUID_PSE = 3,
     CPUID_TSC = 4,
     CPUID_MSR = 5,
+    CPUID_PAE = 6,
     CPUID_CX8 = 8,
     CPUID_SEP = 11,
     CPUID_PGE = 13,
@@ -48,6 +49,11 @@ enum {
     CPUID_FXSR = 24,
     CPUID_SSE = 25,
     CPUID_SSE2 = 26,
+};
+
+/* CPUID 0x80000001 EDX */
+enum {
+    CPUID_EXT_NX = 20,
 };
 
 /* CPUID 1 EBX bits 8-15: the CLFLUSH line size in 8 byte units */
@@ -65,6 +71,7 @@ enum {
     MSR_EVNTSEL0 = 0x186,
     MSR_EVNTSEL1 = 0x187,
     MSR_MISC_ENABLE = 0x1a0,
+    MSR_EFER = 0xc0000080,
 };
 
 /* P6 counters are 40 bits wide */
@@ -90,8 +97,10 @@ static const uint32_t CR0_VALID_MASK = bit_at(CR0_PE) | bit_at(CR0_MP) |
     bit_at(CR0_PG);
 
 static const uint32_t CR4_VALID_MASK = bit_at(CR4_TSD) | bit_at(CR4_DE) |
-    bit_at(CR4_PSE) | bit_at(CR4_PGE) | bit_at(CR4_PCE) | bit_at(CR4_OSFXSR) |
-    bit_at(CR4_OSXMMEXCPT);
+    bit_at(CR4_PSE) | bit_at(CR4_PAE) | bit_at(CR4_PGE) | bit_at(CR4_PCE) |
+    bit_at(CR4_OSFXSR) | bit_at(CR4_OSXMMEXCPT);
+
+static const uint64_t EFER_VALID_MASK = bit_at(EFER_NXE);
 
 
 static void cpu_dump_state(X86CPUState *s)
@@ -239,16 +248,17 @@ void tlb_flush_page(X86CPUState *s, uint64_t lin)
 /* Map the page of 'lin', within the linear address width, onto RAM range
    'pr' and return the host pointer for 'lin'. */
 static uint8_t *tlb_fill(X86CPUState *s, uint64_t lin, PhysMemoryRange *pr,
-                         uint64_t phys, bool writable, int mmu_idx)
+                         uint64_t phys, bool writable, bool executable,
+                         int mmu_idx)
 {
-    uint32_t offset = phys - pr->addr;
+    uint64_t offset = phys - pr->addr;
     uint8_t *ptr = pr->phys_mem + offset;
     uint64_t tag = page_base(lin);
     X86TLBEntry *e = tlb_entry(s, mmu_idx, lin);
 
     e->addend = (uintptr_t)ptr - lin;
     e->read = tag;
-    e->code = tag;
+    e->code = executable ? tag : TLB_INVALID;
     /* A clean page of a dirty-tracked range takes the slow path once, so
        that the write is recorded. */
     if (writable && !(pr->devram_flags & DEVRAM_FLAG_ROM) &&
@@ -263,79 +273,152 @@ static uint8_t *tlb_fill(X86CPUState *s, uint64_t lin, PhysMemoryRange *pr,
 
 //#pragma mark - paging
 
+/* page fault error code bits */
+enum {
+    PF_P = 0,     /* a protection or reserved bit fault, not a missing page */
+    PF_W = 1,
+    PF_U = 2,
+    PF_RSVD = 3,
+    PF_ID = 4,
+};
+
+/* the frame address bits of a PAE entry */
+static const uint64_t PAE_ADDR_MASK =
+    field_mask<uint64_t>(PAGE_BITS, X86_CPU_PHYS_ADDRESS_BITS - PAGE_BITS);
+static const uint64_t PAE_HIGH_RSVD_MASK =
+    field_mask<uint64_t>(X86_CPU_PHYS_ADDRESS_BITS,
+                         64 - X86_CPU_PHYS_ADDRESS_BITS);
+static const uint64_t PDPTE_RSVD_MASK = PAE_HIGH_RSVD_MASK |
+    field_mask<uint64_t>(1, 2) | field_mask<uint64_t>(5, 4);
+/* below the frame of a 2 MB page, above PAT */
+static const uint64_t PAE_LARGE_RSVD_MASK = field_mask<uint64_t>(13, 8);
+
 [[noreturn]] static void page_fault(X86CPUState *s, uint64_t lin, int access,
-                                    int mmu_idx, bool protection)
+                                    int mmu_idx, uint32_t cause)
 {
-    uint32_t error_code = set_bit(0, 0, protection) |
-        set_bit(0, 1, access == ACCESS_WRITE) |
-        set_bit(0, 2, mmu_idx == MMU_USER);
+    bool nx = get_bit(s->cr4, CR4_PAE) && get_bit(s->efer, EFER_NXE);
+    uint32_t error_code = cause | set_bit(0, PF_W, access == ACCESS_WRITE) |
+        set_bit(0, PF_U, mmu_idx == MMU_USER) |
+        set_bit(0, PF_ID, access == ACCESS_CODE && nx);
     s->cr2 = lin;
     raise_exception(s, EXCP_PF, error_code);
 }
 
 /* Translate a linear address, within the linear address width, updating
    the accessed and dirty bits. 'writable' tells whether a write through the
-   mapping needs no walk. */
+   mapping needs no walk, 'executable' whether a fetch does. */
 static uint64_t page_walk(X86CPUState *s, uint64_t lin, int access,
-                          int mmu_idx, bool *writable)
+                          int mmu_idx, bool *writable, bool *executable)
 {
     if (!get_bit(s->cr0, CR0_PG)) {
         *writable = true;
+        *executable = true;
         return lin;
     }
 
     bool is_user = mmu_idx == MMU_USER;
     bool is_write = access == ACCESS_WRITE;
-
-    uint64_t pde_addr = page_base(get_bits(s->cr3, 0, 32)) +
-        get_bits(lin, 22, 10) * 4;
-    uint32_t pde = phys_read(s, pde_addr, SIZE32);
-    if (!get_bit(pde, PTE_P)) {
-        page_fault(s, lin, access, mmu_idx, false);
+    bool pae = get_bit(s->cr4, CR4_PAE);
+    int entry_size = pae ? SIZE64 : SIZE32;
+    int index_bits = pae ? 9 : 10;
+    uint64_t addr_mask = pae ? PAE_ADDR_MASK :
+        field_mask<uint64_t>(PAGE_BITS, 32 - PAGE_BITS);
+    /* XD is reserved unless NX is enabled */
+    uint64_t rsvd = 0;
+    if (pae) {
+        rsvd = PAE_HIGH_RSVD_MASK;
+        if (get_bit(s->efer, EFER_NXE)) {
+            rsvd = set_bit(rsvd, PTE_XD, false);
+        }
     }
 
-    bool large = get_bit(pde, PTE_PS) && get_bit(s->cr4, CR4_PSE);
-    uint64_t pte_addr, phys;
-    uint32_t pte, perms;
+    uint64_t pde_addr;
+    if (pae) {
+        uint64_t pdpte = s->pdpte[get_bits(lin, 30, 2)];
+        if (!get_bit(pdpte, PTE_P)) {
+            page_fault(s, lin, access, mmu_idx, 0);
+        }
+        pde_addr = (pdpte & PAE_ADDR_MASK) + get_bits(lin, 21, 9) * 8;
+    } else {
+        pde_addr = page_base(get_bits(s->cr3, 0, 32)) +
+            get_bits(lin, 22, 10) * 4;
+    }
+    uint64_t pde = phys_read(s, pde_addr, entry_size);
+    if (!get_bit(pde, PTE_P)) {
+        page_fault(s, lin, access, mmu_idx, 0);
+    }
+
+    /* PAE always has large pages, of 2 MB rather than 4 MB */
+    bool large = get_bit(pde, PTE_PS) && (pae || get_bit(s->cr4, CR4_PSE));
+    if (pde & (large && pae ? rsvd | PAE_LARGE_RSVD_MASK : rsvd)) {
+        page_fault(s, lin, access, mmu_idx, bit_at(PF_P) | bit_at(PF_RSVD));
+    }
+    uint64_t pte_addr, pte, perms, phys;
     if (large) {
         pte_addr = pde_addr;
         pte = pde;
         perms = pde;
-        phys = set_bits(lin, 22, 10, get_bits(pde, 22, 10));
+        phys = set_bits(pde & addr_mask, 0, PAGE_BITS + index_bits, lin);
     } else {
-        pte_addr = page_base(pde) + get_bits(lin, 12, 10) * 4;
-        pte = phys_read(s, pte_addr, SIZE32);
+        pte_addr = (pde & addr_mask) +
+            (get_bits(lin, PAGE_BITS, index_bits) << entry_size);
+        pte = phys_read(s, pte_addr, entry_size);
         if (!get_bit(pte, PTE_P)) {
-            page_fault(s, lin, access, mmu_idx, false);
+            page_fault(s, lin, access, mmu_idx, 0);
+        }
+        if (pte & rsvd) {
+            page_fault(s, lin, access, mmu_idx,
+                       bit_at(PF_P) | bit_at(PF_RSVD));
         }
         perms = pde & pte;
-        phys = page_base(pte) | page_offset(lin);
+        phys = (pte & addr_mask) | page_offset(lin);
     }
 
     if (is_user && !get_bit(perms, PTE_US)) {
-        page_fault(s, lin, access, mmu_idx, true);
+        page_fault(s, lin, access, mmu_idx, bit_at(PF_P));
     }
     bool rw = get_bit(perms, PTE_RW) ||
         (!is_user && !get_bit(s->cr0, CR0_WP));
     if (is_write && !rw) {
-        page_fault(s, lin, access, mmu_idx, true);
+        page_fault(s, lin, access, mmu_idx, bit_at(PF_P));
+    }
+    bool nx = get_bit(pde | pte, PTE_XD);
+    if (access == ACCESS_CODE && nx) {
+        page_fault(s, lin, access, mmu_idx, bit_at(PF_P));
     }
 
     if (!large && !get_bit(pde, PTE_A)) {
-        phys_write(s, pde_addr, set_bit(pde, PTE_A, true), SIZE32);
+        phys_write(s, pde_addr, set_bit(pde, PTE_A, true), entry_size);
     }
-    uint32_t new_pte = set_bit(pte, PTE_A, true);
+    uint64_t new_pte = set_bit(pte, PTE_A, true);
     if (is_write) {
         new_pte = set_bit(new_pte, PTE_D, true);
     }
     if (new_pte != pte) {
-        phys_write(s, pte_addr, new_pte, SIZE32);
+        phys_write(s, pte_addr, new_pte, entry_size);
     }
     if (large) {
         s->tlb_large_pages = true;
     }
     *writable = rw && get_bit(new_pte, PTE_D);
+    *executable = !nx;
     return phys;
+}
+
+/* Load the page directory pointers CR3 names, as PAE paging does when it is
+   enabled and on each write of CR3. Nothing changes if one is invalid. */
+static void load_pdptes(X86CPUState *s, uint64_t cr3)
+{
+    uint64_t pdpte[4];
+    uint64_t base = set_bits(get_bits(cr3, 0, 32), 0, 5, 0);
+
+    for (int i = 0; i < 4; i++) {
+        pdpte[i] = phys_read(s, base + 8 * i, SIZE64);
+        if (get_bit(pdpte[i], PTE_P) && (pdpte[i] & PDPTE_RSVD_MASK)) {
+            raise_exception(s, EXCP_GP, 0);
+        }
+    }
+    memcpy(s->pdpte, pdpte, sizeof(pdpte));
 }
 
 
@@ -360,14 +443,16 @@ uint64_t mem_read_slow(X86CPUState *s, uint64_t lin, int size, int mmu_idx)
         return val;
     }
 
-    bool writable;
-    uint64_t phys = page_walk(s, lin, ACCESS_READ, mmu_idx, &writable);
+    bool writable, executable;
+    uint64_t phys = page_walk(s, lin, ACCESS_READ, mmu_idx, &writable,
+                              &executable);
     PhysMemoryRange *pr = s->mem_map->FindRange(phys);
     if (pr == nullptr) {
         return size_mask(size);
     }
     if (pr->is_ram) {
-        return host_load(tlb_fill(s, lin, pr, phys, writable, mmu_idx), size);
+        return host_load(tlb_fill(s, lin, pr, phys, writable, executable,
+                                  mmu_idx), size);
     }
     return locked_device_read(s, pr, phys - pr->addr, size);
 }
@@ -376,14 +461,15 @@ uint64_t mem_read_slow(X86CPUState *s, uint64_t lin, int size, int mmu_idx)
    cannot fault. */
 static void probe_write(X86CPUState *s, uint64_t lin, int mmu_idx)
 {
-    bool writable;
+    bool writable, executable;
     lin &= s->lin_mask;
-    uint64_t phys = page_walk(s, lin, ACCESS_WRITE, mmu_idx, &writable);
+    uint64_t phys = page_walk(s, lin, ACCESS_WRITE, mmu_idx, &writable,
+                              &executable);
     PhysMemoryRange *pr = s->mem_map->FindRange(phys);
     if (pr != nullptr && pr->is_ram &&
         !(pr->devram_flags & DEVRAM_FLAG_ROM)) {
         pr->SetDirtyBit(phys - pr->addr);
-        tlb_fill(s, lin, pr, phys, writable, mmu_idx);
+        tlb_fill(s, lin, pr, phys, writable, executable, mmu_idx);
     }
 }
 
@@ -405,10 +491,10 @@ void mem_write_slow(X86CPUState *s, uint64_t lin, uint64_t val, int size,
     lin &= s->lin_mask;
     if (crosses_page(lin, size)) {
         /* both pages must be writable before any byte is */
-        bool writable;
-        page_walk(s, lin, ACCESS_WRITE, mmu_idx, &writable);
+        bool writable, executable;
+        page_walk(s, lin, ACCESS_WRITE, mmu_idx, &writable, &executable);
         page_walk(s, (lin + size_bytes(size) - 1) & s->lin_mask,
-                  ACCESS_WRITE, mmu_idx, &writable);
+                  ACCESS_WRITE, mmu_idx, &writable, &executable);
         for (int i = 0; i < size_bytes(size); i++) {
             mem_write_mmu(s, lin + i, get_bits(val, 8 * i, 8), SIZE8,
                           mmu_idx);
@@ -416,8 +502,9 @@ void mem_write_slow(X86CPUState *s, uint64_t lin, uint64_t val, int size,
         return;
     }
 
-    bool writable;
-    uint64_t phys = page_walk(s, lin, ACCESS_WRITE, mmu_idx, &writable);
+    bool writable, executable;
+    uint64_t phys = page_walk(s, lin, ACCESS_WRITE, mmu_idx, &writable,
+                              &executable);
     PhysMemoryRange *pr = s->mem_map->FindRange(phys);
     if (pr == nullptr) {
         return;
@@ -427,7 +514,8 @@ void mem_write_slow(X86CPUState *s, uint64_t lin, uint64_t val, int size,
             return;
         }
         pr->SetDirtyBit(phys - pr->addr);
-        host_store(tlb_fill(s, lin, pr, phys, writable, mmu_idx), val, size);
+        host_store(tlb_fill(s, lin, pr, phys, writable, executable, mmu_idx),
+                   val, size);
         return;
     }
     locked_device_write(s, pr, phys - pr->addr, val, size);
@@ -439,8 +527,9 @@ uint8_t fetch_slow(X86CPUState *s, uint64_t lin)
     lin &= s->lin_mask;
     X86TLBEntry *e = tlb_entry(s, mmu_idx, lin);
     if (e->code != page_base(lin)) {
-        bool writable;
-        uint64_t phys = page_walk(s, lin, ACCESS_CODE, mmu_idx, &writable);
+        bool writable, executable;
+        uint64_t phys = page_walk(s, lin, ACCESS_CODE, mmu_idx, &writable,
+                                  &executable);
         PhysMemoryRange *pr = s->mem_map->FindRange(phys);
         if (pr == nullptr) {
             return 0xff;
@@ -448,7 +537,7 @@ uint8_t fetch_slow(X86CPUState *s, uint64_t lin)
         if (!pr->is_ram) {
             return locked_device_read(s, pr, phys - pr->addr, SIZE8);
         }
-        tlb_fill(s, lin, pr, phys, writable, mmu_idx);
+        tlb_fill(s, lin, pr, phys, writable, executable, mmu_idx);
     }
     s->code_tag = e->code;
     s->code_addend = e->addend;
@@ -481,6 +570,10 @@ void cpu_set_cr0(X86CPUState *s, uint32_t val)
 {
     val = set_bit(val & CR0_VALID_MASK, CR0_ET, true);
     uint32_t changed = s->cr0 ^ val;
+    if (get_bit(val, CR0_PG) && get_bit(s->cr4, CR4_PAE) &&
+        (changed & (bit_at(CR0_PG) | bit_at(CR0_CD) | bit_at(CR0_NW)))) {
+        load_pdptes(s, s->cr3);
+    }
     if (changed & (bit_at(CR0_PG) | bit_at(CR0_WP) | bit_at(CR0_PE))) {
         tlb_flush_all(s);
     }
@@ -493,16 +586,23 @@ void cpu_set_cr0(X86CPUState *s, uint32_t val)
 
 void cpu_set_cr3(X86CPUState *s, uint64_t val)
 {
+    if (get_bit(s->cr0, CR0_PG) && get_bit(s->cr4, CR4_PAE)) {
+        load_pdptes(s, val);
+    }
     s->cr3 = val;
     tlb_flush_all(s);
 }
 
 void cpu_set_cr4(X86CPUState *s, uint32_t val)
 {
+    uint32_t paging = bit_at(CR4_PSE) | bit_at(CR4_PAE) | bit_at(CR4_PGE);
     if (val & ~CR4_VALID_MASK) {
         raise_exception(s, EXCP_GP, 0);
     }
-    if ((s->cr4 ^ val) & (bit_at(CR4_PSE) | bit_at(CR4_PGE))) {
+    if ((s->cr4 ^ val) & paging) {
+        if (get_bit(s->cr0, CR0_PG) && get_bit(val, CR4_PAE)) {
+            load_pdptes(s, s->cr3);
+        }
         tlb_flush_all(s);
     }
     s->cr4 = val;
@@ -522,6 +622,8 @@ static void cpu_reset(X86CPUState *s)
     s->cr2 = 0;
     s->cr3 = 0;
     s->cr4 = 0;
+    s->efer = 0;
+    memset(s->pdpte, 0, sizeof(s->pdpte));
     memset(s->dr, 0, sizeof(s->dr));
     s->dr[6] = 0xffff0ff0;
     s->dr[7] = 0x400;
@@ -578,13 +680,16 @@ void cpu_cpuid(X86CPUState *s)
         a = CPUID_SIGNATURE;
         b = set_bits(0, 8, 8, CPUID_CLFLUSH_SIZE);
         d = bit_at(CPUID_FPU) | bit_at(CPUID_DE) | bit_at(CPUID_PSE) |
-            bit_at(CPUID_TSC) | bit_at(CPUID_MSR) | bit_at(CPUID_CX8) |
-            bit_at(CPUID_SEP) | bit_at(CPUID_PGE) | bit_at(CPUID_CMOV) |
-            bit_at(CPUID_CLFSH) | bit_at(CPUID_MMX) | bit_at(CPUID_FXSR) |
-            bit_at(CPUID_SSE) | bit_at(CPUID_SSE2);
+            bit_at(CPUID_TSC) | bit_at(CPUID_MSR) | bit_at(CPUID_PAE) |
+            bit_at(CPUID_CX8) | bit_at(CPUID_SEP) | bit_at(CPUID_PGE) |
+            bit_at(CPUID_CMOV) | bit_at(CPUID_CLFSH) | bit_at(CPUID_MMX) |
+            bit_at(CPUID_FXSR) | bit_at(CPUID_SSE) | bit_at(CPUID_SSE2);
         break;
     case 0x80000000:
         a = 0x80000004;
+        break;
+    case 0x80000001:
+        d = bit_at(CPUID_EXT_NX);
         break;
     case 0x80000002:
     case 0x80000003:
@@ -644,6 +749,9 @@ void cpu_rdmsr(X86CPUState *s)
     case MSR_MISC_ENABLE:
         val = s->misc_enable;
         break;
+    case MSR_EFER:
+        val = s->efer;
+        break;
     default:
         raise_exception(s, EXCP_GP, 0);
     }
@@ -690,6 +798,16 @@ void cpu_wrmsr(X86CPUState *s)
         /* the other bits report what the part has and keep their value */
         s->misc_enable = (s->misc_enable & ~MISC_ENABLE_WRITABLE) |
             (val & MISC_ENABLE_WRITABLE);
+        break;
+    case MSR_EFER:
+        if (val & ~EFER_VALID_MASK) {
+            raise_exception(s, EXCP_GP, 0);
+        }
+        /* NXE decides which PAE entry bits are reserved */
+        if (val != s->efer) {
+            tlb_flush_all(s);
+        }
+        s->efer = val;
         break;
     default:
         raise_exception(s, EXCP_GP, 0);
