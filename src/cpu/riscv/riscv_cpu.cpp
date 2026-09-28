@@ -204,6 +204,73 @@ PHYS_MEM_READ_WRITE(8, uint8_t)
 PHYS_MEM_READ_WRITE(32, uint32_t)
 PHYS_MEM_READ_WRITE(64, uint64_t)
 
+/* Replace what RAM at 'ptr' holds, if it is still *old, as one atomic step;
+   otherwise *old gets what it holds. */
+template <typename T>
+static inline bool host_cmpxchg(uint8_t *ptr, T *old, T val)
+{
+    return __atomic_compare_exchange_n((T *)ptr, old, val, false,
+                                       __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+
+template <typename T>
+static inline T host_atomic_load(uint8_t *ptr)
+{
+    return __atomic_load_n((T *)ptr, __ATOMIC_RELAXED);
+}
+
+#if MLEN >= 128
+/* never reached: target_rmw_ptr() leaves 128 bit operands to the plain
+   path, which keeps libatomic out */
+template <>
+inline bool host_cmpxchg<uint128_t>(uint8_t *ptr, uint128_t *old,
+                                    uint128_t val)
+{
+    abort();
+}
+
+template <>
+inline uint128_t host_atomic_load<uint128_t>(uint8_t *ptr)
+{
+    abort();
+}
+#endif
+
+#define amo_size_log2(size) ((size) == 32 ? 2 : (size) == 64 ? 3 : 4)
+
+/* LR with aq on a host that could let later accesses pass the load. */
+static inline void lr_acquire(RISCVCPUState *s, uint32_t insn)
+{
+#if !defined(__x86_64__) && !defined(__i386__)
+    if (s->smp && get_bit(insn, 26))
+        std::atomic_thread_fence(std::memory_order_acquire);
+#endif
+}
+
+/* Set the A and D bits of a PTE. Another hart may change it meanwhile:
+   then nothing is written, and the walk starts over. */
+static bool update_pte(RISCVCPUState *s, target_ulong pte_addr,
+                       target_ulong old, target_ulong pte, int pte_size_log2)
+{
+    if (!s->smp) {
+        if (pte_size_log2 == 2)
+            phys_write_u32(s, pte_addr, pte);
+        else
+            phys_write_u64(s, pte_addr, pte);
+        return true;
+    }
+    PhysMemoryRange *pr = s->mem_map->FindRange(pte_addr);
+    if (!pr || !pr->is_ram)
+        return true;
+    uint8_t *ptr = pr->phys_mem + (uintptr_t)(pte_addr - pr->addr);
+    if (pte_size_log2 == 2) {
+        uint32_t expected = old;
+        return host_cmpxchg<uint32_t>(ptr, &expected, pte);
+    }
+    uint64_t expected = old;
+    return host_cmpxchg<uint64_t>(ptr, &expected, pte);
+}
+
 #define PTE_V_MASK bit_at(0)
 #define PTE_U_MASK bit_at(4)
 #define PTE_A_MASK bit_at(6)
@@ -277,6 +344,7 @@ static int get_phys_addr(RISCVCPUState *s,
         pte_addr_bits = 44;
     }
 #endif
+restart:
     pte_addr = (target_ulong)get_bits(s->satp, 0, pte_addr_bits) << PG_SHIFT;
     pte_bits = 12 - pte_size_log2;
     for(i = 0; i < levels; i++) {
@@ -328,18 +396,45 @@ static int get_phys_addr(RISCVCPUState *s,
             (!(pte & PTE_D_MASK) && access == ACCESS_WRITE)) {
             if (!(s->menvcfg & MENVCFG_ADUE))
                 return -1;
+            target_ulong old = pte;
             pte |= PTE_A_MASK;
             if (access == ACCESS_WRITE)
                 pte |= PTE_D_MASK;
-            if (pte_size_log2 == 2)
-                phys_write_u32(s, pte_addr, pte);
-            else
-                phys_write_u64(s, pte_addr, pte);
+            if (!update_pte(s, pte_addr, old, pte, pte_size_log2))
+                goto restart;
         }
         *ppaddr = (vaddr & vaddr_mask) | (paddr  & ~vaddr_mask);
         return 0;
     }
     return -1;
+}
+
+/* A device range is found without the device lock: another hart may have
+   moved or disabled it since, and then nothing answers. */
+static bool device_maps(PhysMemoryRange *pr, target_ulong paddr)
+{
+    return paddr >= pr->addr && paddr - pr->addr < pr->size;
+}
+
+/* Map the page of 'addr' for writing onto RAM range 'pr', recording the
+   write in its dirty bits, and return the host pointer for 'addr'. */
+static uint8_t *tlb_fill_write(RISCVCPUState *s, target_ulong addr,
+                               PhysMemoryRange *pr, target_ulong paddr)
+{
+    int tlb_idx = get_bits(addr, PG_SHIFT, TLB_BITS);
+    uint8_t *ptr = pr->phys_mem + (uintptr_t)(paddr - pr->addr);
+
+    pr->SetDirtyBit(paddr - pr->addr);
+    s->tlb_write[tlb_idx].mem_addend = (uintptr_t)ptr - addr;
+    s->tlb_write[tlb_idx].vaddr = addr & ~PG_MASK;
+    /* Another thread may have reset the bits and flushed the entries since:
+       either its flush sees this entry, or this sees the reset. */
+    if (s->smp && pr->dirty_bits != nullptr) {
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        if (!pr->IsDirtyBit(paddr - pr->addr))
+            s->tlb_write[tlb_idx].vaddr = -1;
+    }
+    return ptr;
 }
 
 /* return 0 if OK, != 0 if exception */
@@ -464,7 +559,9 @@ int target_read_slow(RISCVCPUState *s, mem_uint_t *pval,
         } else {
             DeviceLocker locker(*s->device_lock);
             offset = paddr - pr->addr;
-            if (get_bit(pr->devio_flags, size_log2)) {
+            if (!device_maps(pr, paddr)) {
+                ret = 0;
+            } else if (get_bit(pr->devio_flags, size_log2)) {
                 ret = pr->io->DeviceRead(offset, size_log2);
             }
 #if MLEN >= 64
@@ -493,7 +590,7 @@ int target_read_slow(RISCVCPUState *s, mem_uint_t *pval,
 int target_write_slow(RISCVCPUState *s, target_ulong addr,
                       mem_uint_t val, int size_log2)
 {
-    int size, i, tlb_idx, err;
+    int size, i, err;
     target_ulong paddr, offset;
     uint8_t *ptr;
     PhysMemoryRange *pr;
@@ -526,11 +623,7 @@ int target_write_slow(RISCVCPUState *s, target_ulong addr,
             s->pending_exception = CAUSE_FAULT_STORE;
             return -1;
         } else if (pr->is_ram) {
-            pr->SetDirtyBit(paddr - pr->addr);
-            tlb_idx = get_bits(addr, PG_SHIFT, TLB_BITS);
-            ptr = pr->phys_mem + (uintptr_t)(paddr - pr->addr);
-            s->tlb_write[tlb_idx].vaddr = addr & ~PG_MASK;
-            s->tlb_write[tlb_idx].mem_addend = (uintptr_t)ptr - addr;
+            ptr = tlb_fill_write(s, addr, pr, paddr);
             switch(size_log2) {
             case 0:
                 *(uint8_t *)ptr = val;
@@ -557,7 +650,9 @@ int target_write_slow(RISCVCPUState *s, target_ulong addr,
         } else {
             DeviceLocker locker(*s->device_lock);
             offset = paddr - pr->addr;
-            if (get_bit(pr->devio_flags, size_log2)) {
+            if (!device_maps(pr, paddr)) {
+                /* dropped */
+            } else if (get_bit(pr->devio_flags, size_log2)) {
                 pr->io->DeviceWrite(offset, val, size_log2);
             }
 #if MLEN >= 64
@@ -579,6 +674,61 @@ int target_write_slow(RISCVCPUState *s, target_ulong addr,
         }
     }
     return 0;
+}
+
+/* For an AMO or SC with other harts about: the host address of an aligned
+   operand of up to 64 bits in RAM, translated and checked for writing, or
+   null for any other operand, which takes the plain read and write. Returns
+   != 0 on an exception. */
+static no_inline __exception int target_rmw_ptr(RISCVCPUState *s,
+                                                target_ulong addr,
+                                                int size_log2, uint8_t **pptr)
+{
+    int tlb_idx = get_bits(addr, PG_SHIFT, TLB_BITS);
+    target_ulong paddr;
+    PhysMemoryRange *pr;
+
+    if (size_log2 > 3 || (addr & ((1 << size_log2) - 1)) != 0)
+        return 0;
+    if (s->tlb_write[tlb_idx].vaddr == (addr & ~PG_MASK)) {
+        *pptr = (uint8_t *)(s->tlb_write[tlb_idx].mem_addend +
+                            (uintptr_t)addr);
+        return 0;
+    }
+    if (get_phys_addr(s, &paddr, addr, ACCESS_WRITE)) {
+        s->pending_tval = addr;
+        s->pending_exception = CAUSE_STORE_PAGE_FAULT;
+        return -1;
+    }
+    pr = s->mem_map->FindRange(paddr);
+    if (pr && pr->is_ram)
+        *pptr = tlb_fill_write(s, addr, pr, paddr);
+    return 0;
+}
+
+static inline __exception int rmw_ptr(RISCVCPUState *s, target_ulong addr,
+                                      int size_log2, uint8_t **pptr)
+{
+    *pptr = nullptr;
+    if (likely(!s->smp))
+        return 0;
+    return target_rmw_ptr(s, addr, size_log2, pptr);
+}
+
+/* FENCE on the host. An x86 host only lets a load pass an earlier store,
+   so only a fence ordering writes before reads needs an instruction. */
+static inline void fence(RISCVCPUState *s, uint32_t insn)
+{
+    if (likely(!s->smp))
+        return;
+#if defined(__x86_64__) || defined(__i386__)
+    bool pred_w = get_bit(insn, 24), succ_r = get_bit(insn, 21);
+    if (!(pred_w && succ_r)) {
+        std::atomic_signal_fence(std::memory_order_seq_cst);
+        return;
+    }
+#endif
+    std::atomic_thread_fence(std::memory_order_seq_cst);
 }
 
 struct __attribute__((packed)) unaligned_u32 {
@@ -664,21 +814,46 @@ static void tlb_flush_vaddr(RISCVCPUState *s, target_ulong vaddr)
     tlb_flush_all(s);
 }
 
-/* XXX: inefficient but not critical as long as it is seldom used */
+/* Relaxed accesses to TLB fields another thread flushes. A 128 bit field is
+   accessed plainly, as the host has no such atomics without libatomic. */
+template <typename T>
+static inline T tlb_field_load(const T *p)
+{
+    if constexpr (sizeof(T) <= sizeof(uint64_t))
+        return __atomic_load_n(p, __ATOMIC_RELAXED);
+    else
+        return *(const volatile T *)p;
+}
+
+template <typename T>
+static inline void tlb_field_store(T *p, T val)
+{
+    if constexpr (sizeof(T) <= sizeof(uint64_t))
+        __atomic_store_n(p, val, __ATOMIC_RELAXED);
+    else
+        *(volatile T *)p = val;
+}
+
+/* XXX: inefficient but not critical as long as it is seldom used. From
+   another thread than the hart's, a write already past its TLB lookup still
+   completes, into the RAM it found; an entry being filled meanwhile is the
+   filler's to check (see tlb_fill_write()). */
 static void glue(riscv_cpu_flush_tlb_write_range_ram,
                  MAX_XLEN)(RISCVCPUState *s,
                            uint8_t *ram_ptr, size_t ram_size)
 {
     uint8_t *ptr, *ram_end;
     int i;
-    
+
     ram_end = ram_ptr + ram_size;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
     for(i = 0; i < TLB_SIZE; i++) {
-        if (s->tlb_write[i].vaddr != -1) {
-            ptr = (uint8_t *)(s->tlb_write[i].mem_addend +
-                              (uintptr_t)s->tlb_write[i].vaddr);
+        target_ulong vaddr = tlb_field_load(&s->tlb_write[i].vaddr);
+        if (vaddr != (target_ulong)-1) {
+            ptr = (uint8_t *)(tlb_field_load(&s->tlb_write[i].mem_addend) +
+                              (uintptr_t)vaddr);
             if (ptr >= ram_ptr && ptr < ram_end) {
-                s->tlb_write[i].vaddr = -1;
+                tlb_field_store(&s->tlb_write[i].vaddr, (target_ulong)-1);
             }
         }
     }
@@ -1973,6 +2148,11 @@ void RISCVCPUState::FlushTlbWriteRangeRam(uint8_t *ram_ptr, size_t ram_size)
 void RISCVCPUState::SetDeviceLock(DeviceLock *lock)
 {
     device_lock = lock;
+}
+
+void RISCVCPUState::SetSmp(bool enable)
+{
+    smp = enable;
 }
 
 void RISCVCPUState::SetInterruptArch(RISCVInterruptArch arch)

@@ -69,9 +69,10 @@ enum RISCVInterruptArch {
 /* One implementation per supported XLEN; riscv_cpu.cpp is compiled once for
    each and each build keeps its implementation class internal.
 
-   The hart belongs to the processor thread. SetIrqLine() and
-   ImsicSetPending() may be called from any thread; the hart takes them in
-   before it next looks at its interrupts. */
+   The hart belongs to the thread that runs it. SetIrqLine(),
+   ImsicSetPending() and FlushTlbWriteRangeRam() may be called from any
+   thread; the hart takes the first two in before it next looks at its
+   interrupts. */
 class RISCVCPU {
 public:
     virtual ~RISCVCPU() = default;
@@ -83,7 +84,7 @@ public:
     virtual void SetIrqLine(uint32_t mask, bool level) = 0;
     /* Brings the Sstc supervisor timer interrupt up to date with the real time
        counter and returns when the next one falls due, or UINT64_MAX when the
-       comparator is not driving it. */
+       comparator is not driving it. On the thread that runs the hart. */
     virtual uint64_t UpdateSTimer() = 0;
     /* Whether the hart waits for an interrupt, after taking in the ones
        posted to it. */
@@ -92,6 +93,9 @@ public:
     virtual void FlushTlbWriteRangeRam(uint8_t *ram_ptr, size_t ram_size) = 0;
     virtual void SetRtcTimeSource(RtcTimeSource *source) = 0;
     virtual void SetDeviceLock(DeviceLock *lock) = 0;
+    /* Other harts run on other threads and share the memory: LR/SC and AMOs
+       are atomic, and FENCE orders the host's accesses. */
+    virtual void SetSmp(bool smp) = 0;
     virtual void SetInterruptArch(RISCVInterruptArch arch) = 0;
     /* A write of 'id' to the seteipnum register of the hart's machine or
        supervisor level IMSIC interrupt file. */

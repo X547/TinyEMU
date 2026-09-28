@@ -1376,6 +1376,7 @@ static void no_inline glue(riscv_cpu_interp_x, XLEN)(RISCVCPUState *s,
             case 0: /* fence */
                 if (insn & 0xf00fff80)
                     goto illegal_insn;
+                fence(s, insn);
                 break;
             case 1: /* fence.i */
                 if (insn != 0x0000100f)
@@ -1397,9 +1398,14 @@ static void no_inline glue(riscv_cpu_interp_x, XLEN)(RISCVCPUState *s,
             NEXT_INSN;
         case 0x2f:
             funct3 = get_bits(insn, 12, 3);
+/* With other harts about, an operand in RAM is updated through 'ptr': an SC
+   stores only if memory still holds what the LR read, and an AMO computes
+   its result again until its compare and exchange finds the value it
+   read. */
 #define OP_A(size)                                                      \
             {                                                           \
                 uint ## size ##_t rval;                                 \
+                uint8_t *ptr;                                           \
                                                                         \
                 addr = s->reg[rs1];                                     \
                 funct3 = get_bits(insn, 27, 5);                         \
@@ -1409,14 +1415,24 @@ static void no_inline glue(riscv_cpu_interp_x, XLEN)(RISCVCPUState *s,
                         goto illegal_insn;                              \
                     if (target_read_u ## size(s, &rval, addr))          \
                         goto mmu_exception;                             \
+                    lr_acquire(s, insn);                                \
                     val = (int## size ## _t)rval;                       \
                     s->load_res = addr;                                 \
+                    s->load_val = rval;                                 \
                     break;                                              \
                 case 3: /* sc.w */                                      \
                     if (s->load_res == addr) {                          \
-                        if (target_write_u ## size(s, addr, s->reg[rs2])) \
+                        if (rmw_ptr(s, addr, amo_size_log2(size), &ptr)) \
                             goto mmu_exception;                         \
-                        val = 0;                                        \
+                        if (ptr != nullptr) {                           \
+                            rval = s->load_val;                         \
+                            val = !host_cmpxchg<uint ## size ## _t>(    \
+                                ptr, &rval, s->reg[rs2]);               \
+                        } else {                                        \
+                            if (target_write_u ## size(s, addr, s->reg[rs2])) \
+                                goto mmu_exception;                     \
+                            val = 0;                                    \
+                        }                                               \
                     } else {                                            \
                         val = 1;                                        \
                     }                                                   \
@@ -1432,8 +1448,13 @@ static void no_inline glue(riscv_cpu_interp_x, XLEN)(RISCVCPUState *s,
                 case 0x14: /* amomax.w */                               \
                 case 0x18: /* amominu.w */                              \
                 case 0x1c: /* amomaxu.w */                              \
-                    if (target_read_u ## size(s, &rval, addr))          \
+                    if (rmw_ptr(s, addr, amo_size_log2(size), &ptr))    \
                         goto mmu_exception;                             \
+                    if (ptr != nullptr)                                 \
+                        rval = host_atomic_load<uint ## size ## _t>(ptr); \
+                    else if (target_read_u ## size(s, &rval, addr))     \
+                        goto mmu_exception;                             \
+                amo_retry ## size:                                      \
                     val = (int## size ## _t)rval;                       \
                     val2 = s->reg[rs2];                                 \
                     switch(funct3) {                                    \
@@ -1470,8 +1491,13 @@ static void no_inline glue(riscv_cpu_interp_x, XLEN)(RISCVCPUState *s,
                     default:                                            \
                         goto illegal_insn;                              \
                     }                                                   \
-                    if (target_write_u ## size(s, addr, val2))          \
+                    if (ptr != nullptr) {                               \
+                        if (!host_cmpxchg<uint ## size ## _t>(ptr, &rval, \
+                                                              val2))    \
+                            goto amo_retry ## size;                     \
+                    } else if (target_write_u ## size(s, addr, val2)) { \
                         goto mmu_exception;                             \
+                    }                                                   \
                     break;                                              \
                 default:                                                \
                     goto illegal_insn;                                  \

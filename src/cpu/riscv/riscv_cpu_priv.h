@@ -267,6 +267,10 @@ struct RISCVCPUState: public RISCVCPU {
     uint32_t irq_line_mask; /* the mip bits irq_lines drives */
 
     target_ulong load_res; /* for atomic LR/SC */
+    /* what LR read: with other harts, SC stores only if memory still holds
+       it */
+    mem_uint_t load_val;
+    bool smp;
 
     PhysMemoryMap *mem_map;
     DeviceLock *device_lock;
@@ -284,6 +288,7 @@ struct RISCVCPUState: public RISCVCPU {
     void FlushTlbWriteRangeRam(uint8_t *ram_ptr, size_t ram_size) override;
     void SetRtcTimeSource(RtcTimeSource *source) override;
     void SetDeviceLock(DeviceLock *lock) override;
+    void SetSmp(bool smp) override;
     void SetInterruptArch(RISCVInterruptArch arch) override;
     void ImsicSetPending(bool supervisor, uint32_t id) override;
 };
