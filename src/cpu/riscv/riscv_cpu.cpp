@@ -715,19 +715,25 @@ static inline __exception int rmw_ptr(RISCVCPUState *s, target_ulong addr,
     return target_rmw_ptr(s, addr, size_log2, pptr);
 }
 
-/* FENCE on the host. An x86 host only lets a load pass an earlier store,
-   so only a fence ordering writes before reads needs an instruction. */
+/* FENCE and FENCE.TSO on the host. rs1 and rd are ignored, and a reserved
+   fm acts as a plain FENCE, as the base ISA asks. FENCE.TSO orders all but
+   stores before later loads. Only a fence ordering writes before reads
+   needs a full host fence; the others are acquire and release, which an
+   x86 host keeps anyway. */
 static inline void fence(RISCVCPUState *s, uint32_t insn)
 {
     if (likely(!s->smp))
         return;
-#if defined(__x86_64__) || defined(__i386__)
+    bool tso = get_bits(insn, 28, 4) == 8 && get_bits(insn, 20, 8) == 0x33;
     bool pred_w = get_bit(insn, 24), succ_r = get_bit(insn, 21);
-    if (!(pred_w && succ_r)) {
+    if (tso || !(pred_w && succ_r)) {
+#if defined(__x86_64__) || defined(__i386__)
         std::atomic_signal_fence(std::memory_order_seq_cst);
+#else
+        std::atomic_thread_fence(std::memory_order_acq_rel);
+#endif
         return;
     }
-#endif
     std::atomic_thread_fence(std::memory_order_seq_cst);
 }
 

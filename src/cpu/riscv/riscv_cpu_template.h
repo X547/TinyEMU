@@ -1373,9 +1373,7 @@ static void no_inline glue(riscv_cpu_interp_x, XLEN)(RISCVCPUState *s,
         case 0x0f: /* misc-mem */
             funct3 = get_bits(insn, 12, 3);
             switch(funct3) {
-            case 0: /* fence */
-                if (insn & 0xf00fff80)
-                    goto illegal_insn;
+            case 0: /* fence, fence.tso */
                 fence(s, insn);
                 break;
             case 1: /* fence.i */
