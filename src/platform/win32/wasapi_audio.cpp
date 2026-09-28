@@ -32,6 +32,7 @@
 #include <thread>
 #include <vector>
 
+#include "host_thread.h"
 #include "host_time.h"
 #include "paced_audio.h"
 #include "platform_backends.h"
@@ -316,6 +317,7 @@ void WasapiAudio::QueryCaps()
         IAudioClient *client = nullptr;
         WAVEFORMATEX *mix = nullptr;
 
+        host_set_thread_name("audio query");
         CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         fCaps.any_rate = true;
         if (SUCCEEDED(CoCreateInstance(kClsidMMDeviceEnumerator, nullptr,
@@ -428,6 +430,7 @@ void WasapiAudio::ThreadMain()
     IMMDeviceEnumerator *en = nullptr;
     DWORD task_index = 0;
 
+    host_set_thread_name("audio");
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     HANDLE mmcss = AvSetMmThreadCharacteristicsW(L"Pro Audio", &task_index);
     if (FAILED(CoCreateInstance(kClsidMMDeviceEnumerator, nullptr, CLSCTX_ALL,

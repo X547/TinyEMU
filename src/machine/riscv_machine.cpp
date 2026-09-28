@@ -30,6 +30,7 @@
 
 #include "bits.h"
 #include "cutils.h"
+#include "host_thread.h"
 #include "host_time.h"
 #include "iomem.h"
 #include "riscv_cpu.h"
@@ -1033,7 +1034,10 @@ void RISCVMachine::InterruptExecution()
 void RISCVMachine::HartThread(int hart)
 {
     RISCVCPU *cpu = cpus[hart].get();
+    char name[16];
 
+    snprintf(name, sizeof(name), "cpu%d", hart);
+    host_set_thread_name(name);
     while (!StopRequested()) {
         uint64_t next = cpu->UpdateSTimer();
         if (!cpu->PowerDown()) {

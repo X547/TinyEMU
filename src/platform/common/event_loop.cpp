@@ -20,6 +20,7 @@
  * THE SOFTWARE.
  */
 #include "event_loop.h"
+#include "host_thread.h"
 
 #include <assert.h>
 #include <algorithm>
@@ -85,6 +86,7 @@ void EventLoop::Stop()
 
 void EventLoop::ThreadLoop()
 {
+    host_set_thread_name("event loop");
     while (!fStopRequested.load()) {
         Wait(IDLE_TIMEOUT);
     }

@@ -32,6 +32,7 @@
 #include <windows.h>
 
 #include "console_escape.h"
+#include "host_thread.h"
 #include "platform_backends.h"
 #include "run_control.h"
 #include "wait_set.h"
@@ -329,6 +330,7 @@ void StdioConsole::SendSize()
 
 DWORD WINAPI StdioConsole::ReaderThread(LPVOID param)
 {
+    host_set_thread_name("stdin reader");
     static_cast<StdioConsole *>(param)->ReadPipe();
     return 0;
 }

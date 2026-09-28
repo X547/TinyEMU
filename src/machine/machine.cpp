@@ -30,6 +30,7 @@
 
 #include "cutils.h"
 #include "device_lock.h"
+#include "host_thread.h"
 #include "host_time.h"
 #include "iomem.h"
 #include "run_control.h"
@@ -790,6 +791,7 @@ int64_t VirtMachine::RefreshScreen()
 
 void VirtMachine::ThreadLoop()
 {
+    host_set_thread_name("machine");
     fThreadId.store(std::this_thread::get_id());
     ProcessorThreadStarted();
 

@@ -34,6 +34,7 @@
 
 #include "bits.h"
 #include "cutils.h"
+#include "host_thread.h"
 #include "host_time.h"
 #include "host_x86_hypervisor.h"
 #include "iomem.h"
@@ -2672,10 +2673,19 @@ void PCMachine::ProcessorThreadStopping()
    again, should a kick go astray. */
 #define VCPU_MAX_WAIT_US 10000
 
+static void name_cpu_thread(int index)
+{
+    char name[16];
+
+    snprintf(name, sizeof(name), "cpu%d", index);
+    host_set_thread_name(name);
+}
+
 void PCMachine::VcpuThread(int index)
 {
     HostX86Vcpu &vcpu = hypervisor->Vcpu(index);
 
+    name_cpu_thread(index);
     sCurrentVcpu = index;
     vcpu.ThreadStarted();
     while (!StopRequested()) {
@@ -2696,6 +2706,7 @@ void PCMachine::InterpThread(int index)
     X86CPUState *cpu = fCpus[index];
     InterpCpuStart &start = fCpuStarts[index];
 
+    name_cpu_thread(index);
     sCurrentVcpu = index;
     while (!StopRequested()) {
         /* An INIT stops the processor, and then the first processor starts
