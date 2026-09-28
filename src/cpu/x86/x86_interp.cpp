@@ -345,6 +345,7 @@ static force_inline Operand decode_modrm(X86CPUState *s, Decoder &d,
     Operand op;
     op.reg = modrm_rm(modrm) | rex_ext<L>(d, REX_B);
     op.is_reg = modrm_mod(modrm) == 3;
+    op.locked = d.lock;
     op.seg = SEG_DS;
     op.ea = 0;
     if (!op.is_reg) {
@@ -496,6 +497,8 @@ static inline void rm_write(X86CPUState *s, const Operand &op, uint64_t val,
 {
     if (op.is_reg) {
         reg_write<L>(s, op.reg, val, size);
+    } else if (unlikely(op.locked)) {
+        mem_write_locked(s, op_address(s, op, 0, size, true), val, size);
     } else {
         mem_write(s, op_address(s, op, 0, size, true), val, size);
     }
@@ -511,7 +514,8 @@ static inline uint64_t mem_read_modify(X86CPUState *s, uint64_t lin, int size)
     return mem_read(s, lin, size);
 }
 
-/* Read an operand that is written back afterwards. */
+/* Read an operand that is written back afterwards, by rm_write() and
+   before any register is: a locked one may have to run again. */
 template <bool L>
 static force_inline uint64_t rm_read_modify(X86CPUState *s, const Operand &op,
                                             int size)
@@ -519,7 +523,11 @@ static force_inline uint64_t rm_read_modify(X86CPUState *s, const Operand &op,
     if (op.is_reg) {
         return reg_read<L>(s, op.reg, size);
     }
-    return mem_read_modify(s, op_address(s, op, 0, size, true), size);
+    uint64_t lin = op_address(s, op, 0, size, true);
+    if (unlikely(op.locked)) {
+        return mem_read_locked(s, lin, size);
+    }
+    return mem_read_modify(s, lin, size);
 }
 
 static inline void push(X86CPUState *s, uint64_t val, int size)
@@ -1682,16 +1690,12 @@ static bool exec_0f(X86CPUState *s, Decoder &d)
         if (half == SIZE64 && get_bits(lin, 0, 4) != 0) {
             raise_exception(s, EXCP_GP, 0);
         }
-        uint64_t low = mem_read_modify(s, lin, half);
-        uint64_t high = mem_read_modify(s, lin + n, half);
-        bool equal = low == reg_read<L>(s, REG_EAX, half) &&
-            high == reg_read<L>(s, REG_EDX, half);
-        if (equal) {
-            mem_write(s, lin, reg_read<L>(s, REG_EBX, half), half);
-            mem_write(s, lin + n, reg_read<L>(s, REG_ECX, half), half);
-        } else {
-            mem_write(s, lin, low, half);
-            mem_write(s, lin + n, high, half);
+        uint64_t low = reg_read<L>(s, REG_EAX, half);
+        uint64_t high = reg_read<L>(s, REG_EDX, half);
+        bool equal = mem_cmpxchg_wide(s, lin, half, &low, &high,
+                                      reg_read<L>(s, REG_EBX, half),
+                                      reg_read<L>(s, REG_ECX, half));
+        if (!equal) {
             reg_write<L>(s, REG_EAX, low, half);
             reg_write<L>(s, REG_EDX, high, half);
         }
@@ -1961,6 +1965,8 @@ next_byte:
     case 0x86: /* XCHG */
     case 0x87: {
         op = fetch_modrm<L>(s, d, &modrm);
+        /* locked with or without the prefix */
+        op.locked = true;
         int reg = reg_field<L>(d, modrm);
         val = rm_read_modify<L>(s, op, size);
         rm_write<L>(s, op, reg_read<L>(s, reg, size), size);

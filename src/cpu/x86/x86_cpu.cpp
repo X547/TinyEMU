@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <inttypes.h>
+#include <mutex>
 
 #include "x86_cpu_priv.h"
 
@@ -206,19 +207,31 @@ static void device_write(PhysMemoryRange *pr, uint32_t offset, uint64_t val,
 }
 
 /* The entries into device code, which hold the device lock. Nothing in them
-   raises an exception, so no longjmp() leaves the lock held. */
+   raises an exception, so no longjmp() leaves the lock held. The range was
+   found without the lock: another processor may have moved or disabled it
+   since, and then nothing answers. */
+static bool device_maps(PhysMemoryRange *pr, uint64_t phys)
+{
+    return phys >= pr->addr && phys - pr->addr < pr->size;
+}
+
 static uint64_t locked_device_read(X86CPUState *s, PhysMemoryRange *pr,
-                                   uint32_t offset, int size)
+                                   uint64_t phys, int size)
 {
     DeviceLocker locker(*s->device_lock);
-    return device_read(pr, offset, size);
+    if (!device_maps(pr, phys)) {
+        return size_mask(size);
+    }
+    return device_read(pr, phys - pr->addr, size);
 }
 
 static void locked_device_write(X86CPUState *s, PhysMemoryRange *pr,
-                                uint32_t offset, uint64_t val, int size)
+                                uint64_t phys, uint64_t val, int size)
 {
     DeviceLocker locker(*s->device_lock);
-    device_write(pr, offset, val, size);
+    if (device_maps(pr, phys)) {
+        device_write(pr, phys - pr->addr, val, size);
+    }
 }
 
 static uint64_t phys_read(X86CPUState *s, uint64_t phys, int size)
@@ -228,9 +241,9 @@ static uint64_t phys_read(X86CPUState *s, uint64_t phys, int size)
         return size_mask(size);
     }
     if (pr->is_ram) {
-        return host_load(pr->phys_mem + (phys - pr->addr), size);
+        return guest_load(s, pr->phys_mem + (phys - pr->addr), size);
     }
-    return locked_device_read(s, pr, phys - pr->addr, size);
+    return locked_device_read(s, pr, phys, size);
 }
 
 static void phys_write(X86CPUState *s, uint64_t phys, uint64_t val, int size)
@@ -244,10 +257,105 @@ static void phys_write(X86CPUState *s, uint64_t phys, uint64_t val, int size)
             return;
         }
         pr->SetDirtyBit(phys - pr->addr);
-        host_store(pr->phys_mem + (phys - pr->addr), val, size);
+        guest_store(s, pr->phys_mem + (phys - pr->addr), val, size);
         return;
     }
-    locked_device_write(s, pr, phys - pr->addr, val, size);
+    locked_device_write(s, pr, phys, val, size);
+}
+
+
+//#pragma mark - atomics
+
+/* Only the fallbacks of hosts without unaligned or 16 byte atomics take
+   it, and they exclude each other alone. */
+static std::mutex sAtomicFallbackLock;
+
+template <typename T>
+static bool cmpxchg_as(uint8_t *ptr, uint64_t *old, uint64_t val)
+{
+    T expected = *old;
+    bool done = __atomic_compare_exchange_n((T *)ptr, &expected, (T)val,
+                                            false, __ATOMIC_SEQ_CST,
+                                            __ATOMIC_SEQ_CST);
+    *old = expected;
+    return done;
+}
+
+/* Replace 'size' bytes of RAM that still hold *old with 'val', as one
+   atomic step; otherwise *old gets what they hold. */
+static bool host_cmpxchg(uint8_t *ptr, uint64_t *old, uint64_t val, int size)
+{
+#if !HOST_ORDERS_LIKE_X86
+    /* The host has aligned atomics only: an operand within an aligned
+       64 bit word is exchanged with the word, and one across words under a
+       lock, which only other such operands respect. */
+    uintptr_t addr = (uintptr_t)ptr;
+    if ((addr & (size_bytes(size) - 1)) != 0) {
+        uint64_t *word = (uint64_t *)(addr & ~(uintptr_t)7);
+        int shift = (addr & 7) * 8;
+        if (shift + size_bits(size) <= 64) {
+            uint64_t mask = size_mask(size) << shift;
+            uint64_t cur = __atomic_load_n(word, __ATOMIC_RELAXED);
+            for (;;) {
+                if (((cur & mask) >> shift) != *old) {
+                    *old = (cur & mask) >> shift;
+                    return false;
+                }
+                uint64_t next = (cur & ~mask) | ((val << shift) & mask);
+                if (__atomic_compare_exchange_n(word, &cur, next, false,
+                                                __ATOMIC_SEQ_CST,
+                                                __ATOMIC_SEQ_CST)) {
+                    return true;
+                }
+            }
+        }
+        std::lock_guard<std::mutex> guard(sAtomicFallbackLock);
+        uint64_t cur = host_load(ptr, size);
+        if (cur != *old) {
+            *old = cur;
+            return false;
+        }
+        host_store(ptr, val, size);
+        return true;
+    }
+#endif
+    switch (size) {
+    case SIZE8:
+        return cmpxchg_as<uint8_t>(ptr, old, val);
+    case SIZE16:
+        return cmpxchg_as<uint16_t>(ptr, old, val);
+    case SIZE32:
+        return cmpxchg_as<uint32_t>(ptr, old, val);
+    default:
+        return cmpxchg_as<uint64_t>(ptr, old, val);
+    }
+}
+
+/* The same for 16 aligned bytes, as two 64 bit halves. */
+static bool host_cmpxchg16(uint8_t *ptr, uint64_t *low, uint64_t *high,
+                           uint64_t new_low, uint64_t new_high)
+{
+#if defined(__x86_64__)
+    bool done;
+    asm volatile("lock cmpxchg16b %1"
+                 : "=@ccz"(done), "+m"(*(unsigned __int128 *)ptr),
+                   "+a"(*low), "+d"(*high)
+                 : "b"(new_low), "c"(new_high)
+                 : "memory");
+    return done;
+#else
+    std::lock_guard<std::mutex> guard(sAtomicFallbackLock);
+    uint64_t cur_low = host_load(ptr, SIZE64);
+    uint64_t cur_high = host_load(ptr + 8, SIZE64);
+    if (cur_low != *low || cur_high != *high) {
+        *low = cur_low;
+        *high = cur_high;
+        return false;
+    }
+    host_store(ptr, new_low, SIZE64);
+    host_store(ptr + 8, new_high, SIZE64);
+    return true;
+#endif
 }
 
 
@@ -300,6 +408,14 @@ static uint8_t *tlb_fill(X86CPUState *s, uint64_t lin, PhysMemoryRange *pr,
     if (writable && !(pr->devram_flags & DEVRAM_FLAG_ROM) &&
         pr->IsDirtyBit(offset)) {
         e->write = tag;
+        /* Another thread may have reset the bits and flushed the entries
+           since: either its flush sees this entry, or this sees the reset. */
+        if (s->smp && pr->dirty_bits != nullptr) {
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+            if (!pr->IsDirtyBit(offset)) {
+                e->write = TLB_INVALID;
+            }
+        }
     } else {
         e->write = TLB_INVALID;
     }
@@ -345,6 +461,25 @@ static const uint64_t PAE_LARGE_RSVD_MASK = field_mask<uint64_t>(13, 8);
     raise_exception(s, EXCP_PF, error_code);
 }
 
+/* Set the accessed and dirty bits of a paging entry. Another processor may
+   change the entry meanwhile: then nothing is written, and the walk starts
+   over. */
+static bool update_paging_entry(X86CPUState *s, uint64_t addr, uint64_t old,
+                                uint64_t val, int size)
+{
+    if (s->smp) {
+        PhysMemoryRange *pr = s->mem_map->FindRange(addr);
+        if (pr != nullptr && pr->is_ram &&
+            !(pr->devram_flags & DEVRAM_FLAG_ROM)) {
+            pr->SetDirtyBit(addr - pr->addr);
+            return host_cmpxchg(pr->phys_mem + (addr - pr->addr), &old, val,
+                                size);
+        }
+    }
+    phys_write(s, addr, val, size);
+    return true;
+}
+
 /* Translate a linear address, within the linear address width, updating
    the accessed and dirty bits. 'writable' tells whether a write through the
    mapping needs no walk, 'executable' whether a fetch does. */
@@ -374,6 +509,7 @@ static uint64_t page_walk(X86CPUState *s, uint64_t lin, int access,
         }
     }
 
+restart:
     /* Level 0 holds the page table entries; PAE starts from its page
        directory pointer registers rather than from memory. */
     int level;
@@ -445,17 +581,21 @@ static uint64_t page_walk(X86CPUState *s, uint64_t lin, int access,
     }
 
     for (int i = top; i > level; i--) {
-        if (!get_bit(entry[i], PTE_A)) {
-            phys_write(s, entry_addr[i], set_bit(entry[i], PTE_A, true),
-                       entry_size);
+        if (!get_bit(entry[i], PTE_A) &&
+            !update_paging_entry(s, entry_addr[i], entry[i],
+                                 set_bit(entry[i], PTE_A, true),
+                                 entry_size)) {
+            goto restart;
         }
     }
     uint64_t new_leaf = set_bit(leaf, PTE_A, true);
     if (is_write) {
         new_leaf = set_bit(new_leaf, PTE_D, true);
     }
-    if (new_leaf != leaf) {
-        phys_write(s, entry_addr[level], new_leaf, entry_size);
+    if (new_leaf != leaf &&
+        !update_paging_entry(s, entry_addr[level], leaf, new_leaf,
+                             entry_size)) {
+        goto restart;
     }
     if (level != 0) {
         s->tlb_large_pages = true;
@@ -524,10 +664,10 @@ uint64_t mem_read_slow(X86CPUState *s, uint64_t lin, int size, int mmu_idx)
         return size_mask(size);
     }
     if (pr->is_ram) {
-        return host_load(tlb_fill(s, lin, pr, phys, writable, executable,
-                                  mmu_idx), size);
+        return guest_load(s, tlb_fill(s, lin, pr, phys, writable, executable,
+                                      mmu_idx), size);
     }
-    return locked_device_read(s, pr, phys - pr->addr, size);
+    return locked_device_read(s, pr, phys, size);
 }
 
 /* Translate for writing and prepare the TLB, so that the write that follows
@@ -587,11 +727,98 @@ void mem_write_slow(X86CPUState *s, uint64_t lin, uint64_t val, int size,
             return;
         }
         pr->SetDirtyBit(phys - pr->addr);
-        host_store(tlb_fill(s, lin, pr, phys, writable, executable, mmu_idx),
-                   val, size);
+        guest_store(s, tlb_fill(s, lin, pr, phys, writable, executable,
+                                mmu_idx), val, size);
         return;
     }
-    locked_device_write(s, pr, phys - pr->addr, val, size);
+    locked_device_write(s, pr, phys, val, size);
+}
+
+/* The host address of a write of 'size' at 'lin' within one page of RAM,
+   or null, after the checks the write needs. */
+static uint8_t *mem_write_ptr(X86CPUState *s, uint64_t lin, int size)
+{
+    mem_probe_write(s, lin, size);
+    X86TLBEntry *e = tlb_entry(s, s->mmu_idx, lin);
+    if (!tlb_hit(e->write, lin, size)) {
+        return nullptr;
+    }
+    return (uint8_t *)(e->addend + lin);
+}
+
+/* The read of a read-modify-write under LOCK. The write that follows,
+   mem_write_locked(), stores only if the operand still holds what was
+   read, and otherwise runs the instruction again. An operand outside RAM or
+   across pages is read and written without that. */
+uint64_t mem_read_locked(X86CPUState *s, uint64_t lin, int size)
+{
+    uint8_t *ptr = s->smp ? mem_write_ptr(s, lin, size) : nullptr;
+    s->lock_ptr = ptr;
+    if (ptr == nullptr) {
+        mem_probe_write(s, lin, size);
+        return mem_read(s, lin, size);
+    }
+    s->lock_old = host_load(ptr, size);
+    s->lock_cc_op = s->cc_op;
+    s->lock_cc_size = s->cc_size;
+    s->lock_cc_carry = s->cc_carry;
+    s->lock_cc_src = s->cc_src;
+    s->lock_cc_dst = s->cc_dst;
+    s->lock_eflags = s->eflags;
+    return s->lock_old;
+}
+
+void mem_write_locked(X86CPUState *s, uint64_t lin, uint64_t val, int size)
+{
+    uint8_t *ptr = s->lock_ptr;
+    if (ptr == nullptr) {
+        mem_write(s, lin, val, size);
+        return;
+    }
+    s->lock_ptr = nullptr;
+    uint64_t old = s->lock_old;
+    if (!host_cmpxchg(ptr, &old, val, size)) {
+        /* Another processor wrote the operand in between. The instruction
+           has changed nothing but the flags, which go back for the retry
+           from x86_cpu_interp(). */
+        s->cc_op = s->lock_cc_op;
+        s->cc_size = s->lock_cc_size;
+        s->cc_carry = s->lock_cc_carry;
+        s->cc_src = s->lock_cc_src;
+        s->cc_dst = s->lock_cc_dst;
+        s->eflags = s->lock_eflags;
+        longjmp(s->jmp_env, 1);
+    }
+}
+
+/* CMPXCHG8B (half SIZE32) and CMPXCHG16B (SIZE64) under LOCK: true if the
+   operand held low and high and now holds the new halves; otherwise low
+   and high get what it holds, and it is written back unchanged. */
+bool mem_cmpxchg_wide(X86CPUState *s, uint64_t lin, int half, uint64_t *low,
+                      uint64_t *high, uint64_t new_low, uint64_t new_high)
+{
+    int n = size_bytes(half);
+    uint8_t *ptr = s->smp ? mem_write_ptr(s, lin, half + 1) : nullptr;
+    if (ptr == nullptr) {
+        mem_probe_write(s, lin, half + 1);
+        uint64_t cur_low = mem_read(s, lin, half);
+        uint64_t cur_high = mem_read(s, lin + n, half);
+        bool equal = cur_low == *low && cur_high == *high;
+        mem_write(s, lin, equal ? new_low : cur_low, half);
+        mem_write(s, lin + n, equal ? new_high : cur_high, half);
+        *low = cur_low;
+        *high = cur_high;
+        return equal;
+    }
+    if (half == SIZE64) {
+        return host_cmpxchg16(ptr, low, high, new_low, new_high);
+    }
+    uint64_t old = concat_bits(*high, *low, 32);
+    bool done = host_cmpxchg(ptr, &old, concat_bits(new_high, new_low, 32),
+                             SIZE64);
+    *low = get_bits(old, 0, 32);
+    *high = get_bits(old, 32, 32);
+    return done;
 }
 
 uint8_t fetch_slow(X86CPUState *s, uint64_t lin)
@@ -608,7 +835,7 @@ uint8_t fetch_slow(X86CPUState *s, uint64_t lin)
             return 0xff;
         }
         if (!pr->is_ram) {
-            return locked_device_read(s, pr, phys - pr->addr, SIZE8);
+            return locked_device_read(s, pr, phys, SIZE8);
         }
         tlb_fill(s, lin, pr, phys, writable, executable, mmu_idx);
     }
@@ -812,6 +1039,7 @@ static void cpu_reset(X86CPUState *s)
 
     s->irq_inhibit = false;
     s->power_down = false;
+    s->lock_ptr = nullptr;
     s->old_exception = -1;
     fpu_reset(s);
     simd_reset(s);
@@ -1254,23 +1482,49 @@ bool x86_cpu_get_power_down(X86CPUState *s)
 }
 
 /* A RAM mapping moved or its dirty bits were reset: drop the entries that
-   point into it. */
+   point into it. From another thread than the processor's, an access
+   already past its TLB lookup still completes, into the RAM it found; an
+   entry being filled meanwhile is the filler's to check (see tlb_fill()). */
 void x86_cpu_flush_tlb_write_range_ram(X86CPUState *s,
                                        uint8_t *ram_ptr, size_t ram_size)
 {
     uint8_t *ram_end = ram_ptr + ram_size;
 
+    std::atomic_thread_fence(std::memory_order_seq_cst);
     for (int mmu_idx = 0; mmu_idx < MMU_COUNT; mmu_idx++) {
         for (int i = 0; i < TLB_SIZE; i++) {
             X86TLBEntry *e = &s->tlb[mmu_idx][i];
-            if (e->read == TLB_INVALID) {
+            uint64_t tag = __atomic_load_n(&e->read, __ATOMIC_RELAXED);
+            if (tag == TLB_INVALID) {
                 continue;
             }
-            uint8_t *ptr = (uint8_t *)(e->addend + e->read);
+            uintptr_t addend = __atomic_load_n(&e->addend, __ATOMIC_RELAXED);
+            uint8_t *ptr = (uint8_t *)(addend + tag);
             if (ptr >= ram_ptr && ptr < ram_end) {
-                e->read = e->write = e->code = TLB_INVALID;
+                __atomic_store_n(&e->read, TLB_INVALID, __ATOMIC_RELAXED);
+                __atomic_store_n(&e->write, TLB_INVALID, __ATOMIC_RELAXED);
+                __atomic_store_n(&e->code, TLB_INVALID, __ATOMIC_RELAXED);
             }
         }
     }
-    s->code_tag = TLB_INVALID;
+    __atomic_store_n(&s->code_tag, TLB_INVALID, __ATOMIC_RELAXED);
+}
+
+void x86_cpu_set_smp(X86CPUState *s, bool smp)
+{
+    s->smp = smp;
+}
+
+void x86_cpu_reset(X86CPUState *s)
+{
+    cpu_reset(s);
+}
+
+/* A STARTUP IPI: real mode at page 'vector'. */
+void x86_cpu_startup(X86CPUState *s, int vector)
+{
+    X86CPUSeg *cs = &s->segs[SEG_CS];
+    load_seg_cache(s, SEG_CS, vector << 8, (uint32_t)vector << 12, 0xffff,
+                   cs->flags);
+    s->rip = 0;
 }

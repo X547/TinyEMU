@@ -55,6 +55,11 @@ typedef struct {
 
 X86CPUState *x86_cpu_init(PhysMemoryMap *mem_map);
 void x86_cpu_end(X86CPUState *s);
+/* Other processors run on other threads and share the memory. */
+void x86_cpu_set_smp(X86CPUState *s, bool smp);
+/* An INIT, and a STARTUP IPI's real mode entry at page 'vector'. */
+void x86_cpu_reset(X86CPUState *s);
+void x86_cpu_startup(X86CPUState *s, int vector);
 void x86_cpu_interp(X86CPUState *s, int max_cycles1);
 /* any thread */
 void x86_cpu_set_irq(X86CPUState *s, bool set);
@@ -101,5 +106,6 @@ void x86_cpu_set_device_lock(X86CPUState *s, DeviceLock *lock);
 int64_t x86_cpu_get_cycles(X86CPUState *s);
 /* Halted with no interrupt that could wake it. */
 bool x86_cpu_get_power_down(X86CPUState *s);
+/* any thread */
 void x86_cpu_flush_tlb_write_range_ram(X86CPUState *s,
                                        uint8_t *ram_ptr, size_t ram_size);

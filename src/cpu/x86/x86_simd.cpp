@@ -1527,9 +1527,13 @@ static void exec_group15(X86CPUState *s, const SimdInsn &insn)
         raise_exception(s, EXCP_UD);
     }
     if (insn.rm.is_reg) {
-        /* LFENCE, MFENCE and SFENCE order nothing for one processor */
         if (insn.reg < 5) {
             raise_exception(s, EXCP_UD);
+        }
+        /* Loads and stores are already as ordered as LFENCE and SFENCE ask;
+           MFENCE also keeps stores before it ahead of loads after it. */
+        if (insn.reg == 6 && s->smp) {
+            std::atomic_thread_fence(std::memory_order_seq_cst);
         }
         return;
     }

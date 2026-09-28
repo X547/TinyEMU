@@ -443,6 +443,21 @@ struct X86CPUState {
     std::atomic<bool> irq_level; /* set from any thread */
     bool irq_inhibit;    /* for one instruction after STI or a load of SS */
     bool power_down;
+    /* Other processors share the memory: LOCK and XCHG are atomic, and
+       MFENCE and the accessed and dirty bits order and update memory as
+       they do on a multiprocessor. */
+    bool smp;
+    /* The RAM operand of the locked read-modify-write in progress, null if
+       the operand is not in RAM, and the value its write compares with. */
+    uint8_t *lock_ptr;
+    uint64_t lock_old;
+    /* the flags as the locked instruction found them, for a retry */
+    uint8_t lock_cc_op;
+    uint8_t lock_cc_size;
+    bool lock_cc_carry;
+    uint64_t lock_cc_src;
+    uint64_t lock_cc_dst;
+    uint32_t lock_eflags;
     int old_exception;   /* the exception being delivered, or -1 */
     int64_t cycles;
     int64_t cycles_end;
@@ -481,6 +496,7 @@ static inline void set_edx_eax(X86CPUState *s, uint64_t val)
 /* The r/m operand of a ModRM byte. */
 struct Operand {
     bool is_reg;
+    bool locked;         /* memory under LOCK, or of XCHG */
     uint8_t reg;
     uint8_t seg;
     uint64_t ea;
@@ -517,6 +533,10 @@ uint64_t mem_read_slow(X86CPUState *s, uint64_t lin, int size, int mmu_idx);
 void mem_write_slow(X86CPUState *s, uint64_t lin, uint64_t val, int size,
                     int mmu_idx);
 void mem_probe_write(X86CPUState *s, uint64_t lin, int size);
+uint64_t mem_read_locked(X86CPUState *s, uint64_t lin, int size);
+void mem_write_locked(X86CPUState *s, uint64_t lin, uint64_t val, int size);
+bool mem_cmpxchg_wide(X86CPUState *s, uint64_t lin, int half, uint64_t *low,
+                      uint64_t *high, uint64_t new_low, uint64_t new_high);
 uint8_t fetch_slow(X86CPUState *s, uint64_t lin);
 void tlb_flush_all(X86CPUState *s);
 void tlb_flush_page(X86CPUState *s, uint64_t lin);
@@ -622,6 +642,33 @@ static inline void host_store(uint8_t *ptr, uint64_t val, int size)
     }
 }
 
+/* An x86 host keeps the order of loads and stores the guest expects. Other
+   hosts are told to, once another processor could see the difference:
+   loads are acquires and stores releases, which is x86 ordering. */
+#if defined(__x86_64__) || defined(__i386__)
+#define HOST_ORDERS_LIKE_X86 1
+#else
+#define HOST_ORDERS_LIKE_X86 0
+#endif
+
+static inline uint64_t guest_load(X86CPUState *s, const uint8_t *ptr, int size)
+{
+    uint64_t val = host_load(ptr, size);
+    if (!HOST_ORDERS_LIKE_X86 && s->smp) {
+        std::atomic_thread_fence(std::memory_order_acquire);
+    }
+    return val;
+}
+
+static inline void guest_store(X86CPUState *s, uint8_t *ptr, uint64_t val,
+                               int size)
+{
+    if (!HOST_ORDERS_LIKE_X86 && s->smp) {
+        std::atomic_thread_fence(std::memory_order_release);
+    }
+    host_store(ptr, val, size);
+}
+
 static inline X86TLBEntry *tlb_entry(X86CPUState *s, int mmu_idx, uint64_t lin)
 {
     return &s->tlb[mmu_idx][get_bits(lin, PAGE_BITS, TLB_BITS)];
@@ -640,7 +687,7 @@ static inline uint64_t mem_read_mmu(X86CPUState *s, uint64_t lin, int size,
 {
     X86TLBEntry *e = tlb_entry(s, mmu_idx, lin);
     if (likely(tlb_hit(e->read, lin, size))) {
-        return host_load((uint8_t *)(e->addend + lin), size);
+        return guest_load(s, (uint8_t *)(e->addend + lin), size);
     }
     return mem_read_slow(s, lin, size, mmu_idx);
 }
@@ -650,7 +697,7 @@ static inline void mem_write_mmu(X86CPUState *s, uint64_t lin, uint64_t val,
 {
     X86TLBEntry *e = tlb_entry(s, mmu_idx, lin);
     if (likely(tlb_hit(e->write, lin, size))) {
-        host_store((uint8_t *)(e->addend + lin), val, size);
+        guest_store(s, (uint8_t *)(e->addend + lin), val, size);
         return;
     }
     mem_write_slow(s, lin, val, size, mmu_idx);
@@ -688,6 +735,9 @@ static inline void mem_read_bytes(X86CPUState *s, uint64_t lin, void *buf,
     X86TLBEntry *e = tlb_entry(s, s->mmu_idx, lin);
     if (likely(tlb_hit(e->read, lin, size))) {
         memcpy(p, (uint8_t *)(e->addend + lin), size_bytes(size));
+        if (!HOST_ORDERS_LIKE_X86 && s->smp) {
+            std::atomic_thread_fence(std::memory_order_acquire);
+        }
         return;
     }
     int chunk = size < SIZE32 ? size : SIZE32;
@@ -704,6 +754,9 @@ static inline void mem_write_bytes(X86CPUState *s, uint64_t lin,
     const uint8_t *p = (const uint8_t *)buf;
     X86TLBEntry *e = tlb_entry(s, s->mmu_idx, lin);
     if (likely(tlb_hit(e->write, lin, size))) {
+        if (!HOST_ORDERS_LIKE_X86 && s->smp) {
+            std::atomic_thread_fence(std::memory_order_release);
+        }
         memcpy((uint8_t *)(e->addend + lin), p, size_bytes(size));
         return;
     }

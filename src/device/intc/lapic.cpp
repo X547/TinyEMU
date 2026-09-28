@@ -75,6 +75,8 @@ enum {
 enum {
     MODE_FIXED = 0,
     MODE_LOWEST = 1,
+    MODE_INIT = 5,
+    MODE_STARTUP = 6,
     MODE_EXTINT = 7,
 };
 
@@ -99,18 +101,29 @@ enum {
 #define TIMER_HZ 1000000000
 
 
-LocalApic::LocalApic(LocalApicHost &host, uint32_t id):
-    fHost(host), fId(id)
+LocalApic::LocalApic(LocalApicBus &bus, LocalApicHost &host, uint32_t id):
+    fBus(bus), fHost(host), fId(id)
 {
     Reset();
 }
 
 
-/* The processor 0 state after a reset, with LINT0 ready for the 8259s as
+/* The state after a reset, processor 0 with LINT0 ready for the 8259s as
    firmware would leave it. */
 void LocalApic::Reset()
 {
     fBase = LAPIC_BASE | bit_at(BASE_ENABLE) | (fId == 0 ? bit_at(BASE_BSP) : 0);
+    Init();
+    if (fId == 0) {
+        fLvt[LVT_LINT0] = set_bits(0, DELIVERY_MODE, 3, MODE_EXTINT);
+        Update();
+    }
+}
+
+
+/* An INIT resets all but the ID and IA32_APIC_BASE. */
+void LocalApic::Init()
+{
     fTpr = 0;
     fLdr = 0;
     fDfr = UINT32_MAX;
@@ -118,8 +131,6 @@ void LocalApic::Reset()
     fIcrLow = fIcrHigh = 0;
     for (uint32_t &lvt : fLvt)
         lvt = bit_at(LVT_MASKED);
-    if (fId == 0)
-        fLvt[LVT_LINT0] = set_bits(0, DELIVERY_MODE, 3, MODE_EXTINT);
     fDivide = 0;
     fInitialCount = 0;
     for (int i = 0; i < 8; i++)
@@ -173,7 +184,7 @@ bool LocalApic::Deliverable() const
 
 void LocalApic::Update()
 {
-    fHost.SetApicInterrupt(Deliverable() || (fLint0 && AcceptsExtInt()));
+    fHost.SetApicInterrupt(fId, Deliverable() || (fLint0 && AcceptsExtInt()));
 }
 
 
@@ -201,19 +212,30 @@ bool LocalApic::MatchesLogical(uint32_t dest) const
 }
 
 
-void LocalApic::Deliver(uint64_t addr, uint32_t data)
+bool LocalApic::IsDestination(uint32_t dest, bool logical) const
 {
-    uint32_t dest = get_bits(addr, 12, 8);
-    bool logical = get_bit(addr, 2);
-    if (logical ? !MatchesLogical(dest) : dest != fId && dest != 0xff)
-        return;
-    switch (get_bits(data, DELIVERY_MODE, 3)) {
+    return logical ? MatchesLogical(dest) : dest == fId || dest == 0xff;
+}
+
+
+void LocalApic::Receive(int mode, int vector, bool level, bool assert)
+{
+    switch (mode) {
     case MODE_FIXED:
     case MODE_LOWEST:
-        Accept(get_bits(data, 0, 8), get_bit(data, TRIGGER_LEVEL));
+        Accept(vector, level);
+        break;
+    case MODE_INIT:
+        /* the de-assert of a level triggered INIT does nothing today */
+        if (level && !assert)
+            break;
+        Init();
+        fHost.ApicInit(fId);
+        break;
+    case MODE_STARTUP:
+        fHost.ApicStartup(fId, vector);
         break;
     default:
-        /* NMI, SMI, INIT and ExtINT messages are not modelled */
         break;
     }
 }
@@ -242,29 +264,12 @@ int LocalApic::Acknowledge()
 }
 
 
-/* A fixed IPI to this processor is the only kind with a destination. */
 void LocalApic::SendIpi()
 {
-    int mode = get_bits(fIcrLow, DELIVERY_MODE, 3);
-    int vector = get_bits(fIcrLow, 0, 8);
-    bool to_self;
-    switch (get_bits(fIcrLow, ICR_SHORTHAND, 2)) {
-    case SHORTHAND_SELF:
-    case SHORTHAND_ALL:
-        to_self = true;
-        break;
-    case SHORTHAND_OTHERS:
-        to_self = false;
-        break;
-    default: {
-        uint32_t dest = get_bits(fIcrHigh, 24, 8);
-        to_self = get_bit(fIcrLow, ICR_LOGICAL) ? MatchesLogical(dest) :
-            dest == fId || dest == 0xff;
-        break;
-    }
-    }
-    if (to_self && (mode == MODE_FIXED || mode == MODE_LOWEST))
-        Accept(vector, false);
+    fBus.Send(fId, get_bits(fIcrLow, ICR_SHORTHAND, 2),
+              get_bits(fIcrHigh, 24, 8), get_bit(fIcrLow, ICR_LOGICAL),
+              get_bits(fIcrLow, DELIVERY_MODE, 3), get_bits(fIcrLow, 0, 8),
+              get_bit(fIcrLow, TRIGGER_LEVEL), get_bit(fIcrLow, LEVEL_ASSERT));
 }
 
 
@@ -434,12 +439,14 @@ void LocalApic::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
         fInitialCount = val;
         fTimerStart = host_monotonic_us();
         fTimerFired = 0;
+        fHost.ApicTimerChanged();
         return;
     case REG_DIVIDE:
         /* a count in progress starts over at the new rate */
         fDivide = val & 0xb;
         fTimerStart = host_monotonic_us();
         fTimerFired = 0;
+        fHost.ApicTimerChanged();
         return;
     }
     if (offset >= REG_LVT_TIMER && offset <= REG_LVT_ERROR) {
@@ -448,7 +455,74 @@ void LocalApic::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
             val = set_bit(val, LVT_MASKED, true);
         fLvt[i] = val;
         Update();
+        if (i == LVT_TIMER)
+            fHost.ApicTimerChanged();
     }
     /* ID and the read only registers ignore writes; ESR has nothing to
        report */
+}
+
+
+//#pragma mark - bus
+
+LocalApicBus::LocalApicBus(LocalApicHost &host, int count)
+{
+    for (int i = 0; i < count; i++)
+        fApics.push_back(std::make_unique<LocalApic>(*this, host, i));
+}
+
+
+void LocalApicBus::Deliver(uint64_t addr, uint32_t data)
+{
+    Send(0, SHORTHAND_NONE, get_bits(addr, 12, 8), get_bit(addr, 2),
+         get_bits(data, DELIVERY_MODE, 3), get_bits(data, 0, 8),
+         get_bit(data, TRIGGER_LEVEL), get_bit(data, LEVEL_ASSERT));
+}
+
+
+/* Lowest priority delivery picks the destination of lowest processor
+   priority, the first of equals. */
+void LocalApicBus::Send(uint32_t source, int shorthand, uint32_t dest,
+                        bool logical, int mode, int vector, bool level,
+                        bool assert)
+{
+    LocalApic *lowest = nullptr;
+    for (auto &apic : fApics) {
+        bool target;
+        switch (shorthand) {
+        case SHORTHAND_SELF:
+            target = apic->Id() == source;
+            break;
+        case SHORTHAND_ALL:
+            target = true;
+            break;
+        case SHORTHAND_OTHERS:
+            target = apic->Id() != source;
+            break;
+        default:
+            target = apic->IsDestination(dest, logical);
+            break;
+        }
+        if (!target)
+            continue;
+        if (mode != MODE_LOWEST) {
+            apic->Receive(mode, vector, level, assert);
+        } else if (lowest == nullptr || apic->Ppr() < lowest->Ppr()) {
+            lowest = apic.get();
+        }
+    }
+    if (lowest != nullptr)
+        lowest->Receive(mode, vector, level, assert);
+}
+
+
+int64_t LocalApicBus::RunTimers()
+{
+    int64_t delay = -1;
+    for (auto &apic : fApics) {
+        int64_t d = apic->RunTimer();
+        if (d >= 0 && (delay < 0 || d < delay))
+            delay = d;
+    }
+    return delay;
 }

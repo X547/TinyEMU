@@ -178,15 +178,23 @@ void PhysMemoryMap::FreeRam(PhysMemoryRange *pr)
 }
 
 
-/* return a pointer to the bitmap of dirty bits and reset them */
+/* Return a pointer to the bitmap of dirty bits and reset them. Processors
+   on other threads may be setting bits meanwhile: the cleared bitmap takes
+   over before the write TLBs are flushed, so that a page written through a
+   stale entry is in the returned one. */
 const uint32_t *PhysMemoryMap::GetDirtyBits(PhysMemoryRange *pr)
 {
     uint32_t *dirty_bits = pr->dirty_bits;
 
+    pr->dirty_bits_index ^= 1;
+    uint32_t *next = pr->dirty_bits_tab[pr->dirty_bits_index].get();
+    memset(next, 0, pr->dirty_bits_size);
+    __atomic_store_n(&pr->dirty_bits, next, __ATOMIC_SEQ_CST);
+
     bool has_dirty_bits = false;
     size_t n = pr->dirty_bits_size / sizeof(uint32_t);
     for (size_t i = 0; i < n; i++) {
-        if (dirty_bits[i] != 0) {
+        if (__atomic_load_n(&dirty_bits[i], __ATOMIC_RELAXED) != 0) {
             has_dirty_bits = true;
             break;
         }
@@ -195,10 +203,6 @@ const uint32_t *PhysMemoryMap::GetDirtyBits(PhysMemoryRange *pr)
         /* invalidate the corresponding CPU write TLBs */
         FlushTlbWriteRange(pr->phys_mem, pr->org_size);
     }
-
-    pr->dirty_bits_index ^= 1;
-    pr->dirty_bits = pr->dirty_bits_tab[pr->dirty_bits_index].get();
-    memset(pr->dirty_bits, 0, pr->dirty_bits_size);
     return dirty_bits;
 }
 

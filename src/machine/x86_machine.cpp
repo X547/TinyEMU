@@ -1072,7 +1072,9 @@ public:
     PhysMemoryMap *mem_map;
     PhysMemoryMap *port_map;
     
-    X86CPUState *cpu_state;
+    /* the interpreter's processors, by APIC ID; cpu_state is the first */
+    X86CPUState *cpu_state = nullptr;
+    std::vector<X86CPUState *> fCpus;
     std::unique_ptr<PIC2State> pic_state;
     IRQSignal pic_irq[16];
     std::unique_ptr<PITState> pit_state;
@@ -1098,9 +1100,9 @@ public:
     /* the machine's IOAPIC, when the local APICs are the hypervisor's and
        the rest is the machine's */
     std::unique_ptr<IOAPIC> fIoApic;
-    /* the interpreter's local APIC, when there is no hypervisor to have
-       one */
-    std::unique_ptr<LocalApic> fLapic;
+    /* the interpreter's local APICs, when there is no hypervisor to have
+       them */
+    std::unique_ptr<LocalApicBus> fLapics;
     PCIrqFanout fIrqFanout {*this};
     /* the configuration's HPET, if it has one */
     HPET *fHpet = nullptr;
@@ -1111,16 +1113,31 @@ public:
     /* Otherwise the machine's: INTR as the 8259s drive it, read without the
        lock. */
     std::atomic<bool> fCpuIrq {false};
-    /* With a hypervisor each processor runs on a thread of its own, which
-       waits on its wakeup while the processor is halted; the processor
-       thread keeps the timers and the screen. */
+    /* With a hypervisor, or more than one processor in the interpreter, each
+       processor runs on a thread of its own, which waits on its wakeup while
+       the processor is halted; the processor thread keeps the timers and the
+       screen. */
     int fCpuCount = 1;
+    bool fInterpThreads = false;
     std::vector<std::thread> fVcpuThreads;
     std::unique_ptr<HostWakeup[]> fVcpuWakeups;
+    /* The INIT and STARTUP IPIs an interpreter processor has yet to take,
+       and whether it waits for a STARTUP. */
+    struct InterpCpuStart {
+        std::atomic<bool> init {false};
+        std::atomic<int> startup {-1};
+        bool waiting = false;
+    };
+    std::unique_ptr<InterpCpuStart[]> fCpuStarts;
 
     void VcpuThread(int index);
+    void InterpThread(int index);
     /* Makes processor 'index' look at its interrupts again. Any thread. */
     void KickVcpu(int index);
+    /* The processor of the calling thread: its own, or the first on the
+       processor thread. */
+    int CurrentCpu() const;
+    LocalApic &CurrentApic() {return fLapics->Apic(CurrentCpu());}
 
     /* fixed-function port stubs and the VMware backdoor port */
     uint32_t Port80Read(uint32_t offset, int size_log2);
@@ -1144,13 +1161,23 @@ public:
     /* PCIMsiTarget */
     void SendMsi(uint64_t addr, uint32_t data) override;
     /* LocalApicHost; ApicEoi() above serves both */
-    void SetApicInterrupt(bool pending) override;
-    /* X86LocalApicTarget */
-    uint32_t ApicId() override {return fLapic->Id();}
-    uint64_t ApicBase() override {return fLapic->Base();}
-    bool SetApicBase(uint64_t val) override {return fLapic->SetBase(val);}
-    int TaskPriority() override {return fLapic->TaskPriority();}
-    void SetTaskPriority(int val) override {fLapic->SetTaskPriority(val);}
+    void SetApicInterrupt(uint32_t id, bool pending) override;
+    void ApicInit(uint32_t id) override;
+    void ApicStartup(uint32_t id, int vector) override;
+    void ApicTimerChanged() override;
+    /* X86LocalApicTarget, for the calling processor */
+    uint32_t ApicId() override {return CurrentApic().Id();}
+    uint64_t ApicBase() override {return CurrentApic().Base();}
+    bool SetApicBase(uint64_t val) override
+        {return CurrentApic().SetBase(val);}
+    int TaskPriority() override {return CurrentApic().TaskPriority();}
+    void SetTaskPriority(int val) override
+        {CurrentApic().SetTaskPriority(val);}
+    /* the local APICs' page, each processor seeing its own */
+    uint32_t LapicRead(uint32_t offset, int size_log2)
+        {return CurrentApic().DeviceRead(offset, size_log2);}
+    void LapicWrite(uint32_t offset, uint32_t val, int size_log2)
+        {CurrentApic().DeviceWrite(offset, val, size_log2);}
 
     DeviceIOAdapter<PCMachine, &PCMachine::Port80Read,
                     &PCMachine::Port80Write> fPort80Io {*this};
@@ -1162,6 +1189,8 @@ public:
                     &PCMachine::BiosDebugWrite> fBiosDebugIo {*this};
     DeviceIOAdapter<PCMachine, &PCMachine::PortRead,
                     &PCMachine::PortWrite> fPortIo {*this};
+    DeviceIOAdapter<PCMachine, &PCMachine::LapicRead,
+                    &PCMachine::LapicWrite> fLapicIo {*this};
 
     ~PCMachine() override;
 
@@ -1303,22 +1332,24 @@ uint32_t PCMachine::VmPortRead(uint32_t addr, int size_log2)
             vcpu.SetRegs(r);
         }
     } else {
-        regs[REG_EAX] = x86_cpu_get_reg(s->cpu_state, 0);
-        regs[REG_EBX] = x86_cpu_get_reg(s->cpu_state, 3);
-        regs[REG_ECX] = x86_cpu_get_reg(s->cpu_state, 1);
-        regs[REG_EDX] = x86_cpu_get_reg(s->cpu_state, 2);
-        regs[REG_ESI] = x86_cpu_get_reg(s->cpu_state, 6);
-        regs[REG_EDI] = x86_cpu_get_reg(s->cpu_state, 7);
+        X86CPUState *cpu = s->fCpus[CurrentCpu()];
+
+        regs[REG_EAX] = x86_cpu_get_reg(cpu, 0);
+        regs[REG_EBX] = x86_cpu_get_reg(cpu, 3);
+        regs[REG_ECX] = x86_cpu_get_reg(cpu, 1);
+        regs[REG_EDX] = x86_cpu_get_reg(cpu, 2);
+        regs[REG_ESI] = x86_cpu_get_reg(cpu, 6);
+        regs[REG_EDI] = x86_cpu_get_reg(cpu, 7);
 
         if (regs[REG_EAX] == VMPORT_MAGIC) {
             s->vmport->VMPortCommand(regs);
 
-            x86_cpu_set_reg(s->cpu_state, 0, regs[REG_EAX]);
-            x86_cpu_set_reg(s->cpu_state, 3, regs[REG_EBX]);
-            x86_cpu_set_reg(s->cpu_state, 1, regs[REG_ECX]);
-            x86_cpu_set_reg(s->cpu_state, 2, regs[REG_EDX]);
-            x86_cpu_set_reg(s->cpu_state, 6, regs[REG_ESI]);
-            x86_cpu_set_reg(s->cpu_state, 7, regs[REG_EDI]);
+            x86_cpu_set_reg(cpu, 0, regs[REG_EAX]);
+            x86_cpu_set_reg(cpu, 3, regs[REG_EBX]);
+            x86_cpu_set_reg(cpu, 1, regs[REG_ECX]);
+            x86_cpu_set_reg(cpu, 2, regs[REG_EDX]);
+            x86_cpu_set_reg(cpu, 6, regs[REG_ESI]);
+            x86_cpu_set_reg(cpu, 7, regs[REG_EDI]);
         }
     }
     return regs[REG_EAX];
@@ -1341,24 +1372,58 @@ void PCMachine::SetCPUIRQ(int level)
         if (raised && sCurrentVcpu != 0) {
             KickVcpu(0);
         }
-    } else if (fLapic) {
-        fLapic->SetLint0(level);
+    } else if (fLapics) {
+        /* the other processors' LINT0 is left masked */
+        fLapics->Apic(0).SetLint0(level);
     } else {
         x86_cpu_set_irq(cpu_state, level);
         Kick();
     }
 }
 
-void PCMachine::SetApicInterrupt(bool pending)
+int PCMachine::CurrentCpu() const
 {
-    x86_cpu_set_irq(cpu_state, pending);
-    Kick();
+    return sCurrentVcpu < 0 ? 0 : sCurrentVcpu;
+}
+
+void PCMachine::SetApicInterrupt(uint32_t id, bool pending)
+{
+    x86_cpu_set_irq(fCpus[id], pending);
+    if (!fInterpThreads)
+        Kick();
+    else if (pending)
+        KickVcpu(id);
+}
+
+/* The processor takes these between runs of the interpreter, on its own
+   thread. A lone processor ignores them. */
+void PCMachine::ApicInit(uint32_t id)
+{
+    if (fInterpThreads) {
+        fCpuStarts[id].init.store(true);
+        KickVcpu(id);
+    }
+}
+
+void PCMachine::ApicStartup(uint32_t id, int vector)
+{
+    if (fInterpThreads) {
+        fCpuStarts[id].startup.store(vector);
+        KickVcpu(id);
+    }
+}
+
+/* The processor thread may be asleep until a later deadline. */
+void PCMachine::ApicTimerChanged()
+{
+    if (fInterpThreads)
+        Kick();
 }
 
 int PCMachine::HardIntno()
 {
-    if (fLapic) {
-        int vector = fLapic->Acknowledge();
+    if (fLapics) {
+        int vector = CurrentApic().Acknowledge();
         if (vector != LAPIC_EXTINT)
             return vector;
     }
@@ -1382,8 +1447,8 @@ void PCMachine::SendMsi(uint64_t addr, uint32_t data)
     if ((addr >> 20) == 0xfee) {
         if (hypervisor)
             hypervisor->SendMsi(addr, data);
-        else if (fLapic)
-            fLapic->Deliver(addr, data);
+        else if (fLapics)
+            fLapics->Deliver(addr, data);
     } else
         mem_map->IoWrite(addr, data, 2);
 }
@@ -1443,7 +1508,7 @@ void PCMachine::PortWrite(uint32_t port, uint32_t val, int size_log2)
     port_map->IoWrite(port, val, size_log2);
     /* Programming the PIT or the RTC can bring a timer the processor thread
        sleeps on forward. */
-    if (hypervisor && (port - 0x40 < 4 || port - 0x70 < 2))
+    if ((hypervisor || fInterpThreads) && (port - 0x40 < 4 || port - 0x70 < 2))
         Kick();
 }
 
@@ -1659,8 +1724,9 @@ uint64_t PCMachine::Tsc()
 
 void PCMachine::FlushTlbWriteRange(uint8_t *ram_addr, size_t ram_size)
 {
-    assert(OnProcessorThread());
-    x86_cpu_flush_tlb_write_range_ram(cpu_state, ram_addr, ram_size);
+    assert(fInterpThreads || OnProcessorThread());
+    for (X86CPUState *cpu : fCpus)
+        x86_cpu_flush_tlb_write_range_ram(cpu, ram_addr, ram_size);
 }
 
 /* What a host bridge may decode: from the end of low RAM up to the device
@@ -1762,17 +1828,13 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
         s->hypervisor = host_x86_hypervisor_open(*s, *p->device_lock,
                                                  options);
     }
-    /* the interpreter runs one processor */
-    if (options.cpu_count > 1 && !s->hypervisor) {
-        vm_error("pc: more than one processor needs a hypervisor\n");
-        return nullptr;
-    }
     s->fLocalApic = options.local_apic;
-    if (s->hypervisor) {
-        s->fCpuCount = options.cpu_count;
+    s->fCpuCount = options.cpu_count;
+    s->fInterpThreads = !s->hypervisor && s->fCpuCount > 1;
+    if (s->hypervisor || s->fInterpThreads)
         s->fVcpuWakeups = std::make_unique<HostWakeup[]>(s->fCpuCount);
+    if (s->hypervisor)
         s->fPhysAddressBits = s->hypervisor->PhysAddressBits();
-    }
     if (s->fHighRamSize != 0 && PC_HIGH_RAM_BASE + s->fHighRamSize >
         (uint64_t)1 << s->fPhysAddressBits) {
         vm_error("pc: %llu MB of RAM is beyond the processors' %d bit "
@@ -1792,10 +1854,20 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
         }
     } else {
         s->mem_map = new PhysMemoryMap();
-        s->cpu_state = x86_cpu_init(s->mem_map);
-        x86_cpu_set_tsc_source(s->cpu_state, s);
-        x86_cpu_set_port_io(s->cpu_state, &s->fPortIo);
-        x86_cpu_set_device_lock(s->cpu_state, p->device_lock);
+        for (int i = 0; i < s->fCpuCount; i++) {
+            X86CPUState *cpu = x86_cpu_init(s->mem_map);
+            x86_cpu_set_tsc_source(cpu, s);
+            x86_cpu_set_port_io(cpu, &s->fPortIo);
+            x86_cpu_set_device_lock(cpu, p->device_lock);
+            x86_cpu_set_smp(cpu, s->fInterpThreads);
+            s->fCpus.push_back(cpu);
+        }
+        s->cpu_state = s->fCpus[0];
+        /* the others wait for their STARTUP IPIs */
+        s->fCpuStarts =
+            std::make_unique<PCMachine::InterpCpuStart[]>(s->fCpuCount);
+        for (int i = 1; i < s->fCpuCount; i++)
+            s->fCpuStarts[i].waiting = true;
 
         /* needed to handle the RAM dirty bits */
         s->mem_map->SetTlbFlushTarget(s);
@@ -1844,16 +1916,16 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
             for (int i = 0; i < PC_IRQ_COUNT; i++)
                 s->pic_irq[i].Init(&s->fIrqFanout, i);
         }
-        /* the 8259s then reach the processor through its LINT0 */
+        /* the 8259s then reach the first processor through its LINT0 */
         if (s->fLocalApic && s->cpu_state) {
-            s->fLapic = std::make_unique<LocalApic>(*s, 0);
-            s->mem_map->RegisterDevice(LAPIC_BASE, LAPIC_SIZE, s->fLapic.get(),
+            s->fLapics = std::make_unique<LocalApicBus>(*s, s->fCpuCount);
+            s->mem_map->RegisterDevice(LAPIC_BASE, LAPIC_SIZE, &s->fLapicIo,
                                        DEVIO_SIZE32);
-            x86_cpu_set_local_apic(s->cpu_state, s);
+            for (X86CPUState *cpu : s->fCpus)
+                x86_cpu_set_local_apic(cpu, s);
         }
-        if (s->cpu_state) {
-            x86_cpu_set_hard_intno_source(s->cpu_state, s);
-        }
+        for (X86CPUState *cpu : s->fCpus)
+            x86_cpu_set_hard_intno_source(cpu, s);
         s->pit_state = pit_init(s->port_map, 0x40, 0x61, &s->pic_irq[0], s);
     }
 
@@ -1976,9 +2048,8 @@ PCMachine::~PCMachine()
 {
     PCMachine *s = this;
     /* XXX: free all */
-    if (s->cpu_state) {
-        x86_cpu_end(s->cpu_state);
-    }
+    for (X86CPUState *cpu : s->fCpus)
+        x86_cpu_end(cpu);
     delete s->bus;
     delete s->mem_map;
     delete s->port_map;
@@ -2586,6 +2657,8 @@ void PCMachine::ProcessorThreadStarted()
 {
     for (int i = 0; hypervisor && i < fCpuCount; i++)
         fVcpuThreads.emplace_back([this, i]() {VcpuThread(i);});
+    for (int i = 0; fInterpThreads && i < fCpuCount; i++)
+        fVcpuThreads.emplace_back([this, i]() {InterpThread(i);});
 }
 
 void PCMachine::ProcessorThreadStopping()
@@ -2614,9 +2687,41 @@ void PCMachine::VcpuThread(int index)
     }
 }
 
+/* Instructions an interpreter processor runs between looks at its INIT
+   and STARTUP IPIs and at a stop request. */
+#define INTERP_SLICE 500000
+
+void PCMachine::InterpThread(int index)
+{
+    X86CPUState *cpu = fCpus[index];
+    InterpCpuStart &start = fCpuStarts[index];
+
+    sCurrentVcpu = index;
+    while (!StopRequested()) {
+        /* An INIT stops the processor, and then the first processor starts
+           over from the reset vector, the others at their next STARTUP,
+           which may already be here. */
+        if (start.init.exchange(false)) {
+            x86_cpu_reset(cpu);
+            start.waiting = index != 0;
+        }
+        int vector = start.startup.exchange(-1);
+        if (vector >= 0 && start.waiting) {
+            x86_cpu_startup(cpu, vector);
+            start.waiting = false;
+        }
+        if (start.waiting || x86_cpu_get_power_down(cpu)) {
+            fVcpuWakeups[index].Wait(VCPU_MAX_WAIT_US);
+            continue;
+        }
+        x86_cpu_interp(cpu, INTERP_SLICE);
+    }
+}
+
 void PCMachine::KickVcpu(int index)
 {
-    hypervisor->Vcpu(index).InterruptRun();
+    if (hypervisor)
+        hypervisor->Vcpu(index).InterruptRun();
     fVcpuWakeups[index].Kick();
 }
 
@@ -2638,19 +2743,19 @@ int64_t PCMachine::RunTimers()
         if (delay < 0 || pit_delay < delay)
             delay = pit_delay;
     }
-    if (s->fLapic) {
-        int64_t apic_delay = s->fLapic->RunTimer();
+    if (s->fLapics) {
+        int64_t apic_delay = s->fLapics->RunTimers();
         if (apic_delay >= 0 && (delay < 0 || apic_delay < delay))
             delay = apic_delay;
     }
     return delay;
 }
 
-/* The processors that run in the hypervisor are never the processor
-   thread's to run. */
+/* The processors on threads of their own are never the processor thread's
+   to run. */
 bool PCMachine::Idle()
 {
-    if (hypervisor)
+    if (hypervisor || fInterpThreads)
         return true;
     return x86_cpu_get_power_down(cpu_state);
 }
@@ -2662,7 +2767,7 @@ void PCMachine::Interp(int max_exec_cycles)
 
 void PCMachine::InterruptExecution()
 {
-    for (int i = 0; hypervisor && i < fCpuCount; i++)
+    for (int i = 0; (hypervisor || fInterpThreads) && i < fCpuCount; i++)
         KickVcpu(i);
 }
 

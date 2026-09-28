@@ -90,8 +90,9 @@ public:
 
 
 /* Implemented by the CPU so the memory map can invalidate write TLB entries
-   when a RAM mapping moves or a dirty page is reclaimed. Called on the
-   processor thread only. */
+   when a RAM mapping moves or a dirty page is reclaimed. Called with the
+   device lock held, on the processor thread or, with processors on threads
+   of their own, on any thread. */
 class TlbFlushTarget {
 public:
     virtual ~TlbFlushTarget() = default;
@@ -122,24 +123,30 @@ struct PhysMemoryRange {
     void ResetDirtyBit(size_t offset);
     void SetAddr(uint64_t addr, bool enabled);
 
+    /* The bitmap in use may be switched by GetDirtyBits() on another
+       thread meanwhile. */
     void SetDirtyBit(size_t offset)
     {
-        if (dirty_bits == nullptr) {
+        uint32_t *bits = __atomic_load_n(&dirty_bits, __ATOMIC_ACQUIRE);
+        if (bits == nullptr) {
             return;
         }
         size_t page_index = offset >> DEVRAM_PAGE_SIZE_LOG2;
         uint32_t mask = bit_at(page_index % 32);
-        /* the processor and a device with the lock may set bits at once */
-        __sync_fetch_and_or(&dirty_bits[page_index >> 5], mask);
+        /* the processors and a device with the lock may set bits at once */
+        __sync_fetch_and_or(&bits[page_index >> 5], mask);
     }
 
     bool IsDirtyBit(size_t offset) const
     {
-        if (dirty_bits == nullptr) {
+        uint32_t *bits = __atomic_load_n(&dirty_bits, __ATOMIC_ACQUIRE);
+        if (bits == nullptr) {
             return true;
         }
         size_t page_index = offset >> DEVRAM_PAGE_SIZE_LOG2;
-        return get_bit(dirty_bits[page_index / 32], page_index % 32);
+        return get_bit(__atomic_load_n(&bits[page_index / 32],
+                                       __ATOMIC_RELAXED),
+                       page_index % 32);
     }
 };
 
@@ -148,9 +155,11 @@ struct PhysMemoryRange {
    dirty bitmap itself; the x86 machine overrides the virtual methods to hand
    both to a host hypervisor.
 
-   The map changes only on the processor thread, with the device lock held.
-   The processor looks up RAM without the lock; everything else uses the map
-   with the lock held. */
+   The map changes only with the device lock held, on the processor thread
+   or on a thread of a processor of its own. The processors look up RAM
+   without the lock; everything else uses the map with the lock held. With
+   more than one processor thread a lookup can therefore race a change, so
+   a processor checks a device range again once it holds the lock. */
 class PhysMemoryMap {
 private:
     TlbFlushTarget *fTlbFlushTarget = nullptr;

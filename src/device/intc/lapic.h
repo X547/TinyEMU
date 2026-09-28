@@ -23,6 +23,9 @@
 
 #include <stdint.h>
 
+#include <memory>
+#include <vector>
+
 #include "iomem.h"
 
 
@@ -33,24 +36,33 @@
 #define LAPIC_EXTINT (-1)
 
 
-/* What a local APIC needs of the machine. */
+/* What the local APICs need of the machine. Processors are named by their
+   APIC IDs, which count from 0. */
 class LocalApicHost {
 public:
     virtual ~LocalApicHost() = default;
 
-    /* Whether the processor has an interrupt to take. */
-    virtual void SetApicInterrupt(bool pending) = 0;
+    /* Whether processor 'id' has an interrupt to take. */
+    virtual void SetApicInterrupt(uint32_t id, bool pending) = 0;
     /* An EOI for a level triggered vector, for the IOAPIC. */
     virtual void ApicEoi(int vector) = 0;
+    /* An INIT, and a STARTUP IPI with its vector, for processor 'id'. */
+    virtual void ApicInit(uint32_t id) = 0;
+    virtual void ApicStartup(uint32_t id, int vector) = 0;
+    /* A timer was programmed and may be due sooner than RunTimers() last
+       said. */
+    virtual void ApicTimerChanged() = 0;
 };
 
+class LocalApicBus;
 
-/* The xAPIC of a processor without other processors: messages it is not
-   the destination of, and IPIs to others, are dropped. The timer counts
-   at 1 GHz, the bus clock a hypervisor's APIC has, from the host clock.
-   The device lock covers every call. */
+
+/* The xAPIC of one processor. The timer counts at 1 GHz, the bus clock a
+   hypervisor's APIC has, from the host clock. NMI, SMI and ExtINT
+   messages are not modelled. The device lock covers every call. */
 class LocalApic final: public DeviceIO {
 private:
+    LocalApicBus &fBus;
     LocalApicHost &fHost;
     uint32_t fId;
     uint64_t fBase;
@@ -74,18 +86,18 @@ private:
 
     bool Enabled() const;
     bool AcceptsExtInt() const;
-    int Ppr() const;
     bool Deliverable() const;
     void Update();
     void Accept(int vector, bool level);
     bool MatchesLogical(uint32_t dest) const;
+    void Init();
     void SendIpi();
     uint32_t TimerDivisor() const;
     uint64_t TimerTicks(uint64_t now) const;
     uint32_t CurrentCount(uint64_t now) const;
 
 public:
-    LocalApic(LocalApicHost &host, uint32_t id);
+    LocalApic(LocalApicBus &bus, LocalApicHost &host, uint32_t id);
 
     void Reset();
 
@@ -93,8 +105,13 @@ public:
     uint32_t DeviceRead(uint32_t offset, int size_log2) override;
     void DeviceWrite(uint32_t offset, uint32_t val, int size_log2) override;
 
-    /* An MSI or an IOAPIC message. */
-    void Deliver(uint64_t addr, uint32_t data);
+    /* Whether a message to 'dest' reaches this APIC. */
+    bool IsDestination(uint32_t dest, bool logical) const;
+    /* A message with delivery mode 'mode'; 'level' for level triggered,
+       'assert' for its level. */
+    void Receive(int mode, int vector, bool level, bool assert);
+    /* The processor priority, which lowest priority delivery goes by. */
+    int Ppr() const;
     /* The 8259s' INTR, on LINT0. */
     void SetLint0(bool level);
 
@@ -113,4 +130,27 @@ public:
     /* Fires the timer if due; returns the microseconds until it is due
        next, or -1. */
     int64_t RunTimer();
+};
+
+
+/* The local APICs of the processors, and the messages between them. The
+   device lock covers every call. */
+class LocalApicBus {
+private:
+    std::vector<std::unique_ptr<LocalApic>> fApics;
+
+public:
+    LocalApicBus(LocalApicHost &host, int count);
+
+    int Count() const {return (int)fApics.size();}
+    LocalApic &Apic(uint32_t id) {return *fApics[id];}
+
+    /* An MSI or an IOAPIC message. */
+    void Deliver(uint64_t addr, uint32_t data);
+    /* A message from APIC 'source' by ICR shorthand 'shorthand': to
+       itself, to all, to all others, or to 'dest'. */
+    void Send(uint32_t source, int shorthand, uint32_t dest, bool logical,
+              int mode, int vector, bool level, bool assert);
+    /* LocalApic::RunTimer() for each; the soonest of their results. */
+    int64_t RunTimers();
 };
