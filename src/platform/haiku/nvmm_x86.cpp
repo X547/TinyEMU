@@ -270,13 +270,14 @@ NvmmX86Vcpu::NvmmX86Vcpu(NvmmX86Hypervisor &owner, struct nvmm_machine *mach,
         }
     }
 
-    /* the physical address width, with no separate guest width */
+    /* the physical address width, with no separate guest width; the kernel
+       refuses a bit both set and deleted */
     struct nvmm_vcpu_conf_cpuid cpuid;
     memset(&cpuid, 0, sizeof(cpuid));
     cpuid.mask = 1;
     cpuid.leaf = 0x80000008;
-    cpuid.u.mask.del.eax = 0x00ff00ff;
     cpuid.u.mask.set.eax = owner.fPhysAddressBits;
+    cpuid.u.mask.del.eax = 0x00ff00ff & ~cpuid.u.mask.set.eax;
     if (nvmm_vcpu_configure(fMach, &fVcpu.vcpu, NVMM_VCPU_CONF_CPUID,
                             &cpuid) == -1) {
         nvmm_fail("setting the physical address width");
