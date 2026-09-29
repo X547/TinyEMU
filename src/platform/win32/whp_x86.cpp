@@ -134,6 +134,9 @@ public:
     void Run() override;
     bool Idle(bool intr) override;
     void InterruptRun() override;
+    /* the hypervisor's local APICs take INIT and STARTUP themselves */
+    void Init() override {abort();}
+    void Startup(int vector) override {abort();}
 };
 
 
@@ -171,6 +174,7 @@ public:
     bool Init();
 
     bool HasInterruptControllers() override {return false;}
+    bool HasLocalApics() override {return true;}
     int PhysAddressBits() override {return fPhysAddressBits;}
     uint8_t *AllocRam(size_t size) override {return host_ram_alloc(size);}
     void FreeRam(uint8_t *ptr, size_t size) override

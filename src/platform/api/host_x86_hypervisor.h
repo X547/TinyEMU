@@ -40,7 +40,8 @@ struct HostX86Regs {
 
 /* What the machine needs from the hypervisor, fixed when it is opened. */
 struct HostX86Options {
-    /* local APICs, reached by SendMsi() */
+    /* local APICs: the hypervisor's, reached by SendMsi(), or the machine's
+       when it has none */
     bool local_apic = false;
     /* processors, numbered from 0 */
     int cpu_count = 1;
@@ -64,11 +65,19 @@ public:
     virtual void MmioRead(uint64_t addr, uint8_t *data, int len) = 0;
     virtual void MmioWrite(uint64_t addr, const uint8_t *data, int len) = 0;
 
-    /* Whether the interrupt controller raises INTR, which only processor 0
-       takes. */
+    /* Whether the calling processor has an interrupt to take: the 8259s'
+       INTR, which only processor 0 takes, or with the machine's local
+       APICs, its own APIC's. */
     virtual bool InterruptRequested() = 0;
     /* Acknowledges the request and returns its vector. */
     virtual int AcknowledgeInterrupt() = 0;
+
+    /* The calling processor's local APIC, when the machine has them:
+       IA32_APIC_BASE, false for a value the APIC cannot take, and CR8. */
+    virtual uint64_t ApicBase() = 0;
+    virtual bool SetApicBase(uint64_t val) = 0;
+    virtual int TaskPriority() = 0;
+    virtual void SetTaskPriority(int cr8) = 0;
 
     /* A local APIC the hypervisor emulates ended a level triggered
        interrupt with this vector, for the IOAPIC the machine may have. */
@@ -106,6 +115,12 @@ public:
     virtual bool Idle(bool intr) = 0;
     /* Makes Run() return soon. */
     virtual void InterruptRun() = 0;
+
+    /* Only with the machine's local APICs, on the processor's thread: an
+       INIT, after which the processor is as at reset, and a STARTUP, which
+       starts it in real mode at 'vector' << 12. */
+    virtual void Init() = 0;
+    virtual void Startup(int vector) = 0;
 };
 
 
@@ -120,6 +135,10 @@ public:
     virtual ~HostX86Hypervisor() = default;
 
     virtual bool HasInterruptControllers() = 0;
+    /* Whether it emulates the local APICs HostX86Options::local_apic asks
+       for; if not, the machine has them and the processors reach them
+       through the target. */
+    virtual bool HasLocalApics() = 0;
     /* The physical address width the processors report: the host's, cut to
        HostX86Options::max_phys_address_bits. */
     virtual int PhysAddressBits() = 0;

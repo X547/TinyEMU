@@ -81,6 +81,9 @@ public:
     void Run() override;
     bool Idle(bool intr) override {return fShutdown;}
     void InterruptRun() override;
+    /* the in-kernel local APICs take INIT and STARTUP themselves */
+    void Init() override {abort();}
+    void Startup(int vector) override {abort();}
 };
 
 
@@ -114,6 +117,7 @@ public:
     void Init();
 
     bool HasInterruptControllers() override {return true;}
+    bool HasLocalApics() override {return true;}
     int PhysAddressBits() override {return fPhysAddressBits;}
     uint8_t *AllocRam(size_t size) override {return host_ram_alloc(size);}
     void FreeRam(uint8_t *ptr, size_t size) override

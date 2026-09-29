@@ -1093,17 +1093,17 @@ public:
 
     /* runs the processor instead of the interpreter when the host has one */
     std::unique_ptr<HostX86Hypervisor> hypervisor;
-    /* the hypervisor provides local APICs, and MSIs go to them */
+    /* the processors have local APICs, and MSIs go to them */
     bool fLocalApic = false;
     /* the hypervisor has the 8259s and the 8254 rather than the machine */
     bool fHypervisorIrqchip = false;
     HypervisorIRQTarget fHypervisorIrqTarget {*this};
-    /* the machine's IOAPIC, when the local APICs are the hypervisor's and
-       the rest is the machine's */
+    /* the machine's IOAPIC, when the 8259s are the machine's */
     std::unique_ptr<IOAPIC> fIoApic;
-    /* the interpreter's local APICs, when there is no hypervisor to have
-       them */
+    /* the machine's local APICs, when there is no hypervisor to have them;
+       a hypervisor's processors read theirs from fApicIrq */
     std::unique_ptr<LocalApicBus> fLapics;
+    std::unique_ptr<std::atomic<bool>[]> fApicIrq;
     PCIrqFanout fIrqFanout {*this};
     /* the configuration's HPET, if it has one */
     HPET *fHpet = nullptr;
@@ -1122,17 +1122,21 @@ public:
     bool fInterpThreads = false;
     std::vector<std::thread> fVcpuThreads;
     std::unique_ptr<HostWakeup[]> fVcpuWakeups;
-    /* The INIT and STARTUP IPIs an interpreter processor has yet to take,
-       and whether it waits for a STARTUP. */
-    struct InterpCpuStart {
+    /* The INIT and STARTUP IPIs a processor with the machine's local APIC
+       has yet to take, and whether it waits for a STARTUP. */
+    struct CpuStart {
         std::atomic<bool> init {false};
         std::atomic<int> startup {-1};
         bool waiting = false;
     };
-    std::unique_ptr<InterpCpuStart[]> fCpuStarts;
+    std::unique_ptr<CpuStart[]> fCpuStarts;
 
     void VcpuThread(int index);
     void InterpThread(int index);
+    /* On the thread of processor 'index': acts out the IPIs it was sent,
+       and false while it waits for a STARTUP. */
+    template <typename Reset, typename Startup>
+    bool TakeCpuStart(int index, Reset reset, Startup startup);
     /* Makes processor 'index' look at its interrupts again. Any thread. */
     void KickVcpu(int index);
     /* The processor of the calling thread: its own, or the first on the
@@ -1150,7 +1154,7 @@ public:
     uint32_t BiosDebugRead(uint32_t offset, int size_log2);
     void BiosDebugWrite(uint32_t offset, uint32_t val, int size_log2);
     /* X86HypervisorTarget; the interpreter reaches the port map through
-       fPortIo too */
+       fPortIo too, and the local APIC methods below serve both */
     uint32_t PortRead(uint32_t port, int size_log2) override;
     void PortWrite(uint32_t port, uint32_t val, int size_log2) override;
     void MmioRead(uint64_t addr, uint8_t *data, int len) override;
@@ -1365,7 +1369,10 @@ void PCMachine::VmPortWrite(uint32_t addr, uint32_t val, int size_log2)
 
 void PCMachine::SetCPUIRQ(int level)
 {
-    if (hypervisor) {
+    if (fLapics) {
+        /* the other processors' LINT0 is left masked */
+        fLapics->Apic(0).SetLint0(level);
+    } else if (hypervisor) {
         bool raised = level && !fCpuIrq.load();
         fCpuIrq.store(level != 0);
         /* Processor 0 looks at INTR before each run, so only a request from
@@ -1373,9 +1380,6 @@ void PCMachine::SetCPUIRQ(int level)
         if (raised && sCurrentVcpu != 0) {
             KickVcpu(0);
         }
-    } else if (fLapics) {
-        /* the other processors' LINT0 is left masked */
-        fLapics->Apic(0).SetLint0(level);
     } else {
         x86_cpu_set_irq(cpu_state, level);
         Kick();
@@ -1389,6 +1393,13 @@ int PCMachine::CurrentCpu() const
 
 void PCMachine::SetApicInterrupt(uint32_t id, bool pending)
 {
+    if (hypervisor) {
+        /* as with INTR, a processor looks before each run */
+        fApicIrq[id].store(pending);
+        if (pending && sCurrentVcpu != (int)id)
+            KickVcpu(id);
+        return;
+    }
     x86_cpu_set_irq(fCpus[id], pending);
     if (!fInterpThreads)
         Kick();
@@ -1396,11 +1407,11 @@ void PCMachine::SetApicInterrupt(uint32_t id, bool pending)
         KickVcpu(id);
 }
 
-/* The processor takes these between runs of the interpreter, on its own
-   thread. A lone processor ignores them. */
+/* The processor takes these between runs, on its own thread. A lone
+   interpreter processor ignores them. */
 void PCMachine::ApicInit(uint32_t id)
 {
-    if (fInterpThreads) {
+    if (hypervisor || fInterpThreads) {
         fCpuStarts[id].init.store(true);
         KickVcpu(id);
     }
@@ -1408,7 +1419,7 @@ void PCMachine::ApicInit(uint32_t id)
 
 void PCMachine::ApicStartup(uint32_t id, int vector)
 {
-    if (fInterpThreads) {
+    if (hypervisor || fInterpThreads) {
         fCpuStarts[id].startup.store(vector);
         KickVcpu(id);
     }
@@ -1417,7 +1428,7 @@ void PCMachine::ApicStartup(uint32_t id, int vector)
 /* The processor thread may be asleep until a later deadline. */
 void PCMachine::ApicTimerChanged()
 {
-    if (fInterpThreads)
+    if (hypervisor || fInterpThreads)
         Kick();
 }
 
@@ -1433,12 +1444,14 @@ int PCMachine::HardIntno()
 
 bool PCMachine::InterruptRequested()
 {
-    return fCpuIrq.load();
+    if (fLapics)
+        return fApicIrq[CurrentCpu()].load();
+    return CurrentCpu() == 0 && fCpuIrq.load();
 }
 
 int PCMachine::AcknowledgeInterrupt()
 {
-    return pic2_get_hard_intno(pic_state.get());
+    return HardIntno();
 }
 
 /* Only a write to the local APICs' page is an interrupt; anything else is
@@ -1446,10 +1459,10 @@ int PCMachine::AcknowledgeInterrupt()
 void PCMachine::SendMsi(uint64_t addr, uint32_t data)
 {
     if ((addr >> 20) == 0xfee) {
-        if (hypervisor)
-            hypervisor->SendMsi(addr, data);
-        else if (fLapics)
+        if (fLapics)
             fLapics->Deliver(addr, data);
+        else if (hypervisor)
+            hypervisor->SendMsi(addr, data);
     } else
         mem_map->IoWrite(addr, data, 2);
 }
@@ -1830,6 +1843,8 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
                                                  options);
     }
     s->fLocalApic = options.local_apic;
+    bool machine_lapics = s->fLocalApic &&
+        (!s->hypervisor || !s->hypervisor->HasLocalApics());
     s->fCpuCount = options.cpu_count;
     s->fInterpThreads = !s->hypervisor && s->fCpuCount > 1;
     if (s->hypervisor || s->fInterpThreads)
@@ -1864,14 +1879,15 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
             s->fCpus.push_back(cpu);
         }
         s->cpu_state = s->fCpus[0];
-        /* the others wait for their STARTUP IPIs */
-        s->fCpuStarts =
-            std::make_unique<PCMachine::InterpCpuStart[]>(s->fCpuCount);
-        for (int i = 1; i < s->fCpuCount; i++)
-            s->fCpuStarts[i].waiting = true;
 
         /* needed to handle the RAM dirty bits */
         s->mem_map->SetTlbFlushTarget(s);
+    }
+    /* the others wait for their STARTUP IPIs */
+    if (!s->hypervisor || machine_lapics) {
+        s->fCpuStarts = std::make_unique<PCMachine::CpuStart[]>(s->fCpuCount);
+        for (int i = 1; i < s->fCpuCount; i++)
+            s->fCpuStarts[i].waiting = true;
     }
 
     /* set the RAM mapping and leave the VGA addresses empty */
@@ -1918,7 +1934,11 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
                 s->pic_irq[i].Init(&s->fIrqFanout, i);
         }
         /* the 8259s then reach the first processor through its LINT0 */
-        if (s->fLocalApic && s->cpu_state) {
+        if (machine_lapics) {
+            if (s->hypervisor) {
+                s->fApicIrq =
+                    std::make_unique<std::atomic<bool>[]>(s->fCpuCount);
+            }
             s->fLapics = std::make_unique<LocalApicBus>(*s, s->fCpuCount);
             s->mem_map->RegisterDevice(LAPIC_BASE, LAPIC_SIZE, &s->fLapicIo,
                                        DEVIO_SIZE32);
@@ -2681,6 +2701,26 @@ static void name_cpu_thread(int index)
     host_set_thread_name(name);
 }
 
+/* An INIT stops the processor, and then the first processor starts over
+   from the reset vector, the others at their next STARTUP, which may
+   already be here. */
+template <typename Reset, typename Startup>
+bool PCMachine::TakeCpuStart(int index, Reset reset, Startup startup)
+{
+    CpuStart &start = fCpuStarts[index];
+
+    if (start.init.exchange(false)) {
+        reset();
+        start.waiting = index != 0;
+    }
+    int vector = start.startup.exchange(-1);
+    if (vector >= 0 && start.waiting) {
+        startup(vector);
+        start.waiting = false;
+    }
+    return !start.waiting;
+}
+
 void PCMachine::VcpuThread(int index)
 {
     HostX86Vcpu &vcpu = hypervisor->Vcpu(index);
@@ -2689,7 +2729,10 @@ void PCMachine::VcpuThread(int index)
     sCurrentVcpu = index;
     vcpu.ThreadStarted();
     while (!StopRequested()) {
-        if (vcpu.Idle(index == 0 && fCpuIrq.load())) {
+        bool started = !fCpuStarts ||
+            TakeCpuStart(index, [&]() {vcpu.Init();},
+                         [&](int vector) {vcpu.Startup(vector);});
+        if (!started || vcpu.Idle(InterruptRequested())) {
             fVcpuWakeups[index].Wait(VCPU_MAX_WAIT_US);
             continue;
         }
@@ -2704,24 +2747,14 @@ void PCMachine::VcpuThread(int index)
 void PCMachine::InterpThread(int index)
 {
     X86CPUState *cpu = fCpus[index];
-    InterpCpuStart &start = fCpuStarts[index];
 
     name_cpu_thread(index);
     sCurrentVcpu = index;
     while (!StopRequested()) {
-        /* An INIT stops the processor, and then the first processor starts
-           over from the reset vector, the others at their next STARTUP,
-           which may already be here. */
-        if (start.init.exchange(false)) {
-            x86_cpu_reset(cpu);
-            start.waiting = index != 0;
-        }
-        int vector = start.startup.exchange(-1);
-        if (vector >= 0 && start.waiting) {
-            x86_cpu_startup(cpu, vector);
-            start.waiting = false;
-        }
-        if (start.waiting || x86_cpu_get_power_down(cpu)) {
+        bool started =
+            TakeCpuStart(index, [&]() {x86_cpu_reset(cpu);},
+                         [&](int vector) {x86_cpu_startup(cpu, vector);});
+        if (!started || x86_cpu_get_power_down(cpu)) {
             fVcpuWakeups[index].Wait(VCPU_MAX_WAIT_US);
             continue;
         }

@@ -75,27 +75,33 @@ struct NvmmVcpu {
 };
 
 
-/* The one vcpu. The machine's 8259s raise INTR, and the vector goes in as
-   an event before a run. Nothing can stop a run from another thread, so one
-   lasts until an exit or the end of the host scheduler's quantum, and
+/* One vcpu. The interrupt the machine's 8259s or local APIC has for it
+   goes in as an event before a run. Nothing can stop a run from another
+   thread: the kernel leaves a run only at an exit or when the host
+   scheduler wants the processor back, and a signal does not make it, so
    InterruptRun() does nothing. */
 class NvmmX86Vcpu final: public HostX86Vcpu {
 private:
     NvmmX86Hypervisor &fOwner;
     struct nvmm_machine *fMach;
     NvmmVcpu fVcpu;
+    /* the state after vcpu creation, which an INIT goes back to */
+    struct nvmm_x64_state fResetState;
 
     /* the interrupt state as of the last exit */
     uint64_t fRflags = 0x2;
     bool fInterruptShadow = false;
     bool fEventPending = false;
     bool fWindowRequested = false;
+    /* CR8 as the vcpu and the machine's local APIC last agreed on it */
+    int fTaskPriority = 0;
     /* stopped at HLT until an interrupt is taken */
     bool fHalted = false;
     /* shut down, until the machine ends */
     bool fShutdown = false;
 
     void SetResetFpuState();
+    void SyncTaskPriority();
     bool InjectInterrupt();
     void InjectException(int vector);
     void ExitMsr(const struct nvmm_vcpu_exit *ctx);
@@ -104,7 +110,8 @@ private:
     static void MemCallback(struct nvmm_mem *mem);
 
 public:
-    NvmmX86Vcpu(NvmmX86Hypervisor &owner, struct nvmm_machine *mach);
+    NvmmX86Vcpu(NvmmX86Hypervisor &owner, struct nvmm_machine *mach,
+                int index);
     ~NvmmX86Vcpu() override;
 
     void GetRegs(HostX86Regs *regs) override;
@@ -115,21 +122,28 @@ public:
     void Run() override;
     bool Idle(bool intr) override;
     void InterruptRun() override {}
+    void Init() override;
+    void Startup(int vector) override;
 };
 
 
-/* The machine has no interrupt controller in the kernel, and so no more than
-   one processor. */
+/* The kernel has no interrupt controllers, so the machine keeps them all,
+   the local APICs included. */
 class NvmmX86Hypervisor final: public HostX86Hypervisor {
 private:
     friend class NvmmX86Vcpu;
 
     X86HypervisorTarget &fTarget;
     DeviceLock &fLock;
+    /* the machine has local APICs */
+    bool fLocalApic;
+    /* and the kernel can exit at a write to CR8 */
+    bool fTprExits = false;
+    int fCpuCount;
     int fPhysAddressBits;
     struct nvmm_machine fMach {};
     bool fMachCreated = false;
-    std::unique_ptr<NvmmX86Vcpu> fVcpu;
+    std::vector<std::unique_ptr<NvmmX86Vcpu>> fVcpus;
     /* where each slot is mapped; the platform knows ranges, not slots */
     struct Slot {
         uint64_t addr;
@@ -141,7 +155,8 @@ private:
 public:
     NvmmX86Hypervisor(X86HypervisorTarget &target, DeviceLock &lock,
                       const HostX86Options &options):
-        fTarget(target), fLock(lock),
+        fTarget(target), fLock(lock), fLocalApic(options.local_apic),
+        fCpuCount(options.cpu_count),
         fPhysAddressBits(std::min(host_phys_address_bits(),
                                   options.max_phys_address_bits)) {}
     ~NvmmX86Hypervisor() override;
@@ -149,6 +164,7 @@ public:
     bool Init();
 
     bool HasInterruptControllers() override {return false;}
+    bool HasLocalApics() override {return false;}
     int PhysAddressBits() override {return fPhysAddressBits;}
     uint8_t *AllocRam(size_t size) override;
     void FreeRam(uint8_t *ptr, size_t size) override;
@@ -157,13 +173,13 @@ public:
     void GetDirtyLog(int slot, uint32_t *bitmap) override;
     void SetIRQ(int irq, int level) override;
     void SendMsi(uint64_t addr, uint32_t data) override;
-    HostX86Vcpu &Vcpu(int index) override {return *fVcpu;}
+    HostX86Vcpu &Vcpu(int index) override {return *fVcpus[index];}
 };
 
 
 NvmmX86Hypervisor::~NvmmX86Hypervisor()
 {
-    fVcpu.reset();
+    fVcpus.clear();
     if (fMachCreated)
         nvmm_machine_destroy(&fMach);
 }
@@ -182,6 +198,13 @@ bool NvmmX86Hypervisor::Init()
         fprintf(stderr, "NVMM: CPUID cannot be configured\n");
         return false;
     }
+    if (fCpuCount > (int)cap.max_vcpus) {
+        fprintf(stderr, "NVMM runs no more than %u processors\n",
+                cap.max_vcpus);
+        return false;
+    }
+    fTprExits = fLocalApic &&
+        (cap.arch.vcpu_conf_support & NVMM_CAP_ARCH_VCPU_CONF_TPR);
 
     if (nvmm_machine_create(&fMach) == -1) {
         fprintf(stderr, "NVMM: cannot create a machine: %s\n",
@@ -190,16 +213,21 @@ bool NvmmX86Hypervisor::Init()
     }
     fMachCreated = true;
 
-    fVcpu = std::make_unique<NvmmX86Vcpu>(*this, &fMach);
+    for (int i = 0; i < fCpuCount; i++)
+        fVcpus.push_back(std::make_unique<NvmmX86Vcpu>(*this, &fMach, i));
     return true;
 }
 
 
-NvmmX86Vcpu::NvmmX86Vcpu(NvmmX86Hypervisor &owner, struct nvmm_machine *mach):
+/* The kernel gives CPUID the APIC ID, which is the vcpu's index, and the
+   number of processors, which is the vcpus created so far: all of them by
+   the time the guest runs. */
+NvmmX86Vcpu::NvmmX86Vcpu(NvmmX86Hypervisor &owner, struct nvmm_machine *mach,
+                         int index):
     fOwner(owner), fMach(mach)
 {
     fVcpu.owner = this;
-    if (nvmm_vcpu_create(fMach, 0, &fVcpu.vcpu) == -1)
+    if (nvmm_vcpu_create(fMach, index, &fVcpu.vcpu) == -1)
         nvmm_fail("nvmm_vcpu_create");
 
     struct nvmm_assist_callbacks callbacks = {IoCallback, MemCallback};
@@ -209,18 +237,36 @@ NvmmX86Vcpu::NvmmX86Vcpu(NvmmX86Hypervisor &owner, struct nvmm_machine *mach):
     }
 
     SetResetFpuState();
+    if (nvmm_vcpu_getstate(fMach, &fVcpu.vcpu, NVMM_X64_STATE_ALL) == -1)
+        nvmm_fail("nvmm_vcpu_getstate");
+    fResetState = *fVcpu.vcpu.state;
 
-    /* remove the APIC & ACPI to be in sync with the emulator */
+    /* remove the APIC, unless the machine has one, & ACPI to be in sync with
+       the emulator */
     static const uint32_t leaves[] = {1, 0x80000001};
     for (uint32_t leaf: leaves) {
         struct nvmm_vcpu_conf_cpuid cpuid;
         memset(&cpuid, 0, sizeof(cpuid));
         cpuid.mask = 1;
         cpuid.leaf = leaf;
-        cpuid.u.mask.del.edx = CPUID_APIC | CPUID_ACPI;
+        cpuid.u.mask.del.edx = CPUID_ACPI;
+        if (!owner.fLocalApic)
+            cpuid.u.mask.del.edx |= CPUID_APIC;
         if (nvmm_vcpu_configure(fMach, &fVcpu.vcpu, NVMM_VCPU_CONF_CPUID,
                                 &cpuid) == -1) {
             nvmm_fail("masking CPUID");
+        }
+    }
+
+    /* A write to CR8 exits, for the local APIC to know at once of a priority
+       that lets an interrupt through. */
+    if (owner.fTprExits) {
+        struct nvmm_vcpu_conf_tpr tpr;
+        memset(&tpr, 0, sizeof(tpr));
+        tpr.exit_changed = 1;
+        if (nvmm_vcpu_configure(fMach, &fVcpu.vcpu, NVMM_VCPU_CONF_TPR,
+                                &tpr) == -1) {
+            nvmm_fail("asking for CR8 exits");
         }
     }
 
@@ -331,7 +377,7 @@ void NvmmX86Hypervisor::SetIRQ(int irq, int level)
 
 void NvmmX86Hypervisor::SendMsi(uint64_t addr, uint32_t data)
 {
-    /* there is no local APIC to send to */
+    /* the local APICs are the machine's, so no MSI comes here */
     abort();
 }
 
@@ -460,9 +506,27 @@ void NvmmX86Vcpu::MemCallback(struct nvmm_mem *mem)
 }
 
 
+/* With the lock held, before a run: CR8 takes a task priority the guest
+   wrote to the local APIC's page. */
+void NvmmX86Vcpu::SyncTaskPriority()
+{
+    struct nvmm_vcpu *vcpu = &fVcpu.vcpu;
+    int tpr = fOwner.fTarget.TaskPriority();
+
+    if (tpr == fTaskPriority)
+        return;
+    if (nvmm_vcpu_getstate(fMach, vcpu, NVMM_X64_STATE_CRS) == -1)
+        nvmm_fail("nvmm_vcpu_getstate");
+    vcpu->state->crs[NVMM_X64_CR_CR8] = tpr;
+    if (nvmm_vcpu_setstate(fMach, vcpu, NVMM_X64_STATE_CRS) == -1)
+        nvmm_fail("nvmm_vcpu_setstate");
+    fTaskPriority = tpr;
+}
+
+
 /* With the lock held, before a run: hands the processor the interrupt the
-   8259s raise when it can take one, and otherwise asks to exit once it can.
-   False while it stays halted. */
+   8259s or its local APIC raise when it can take one, and otherwise asks to
+   exit once it can. False while it stays halted. */
 bool NvmmX86Vcpu::InjectInterrupt()
 {
     struct nvmm_vcpu *vcpu = &fVcpu.vcpu;
@@ -505,23 +569,82 @@ void NvmmX86Vcpu::InjectException(int vector)
 }
 
 
-/* An MSR the kernel does not handle reads as 0 and ignores writes, rather
-   than faulting a guest that probes it. */
+#define MSR_IA32_APIC_BASE 0x1b
+
+/* IA32_APIC_BASE goes to the machine's local APIC. Another MSR the kernel
+   does not handle reads as 0 and ignores writes, rather than faulting a
+   guest that probes it. */
 void NvmmX86Vcpu::ExitMsr(const struct nvmm_vcpu_exit *ctx)
 {
     struct nvmm_x64_state *state = fVcpu.vcpu.state;
+    X86HypervisorTarget &target = fOwner.fTarget;
+    bool apic = fOwner.fLocalApic;
 
     if (nvmm_vcpu_getstate(fMach, &fVcpu.vcpu, NVMM_X64_STATE_GPRS) == -1)
         nvmm_fail("nvmm_vcpu_getstate");
     if (ctx->reason == NVMM_VCPU_EXIT_RDMSR) {
-        state->gprs[NVMM_X64_GPR_RAX] = 0;
-        state->gprs[NVMM_X64_GPR_RDX] = 0;
+        uint64_t val = 0;
+        if (apic && ctx->u.rdmsr.msr == MSR_IA32_APIC_BASE) {
+            DeviceLocker locker(fOwner.fLock);
+            val = target.ApicBase();
+        }
+        state->gprs[NVMM_X64_GPR_RAX] = (uint32_t)val;
+        state->gprs[NVMM_X64_GPR_RDX] = val >> 32;
         state->gprs[NVMM_X64_GPR_RIP] = ctx->u.rdmsr.npc;
     } else {
+        if (apic && ctx->u.wrmsr.msr == MSR_IA32_APIC_BASE) {
+            DeviceLocker locker(fOwner.fLock);
+            if (!target.SetApicBase(ctx->u.wrmsr.val)) {
+                InjectException(13); /* #GP */
+                return;
+            }
+        }
         state->gprs[NVMM_X64_GPR_RIP] = ctx->u.wrmsr.npc;
     }
     if (nvmm_vcpu_setstate(fMach, &fVcpu.vcpu, NVMM_X64_STATE_GPRS) == -1)
         nvmm_fail("nvmm_vcpu_setstate");
+}
+
+
+/* The state the vcpu was created with, less the time stamp counter, which
+   an INIT leaves running. */
+void NvmmX86Vcpu::Init()
+{
+    struct nvmm_vcpu *vcpu = &fVcpu.vcpu;
+
+    if (nvmm_vcpu_getstate(fMach, vcpu, NVMM_X64_STATE_MSRS) == -1)
+        nvmm_fail("nvmm_vcpu_getstate");
+    uint64_t tsc = vcpu->state->msrs[NVMM_X64_MSR_TSC];
+    *vcpu->state = fResetState;
+    vcpu->state->msrs[NVMM_X64_MSR_TSC] = tsc;
+    if (nvmm_vcpu_setstate(fMach, vcpu, NVMM_X64_STATE_ALL) == -1)
+        nvmm_fail("nvmm_vcpu_setstate");
+
+    fRflags = 0x2;
+    fInterruptShadow = false;
+    fEventPending = false;
+    fWindowRequested = false;
+    fTaskPriority = 0;
+    fHalted = false;
+}
+
+
+void NvmmX86Vcpu::Startup(int vector)
+{
+    struct nvmm_vcpu *vcpu = &fVcpu.vcpu;
+    struct nvmm_x64_state *state = vcpu->state;
+
+    if (nvmm_vcpu_getstate(fMach, vcpu,
+                           NVMM_X64_STATE_SEGS | NVMM_X64_STATE_GPRS) == -1) {
+        nvmm_fail("nvmm_vcpu_getstate");
+    }
+    state->segs[NVMM_X64_SEG_CS].selector = vector << 8;
+    state->segs[NVMM_X64_SEG_CS].base = (uint64_t)vector << 12;
+    state->gprs[NVMM_X64_GPR_RIP] = 0;
+    if (nvmm_vcpu_setstate(fMach, vcpu,
+                           NVMM_X64_STATE_SEGS | NVMM_X64_STATE_GPRS) == -1) {
+        nvmm_fail("nvmm_vcpu_setstate");
+    }
 }
 
 
@@ -533,6 +656,8 @@ void NvmmX86Vcpu::Run()
 
     {
         DeviceLocker locker(lock);
+        if (fOwner.fLocalApic)
+            SyncTaskPriority();
         if (!InjectInterrupt())
             return;
     }
@@ -547,6 +672,13 @@ void NvmmX86Vcpu::Run()
     fInterruptShadow = ctx->exitstate.int_shadow;
     fEventPending = ctx->exitstate.evt_pending;
     fWindowRequested = ctx->exitstate.int_window_exiting;
+    /* the local APIC learns of a write to CR8 before anything else sees
+       it */
+    if (fOwner.fLocalApic && (int)ctx->exitstate.cr8 != fTaskPriority) {
+        fTaskPriority = ctx->exitstate.cr8;
+        DeviceLocker locker(lock);
+        fOwner.fTarget.SetTaskPriority(fTaskPriority);
+    }
 
     switch (ctx->reason) {
     case NVMM_VCPU_EXIT_NONE:
@@ -607,14 +739,6 @@ std::unique_ptr<HostX86Hypervisor> host_x86_hypervisor_open(
     X86HypervisorTarget &target, DeviceLock &lock,
     const HostX86Options &options)
 {
-    if (options.local_apic) {
-        fprintf(stderr, "NVMM has no local APIC\n");
-        return nullptr;
-    }
-    if (options.cpu_count != 1) {
-        fprintf(stderr, "NVMM runs one processor only\n");
-        return nullptr;
-    }
     if (nvmm_init() == -1) {
         fprintf(stderr, "NVMM not available: %s\n", strerror(errno));
         return nullptr;
