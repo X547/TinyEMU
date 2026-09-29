@@ -43,6 +43,7 @@ extern "C" {
 
 #define CPUID_APIC bit_at(9)
 #define CPUID_ACPI bit_at(22)
+#define CPUID_TOPOEXT bit_at(22) /* 0x80000001 ECX */
 #define RFLAGS_IF bit_at(9)
 
 
@@ -252,6 +253,11 @@ NvmmX86Vcpu::NvmmX86Vcpu(NvmmX86Hypervisor &owner, struct nvmm_machine *mach,
         cpuid.u.mask.del.edx = CPUID_ACPI;
         if (!owner.fLocalApic)
             cpuid.u.mask.del.edx |= CPUID_APIC;
+        /* The kernel passes the topology leaves through from the host
+           processor the vcpu happens to run on, APIC IDs included, so the
+           guest is not told they exist. */
+        if (leaf == 0x80000001)
+            cpuid.u.mask.del.ecx = CPUID_TOPOEXT;
         if (nvmm_vcpu_configure(fMach, &fVcpu.vcpu, NVMM_VCPU_CONF_CPUID,
                                 &cpuid) == -1) {
             nvmm_fail("masking CPUID");
