@@ -669,7 +669,16 @@ void NvmmX86Vcpu::Run()
             return;
     }
 
-    if (nvmm_vcpu_run(fMach, vcpu) == -1) {
+    /* The driver loads the guest's x87 and SSE state for a run and puts back
+       only the host's MXCSR, so the thread would return with the guest's x87
+       control and status words, and a pending exception the guest left would
+       fault the next x87 instruction in the host. FXSAVE and FXRSTOR do not
+       raise pending exceptions. */
+    alignas(16) uint8_t host_fpu[512];
+    asm volatile("fxsave64 %0" : "=m" (host_fpu));
+    int ret = nvmm_vcpu_run(fMach, vcpu);
+    asm volatile("fxrstor64 %0" : : "m" (host_fpu));
+    if (ret == -1) {
         if (errno == EINTR || errno == EAGAIN)
             return;
         nvmm_fail("nvmm_vcpu_run");
