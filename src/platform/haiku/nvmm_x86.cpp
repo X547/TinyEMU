@@ -24,8 +24,11 @@
 #include <string.h>
 #include <errno.h>
 #include <inttypes.h>
+#include <pthread.h>
+#include <signal.h>
 
 #include <algorithm>
+#include <atomic>
 #include <memory>
 #include <vector>
 
@@ -53,6 +56,12 @@ static void nvmm_fail(const char *what)
     exit(1);
 }
 
+/* Its delivery is all a kick needs. */
+static void sigalrm_handler(int sig)
+{
+    (void)sig;
+}
+
 /* The host processor's physical address width, which the machine's
    processor reports unless told otherwise. */
 static int host_phys_address_bits()
@@ -77,15 +86,22 @@ struct NvmmVcpu {
 
 
 /* One vcpu. The interrupt the machine's 8259s or local APIC has for it
-   goes in as an event before a run. Nothing can stop a run from another
-   thread: the kernel leaves a run only at an exit or when the host
-   scheduler wants the processor back, and a signal does not make it, so
-   InterruptRun() does nothing. */
+   goes in as an event before a run. A signal to its thread ends a run on
+   kernels that leave a run for a pending signal and send it to a thread on
+   another processor at once; elsewhere the run goes on to its next exit.
+   A signal that lands between the look at fKicked and the kernel entry is
+   lost, and the run goes on to its next exit too. */
 class NvmmX86Vcpu final: public HostX86Vcpu {
 private:
     NvmmX86Hypervisor &fOwner;
     struct nvmm_machine *fMach;
     NvmmVcpu fVcpu;
+    /* the thread that runs it, for signalling it out of a run */
+    pthread_t fThread {};
+    /* in or about to enter nvmm_vcpu_run() */
+    std::atomic<bool> fInRun {false};
+    /* asked to leave the run since the interrupts were last looked at */
+    std::atomic<bool> fKicked {false};
     /* the state after vcpu creation, which an INIT goes back to */
     struct nvmm_x64_state fResetState;
 
@@ -119,10 +135,10 @@ public:
     void SetRegs(const HostX86Regs &regs) override;
     void SetFlatProtectedMode(uint32_t gdt_base, uint16_t gdt_limit,
                               uint16_t code_sel, uint16_t data_sel) override;
-    void ThreadStarted() override {}
+    void ThreadStarted() override;
     void Run() override;
     bool Idle(bool intr) override;
-    void InterruptRun() override {}
+    void InterruptRun() override;
     void Init() override;
     void Startup(int vector) override;
 };
@@ -216,6 +232,19 @@ bool NvmmX86Hypervisor::Init()
 
     for (int i = 0; i < fCpuCount; i++)
         fVcpus.push_back(std::make_unique<NvmmX86Vcpu>(*this, &fMach, i));
+
+    struct sigaction act;
+    memset(&act, 0, sizeof(act));
+    act.sa_handler = sigalrm_handler;
+    sigemptyset(&act.sa_mask);
+    act.sa_flags = SA_RESTART;
+    sigaction(SIGALRM, &act, NULL);
+    /* The signal is for the vcpu threads, which unblock it. Every thread
+       started after this inherits the mask. */
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGALRM);
+    pthread_sigmask(SIG_BLOCK, &set, NULL);
     return true;
 }
 
@@ -655,12 +684,35 @@ void NvmmX86Vcpu::Startup(int vector)
 }
 
 
+void NvmmX86Vcpu::ThreadStarted()
+{
+    sigset_t set;
+
+    fThread = pthread_self();
+    sigemptyset(&set);
+    sigaddset(&set, SIGALRM);
+    pthread_sigmask(SIG_UNBLOCK, &set, NULL);
+}
+
+
+/* A kick sets fKicked before it looks at fInRun, and a run sets fInRun
+   before it looks at fKicked, so either the run does not start or the kick
+   signals it. */
+void NvmmX86Vcpu::InterruptRun()
+{
+    fKicked.store(true);
+    if (fInRun.load())
+        pthread_kill(fThread, SIGALRM);
+}
+
+
 void NvmmX86Vcpu::Run()
 {
     struct nvmm_vcpu *vcpu = &fVcpu.vcpu;
     const struct nvmm_vcpu_exit *ctx = vcpu->exit;
     DeviceLock &lock = fOwner.fLock;
 
+    fKicked.store(false);
     {
         DeviceLocker locker(lock);
         if (fOwner.fLocalApic)
@@ -669,7 +721,14 @@ void NvmmX86Vcpu::Run()
             return;
     }
 
-    if (nvmm_vcpu_run(fMach, vcpu) == -1) {
+    fInRun.store(true);
+    if (fKicked.load()) {
+        fInRun.store(false);
+        return;
+    }
+    int ret = nvmm_vcpu_run(fMach, vcpu);
+    fInRun.store(false);
+    if (ret == -1) {
         if (errno == EINTR || errno == EAGAIN)
             return;
         nvmm_fail("nvmm_vcpu_run");
