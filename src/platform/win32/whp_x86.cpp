@@ -42,7 +42,10 @@
 
 #define CPUID_APIC bit_at(9)
 #define CPUID_ACPI bit_at(22)
+#define CPUID_X2APIC bit_at(21)
+#define CPUID_TSC_DEADLINE bit_at(24)
 #define RFLAGS_IF bit_at(9)
+#define MSR_IA32_APIC_BASE 0x1b
 
 /* The longest a run lasts, in case the request to end it came just before
    it started. */
@@ -53,6 +56,41 @@ static const WHV_REGISTER_NAME kGprNames[8] = {
     WHvX64RegisterRbx, WHvX64RegisterRsp, WHvX64RegisterRbp,
     WHvX64RegisterRsi, WHvX64RegisterRdi,
 };
+
+/* What an INIT puts back as the processor was created: all but the time
+   stamp counter and IA32_APIC_BASE. */
+static const WHV_REGISTER_NAME kResetNames[] = {
+    WHvX64RegisterRax, WHvX64RegisterRcx, WHvX64RegisterRdx,
+    WHvX64RegisterRbx, WHvX64RegisterRsp, WHvX64RegisterRbp,
+    WHvX64RegisterRsi, WHvX64RegisterRdi, WHvX64RegisterR8,
+    WHvX64RegisterR9, WHvX64RegisterR10, WHvX64RegisterR11,
+    WHvX64RegisterR12, WHvX64RegisterR13, WHvX64RegisterR14,
+    WHvX64RegisterR15, WHvX64RegisterRip, WHvX64RegisterRflags,
+    WHvX64RegisterEs, WHvX64RegisterCs, WHvX64RegisterSs,
+    WHvX64RegisterDs, WHvX64RegisterFs, WHvX64RegisterGs,
+    WHvX64RegisterLdtr, WHvX64RegisterTr, WHvX64RegisterIdtr,
+    WHvX64RegisterGdtr, WHvX64RegisterCr0, WHvX64RegisterCr2,
+    WHvX64RegisterCr3, WHvX64RegisterCr4, WHvX64RegisterCr8,
+    WHvX64RegisterDr0, WHvX64RegisterDr1, WHvX64RegisterDr2,
+    WHvX64RegisterDr3, WHvX64RegisterDr6, WHvX64RegisterDr7,
+    WHvX64RegisterXCr0, WHvX64RegisterXmm0, WHvX64RegisterXmm1,
+    WHvX64RegisterXmm2, WHvX64RegisterXmm3, WHvX64RegisterXmm4,
+    WHvX64RegisterXmm5, WHvX64RegisterXmm6, WHvX64RegisterXmm7,
+    WHvX64RegisterXmm8, WHvX64RegisterXmm9, WHvX64RegisterXmm10,
+    WHvX64RegisterXmm11, WHvX64RegisterXmm12, WHvX64RegisterXmm13,
+    WHvX64RegisterXmm14, WHvX64RegisterXmm15, WHvX64RegisterFpMmx0,
+    WHvX64RegisterFpMmx1, WHvX64RegisterFpMmx2, WHvX64RegisterFpMmx3,
+    WHvX64RegisterFpMmx4, WHvX64RegisterFpMmx5, WHvX64RegisterFpMmx6,
+    WHvX64RegisterFpMmx7, WHvX64RegisterFpControlStatus,
+    WHvX64RegisterXmmControlStatus, WHvX64RegisterEfer,
+    WHvX64RegisterKernelGsBase, WHvX64RegisterPat,
+    WHvX64RegisterSysenterCs, WHvX64RegisterSysenterEip,
+    WHvX64RegisterSysenterEsp, WHvX64RegisterStar, WHvX64RegisterLstar,
+    WHvX64RegisterCstar, WHvX64RegisterSfmask,
+    WHvRegisterPendingInterruption, WHvRegisterInterruptState,
+    WHvX64RegisterDeliverabilityNotifications,
+};
+#define RESET_REGISTER_COUNT (sizeof(kResetNames) / sizeof(kResetNames[0]))
 
 
 static void whp_fail(const char *what, HRESULT hr)
@@ -75,8 +113,9 @@ static int host_phys_address_bits()
 
 class WhpX86Hypervisor;
 
-/* One virtual processor. The 8259s raise INTR for processor 0 only, and the
-   vector goes in as a pending interruption before a run. */
+/* One virtual processor. The 8259s raise INTR for processor 0 only, or the
+   machine's local APIC for its own, and the vector goes in as a pending
+   interruption before a run. */
 class WhpX86Vcpu final: public HostX86Vcpu {
 private:
     WhpX86Hypervisor &fOwner;
@@ -95,6 +134,12 @@ private:
     bool fHalted = false;
     /* shut down, until the machine ends */
     bool fShutdown = false;
+    /* With the machine's local APIC: CR8 as the processor and the APIC last
+       agreed on it, and whether IA32_APIC_BASE holds the APIC's value. */
+    int fTaskPriority = 0;
+    bool fApicBaseSet = false;
+    /* the registers as created, for an INIT */
+    WHV_REGISTER_VALUE fResetValues[RESET_REGISTER_COUNT];
 
     void GetVpRegisters(const WHV_REGISTER_NAME *names, UINT32 count,
                         WHV_REGISTER_VALUE *values);
@@ -102,7 +147,10 @@ private:
                         const WHV_REGISTER_VALUE *values);
     bool AcceptsPicInterrupt();
     bool InjectInterrupt();
+    void SyncApic();
+    void InjectGeneralProtection();
     void ExitCpuid(const WHV_RUN_VP_EXIT_CONTEXT &ctx);
+    void ExitMsr(const WHV_RUN_VP_EXIT_CONTEXT &ctx);
 
     static HRESULT CALLBACK IoPortCallback(void *context,
                                            WHV_EMULATOR_IO_ACCESS_INFO *io);
@@ -134,23 +182,27 @@ public:
     void Run() override;
     bool Idle(bool intr) override;
     void InterruptRun() override;
-    /* the hypervisor's local APICs take INIT and STARTUP themselves */
-    void Init() override {abort();}
-    void Startup(int vector) override {abort();}
+    /* only with the machine's local APICs; the hypervisor's take INIT and
+       STARTUP themselves */
+    void Init() override;
+    void Startup(int vector) override;
 };
 
 
-/* The partition has no interrupt controller but, when asked, the local
-   APICs: the machine's IOAPIC and MSIs reach them through
-   WHvRequestInterrupt(). */
+/* The partition has no interrupt controller but, when asked and allowed, the
+   local APICs: the machine's IOAPIC and MSIs reach them through
+   WHvRequestInterrupt(). Otherwise the machine has them, and a processor
+   exits for their page and for a write to IA32_APIC_BASE. */
 class WhpX86Hypervisor final: public HostX86Hypervisor {
 private:
     friend class WhpX86Vcpu;
 
     X86HypervisorTarget &fTarget;
     DeviceLock &fLock;
-    /* the hypervisor emulates the local APICs */
+    /* the processors have local APICs */
     bool fLocalApic;
+    /* which the hypervisor emulates */
+    bool fApicEmulation;
     int fCpuCount;
     int fPhysAddressBits;
     WHV_PARTITION_HANDLE fPartition = nullptr;
@@ -166,6 +218,8 @@ public:
     WhpX86Hypervisor(X86HypervisorTarget &target, DeviceLock &lock,
                      const HostX86Options &options):
         fTarget(target), fLock(lock), fLocalApic(options.local_apic),
+        fApicEmulation(options.local_apic &&
+                       options.hypervisor_interrupt_controllers),
         fCpuCount(options.cpu_count),
         fPhysAddressBits(std::min(host_phys_address_bits(),
                                   options.max_phys_address_bits)) {}
@@ -174,7 +228,7 @@ public:
     bool Init();
 
     bool HasInterruptControllers() override {return false;}
-    bool HasLocalApics() override {return true;}
+    bool HasLocalApics() override {return fApicEmulation;}
     int PhysAddressBits() override {return fPhysAddressBits;}
     uint8_t *AllocRam(size_t size) override {return host_ram_alloc(size);}
     void FreeRam(uint8_t *ptr, size_t size) override
@@ -216,7 +270,7 @@ bool WhpX86Hypervisor::Init()
     if (FAILED(hr))
         whp_fail("setting the processor count", hr);
 
-    if (fLocalApic) {
+    if (fApicEmulation) {
         WHV_X64_LOCAL_APIC_EMULATION_MODE mode =
             WHvX64LocalApicEmulationModeXApic;
         hr = WHvSetPartitionProperty(
@@ -230,11 +284,23 @@ bool WhpX86Hypervisor::Init()
        the machine may not have, and for the physical address width. */
     WHV_EXTENDED_VM_EXITS exits {};
     exits.X64CpuidExit = 1;
+    /* the machine's local APIC hears of a write to IA32_APIC_BASE */
+    if (fLocalApic && !fApicEmulation)
+        exits.X64MsrExit = 1;
     hr = WHvSetPartitionProperty(fPartition,
                                  WHvPartitionPropertyCodeExtendedVmExits,
                                  &exits, sizeof(exits));
     if (FAILED(hr))
         whp_fail("enabling CPUID exits", hr);
+    if (exits.X64MsrExit) {
+        WHV_X64_MSR_EXIT_BITMAP msr_exits {};
+        msr_exits.ApicBaseMsrWrite = 1;
+        hr = WHvSetPartitionProperty(fPartition,
+                                     WHvPartitionPropertyCodeX64MsrExitBitmap,
+                                     &msr_exits, sizeof(msr_exits));
+        if (FAILED(hr))
+            whp_fail("setting the MSR exit bitmap", hr);
+    }
     static const UINT32 cpuid_leaves[] = {1, 0x80000001, 0x80000008};
     hr = WHvSetPartitionProperty(fPartition,
                                  WHvPartitionPropertyCodeCpuidExitList,
@@ -374,6 +440,8 @@ WhpX86Vcpu::WhpX86Vcpu(WhpX86Hypervisor &owner,
     fTimer = CreateThreadpoolTimer(TimerCallback, this, nullptr);
     if (fTimer == nullptr)
         whp_fail("CreateThreadpoolTimer", HRESULT_FROM_WIN32(GetLastError()));
+
+    GetVpRegisters(kResetNames, RESET_REGISTER_COUNT, fResetValues);
 }
 
 
@@ -581,7 +649,7 @@ bool WhpX86Vcpu::AcceptsPicInterrupt()
     UINT32 size;
     HRESULT hr;
 
-    if (!fOwner.fLocalApic)
+    if (!fOwner.fApicEmulation)
         return true;
     GetVpRegisters(&name, 1, &base);
     if (!get_bit(base.Reg64, 11)) /* the APIC is disabled */
@@ -597,22 +665,22 @@ bool WhpX86Vcpu::AcceptsPicInterrupt()
 
 
 /* With the lock held, before a run: hands the processor the interrupt the
-   8259s raise when it can take one, and otherwise asks to exit once it can.
-   False while it stays halted. */
+   8259s or the machine's local APIC raise when it can take one, and
+   otherwise asks to exit once it can. False while it stays halted. */
 bool WhpX86Vcpu::InjectInterrupt()
 {
     X86HypervisorTarget &target = fOwner.fTarget;
     WHV_REGISTER_NAME names[3];
     WHV_REGISTER_VALUE values[3] {};
     UINT32 count = 0;
-    bool intr = fIndex == 0 && target.InterruptRequested() &&
-        AcceptsPicInterrupt();
+    bool intr = (fIndex == 0 || !fOwner.fApicEmulation) &&
+        target.InterruptRequested() && AcceptsPicInterrupt();
 
     if (intr && !fInterruptionPending && !fInterruptShadow &&
         (fRflags & RFLAGS_IF)) {
         /* With the local APIC, HLT waits inside the hypervisor, and an
            injected interrupt does not end the wait by itself. */
-        if (fOwner.fLocalApic) {
+        if (fOwner.fApicEmulation) {
             WHV_REGISTER_NAME name = WHvRegisterInternalActivityState;
             GetVpRegisters(&name, 1, &values[count]);
             if (values[count].InternalActivity.HaltSuspend) {
@@ -665,12 +733,111 @@ void WhpX86Vcpu::ExitCpuid(const WHV_RUN_VP_EXIT_CONTEXT &ctx)
         if (!fOwner.fLocalApic)
             values[4].Reg64 &= ~(uint64_t)CPUID_APIC;
     }
+    /* the machine's local APIC: xAPIC only, with the processor's index as
+       its ID */
+    if (c.Rax == 1 && fOwner.fLocalApic && !fOwner.fApicEmulation) {
+        values[2].Reg64 = set_bits((uint32_t)values[2].Reg64, 24, 8, fIndex);
+        values[3].Reg64 &= ~(uint64_t)(CPUID_X2APIC | CPUID_TSC_DEADLINE);
+        values[4].Reg64 |= CPUID_APIC;
+    }
     /* the physical address width, with no separate guest width */
     if (c.Rax == 0x80000008) {
         values[1].Reg64 = (values[1].Reg64 & ~(uint64_t)0x00ff00ff) |
             fOwner.fPhysAddressBits;
     }
     SetVpRegisters(names, 5, values);
+}
+
+
+/* With the lock held, before a run: IA32_APIC_BASE, which the processor
+   reads without an exit, and CR8 take what the machine's local APIC has.
+   CR8 comes back at every exit; a write that lowers it goes unnoticed until
+   then, since the hypervisor has no exit for it. */
+void WhpX86Vcpu::SyncApic()
+{
+    X86HypervisorTarget &target = fOwner.fTarget;
+    WHV_REGISTER_NAME names[2];
+    WHV_REGISTER_VALUE values[2] {};
+    UINT32 count = 0;
+
+    if (!fApicBaseSet) {
+        names[count] = WHvX64RegisterApicBase;
+        values[count].Reg64 = target.ApicBase();
+        count++;
+        fApicBaseSet = true;
+    }
+    int tpr = target.TaskPriority();
+    if (tpr != fTaskPriority) {
+        names[count] = WHvX64RegisterCr8;
+        values[count].Reg64 = tpr;
+        count++;
+        fTaskPriority = tpr;
+    }
+    if (count != 0)
+        SetVpRegisters(names, count, values);
+}
+
+
+void WhpX86Vcpu::InjectGeneralProtection()
+{
+    WHV_REGISTER_NAME name = WHvRegisterPendingInterruption;
+    WHV_REGISTER_VALUE value {};
+
+    value.PendingInterruption.InterruptionPending = 1;
+    value.PendingInterruption.InterruptionType = WHvX64PendingException;
+    value.PendingInterruption.DeliverErrorCode = 1;
+    value.PendingInterruption.InterruptionVector = 13;
+    SetVpRegisters(&name, 1, &value);
+}
+
+
+/* Only a write to IA32_APIC_BASE exits, for the machine's local APIC. */
+void WhpX86Vcpu::ExitMsr(const WHV_RUN_VP_EXIT_CONTEXT &ctx)
+{
+    const WHV_X64_MSR_ACCESS_CONTEXT &m = ctx.MsrAccess;
+    X86HypervisorTarget &target = fOwner.fTarget;
+    WHV_REGISTER_NAME names[2] = {WHvX64RegisterRip, WHvX64RegisterApicBase};
+    WHV_REGISTER_VALUE values[2] {};
+
+    if (!m.AccessInfo.IsWrite || m.MsrNumber != MSR_IA32_APIC_BASE) {
+        fprintf(stderr, "WHP: unexpected exit for MSR 0x%x at rip=0x%" PRIx64
+                "\n", m.MsrNumber, (uint64_t)ctx.VpContext.Rip);
+        exit(1);
+    }
+    DeviceLocker locker(fOwner.fLock);
+    if (!target.SetApicBase(((uint64_t)m.Rdx << 32) | (uint32_t)m.Rax)) {
+        InjectGeneralProtection();
+        return;
+    }
+    values[0].Reg64 = ctx.VpContext.Rip + ctx.VpContext.InstructionLength;
+    values[1].Reg64 = target.ApicBase();
+    SetVpRegisters(names, 2, values);
+}
+
+
+/* The registers as created; the machine's local APIC keeps its base. */
+void WhpX86Vcpu::Init()
+{
+    SetVpRegisters(kResetNames, RESET_REGISTER_COUNT, fResetValues);
+    fRflags = 0x2;
+    fInterruptShadow = false;
+    fInterruptionPending = false;
+    fWindowRequested = false;
+    fHalted = false;
+    fTaskPriority = 0;
+}
+
+
+void WhpX86Vcpu::Startup(int vector)
+{
+    WHV_REGISTER_NAME names[2] = {WHvX64RegisterCs, WHvX64RegisterRip};
+    WHV_REGISTER_VALUE values[2];
+
+    GetVpRegisters(names, 2, values);
+    values[0].Segment.Selector = vector << 8;
+    values[0].Segment.Base = (uint64_t)vector << 12;
+    values[1].Reg64 = 0;
+    SetVpRegisters(names, 2, values);
 }
 
 
@@ -684,6 +851,8 @@ void WhpX86Vcpu::Run()
 
     {
         DeviceLocker locker(lock);
+        if (fOwner.fLocalApic && !fOwner.fApicEmulation)
+            SyncApic();
         if (!InjectInterrupt())
             return;
     }
@@ -704,6 +873,14 @@ void WhpX86Vcpu::Run()
     fRflags = ctx.VpContext.Rflags;
     fInterruptShadow = ctx.VpContext.ExecutionState.InterruptShadow;
     fInterruptionPending = ctx.VpContext.ExecutionState.InterruptionPending;
+    /* the local APIC learns of a write to CR8 before anything else sees
+       it */
+    if (fOwner.fLocalApic && !fOwner.fApicEmulation &&
+        ctx.VpContext.Cr8 != fTaskPriority) {
+        fTaskPriority = ctx.VpContext.Cr8;
+        DeviceLocker locker(lock);
+        target.SetTaskPriority(fTaskPriority);
+    }
 
     switch (ctx.ExitReason) {
     case WHvRunVpExitReasonMemoryAccess: {
@@ -734,6 +911,9 @@ void WhpX86Vcpu::Run()
     }
     case WHvRunVpExitReasonX64Cpuid:
         ExitCpuid(ctx);
+        break;
+    case WHvRunVpExitReasonX64MsrAccess:
+        ExitMsr(ctx);
         break;
     case WHvRunVpExitReasonX64Halt:
         fHalted = true;
@@ -791,11 +971,19 @@ std::unique_ptr<HostX86Hypervisor> host_x86_hypervisor_open(
         return nullptr;
     }
 
-    if (options.local_apic) {
+    if (options.local_apic && options.hypervisor_interrupt_controllers) {
         hr = WHvGetCapability(WHvCapabilityCodeFeatures, &cap, sizeof(cap),
                               &size);
         if (FAILED(hr) || !cap.Features.LocalApicEmulation) {
             fprintf(stderr, "WHP has no local APIC emulation\n");
+            return nullptr;
+        }
+    } else if (options.local_apic) {
+        hr = WHvGetCapability(WHvCapabilityCodeX64MsrExitBitmap, &cap,
+                              sizeof(cap), &size);
+        if (FAILED(hr) || !cap.X64MsrExitBitmap.ApicBaseMsrWrite) {
+            fprintf(stderr, "WHP cannot exit at a write to "
+                    "IA32_APIC_BASE\n");
             return nullptr;
         }
     }

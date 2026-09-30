@@ -140,6 +140,9 @@ typedef struct {
     /* "plic", "aplic" or "aplic-imsic"; NULL when the configuration does not
        say, which leaves the choice to the machine */
     char *interrupt_controller;
+    /* the hypervisor's interrupt controllers may be used, whichever kinds it
+       has; false keeps them all in the machine */
+    bool hypervisor_intc;
     bool rtc_real_time;
     bool rtc_local_time;
     Platform *platform;

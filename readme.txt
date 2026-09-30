@@ -158,9 +158,20 @@ what the processor has besides the two 8259s:
   pic          nothing (the default)
   apic         a local APIC and an IOAPIC at 0xfec00000, which every line
                of the 8259s also reaches; the local APIC takes the MSI-X
-               messages of the devices behind the pci-host-i440fx. It needs
-               a hypervisor with a local APIC (WHP or KVM), and a kernel
-               booted without firmware finds both in its ACPI tables
+               messages of the devices behind the pci-host-i440fx. A
+               kernel booted without firmware finds both in its ACPI
+               tables
+
+"hypervisor_intc" (true unless given) lets a hardware hypervisor provide the
+interrupt controllers it can, of whatever kind the machine has. With false
+the machine emulates them all itself. On the PC machine that is the local
+APICs and the IOAPIC under WHP, and under KVM, whose kernel has them only as
+a set, the 8259s and the 8254 too; the guest then sees no KVM paravirtual
+interfaces that need the kernel's local APIC (PV EOI, PV IPIs, PV unhalt,
+async page faults). An interrupt for a running processor has to stop its
+run, so IPIs cost more than with the hypervisor's local APIC. Without a
+hypervisor, and with NVMM, which has no interrupt controllers, the machine's
+are used whatever the setting.
 
 The root bus of an FDT machine is declared as:
 

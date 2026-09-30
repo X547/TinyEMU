@@ -43,6 +43,9 @@ struct HostX86Options {
     /* local APICs: the hypervisor's, reached by SendMsi(), or the machine's
        when it has none */
     bool local_apic = false;
+    /* whether the hypervisor may provide interrupt controllers at all;
+       without, the machine keeps every one, the local APICs included */
+    bool hypervisor_interrupt_controllers = true;
     /* processors, numbered from 0 */
     int cpu_count = 1;
     /* the widest physical address the processors report in CPUID

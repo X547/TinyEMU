@@ -419,6 +419,16 @@ static int virt_machine_parse_config(VirtMachineParams *p,
         }
     }
 
+    tag_name = "hypervisor_intc";
+    el = json_object_get(cfg, tag_name);
+    if (!json_is_undefined(el)) {
+        if (el.type != JSON_BOOL) {
+            vm_error("%s: boolean expected\n", tag_name);
+            goto tag_fail;
+        }
+        p->hypervisor_intc = el.u.b;
+    }
+
     tag_name = "rtc_local_time";
     el = json_object_get(cfg, tag_name);
     if (!json_is_undefined(el)) {
@@ -821,4 +831,5 @@ void virt_machine_set_defaults(VirtMachineParams *p)
     memset(p, 0, sizeof(*p));
     /* a zeroed JSONValue is a JSON_STR with a null payload, not "nothing" */
     p->cfg_json = json_undefined_new();
+    p->hypervisor_intc = true;
 }

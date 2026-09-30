@@ -33,6 +33,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <linux/kvm.h>
+#include <linux/kvm_para.h>
 
 #include <algorithm>
 #include <atomic>
@@ -47,12 +48,16 @@
 
 #define CPUID_APIC bit_at(9)
 #define CPUID_ACPI bit_at(22)
+#define CPUID_X2APIC bit_at(21)
+#define CPUID_TSC_DEADLINE bit_at(24)
 
 
 class KvmX86Hypervisor;
 
 /* One vcpu. The in-kernel local APIC waits at HLT, so a run lasts until an
-   access for the target or InterruptRun(). */
+   access for the target or InterruptRun(). Without the in-kernel interrupt
+   controllers, HLT comes back here and the machine's interrupts go in
+   before a run. */
 class KvmX86Vcpu final: public HostX86Vcpu {
 private:
     KvmX86Hypervisor &fOwner;
@@ -64,8 +69,23 @@ private:
     std::atomic<bool> fThreadKnown {false};
     /* shut down, until the machine ends */
     bool fShutdown = false;
+    /* Without the in-kernel interrupt controllers: stopped at HLT until an
+       interrupt is taken, CR8 and IA32_APIC_BASE as the vcpu and the
+       machine's local APIC last agreed on them, and the registers as
+       created, for an INIT. */
+    bool fHalted = false;
+    int fTaskPriority = 0;
+    uint64_t fApicBase = 0;
+    bool fApicBaseSet = false;
+    struct kvm_regs fResetRegs;
+    struct kvm_sregs fResetSregs;
+    struct kvm_fpu fResetFpu;
 
     void SetCpuid(int index);
+    void GetSregs(struct kvm_sregs *sregs);
+    void SetSregs(const struct kvm_sregs &sregs);
+    bool InjectInterrupt();
+    void ExitApicState();
     void ExitIo();
     void ExitMmio();
 
@@ -79,24 +99,28 @@ public:
                               uint16_t code_sel, uint16_t data_sel) override;
     void ThreadStarted() override;
     void Run() override;
-    bool Idle(bool intr) override {return fShutdown;}
+    bool Idle(bool intr) override;
     void InterruptRun() override;
-    /* the in-kernel local APICs take INIT and STARTUP themselves */
-    void Init() override {abort();}
-    void Startup(int vector) override {abort();}
+    /* only without the in-kernel local APICs, which take INIT and STARTUP
+       themselves */
+    void Init() override;
+    void Startup(int vector) override;
 };
 
 
 /* The VM keeps the 8259s, the 8254, the IOAPIC and the local APICs in the
-   kernel. */
+   kernel, which has them only as a set; or, when not allowed them, none,
+   leaving them all to the machine. */
 class KvmX86Hypervisor final: public HostX86Hypervisor {
 private:
     friend class KvmX86Vcpu;
 
     X86HypervisorTarget &fTarget;
     DeviceLock &fLock;
-    /* the in-kernel local APIC is shown to the guest */
+    /* the local APIC is shown to the guest */
     bool fLocalApic;
+    /* the kernel has the interrupt controllers */
+    bool fIrqchip;
     int fCpuCount;
     int fMaxPhysAddressBits;
     int fPhysAddressBits = 36;
@@ -110,14 +134,15 @@ public:
     KvmX86Hypervisor(X86HypervisorTarget &target, DeviceLock &lock,
                      const HostX86Options &options, int kvm_fd):
         fTarget(target), fLock(lock), fLocalApic(options.local_apic),
+        fIrqchip(options.hypervisor_interrupt_controllers),
         fCpuCount(options.cpu_count),
         fMaxPhysAddressBits(options.max_phys_address_bits), fKvmFd(kvm_fd) {}
     ~KvmX86Hypervisor() override;
 
     void Init();
 
-    bool HasInterruptControllers() override {return true;}
-    bool HasLocalApics() override {return true;}
+    bool HasInterruptControllers() override {return fIrqchip;}
+    bool HasLocalApics() override {return fIrqchip;}
     int PhysAddressBits() override {return fPhysAddressBits;}
     uint8_t *AllocRam(size_t size) override {return host_ram_alloc(size);}
     void FreeRam(uint8_t *ptr, size_t size) override
@@ -226,12 +251,14 @@ void KvmX86Hypervisor::Init()
         exit(1);
     }
 
-    if (ioctl(fVmFd, KVM_CREATE_IRQCHIP, 0) < 0) {
-        perror("KVM_CREATE_IRQCHIP");
-        exit(1);
+    if (fIrqchip) {
+        if (ioctl(fVmFd, KVM_CREATE_IRQCHIP, 0) < 0) {
+            perror("KVM_CREATE_IRQCHIP");
+            exit(1);
+        }
+        if (fLocalApic)
+            SetGsiRouting();
     }
-    if (fLocalApic)
-        SetGsiRouting();
 
     /* before the vcpus, whose CPUID reports it */
     struct kvm_cpuid2 *kvm_cpuid = kvm_supported_cpuid(fKvmFd);
@@ -242,11 +269,13 @@ void KvmX86Hypervisor::Init()
     free(kvm_cpuid);
     fPhysAddressBits = std::min(fPhysAddressBits, fMaxPhysAddressBits);
 
-    memset(&pit_config, 0, sizeof(pit_config));
-    pit_config.flags = KVM_PIT_SPEAKER_DUMMY;
-    if (ioctl(fVmFd, KVM_CREATE_PIT2, &pit_config)) {
-        perror("KVM_CREATE_PIT2");
-        exit(1);
+    if (fIrqchip) {
+        memset(&pit_config, 0, sizeof(pit_config));
+        pit_config.flags = KVM_PIT_SPEAKER_DUMMY;
+        if (ioctl(fVmFd, KVM_CREATE_PIT2, &pit_config)) {
+            perror("KVM_CREATE_PIT2");
+            exit(1);
+        }
     }
 
     for (int i = 0; i < fCpuCount; i++)
@@ -354,6 +383,18 @@ KvmX86Vcpu::KvmX86Vcpu(KvmX86Hypervisor &owner, int index):
         exit(1);
     }
     fRun = static_cast<struct kvm_run *>(run);
+
+    if (!fOwner.fIrqchip) {
+        if (ioctl(fFd, KVM_GET_REGS, &fResetRegs) < 0) {
+            perror("KVM_GET_REGS");
+            exit(1);
+        }
+        GetSregs(&fResetSregs);
+        if (ioctl(fFd, KVM_GET_FPU, &fResetFpu) < 0) {
+            perror("KVM_GET_FPU");
+            exit(1);
+        }
+    }
 }
 
 
@@ -381,6 +422,20 @@ void KvmX86Vcpu::SetCpuid(int index)
             ent->edx &= ~CPUID_ACPI;
             if (!fOwner.fLocalApic)
                 ent->edx &= ~CPUID_APIC;
+        }
+        /* the machine's local APIC is an xAPIC only, and the paravirtual
+           interfaces that go through the in-kernel one are not there */
+        if (ent->function == 1 && !fOwner.fIrqchip)
+            ent->ecx &= ~(CPUID_X2APIC | CPUID_TSC_DEADLINE);
+        if (ent->function == KVM_CPUID_FEATURES && !fOwner.fIrqchip) {
+            ent->eax &= ~(bit_at(KVM_FEATURE_ASYNC_PF) |
+                          bit_at(KVM_FEATURE_PV_EOI) |
+                          bit_at(KVM_FEATURE_PV_UNHALT) |
+                          bit_at(KVM_FEATURE_ASYNC_PF_VMEXIT) |
+                          bit_at(KVM_FEATURE_PV_SEND_IPI) |
+                          bit_at(KVM_FEATURE_PV_SCHED_YIELD) |
+                          bit_at(KVM_FEATURE_ASYNC_PF_INT) |
+                          bit_at(KVM_FEATURE_MSI_EXT_DEST_ID));
         }
         /* The table is the host's; the APIC ID it reports is the vcpu's,
            which is its index. */
@@ -456,16 +511,31 @@ void KvmX86Vcpu::SetRegs(const HostX86Regs &regs)
 }
 
 
+void KvmX86Vcpu::GetSregs(struct kvm_sregs *sregs)
+{
+    if (ioctl(fFd, KVM_GET_SREGS, sregs) < 0) {
+        perror("KVM_GET_SREGS");
+        exit(1);
+    }
+}
+
+
+void KvmX86Vcpu::SetSregs(const struct kvm_sregs &sregs)
+{
+    if (ioctl(fFd, KVM_SET_SREGS, &sregs) < 0) {
+        perror("KVM_SET_SREGS");
+        exit(1);
+    }
+}
+
+
 void KvmX86Vcpu::SetFlatProtectedMode(uint32_t gdt_base, uint16_t gdt_limit,
                                       uint16_t code_sel, uint16_t data_sel)
 {
     struct kvm_sregs sregs;
     struct kvm_segment seg;
 
-    if (ioctl(fFd, KVM_GET_SREGS, &sregs) < 0) {
-        perror("KVM_GET_SREGS");
-        exit(1);
-    }
+    GetSregs(&sregs);
 
     sregs.cr0 |= (1 << 0); /* CR0_PE */
     sregs.gdt.base = gdt_base;
@@ -490,10 +560,7 @@ void KvmX86Vcpu::SetFlatProtectedMode(uint32_t gdt_base, uint16_t gdt_limit,
     sregs.fs = seg;
     sregs.gs = seg;
 
-    if (ioctl(fFd, KVM_SET_SREGS, &sregs) < 0) {
-        perror("KVM_SET_SREGS");
-        exit(1);
-    }
+    SetSregs(sregs);
 }
 
 
@@ -566,14 +633,125 @@ void KvmX86Vcpu::ExitMmio()
 }
 
 
+/* Without the in-kernel interrupt controllers, with the lock held, before a
+   run: CR8 and IA32_APIC_BASE take what the machine's local APIC has, and
+   the processor the interrupt the 8259s or that APIC raise when it can take
+   one, and otherwise asks to exit once it can. False while it stays
+   halted. */
+bool KvmX86Vcpu::InjectInterrupt()
+{
+    X86HypervisorTarget &target = fOwner.fTarget;
+    struct kvm_run *run = fRun;
+
+    if (fOwner.fLocalApic) {
+        if (!fApicBaseSet) {
+            struct kvm_sregs sregs;
+            GetSregs(&sregs);
+            sregs.apic_base = fApicBase = target.ApicBase();
+            SetSregs(sregs);
+            fApicBaseSet = true;
+        }
+        fTaskPriority = target.TaskPriority();
+        run->cr8 = fTaskPriority;
+    }
+
+    bool intr = target.InterruptRequested();
+    if (intr && run->ready_for_interrupt_injection) {
+        struct kvm_interrupt irq;
+        irq.irq = target.AcknowledgeInterrupt();
+        if (ioctl(fFd, KVM_INTERRUPT, &irq) < 0) {
+            perror("KVM_INTERRUPT");
+            exit(1);
+        }
+        fHalted = false;
+        intr = target.InterruptRequested();
+    }
+    run->request_interrupt_window = intr;
+    return !fHalted;
+}
+
+
+/* The machine's local APIC learns of a write to CR8 or IA32_APIC_BASE
+   before anything else sees it. The kernel checks the base; the APIC keeps
+   its page where it is whatever the base says. */
+void KvmX86Vcpu::ExitApicState()
+{
+    X86HypervisorTarget &target = fOwner.fTarget;
+    struct kvm_run *run = fRun;
+
+    if ((int)run->cr8 == fTaskPriority && run->apic_base == fApicBase)
+        return;
+    DeviceLocker locker(fOwner.fLock);
+    if ((int)run->cr8 != fTaskPriority) {
+        fTaskPriority = run->cr8;
+        target.SetTaskPriority(fTaskPriority);
+    }
+    if (run->apic_base != fApicBase) {
+        fApicBase = run->apic_base;
+        target.SetApicBase(fApicBase);
+    }
+}
+
+
+/* The registers as created, less IA32_APIC_BASE and the time stamp counter,
+   which an INIT leaves alone. */
+void KvmX86Vcpu::Init()
+{
+    struct kvm_sregs sregs = fResetSregs;
+
+    if (fApicBaseSet)
+        sregs.apic_base = fApicBase;
+    SetSregs(sregs);
+    if (ioctl(fFd, KVM_SET_REGS, &fResetRegs) < 0) {
+        perror("KVM_SET_REGS");
+        exit(1);
+    }
+    if (ioctl(fFd, KVM_SET_FPU, &fResetFpu) < 0) {
+        perror("KVM_SET_FPU");
+        exit(1);
+    }
+    fHalted = false;
+    fTaskPriority = 0;
+    fRun->cr8 = 0;
+}
+
+
+void KvmX86Vcpu::Startup(int vector)
+{
+    struct kvm_sregs sregs;
+    struct kvm_regs regs;
+
+    GetSregs(&sregs);
+    sregs.cs.selector = vector << 8;
+    sregs.cs.base = (uint64_t)vector << 12;
+    SetSregs(sregs);
+    if (ioctl(fFd, KVM_GET_REGS, &regs) < 0) {
+        perror("KVM_GET_REGS");
+        exit(1);
+    }
+    regs.rip = 0;
+    if (ioctl(fFd, KVM_SET_REGS, &regs) < 0) {
+        perror("KVM_SET_REGS");
+        exit(1);
+    }
+}
+
+
 void KvmX86Vcpu::Run()
 {
     struct kvm_run *run = fRun;
     int ret;
 
+    if (!fOwner.fIrqchip) {
+        DeviceLocker locker(fOwner.fLock);
+        if (!InjectInterrupt())
+            return;
+    }
     ret = ioctl(fFd, KVM_RUN, 0);
     /* a request to return that came in while running has done its job */
     run->immediate_exit = 0;
+    if (!fOwner.fIrqchip && fOwner.fLocalApic)
+        ExitApicState();
     if (ret < 0) {
         if (errno == EINTR || errno == EAGAIN)
             return;
@@ -582,6 +760,10 @@ void KvmX86Vcpu::Run()
     }
     switch(run->exit_reason) {
     case KVM_EXIT_HLT:
+        fHalted = !fOwner.fIrqchip;
+        break;
+    case KVM_EXIT_IRQ_WINDOW_OPEN:
+    case KVM_EXIT_SET_TPR:
         break;
     case KVM_EXIT_IO: {
         DeviceLocker locker(fOwner.fLock);
@@ -611,6 +793,12 @@ void KvmX86Vcpu::Run()
         fprintf(stderr, "KVM: unsupported exit_reason=%d\n", run->exit_reason);
         exit(1);
     }
+}
+
+
+bool KvmX86Vcpu::Idle(bool intr)
+{
+    return fShutdown || (fHalted && !(intr && fRun->if_flag));
 }
 
 

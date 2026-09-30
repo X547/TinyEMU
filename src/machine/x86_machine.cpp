@@ -1821,6 +1821,7 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
         return nullptr;
     }
     options.cpu_count = p->cpu_count;
+    options.hypervisor_interrupt_controllers = p->hypervisor_intc;
     /* The nesting in the file is the nesting of the buses, so the root one
        has to be the kind this machine provides. */
     if (p->root_bus_type != NULL && strcmp(p->root_bus_type, "pc") != 0) {
