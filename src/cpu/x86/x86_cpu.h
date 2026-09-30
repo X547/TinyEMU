@@ -97,14 +97,26 @@ public:
     virtual void SetTaskPriority(int val) = 0;
 };
 
+/* Implemented by the machine, which decides what a shut down processor
+   means for the rest of it, as a PC's chipset resets on a triple fault. */
+class X86ShutdownTarget {
+public:
+    virtual ~X86ShutdownTarget() = default;
+
+    /* A processor shut down; it runs no more until an INIT or a reset.
+       From the processor's own thread. */
+    virtual void ProcessorShutdown() = 0;
+};
+
 void x86_cpu_set_hard_intno_source(X86CPUState *s, X86HardIntnoSource *source);
+void x86_cpu_set_shutdown_target(X86CPUState *s, X86ShutdownTarget *target);
 void x86_cpu_set_local_apic(X86CPUState *s, X86LocalApicTarget *apic);
 void x86_cpu_set_tsc_source(X86CPUState *s, X86TscSource *source);
 void x86_cpu_set_port_io(X86CPUState *s, DeviceIO *port_io);
 /* taken around every device access and interrupt acknowledge */
 void x86_cpu_set_device_lock(X86CPUState *s, DeviceLock *lock);
 int64_t x86_cpu_get_cycles(X86CPUState *s);
-/* Halted with no interrupt that could wake it. */
+/* Halted with no interrupt that could wake it, or shut down. */
 bool x86_cpu_get_power_down(X86CPUState *s);
 /* any thread */
 void x86_cpu_flush_tlb_write_range_ram(X86CPUState *s,

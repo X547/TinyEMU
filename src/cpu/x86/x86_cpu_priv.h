@@ -443,6 +443,7 @@ struct X86CPUState {
     std::atomic<bool> irq_level; /* set from any thread */
     bool irq_inhibit;    /* for one instruction after STI or a load of SS */
     bool power_down;
+    bool shutdown;       /* after a triple fault, until an INIT or a reset */
     /* Other processors share the memory: LOCK and XCHG are atomic, and
        MFENCE and the accessed and dirty bits order and update memory as
        they do on a multiprocessor. */
@@ -474,6 +475,7 @@ struct X86CPUState {
     X86HardIntnoSource *hard_intno_source;
     X86LocalApicTarget *local_apic; /* null without one */
     X86TscSource *tsc_source;
+    X86ShutdownTarget *shutdown_target; /* null without one */
 };
 
 

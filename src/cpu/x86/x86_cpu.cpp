@@ -1039,6 +1039,7 @@ static void cpu_reset(X86CPUState *s)
 
     s->irq_inhibit = false;
     s->power_down = false;
+    s->shutdown = false;
     s->lock_ptr = nullptr;
     s->old_exception = -1;
     fpu_reset(s);
@@ -1330,9 +1331,14 @@ void raise_exception(X86CPUState *s, int intno, int error_code)
             s->rip, s->cr2);
 #endif
     if (old == EXCP_DF) {
-        fprintf(stderr, "x86: triple fault, resetting\n");
+        fprintf(stderr, "x86: triple fault\n");
         cpu_dump_state(s);
-        cpu_reset(s);
+        s->old_exception = -1;
+        s->shutdown = true;
+        s->power_down = true;
+        if (s->shutdown_target != nullptr) {
+            s->shutdown_target->ProcessorShutdown();
+        }
         longjmp(s->jmp_env, 1);
     }
     if ((exception_is_contributory(old) && exception_is_contributory(intno)) ||
@@ -1367,7 +1373,8 @@ void x86_cpu_interp(X86CPUState *s, int max_cycles)
 {
     s->cycles_end = s->cycles + max_cycles;
     if (s->power_down) {
-        if (!s->irq_level.load() || !get_bit(s->eflags, EFLAGS_IF)) {
+        if (s->shutdown || !s->irq_level.load() ||
+            !get_bit(s->eflags, EFLAGS_IF)) {
             return;
         }
         s->power_down = false;
@@ -1450,6 +1457,11 @@ void x86_cpu_set_hard_intno_source(X86CPUState *s, X86HardIntnoSource *source)
     s->hard_intno_source = source;
 }
 
+void x86_cpu_set_shutdown_target(X86CPUState *s, X86ShutdownTarget *target)
+{
+    s->shutdown_target = target;
+}
+
 void x86_cpu_set_local_apic(X86CPUState *s, X86LocalApicTarget *apic)
 {
     s->local_apic = apic;
@@ -1477,8 +1489,8 @@ int64_t x86_cpu_get_cycles(X86CPUState *s)
 
 bool x86_cpu_get_power_down(X86CPUState *s)
 {
-    return s->power_down &&
-        !(s->irq_level.load() && get_bit(s->eflags, EFLAGS_IF));
+    return s->power_down && (s->shutdown ||
+        !(s->irq_level.load() && get_bit(s->eflags, EFLAGS_IF)));
 }
 
 /* A RAM mapping moved or its dirty bits were reset: drop the entries that

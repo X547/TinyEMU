@@ -1063,6 +1063,7 @@ class PCMachine final:
     public X86HardIntnoSource,
     public X86TscSource,
     public X86HypervisorTarget,
+    public X86ShutdownTarget,
     public PCIMsiTarget,
     public LocalApicHost,
     public X86LocalApicTarget {
@@ -1162,6 +1163,7 @@ public:
     bool InterruptRequested() override;
     int AcknowledgeInterrupt() override;
     void ApicEoi(int vector) override;
+    /* and X86ShutdownTarget */
     void ProcessorShutdown() override;
     /* PCIMsiTarget */
     void SendMsi(uint64_t addr, uint32_t data) override;
@@ -1873,6 +1875,7 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
         for (int i = 0; i < s->fCpuCount; i++) {
             X86CPUState *cpu = x86_cpu_init(s->mem_map);
             x86_cpu_set_tsc_source(cpu, s);
+            x86_cpu_set_shutdown_target(cpu, s);
             x86_cpu_set_port_io(cpu, &s->fPortIo);
             x86_cpu_set_device_lock(cpu, p->device_lock);
             x86_cpu_set_smp(cpu, s->fInterpThreads);
