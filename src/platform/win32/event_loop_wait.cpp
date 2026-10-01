@@ -289,6 +289,13 @@ bool event_loop_attach(EventLoop &loop, HANDLE file, void *key)
 }
 
 
+bool event_loop_post(EventLoop &loop, void *key, OVERLAPPED *ov)
+{
+    return PostQueuedCompletionStatus(loop.Waker().port, 0,
+                                      reinterpret_cast<ULONG_PTR>(key), ov);
+}
+
+
 EventLoop::EventLoop():
     fWaker(std::make_unique<LoopWaker>())
 {

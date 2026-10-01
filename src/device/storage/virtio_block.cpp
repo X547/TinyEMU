@@ -26,37 +26,38 @@
 #include <string.h>
 #include <inttypes.h>
 #include <assert.h>
+#include <algorithm>
+#include <vector>
 
 #include "cutils.h"
 #include "virtio.h"
 #include "virtio_priv.h"
 
 
-typedef struct {
-    uint32_t type;
+struct VIRTIOBlockDevice;
+
+/* One request the guest made. It is also the completion the back end answers
+   through, which is what tells the requests in flight apart. */
+struct BlockRequest final: public BlockCompletion {
+    VIRTIOBlockDevice &dev;
+    uint32_t type = 0;
     std::unique_ptr<uint8_t[]> buf;
-    int write_size;
-    int queue_idx;
-    int desc_idx;
-} BlockRequest;
+    int write_size = 0;
+    int queue_idx = 0;
+    int desc_idx = 0;
+
+    BlockRequest(VIRTIOBlockDevice &dev): dev(dev) {}
+
+    void Complete(int ret) override;
+};
 
 struct VIRTIOBlockDevice: public VIRTIODevice {
-    class Completion final: public BlockCompletion {
-    private:
-        VIRTIOBlockDevice &fDev;
-
-    public:
-        Completion(VIRTIOBlockDevice &dev): fDev(dev) {}
-
-        void Complete(int ret) override;
-    };
-
     HostBlockDevice *bs = nullptr; /* owned by the node that created the device */
     bool read_only = false;
 
-    bool req_in_progress = false;
-    BlockRequest req {}; /* request in progress */
-    Completion fCompletion {*this};
+    /* The requests with the back end. They finish in whatever order it
+       answers, which virtio allows. */
+    std::vector<std::unique_ptr<BlockRequest>> in_flight;
 
     int RecvRequest(int queue_idx, int desc_idx, int read_size,
                     int write_size) override;
@@ -75,7 +76,22 @@ typedef struct {
 #define VIRTIO_BLK_T_FLUSH_OUT   5
 #define VIRTIO_BLK_T_GET_ID      8
 
+#define VIRTIO_BLK_F_SIZE_MAX    (1 << 1)
+#define VIRTIO_BLK_F_SEG_MAX     (1 << 2)
 #define VIRTIO_BLK_F_RO          (1 << 5)
+
+/* configuration space */
+#define VIRTIO_BLK_CFG_CAPACITY  0
+#define VIRTIO_BLK_CFG_SIZE_MAX  8
+#define VIRTIO_BLK_CFG_SEG_MAX   12
+#define VIRTIO_BLK_CFG_SIZE      16
+
+/* Without these a driver puts one segment in each request, which is one
+   page of a buffer that is not physically contiguous. A request has to fit
+   the ring with its header and status, as no indirect descriptors are
+   offered. */
+#define VIRTIO_BLK_SEG_MAX       (MAX_QUEUE_NUM - 2)
+#define VIRTIO_BLK_SIZE_MAX      (1 << 20)
 
 /* length of the serial reported by VIRTIO_BLK_T_GET_ID */
 #define VIRTIO_BLK_ID_BYTES     20
@@ -88,144 +104,131 @@ typedef struct {
 
 /* Complete a request that carries a data buffer: the status byte is the last
    byte the guest made writable. */
-static void virtio_block_req_end_buf(VIRTIODevice *s, uint8_t status)
+static void virtio_block_req_end_buf(VIRTIODevice *s, BlockRequest *req,
+                                     uint8_t status)
 {
-    VIRTIOBlockDevice *s1 = (VIRTIOBlockDevice *)s;
-    int queue_idx = s1->req.queue_idx;
-    int desc_idx = s1->req.desc_idx;
-    int write_size = s1->req.write_size;
-    uint8_t *buf = s1->req.buf.get();
+    uint8_t *buf = req->buf.get();
 
-    buf[write_size - 1] = status;
-    memcpy_to_queue(s, queue_idx, desc_idx, 0, buf, write_size);
-    s1->req.buf.reset();
-    virtio_consume_desc(s, queue_idx, desc_idx, write_size);
+    buf[req->write_size - 1] = status;
+    memcpy_to_queue(s, req->queue_idx, req->desc_idx, 0, buf, req->write_size);
+    virtio_consume_desc(s, req->queue_idx, req->desc_idx, req->write_size);
 }
 
 /* Complete a request whose only writable byte is the status. */
-static void virtio_block_req_end_status(VIRTIODevice *s, uint8_t status)
+static void virtio_block_req_end_status(VIRTIODevice *s, BlockRequest *req,
+                                        uint8_t status)
 {
-    VIRTIOBlockDevice *s1 = (VIRTIOBlockDevice *)s;
-
-    memcpy_to_queue(s, s1->req.queue_idx, s1->req.desc_idx, 0, &status, 1);
-    virtio_consume_desc(s, s1->req.queue_idx, s1->req.desc_idx, 1);
+    memcpy_to_queue(s, req->queue_idx, req->desc_idx, 0, &status, 1);
+    virtio_consume_desc(s, req->queue_idx, req->desc_idx, 1);
 }
 
-static void virtio_block_req_end(VIRTIODevice *s, int ret)
+static void virtio_block_req_end(VIRTIODevice *s, BlockRequest *req, int ret)
 {
-    VIRTIOBlockDevice *s1 = (VIRTIOBlockDevice *)s;
     uint8_t status = ret < 0 ? VIRTIO_BLK_S_IOERR : VIRTIO_BLK_S_OK;
 
-    switch(s1->req.type) {
+    switch(req->type) {
     case VIRTIO_BLK_T_IN:
     case VIRTIO_BLK_T_GET_ID:
-        virtio_block_req_end_buf(s, status);
+        virtio_block_req_end_buf(s, req, status);
         break;
     default:
         /* OUT, FLUSH, and anything else: status byte only. Every request
            must be completed, whatever its type: leaving one unanswered
            stalls the queue forever because the guest waits for a used ring
            entry that never arrives. */
-        virtio_block_req_end_status(s, status);
-        s1->req.buf.reset();
+        virtio_block_req_end_status(s, req, status);
         break;
     }
 }
 
-void VIRTIOBlockDevice::Completion::Complete(int ret)
+void BlockRequest::Complete(int ret)
 {
-    VIRTIOBlockDevice *s1 = &fDev;
+    VIRTIOBlockDevice *s = &dev;
 
-    virtio_block_req_end(s1, ret);
+    virtio_block_req_end(s, this, ret);
 
-    s1->req_in_progress = false;
-
-    /* handle next requests */
-    queue_notify(s1, s1->req.queue_idx);
+    /* the last thing done with the request: it goes with its entry */
+    auto it = std::find_if(s->in_flight.begin(), s->in_flight.end(),
+                           [this](const std::unique_ptr<BlockRequest> &r) {
+                               return r.get() == this;
+                           });
+    std::unique_ptr<BlockRequest> self = std::move(*it);
+    s->in_flight.erase(it);
 }
 
 void VIRTIOBlockDevice::Reset()
 {
-    /* the queues the request came from are gone */
-    bs->Cancel(&fCompletion);
-    req_in_progress = false;
-    req.buf.reset();
+    /* the queues the requests came from are gone */
+    for (auto &req : in_flight)
+        bs->Cancel(req.get());
+    in_flight.clear();
 }
 
 int VIRTIOBlockDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
                                    int write_size)
 {
     VIRTIODevice *s = this;
-    VIRTIOBlockDevice *s1 = this;
-    HostBlockDevice *bs = s1->bs;
     BlockRequestHeader h;
     int len, ret;
 
-    if (s1->req_in_progress)
-        return -1;
-    
     if (memcpy_from_queue(s, &h, queue_idx, desc_idx, 0, sizeof(h)) < 0)
         return 0;
-    s1->req.type = h.type;
-    s1->req.queue_idx = queue_idx;
-    s1->req.desc_idx = desc_idx;
+    auto req = std::make_unique<BlockRequest>(*this);
+    req->type = h.type;
+    req->queue_idx = queue_idx;
+    req->desc_idx = desc_idx;
     switch(h.type) {
     case VIRTIO_BLK_T_IN:
         /* not zeroed, the read fills it */
-        s1->req.buf.reset(new uint8_t[write_size]);
-        s1->req.write_size = write_size;
-        ret = bs->ReadAsync(h.sector_num, s1->req.buf.get(),
-                            (write_size - 1) / SECTOR_SIZE, &s1->fCompletion);
-        if (ret > 0) {
-            /* asyncronous read */
-            s1->req_in_progress = true;
-        } else {
-            virtio_block_req_end(s, ret);
-        }
+        req->buf.reset(new uint8_t[write_size]);
+        req->write_size = write_size;
+        ret = bs->ReadAsync(h.sector_num, req->buf.get(),
+                            (write_size - 1) / SECTOR_SIZE, req.get());
         break;
     case VIRTIO_BLK_T_OUT:
         assert(write_size >= 1);
-        if (s1->read_only) {
-            virtio_block_req_end_status(s, VIRTIO_BLK_S_IOERR);
+        if (read_only) {
+            ret = -1;
             break;
         }
         len = read_size - sizeof(h);
         /* kept until the write finishes */
-        s1->req.buf.reset(new uint8_t[len]);
-        memcpy_from_queue(s, s1->req.buf.get(), queue_idx, desc_idx,
+        req->buf.reset(new uint8_t[len]);
+        memcpy_from_queue(s, req->buf.get(), queue_idx, desc_idx,
                           sizeof(h), len);
-        ret = bs->WriteAsync(h.sector_num, s1->req.buf.get(),
-                             len / SECTOR_SIZE, &s1->fCompletion);
-        if (ret > 0) {
-            /* asyncronous write */
-            s1->req_in_progress = true;
-        } else {
-            virtio_block_req_end(s, ret);
-        }
+        ret = bs->WriteAsync(h.sector_num, req->buf.get(),
+                             len / SECTOR_SIZE, req.get());
         break;
     case VIRTIO_BLK_T_FLUSH:
     case VIRTIO_BLK_T_FLUSH_OUT:
         /* a write is answered only once the back end has it, so there is
            nothing to flush */
-        virtio_block_req_end(s, 0);
+        ret = 0;
         break;
     case VIRTIO_BLK_T_GET_ID:
-        s1->req.buf = std::make_unique<uint8_t[]>(write_size);
-        s1->req.write_size = write_size;
+        req->buf = std::make_unique<uint8_t[]>(write_size);
+        req->write_size = write_size;
         if (write_size > 1) {
             int id_len = write_size - 1;
             if (id_len > VIRTIO_BLK_ID_BYTES) {
                 id_len = VIRTIO_BLK_ID_BYTES;
             }
-            strncpy((char *)s1->req.buf.get(), "tinyemu-blk", id_len);
+            strncpy((char *)req->buf.get(), "tinyemu-blk", id_len);
         }
-        virtio_block_req_end(s, 0);
+        ret = 0;
         break;
     default:
         /* Report the request as unsupported rather than dropping it: an
            unanswered request stalls the queue forever. */
-        virtio_block_req_end_status(s, VIRTIO_BLK_S_UNSUPP);
-        break;
+        virtio_block_req_end_status(s, req.get(), VIRTIO_BLK_S_UNSUPP);
+        return 0;
+    }
+
+    if (ret > 0) {
+        /* the completion finishes it */
+        in_flight.push_back(std::move(req));
+    } else {
+        virtio_block_req_end(s, req.get(), ret);
     }
     return 0;
 }
@@ -237,15 +240,18 @@ std::unique_ptr<VIRTIODevice> virtio_block_init(VIRTIOBusDef *bus,
     uint64_t nb_sectors;
 
     auto s = std::make_unique<VIRTIOBlockDevice>();
-    virtio_init(s.get(), bus, 2, 8);
+    virtio_init(s.get(), bus, 2, VIRTIO_BLK_CFG_SIZE);
     s->bs = bs;
     s->read_only = read_only;
+    s->device_features = VIRTIO_BLK_F_SIZE_MAX | VIRTIO_BLK_F_SEG_MAX;
     if (read_only)
         s->device_features |= VIRTIO_BLK_F_RO;
 
     nb_sectors = bs->SectorCount();
-    put_le32(s->config_space, nb_sectors);
-    put_le32(s->config_space + 4, nb_sectors >> 32);
+    put_le32(s->config_space + VIRTIO_BLK_CFG_CAPACITY, nb_sectors);
+    put_le32(s->config_space + VIRTIO_BLK_CFG_CAPACITY + 4, nb_sectors >> 32);
+    put_le32(s->config_space + VIRTIO_BLK_CFG_SIZE_MAX, VIRTIO_BLK_SIZE_MAX);
+    put_le32(s->config_space + VIRTIO_BLK_CFG_SEG_MAX, VIRTIO_BLK_SEG_MAX);
 
     return s;
 }

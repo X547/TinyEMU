@@ -96,6 +96,10 @@
 #define NVME_MDTS 5
 #define NVME_MAX_TRANSFER (4096u << NVME_MDTS)
 
+/* How many I/O commands may be with the block back ends at once. The rest
+   wait in their submission queues. */
+#define NVME_MAX_IN_FLIGHT 32
+
 /* Admin command opcodes. */
 #define NVME_ADM_DELETE_SQ  0x00
 #define NVME_ADM_CREATE_SQ  0x01
@@ -136,6 +140,8 @@
 #define NVME_SC_INVALID_FIELD   0x02
 #define NVME_SC_DATA_XFER_ERROR 0x04
 #define NVME_SC_INTERNAL_ERROR  0x06
+#define NVME_SC_ABORT_REQUESTED 0x07
+#define NVME_SC_ABORT_SQ_DELETE 0x08
 #define NVME_SC_INVALID_NS      0x0b
 #define NVME_SC_NS_WRITE_PROT   0x20
 #define NVME_SC_LBA_RANGE       0x80
@@ -293,21 +299,35 @@ public:
 
 //#pragma mark - NVMeDevice
 
+/* One I/O command the controller holds while a block back end has it. It is
+   also the completion the back end answers through, which is what tells the
+   commands apart. */
+class NVMeIoCommand final: public BlockCompletion {
+private:
+    NVMeDevice &fCtrl;
+
+public:
+    bool busy = false;
+    HostBlockDevice *backend = nullptr;
+    uint16_t cid = 0;
+    uint16_t sqid = 0;
+    uint16_t cqid = 0;
+    bool is_read = false;
+    uint64_t prp1 = 0;
+    uint64_t prp2 = 0;
+    uint32_t length = 0;
+    /* allocated on first use, NVME_MAX_TRANSFER bytes */
+    std::unique_ptr<uint8_t[]> buf;
+
+    NVMeIoCommand(NVMeDevice &ctrl): fCtrl(ctrl) {}
+
+    void Complete(int ret) override;
+};
+
+
 class NVMeDevice final: public Device, public PCIBarTarget, public DeviceIO,
                         public NVMeNamespaceTarget {
 private:
-    /* The block back end answers through this when it takes a request
-       asynchronously; the controller holds the command until it does. */
-    class Completion final: public BlockCompletion {
-    private:
-        NVMeDevice &fCtrl;
-
-    public:
-        Completion(NVMeDevice &ctrl): fCtrl(ctrl) {}
-
-        void Complete(int ret) override {fCtrl.BlockDone(ret);}
-    };
-
     uint32_t fQuirks;
 
     PCIDevice *fPciDev = nullptr;
@@ -336,19 +356,12 @@ private:
     uint32_t fNumSqAllocated = NVME_MAX_IO_QUEUES;
     uint32_t fNumCqAllocated = NVME_MAX_IO_QUEUES;
 
-    /* One command may be with the block back end at a time; while it is, no
-       queue is served, so the controller never has two in flight. */
-    Completion fCompletion {*this};
-    bool fBusy = false;
-    HostBlockDevice *fPendingBackend = nullptr;
-    uint16_t fPendingCid = 0;
-    uint16_t fPendingSqid = 0;
-    uint16_t fPendingCqid = 0;
-    bool fPendingIsRead = false;
-    uint64_t fPendingPrp1 = 0;
-    uint64_t fPendingPrp2 = 0;
-    uint32_t fPendingLength = 0;
+    /* The I/O commands with the back ends; an I/O queue is only read while
+       one of these is free. They finish in whatever order the back ends
+       answer, which NVMe allows. */
+    std::unique_ptr<NVMeIoCommand> fIo[NVME_MAX_IN_FLIGHT];
 
+    /* for admin commands */
     uint8_t *fBuf = nullptr;
     uint32_t fBufSize = 0;
 
@@ -371,6 +384,9 @@ private:
 
     bool EnsureBuffer(uint32_t size);
     NVMeNamespace *NamespaceFor(uint32_t nsid);
+    NVMeIoCommand *FreeIo();
+    /* Take a command back from its back end and answer it with 'sc'. */
+    void AbortIo(NVMeIoCommand *io, int sc);
 
     /* register file */
     uint32_t ReadDword(uint32_t offset);
@@ -400,12 +416,11 @@ private:
     void IdentifyController(uint8_t *buf);
     void IdentifyNamespace(uint8_t *buf, NVMeNamespace *ns);
 
-    void BlockDone(int ret);
-
 public:
-    NVMeDevice(const char *name, uint32_t quirks):
-        Device(name), fQuirks(quirks) {}
+    NVMeDevice(const char *name, uint32_t quirks);
     ~NVMeDevice() override;
+
+    void BlockDone(NVMeIoCommand *io, int ret);
 
     /* DMA, chunked a page at a time, as pci_device_get_dma_ptr requires. */
     bool DmaRead(uint64_t addr, void *buf, uint32_t len);
@@ -426,6 +441,21 @@ public:
     int FindFreeNsid() override;
     bool AttachNamespace(NVMeNamespace *ns, uint32_t nsid) override;
 };
+
+
+void NVMeIoCommand::Complete(int ret)
+{
+    fCtrl.BlockDone(this, ret);
+}
+
+
+NVMeDevice::NVMeDevice(const char *name, uint32_t quirks):
+    Device(name), fQuirks(quirks)
+{
+    for (auto &io : fIo) {
+        io = std::make_unique<NVMeIoCommand>(*this);
+    }
+}
 
 
 NVMeDevice::~NVMeDevice()
@@ -576,6 +606,26 @@ NVMeNamespace *NVMeDevice::NamespaceFor(uint32_t nsid)
         return nullptr;
     }
     return fNamespaces[nsid];
+}
+
+
+NVMeIoCommand *NVMeDevice::FreeIo()
+{
+    for (auto &io : fIo) {
+        if (!io->busy) {
+            return io.get();
+        }
+    }
+    return nullptr;
+}
+
+
+void NVMeDevice::AbortIo(NVMeIoCommand *io, int sc)
+{
+    io->backend->Cancel(io);
+    io->busy = false;
+    io->backend = nullptr;
+    PostCompletion(io->sqid, io->cqid, io->cid, 0, NVME_SCT_GENERIC, sc);
 }
 
 
@@ -733,7 +783,11 @@ void NVMeDevice::ProcessSq(int sqid)
 {
     NVMeSubQueue *sq = &fSq[sqid];
 
-    while (!fBusy && sq->enabled && sq->head != sq->tail) {
+    while (sq->enabled && sq->head != sq->tail) {
+        if (sqid != 0 && FreeIo() == nullptr) {
+            /* left in the queue until a command finishes */
+            return;
+        }
         uint8_t raw[NVME_SQE_SIZE];
         if (!DmaRead(sq->base + (uint64_t)sq->head * NVME_SQE_SIZE, raw,
                      NVME_SQE_SIZE)) {
@@ -1092,6 +1146,12 @@ void NVMeDevice::ExecuteAdmin(const NVMeCommand &cmd)
             status = (NVME_SCT_SPECIFIC << 8) | NVME_SC_QID_INVALID;
             break;
         }
+        /* what the queue still has in flight is answered as aborted */
+        for (auto &io : fIo) {
+            if (io->busy && io->sqid == qid) {
+                AbortIo(io.get(), NVME_SC_ABORT_SQ_DELETE);
+            }
+        }
         fSq[qid] = NVMeSubQueue();
         break;
     }
@@ -1112,11 +1172,27 @@ void NVMeDevice::ExecuteAdmin(const NVMeCommand &cmd)
         status = CmdGetFeatures(cmd, &dw0);
         break;
 
-    case NVME_ADM_ABORT:
-        /* Nothing is ever queued long enough to abort, and bit 0 set is how
-           the controller says it did not abort the command. */
+    case NVME_ADM_ABORT: {
+        /* Only a command with a back end can be caught. Bit 0 set is how the
+           controller says it did not abort one. */
+        uint16_t sqid = get_bits(cmd.cdw10, 0, 16);
+        uint16_t cid = get_bits(cmd.cdw10, 16, 16);
         dw0 = 1;
+        for (auto &io : fIo) {
+            if (io->busy && io->sqid == sqid && io->cid == cid) {
+                AbortIo(io.get(), NVME_SC_ABORT_REQUESTED);
+                dw0 = 0;
+                break;
+            }
+        }
+        if (dw0 == 0) {
+            /* the slot it had may take a waiting command */
+            for (int i = 1; i < NVME_MAX_QUEUES; i++) {
+                ProcessSq(i);
+            }
+        }
         break;
+    }
 
     case NVME_ADM_KEEP_ALIVE:
         break;
@@ -1200,39 +1276,45 @@ void NVMeDevice::ExecuteIo(int sqid, const NVMeCommand &cmd)
             tail_pad = (blocks - fit) * NVMeNamespace::BlockSize();
             blocks = fit;
         }
-        if (length > NVME_MAX_TRANSFER || !EnsureBuffer(length)) {
+        if (length > NVME_MAX_TRANSFER) {
             status = (NVME_SCT_GENERIC << 8) | NVME_SC_INVALID_FIELD;
             break;
         }
 
+        /* ProcessSq() only reads an I/O queue while one is free */
+        NVMeIoCommand *io = FreeIo();
+        if (!io->buf) {
+            io->buf.reset(new uint8_t[NVME_MAX_TRANSFER]);
+        }
+        uint8_t *buf = io->buf.get();
+
         if (tail_pad > 0) {
             /* Whatever the clamp above dropped reads back as zeros. */
-            memset(fBuf + length - tail_pad, 0, tail_pad);
+            memset(buf + length - tail_pad, 0, tail_pad);
         }
 
         int ret;
         if (is_read) {
-            ret = ns->Backend()->ReadAsync(slba, fBuf, blocks, &fCompletion);
+            ret = ns->Backend()->ReadAsync(slba, buf, blocks, io);
         } else {
-            if (!PrpTransfer(cmd.prp1, cmd.prp2, fBuf, length, false)) {
+            if (!PrpTransfer(cmd.prp1, cmd.prp2, buf, length, false)) {
                 status = (NVME_SCT_GENERIC << 8) | NVME_SC_DATA_XFER_ERROR;
                 break;
             }
-            ret = ns->Backend()->WriteAsync(slba, fBuf, blocks, &fCompletion);
+            ret = ns->Backend()->WriteAsync(slba, buf, blocks, io);
         }
 
         if (ret > 0) {
-            /* The back end took it; the completion finishes the command and
-               no queue is served until it does. */
-            fBusy = true;
-            fPendingBackend = ns->Backend();
-            fPendingCid = cmd.CommandId();
-            fPendingSqid = sqid;
-            fPendingCqid = cqid;
-            fPendingIsRead = is_read;
-            fPendingPrp1 = cmd.prp1;
-            fPendingPrp2 = cmd.prp2;
-            fPendingLength = length;
+            /* The back end took it; the completion finishes the command. */
+            io->busy = true;
+            io->backend = ns->Backend();
+            io->cid = cmd.CommandId();
+            io->sqid = sqid;
+            io->cqid = cqid;
+            io->is_read = is_read;
+            io->prp1 = cmd.prp1;
+            io->prp2 = cmd.prp2;
+            io->length = length;
             return;
         }
         if (ret < 0) {
@@ -1240,7 +1322,7 @@ void NVMeDevice::ExecuteIo(int sqid, const NVMeCommand &cmd)
             break;
         }
         if (is_read &&
-            !PrpTransfer(cmd.prp1, cmd.prp2, fBuf, length, true)) {
+            !PrpTransfer(cmd.prp1, cmd.prp2, buf, length, true)) {
             status = (NVME_SCT_GENERIC << 8) | NVME_SC_DATA_XFER_ERROR;
         }
         break;
@@ -1278,25 +1360,25 @@ void NVMeDevice::Execute(int sqid, const NVMeCommand &cmd)
 }
 
 
-void NVMeDevice::BlockDone(int ret)
+void NVMeDevice::BlockDone(NVMeIoCommand *io, int ret)
 {
-    fBusy = false;
-    fPendingBackend = nullptr;
+    io->busy = false;
+    io->backend = nullptr;
 
     int status = 0;
     if (ret < 0) {
         status = (NVME_SCT_GENERIC << 8) | NVME_SC_DATA_XFER_ERROR;
-    } else if (fPendingIsRead &&
-               !PrpTransfer(fPendingPrp1, fPendingPrp2, fBuf, fPendingLength,
+    } else if (io->is_read &&
+               !PrpTransfer(io->prp1, io->prp2, io->buf.get(), io->length,
                             true)) {
         status = (NVME_SCT_GENERIC << 8) | NVME_SC_DATA_XFER_ERROR;
     }
 
-    PostCompletion(fPendingSqid, fPendingCqid, fPendingCid, 0,
+    PostCompletion(io->sqid, io->cqid, io->cid, 0,
                    get_bits(status, 8, 3), get_bits(status, 0, 8));
 
-    /* Whatever arrived while the back end had the command. */
-    for (int i = 0; i < NVME_MAX_QUEUES; i++) {
+    /* Whatever waited for a free command. */
+    for (int i = 1; i < NVME_MAX_QUEUES; i++) {
         ProcessSq(i);
     }
 }
@@ -1335,10 +1417,12 @@ void NVMeDevice::ControllerDisable()
         fCq[i] = NVMeCompQueue();
     }
     fAerCount = 0;
-    if (fBusy) {
-        fPendingBackend->Cancel(&fCompletion);
-        fBusy = false;
-        fPendingBackend = nullptr;
+    for (auto &io : fIo) {
+        if (io->busy) {
+            io->backend->Cancel(io.get());
+            io->busy = false;
+            io->backend = nullptr;
+        }
     }
     fCsts &= ~(CSTS_RDY | CSTS_SHST_MASK);
     fIntMask = 0;

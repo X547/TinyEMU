@@ -90,3 +90,5 @@ public:
    that does not finish at once shows up in Completions() with 'key'. One
    that finishes at once is not reported again. */
 bool event_loop_attach(EventLoop &loop, HANDLE file, void *key);
+/* Report 'ov' in Completions() with 'key' as if the system had queued it. */
+bool event_loop_post(EventLoop &loop, void *key, OVERLAPPED *ov);

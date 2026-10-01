@@ -34,6 +34,11 @@
 
 #define SECTOR_SIZE 512
 
+/* Answer every request that finished at once later, from the event loop, as
+   if it had not. Reads the system has cached finish at once, so this is what
+   puts several requests in flight for the devices' queues to be tested. */
+//#define DEFER_BLOCK_COMPLETION
+
 
 /* One request the system has. It is read into, or written from, a buffer
    of its own, so that a request the device gives up on can be left to
@@ -130,6 +135,12 @@ int BlockDeviceFile::Start(std::unique_ptr<FileRequest> req)
         fInFlight.push_back(std::move(req));
         return 1;
     }
+#ifdef DEFER_BLOCK_COMPLETION
+    if (ok && event_loop_post(fLoop, this, &req->ov)) {
+        fInFlight.push_back(std::move(req));
+        return 1;
+    }
+#endif
     DWORD bytes = 0;
     if (ok)
         ok = GetOverlappedResult(fFile, &req->ov, &bytes, FALSE);
