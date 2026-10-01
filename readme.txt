@@ -279,7 +279,7 @@ Device types:
                          and elsewhere in native mode, where every window is a
                          base address register and the interrupt is INTx
   ata-disk               ATA disk; "file", and "read_only"
-  virtio-block           "file"
+  virtio-block           "file", and "read_only"
   virtio-9p              "file", "tag"
   virtio-net             "driver" ("user" or "tap"), "ifname" for tap, and
                          "forward" (see below) for user
@@ -303,12 +303,13 @@ Device types:
   hid-keyboard           HID keyboard; "index" (which function of the
                          transport to be, default the first free one)
   hid-tablet             HID absolute pointing device; "index" as above
-  scsi-disk              SCSI direct access block device; "file", and "lun"
-                         (default the first free logical unit)
+  scsi-disk              SCSI direct access block device; "file", "lun"
+                         (default the first free logical unit), and
+                         "read_only"
   nvme                   NVM Express controller on PCI; "quirks" (see below)
                          and a nested NVMe bus
-  nvme-ns                NVMe namespace; "file", and "nsid" (default the
-                         first free namespace id)
+  nvme-ns                NVMe namespace; "file", "nsid" (default the first
+                         free namespace id), and "read_only"
   sdhci                  SD host controller, on PCI or on the FDT bus;
                          "clock" (the base clock in MHz, default 50),
                          "compatible" (which controller the device tree node

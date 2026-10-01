@@ -137,6 +137,7 @@
 #define NVME_SC_DATA_XFER_ERROR 0x04
 #define NVME_SC_INTERNAL_ERROR  0x06
 #define NVME_SC_INVALID_NS      0x0b
+#define NVME_SC_NS_WRITE_PROT   0x20
 #define NVME_SC_LBA_RANGE       0x80
 
 /* Command specific status codes. */
@@ -206,11 +207,14 @@ class NVMeNamespace {
 private:
     std::unique_ptr<HostBlockDevice> fBlockDev;
     uint32_t fNsid = 0;
+    bool fReadOnly;
 
 public:
-    NVMeNamespace(std::unique_ptr<HostBlockDevice> bs): fBlockDev(std::move(bs)) {}
+    NVMeNamespace(std::unique_ptr<HostBlockDevice> bs, bool read_only):
+        fBlockDev(std::move(bs)), fReadOnly(read_only) {}
 
     HostBlockDevice *Backend() const {return fBlockDev.get();}
+    bool ReadOnly() const {return fReadOnly;}
     uint32_t Nsid() const {return fNsid;}
     void SetNsid(uint32_t nsid) {fNsid = nsid;}
 
@@ -896,6 +900,7 @@ void NVMeDevice::IdentifyNamespace(uint8_t *buf, NVMeNamespace *ns)
     buf[26] = 0;                /* formatted with LBA format 0 */
     buf[27] = 0;                /* no metadata */
     buf[28] = 0;                /* no end to end protection */
+    buf[99] = ns->ReadOnly() ? 1 : 0; /* attributes: write protected */
     /* NGUID at 104 and EUI64 at 120 stay zero, matching the empty namespace
        descriptor list: a host reads both and treats a disagreement between
        them as a controller bug. */
@@ -1173,6 +1178,10 @@ void NVMeDevice::ExecuteIo(int sqid, const NVMeCommand &cmd)
         uint32_t length = blocks * NVMeNamespace::BlockSize();
 
         uint32_t tail_pad = 0;
+        if (!is_read && ns->ReadOnly()) {
+            status = (NVME_SCT_GENERIC << 8) | NVME_SC_NS_WRITE_PROT;
+            break;
+        }
         if (slba >= ns->BlockCount()) {
             status = (NVME_SCT_GENERIC << 8) | NVME_SC_LBA_RANGE;
             break;
@@ -1610,8 +1619,9 @@ Device *nvme_node_create(const char *name, uint32_t quirks)
 }
 
 
-Device *nvme_namespace_node_create(std::unique_ptr<HostBlockDevice> bs, int nsid)
+Device *nvme_namespace_node_create(std::unique_ptr<HostBlockDevice> bs, int nsid,
+                                   bool read_only)
 {
     return new NVMeNamespaceNode(
-        std::make_unique<NVMeNamespace>(std::move(bs)), nsid);
+        std::make_unique<NVMeNamespace>(std::move(bs), read_only), nsid);
 }

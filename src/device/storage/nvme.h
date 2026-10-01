@@ -74,4 +74,6 @@ uint32_t nvme_quirks_from_name(const char *name);
 
 /* nvme.cpp */
 Device *nvme_node_create(const char *name, uint32_t quirks);
-Device *nvme_namespace_node_create(std::unique_ptr<HostBlockDevice> bs, int nsid);
+/* 'read_only' reports the namespace write protected */
+Device *nvme_namespace_node_create(std::unique_ptr<HostBlockDevice> bs, int nsid,
+                                   bool read_only);

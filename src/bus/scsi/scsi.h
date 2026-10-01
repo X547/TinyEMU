@@ -62,6 +62,7 @@ class HostBlockDevice;
 #define SCSI_ASC_WRITE_ERROR                0x0c00
 #define SCSI_ASC_MEDIUM_NOT_PRESENT         0x3a00
 #define SCSI_ASC_POWER_ON_RESET             0x2900
+#define SCSI_ASC_WRITE_PROTECTED            0x2700
 
 /* Command operation codes. */
 #define SCSI_TEST_UNIT_READY        0x00
@@ -249,6 +250,6 @@ int scsi_cdb_len(uint8_t opcode);
 uint32_t scsi_report_luns(uint8_t *buf, uint32_t buf_len,
                           SCSIDevice *const *units, int count);
 
-/* scsi_disk.cpp */
+/* scsi_disk.cpp; 'read_only' reports the unit write protected */
 Device *scsi_disk_node_create(std::unique_ptr<HostBlockDevice> bs, int target,
-                              int lun);
+                              int lun, bool read_only);

@@ -58,10 +58,11 @@ typedef struct VIRTIODevice VIRTIODevice;
 
 void virtio_set_debug(VIRTIODevice *s, int debug_flags);
 
-/* block device */
+/* block device; 'read_only' offers it to the guest as read only */
 
 std::unique_ptr<VIRTIODevice> virtio_block_init(VIRTIOBusDef *bus,
-                                                HostBlockDevice *bs);
+                                                HostBlockDevice *bs,
+                                                bool read_only);
 
 /* SCSI host device */
 
@@ -127,7 +128,8 @@ struct DeviceContext;
    it takes is decided by the bus it is attached to, so the same node works on
    an MMIO machine and behind a PCI bridge. */
 Device *virtio_block_node_create(DeviceContext *ctx,
-                                 std::unique_ptr<HostBlockDevice> bs);
+                                 std::unique_ptr<HostBlockDevice> bs,
+                                 bool read_only);
 /* Provides a SCSI bus for the units declared inside it. */
 Device *virtio_scsi_node_create(DeviceContext *ctx);
 Device *virtio_net_node_create(DeviceContext *ctx,

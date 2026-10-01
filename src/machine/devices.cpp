@@ -559,15 +559,16 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
     }
 
     if (strcmp(type, "nvme-ns") == 0) {
-        int nsid;
-        if (!node_int_opt(node, "nsid", &nsid, -1)) {
+        int nsid, read_only;
+        if (!node_int_opt(node, "nsid", &nsid, -1) ||
+            !node_int_opt(node, "read_only", &read_only, 0)) {
             return nullptr;
         }
         auto bs = node_open_block(node, ctx);
         if (bs == nullptr) {
             return nullptr;
         }
-        return nvme_namespace_node_create(std::move(bs), nsid);
+        return nvme_namespace_node_create(std::move(bs), nsid, read_only != 0);
     }
 
     if (strcmp(type, "sdhci") == 0) {
@@ -768,16 +769,18 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
     }
 
     if (strcmp(type, "scsi-disk") == 0) {
-        int target, lun;
+        int target, lun, read_only;
         if (!node_int_opt(node, "target", &target, -1) ||
-            !node_int_opt(node, "lun", &lun, -1)) {
+            !node_int_opt(node, "lun", &lun, -1) ||
+            !node_int_opt(node, "read_only", &read_only, 0)) {
             return nullptr;
         }
         auto bs = node_open_block(node, ctx);
         if (bs == nullptr) {
             return nullptr;
         }
-        return scsi_disk_node_create(std::move(bs), target, lun);
+        return scsi_disk_node_create(std::move(bs), target, lun,
+                                     read_only != 0);
     }
 
     if (strcmp(type, "dwmac") == 0) {
@@ -854,11 +857,15 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
     }
 
     if (strcmp(type, "virtio-block") == 0) {
+        int read_only;
+        if (!node_int_opt(node, "read_only", &read_only, 0)) {
+            return nullptr;
+        }
         auto bs = node_open_block(node, ctx);
         if (bs == nullptr) {
             return nullptr;
         }
-        return virtio_block_node_create(ctx, std::move(bs));
+        return virtio_block_node_create(ctx, std::move(bs), read_only != 0);
     }
 
     if (strcmp(type, "virtio-scsi") == 0) {

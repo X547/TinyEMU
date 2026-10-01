@@ -57,6 +57,7 @@ private:
     };
 
     std::unique_ptr<HostBlockDevice> fBlockDev;
+    bool fReadOnly;
     Completion fCompletion {*this};
     SCSIRequest *fPending = nullptr;
     uint32_t fPendingLength = 0;
@@ -78,8 +79,9 @@ private:
                    bool is_write);
 
 public:
-    SCSIDisk(std::unique_ptr<HostBlockDevice> bs):
-        SCSIDevice("scsi-disk"), fBlockDev(std::move(bs)) {}
+    SCSIDisk(std::unique_ptr<HostBlockDevice> bs, bool read_only):
+        SCSIDevice("scsi-disk"), fBlockDev(std::move(bs)),
+        fReadOnly(read_only) {}
 
     void Reset() override;
     bool Submit(SCSIRequest *req) override;
@@ -237,6 +239,10 @@ bool SCSIDisk::ModeSense(SCSIRequest *req, bool is_10)
     } else {
         buf[0] = len - 1;
     }
+    /* device specific parameter: write protected */
+    if (fReadOnly) {
+        buf[is_10 ? 3 : 2] = 0x80;
+    }
 
     Good(req, scsi_reply(req, buf, len));
     return true;
@@ -298,6 +304,11 @@ bool SCSIDisk::ReadWrite(SCSIRequest *req, uint64_t lba, uint32_t blocks,
         return true;
     }
     uint32_t length = (uint32_t)length64;
+
+    if (is_write && fReadOnly) {
+        Fail(req, SCSI_SENSE_DATA_PROTECT, SCSI_ASC_WRITE_PROTECTED);
+        return true;
+    }
 
     if (fPending != nullptr) {
         /* Nothing should be able to reach here: the transport waits for a
@@ -459,9 +470,10 @@ bool SCSIDisk::Submit(SCSIRequest *req)
 //#pragma mark - factory
 
 Device *scsi_disk_node_create(std::unique_ptr<HostBlockDevice> bs, int target,
-                              int lun)
+                              int lun, bool read_only)
 {
     return new SCSIDeviceNode("scsi-disk",
-                              std::make_unique<SCSIDisk>(std::move(bs)),
+                              std::make_unique<SCSIDisk>(std::move(bs),
+                                                         read_only),
                               target, lun);
 }

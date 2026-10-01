@@ -1121,6 +1121,7 @@ private:
     const char *fTag = nullptr;
     int fWidth = 0;
     int fHeight = 0;
+    bool fReadOnly = false;
     Resource *fMmio = nullptr;
     Resource *fIrq = nullptr;
     /* declared first, so that fDev goes before the back end it uses */
@@ -1146,8 +1147,8 @@ public:
     Bus *ChildBus() override {return fChildBus.get();}
 
     void SetInputType(VirtioInputTypeEnum type) {fInputType = type;}
-    void SetBlockDevice(std::unique_ptr<HostBlockDevice> bs)
-        {fBlockDev = std::move(bs);}
+    void SetBlockDevice(std::unique_ptr<HostBlockDevice> bs, bool read_only)
+        {fBlockDev = std::move(bs); fReadOnly = read_only;}
     void SetEthernet(std::unique_ptr<HostEthernet> net)
         {fNet = std::move(net);}
     void SetFileSystem(std::unique_ptr<HostFileSystem> fs)
@@ -1190,7 +1191,7 @@ public:
                 vm_error("%s: no block back end\n", Name());
                 return false;
             }
-            fDev = virtio_block_init(&vbus, fBlockDev.get());
+            fDev = virtio_block_init(&vbus, fBlockDev.get(), fReadOnly);
             break;
         case VIRTIO_KIND_SCSI:
             fDev = virtio_scsi_init(&vbus);
@@ -1256,11 +1257,12 @@ public:
 //#pragma mark - factory
 
 Device *virtio_block_node_create(DeviceContext *ctx,
-                                 std::unique_ptr<HostBlockDevice> bs)
+                                 std::unique_ptr<HostBlockDevice> bs,
+                                 bool read_only)
 {
     VirtioDevice *dev = new VirtioDevice("virtio-block", VIRTIO_KIND_BLOCK,
                                          ctx);
-    dev->SetBlockDevice(std::move(bs));
+    dev->SetBlockDevice(std::move(bs), read_only);
     return dev;
 }
 

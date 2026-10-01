@@ -52,6 +52,7 @@ struct VIRTIOBlockDevice: public VIRTIODevice {
     };
 
     HostBlockDevice *bs = nullptr; /* owned by the node that created the device */
+    bool read_only = false;
 
     bool req_in_progress = false;
     BlockRequest req {}; /* request in progress */
@@ -73,6 +74,8 @@ typedef struct {
 #define VIRTIO_BLK_T_FLUSH       4
 #define VIRTIO_BLK_T_FLUSH_OUT   5
 #define VIRTIO_BLK_T_GET_ID      8
+
+#define VIRTIO_BLK_F_RO          (1 << 5)
 
 /* length of the serial reported by VIRTIO_BLK_T_GET_ID */
 #define VIRTIO_BLK_ID_BYTES     20
@@ -182,6 +185,10 @@ int VIRTIOBlockDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
         break;
     case VIRTIO_BLK_T_OUT:
         assert(write_size >= 1);
+        if (s1->read_only) {
+            virtio_block_req_end_status(s, VIRTIO_BLK_S_IOERR);
+            break;
+        }
         len = read_size - sizeof(h);
         /* kept until the write finishes */
         s1->req.buf.reset(new uint8_t[len]);
@@ -224,14 +231,18 @@ int VIRTIOBlockDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
 }
 
 std::unique_ptr<VIRTIODevice> virtio_block_init(VIRTIOBusDef *bus,
-                                                HostBlockDevice *bs)
+                                                HostBlockDevice *bs,
+                                                bool read_only)
 {
     uint64_t nb_sectors;
 
     auto s = std::make_unique<VIRTIOBlockDevice>();
     virtio_init(s.get(), bus, 2, 8);
     s->bs = bs;
-    
+    s->read_only = read_only;
+    if (read_only)
+        s->device_features |= VIRTIO_BLK_F_RO;
+
     nb_sectors = bs->SectorCount();
     put_le32(s->config_space, nb_sectors);
     put_le32(s->config_space + 4, nb_sectors >> 32);
