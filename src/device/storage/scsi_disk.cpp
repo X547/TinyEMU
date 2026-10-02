@@ -23,6 +23,8 @@
  */
 #include <stdio.h>
 #include <string.h>
+#include <algorithm>
+#include <vector>
 
 #include "cutils.h"
 #include "machine.h"
@@ -43,33 +45,33 @@
 
 class SCSIDisk final: public SCSIDevice {
 private:
-    /* One block request may be outstanding, which is all a bulk-only
-       transport can produce: it will not send the next command until it has
-       collected the status of this one. */
-    class Completion final: public BlockCompletion {
-    private:
-        SCSIDisk &fDisk;
+    /* One read or write the back end has. It is also the completion the back
+       end answers through, which is what tells the requests apart. */
+    struct IO final: public BlockCompletion {
+        SCSIDisk &disk;
+        SCSIRequest *req = nullptr;
+        uint32_t length = 0;
+        bool is_write = false;
 
-    public:
-        Completion(SCSIDisk &disk): fDisk(disk) {}
+        IO(SCSIDisk &disk): disk(disk) {}
 
-        void Complete(int ret) override {fDisk.BlockDone(ret);}
+        void Complete(int ret) override {disk.BlockDone(this, ret);}
     };
 
     std::unique_ptr<HostBlockDevice> fBlockDev;
     bool fReadOnly;
-    Completion fCompletion {*this};
-    SCSIRequest *fPending = nullptr;
-    uint32_t fPendingLength = 0;
-    bool fPendingWrite = false;
+    /* They finish in whatever order the back end answers. How many there
+       are is up to the initiator. */
+    std::vector<std::unique_ptr<IO>> fInFlight;
 
     /* The sense data a failed command left behind, for the REQUEST SENSE that
-       a bulk-only transport's host sends afterwards. */
+       a bulk-only transport's host sends afterwards. That transport has one
+       command at a time; the others report sense with the command. */
     uint8_t fSense[SCSI_SENSE_LEN] {};
 
     void Fail(SCSIRequest *req, uint8_t key, uint16_t asc_ascq);
     void Good(SCSIRequest *req, uint32_t length);
-    void BlockDone(int ret);
+    void BlockDone(IO *io, int ret);
 
     bool Inquiry(SCSIRequest *req);
     bool ModeSense(SCSIRequest *req, bool is_10);
@@ -94,19 +96,25 @@ public:
 
 void SCSIDisk::Reset()
 {
-    Cancel(fPending);
+    for (auto &io : fInFlight) {
+        fBlockDev->Cancel(io.get());
+    }
+    fInFlight.clear();
     memset(fSense, 0, sizeof(fSense));
 }
 
 
 void SCSIDisk::Cancel(SCSIRequest *req)
 {
-    if (req == nullptr || req != fPending) {
+    auto it = std::find_if(fInFlight.begin(), fInFlight.end(),
+                           [req](const std::unique_ptr<IO> &io) {
+                               return io->req == req;
+                           });
+    if (it == fInFlight.end()) {
         return;
     }
-    fBlockDev->Cancel(&fCompletion);
-    fPending = nullptr;
-    fPendingLength = 0;
+    fBlockDev->Cancel(it->get());
+    fInFlight.erase(it);
 }
 
 
@@ -310,26 +318,21 @@ bool SCSIDisk::ReadWrite(SCSIRequest *req, uint64_t lba, uint32_t blocks,
         return true;
     }
 
-    if (fPending != nullptr) {
-        /* Nothing should be able to reach here: the transport waits for a
-           command's status before sending the next one. */
-        req->status = SCSI_STATUS_BUSY;
-        req->actual_length = 0;
-        return true;
-    }
+    auto io = std::make_unique<IO>(*this);
+    io->req = req;
+    io->length = length;
+    io->is_write = is_write;
 
     int ret;
     if (is_write) {
-        ret = fBlockDev->WriteAsync(lba, req->buf, blocks, &fCompletion);
+        ret = fBlockDev->WriteAsync(lba, req->buf, blocks, io.get());
     } else {
-        ret = fBlockDev->ReadAsync(lba, req->buf, blocks, &fCompletion);
+        ret = fBlockDev->ReadAsync(lba, req->buf, blocks, io.get());
     }
 
     if (ret > 0) {
         /* In flight; the completion finishes the request. */
-        fPending = req;
-        fPendingLength = length;
-        fPendingWrite = is_write;
+        fInFlight.push_back(std::move(io));
         return false;
     }
     if (ret < 0) {
@@ -342,21 +345,26 @@ bool SCSIDisk::ReadWrite(SCSIRequest *req, uint64_t lba, uint32_t blocks,
 }
 
 
-void SCSIDisk::BlockDone(int ret)
+void SCSIDisk::BlockDone(IO *io, int ret)
 {
-    SCSIRequest *req = fPending;
-    uint32_t length = fPendingLength;
-
-    fPending = nullptr;
-    fPendingLength = 0;
+    SCSIRequest *req = io->req;
 
     if (ret < 0) {
         Fail(req, SCSI_SENSE_MEDIUM_ERROR,
-             fPendingWrite ? SCSI_ASC_WRITE_ERROR
-                           : SCSI_ASC_UNRECOVERED_READ_ERROR);
+             io->is_write ? SCSI_ASC_WRITE_ERROR
+                          : SCSI_ASC_UNRECOVERED_READ_ERROR);
     } else {
-        Good(req, length);
+        Good(req, io->length);
     }
+
+    /* Gone before the initiator hears of it, which may submit again or
+       cancel from the completion. */
+    auto it = std::find_if(fInFlight.begin(), fInFlight.end(),
+                           [io](const std::unique_ptr<IO> &r) {
+                               return r.get() == io;
+                           });
+    fInFlight.erase(it);
+
     if (req->completion != nullptr) {
         req->completion->Complete(req);
     }

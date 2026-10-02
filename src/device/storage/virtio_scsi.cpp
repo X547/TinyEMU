@@ -20,6 +20,8 @@
  * THE SOFTWARE.
  */
 #include <string.h>
+#include <algorithm>
+#include <vector>
 
 #include "cutils.h"
 #include "machine.h"
@@ -95,36 +97,54 @@
 
 //#pragma mark - VIRTIOSCSIDevice
 
-struct VIRTIOSCSIDevice final: public VIRTIODevice, public SCSIBusTarget,
-                               public SCSICompletion {
+struct VIRTIOSCSIDevice;
+
+/* One command the driver made. It is also the completion its unit answers
+   through, which is what tells the commands apart. */
+struct VSCSICommand final: public SCSICompletion {
+    VIRTIOSCSIDevice &dev;
+    int desc_idx = 0;
+    uint64_t id = 0;
+    int target = 0;
+    uint32_t lun = 0;
+    SCSIDevice *unit = nullptr;
+    bool data_in = false;
+    uint32_t data_len = 0;
+    std::unique_ptr<uint8_t[]> buf;
+    SCSIRequest req {};
+
+    VSCSICommand(VIRTIOSCSIDevice &dev): dev(dev) {}
+
+    void Complete(SCSIRequest *req) override;
+};
+
+struct VIRTIOSCSIDevice final: public VIRTIODevice, public SCSIBusTarget {
 private:
     SCSIDevice *fUnits[VSCSI_MAX_TARGET][SCSI_MAX_LUN] {};
 
     uint32_t fSenseSize = VSCSI_DEFAULT_SENSE_SIZE;
     uint32_t fCdbSize = VSCSI_DEFAULT_CDB_SIZE;
 
-    /* The command the units have. One runs at a time, as on virtio-block: a
-       unit takes one request at a time, and the rest wait in the ring. */
-    bool fBusy = false;
-    int fDescIdx = 0;
-    uint64_t fId = 0;
-    int fTarget = 0;
-    uint32_t fLun = 0;
-    SCSIDevice *fUnit = nullptr;
-    bool fDataIn = false;
-    uint32_t fDataLen = 0;
-    std::unique_ptr<uint8_t[]> fBuf;
-    SCSIRequest fRequest {};
+    /* The commands the units have. They finish in whatever order the units
+       answer, which virtio allows; the ring bounds how many there are. Task
+       attributes are not looked at, so an ORDERED command may pass the ones
+       ahead of it. */
+    std::vector<std::unique_ptr<VSCSICommand>> fInFlight;
 
     SCSIDevice *Unit(int target, uint32_t lun);
     bool HasTarget(int target);
 
     void WriteConfig();
-    void Respond(int desc_idx, uint8_t response, const SCSIRequest *req);
-    void Finish(uint8_t response);
-    void Abort(uint8_t response);
+    void Respond(const VSCSICommand *cmd, uint8_t response,
+                 const SCSIRequest *req);
+    void Finish(const VSCSICommand *cmd, uint8_t response);
+    std::unique_ptr<VSCSICommand> TakeInFlight(VSCSICommand *cmd);
+    /* Take every command for which 'match' holds back from its unit and
+       answer it with 'response'. Returns how many there were. */
+    template<typename Match>
+    int Abort(Match match, uint8_t response);
 
-    int Command(int desc_idx, int read_size, int write_size);
+    void Command(int desc_idx, int read_size, int write_size);
     void Control(int desc_idx, int read_size, int write_size);
     uint8_t TaskManagement(uint32_t subtype, const uint8_t *lun, uint64_t id);
 
@@ -136,13 +156,18 @@ public:
     void ConfigWrite() override;
     void Reset() override;
 
+    void CommandDone(VSCSICommand *cmd);
+
     /* SCSIBusTarget */
     bool FindFreeAddress(int *target, int *lun) override;
     bool AttachDevice(SCSIDevice *dev, uint32_t target, uint32_t lun) override;
-
-    /* SCSICompletion */
-    void Complete(SCSIRequest *req) override;
 };
+
+
+void VSCSICommand::Complete(SCSIRequest *)
+{
+    dev.CommandDone(this);
+}
 
 
 /* The single level LUN structure: 1, the target, then the unit in flat space
@@ -217,12 +242,11 @@ void VIRTIOSCSIDevice::ConfigWrite()
 
 void VIRTIOSCSIDevice::Reset()
 {
-    /* the queues the command came from are gone */
-    if (fBusy) {
-        fUnit->Cancel(&fRequest);
-        fBusy = false;
+    /* the queues the commands came from are gone */
+    for (auto &cmd : fInFlight) {
+        cmd->unit->Cancel(&cmd->req);
     }
-    fBuf.reset();
+    fInFlight.clear();
     for (int t = 0; t < VSCSI_MAX_TARGET; t++) {
         for (int l = 0; l < SCSI_MAX_LUN; l++) {
             if (fUnits[t][l] != nullptr) {
@@ -238,9 +262,10 @@ void VIRTIOSCSIDevice::Reset()
 
 /* Answer a command. 'req' is null when the command never reached a unit, and
    then only the response code means anything. */
-void VIRTIOSCSIDevice::Respond(int desc_idx, uint8_t response,
+void VIRTIOSCSIDevice::Respond(const VSCSICommand *cmd, uint8_t response,
                                const SCSIRequest *req)
 {
+    int desc_idx = cmd->desc_idx;
     uint8_t resp[VSCSI_RESP_CMD_HDR];
     uint32_t sense_len = 0;
     uint32_t moved = 0;
@@ -250,18 +275,20 @@ void VIRTIOSCSIDevice::Respond(int desc_idx, uint8_t response,
     if (req != nullptr) {
         sense_len = req->sense_len < (int)fSenseSize ? req->sense_len
                                                      : fSenseSize;
-        moved = req->actual_length < fDataLen ? req->actual_length : fDataLen;
-        residual = fDataLen - moved;
+        moved = req->actual_length < cmd->data_len ? req->actual_length
+                                                   : cmd->data_len;
+        residual = cmd->data_len - moved;
         resp[10] = req->status;
         if (sense_len > 0) {
             memcpy_to_queue(this, VSCSI_QUEUE_REQUEST, desc_idx,
                             VSCSI_RESP_CMD_HDR, req->sense, sense_len);
         }
-        if (!fDataIn) {
+        if (!cmd->data_in) {
             moved = 0;
         } else if (moved > 0) {
             memcpy_to_queue(this, VSCSI_QUEUE_REQUEST, desc_idx,
-                            VSCSI_RESP_CMD_HDR + fSenseSize, fBuf.get(), moved);
+                            VSCSI_RESP_CMD_HDR + fSenseSize, cmd->buf.get(),
+                            moved);
         }
     }
     put_le32(resp, sense_len);
@@ -274,41 +301,58 @@ void VIRTIOSCSIDevice::Respond(int desc_idx, uint8_t response,
 }
 
 
-void VIRTIOSCSIDevice::Finish(uint8_t response)
+void VIRTIOSCSIDevice::Finish(const VSCSICommand *cmd, uint8_t response)
 {
-    if (fRequest.phase_error) {
+    if (cmd->req.phase_error) {
         /* the buffers do not fit the command, which ran no further */
-        Respond(fDescIdx, VIRTIO_SCSI_S_FAILURE, nullptr);
+        Respond(cmd, VIRTIO_SCSI_S_FAILURE, nullptr);
     } else {
-        Respond(fDescIdx, response, &fRequest);
+        Respond(cmd, response, &cmd->req);
     }
-    fBuf.reset();
-    fBusy = false;
 }
 
 
-/* Take the running command back from its unit and answer it with 'response'
-   instead. The ones behind it wait until the task management function has
-   been answered, so none of them can reach a unit that is about to be
-   reset. */
-void VIRTIOSCSIDevice::Abort(uint8_t response)
+std::unique_ptr<VSCSICommand> VIRTIOSCSIDevice::TakeInFlight(VSCSICommand *cmd)
 {
-    fUnit->Cancel(&fRequest);
-    Respond(fDescIdx, response, nullptr);
-    fBuf.reset();
-    fBusy = false;
+    auto it = std::find_if(fInFlight.begin(), fInFlight.end(),
+                           [cmd](const std::unique_ptr<VSCSICommand> &c) {
+                               return c.get() == cmd;
+                           });
+    std::unique_ptr<VSCSICommand> taken = std::move(*it);
+    fInFlight.erase(it);
+    return taken;
 }
 
 
-void VIRTIOSCSIDevice::Complete(SCSIRequest *req)
+/* Nothing new reaches a unit until the task management function has been
+   answered, so none can slip past a reset. */
+template<typename Match>
+int VIRTIOSCSIDevice::Abort(Match match, uint8_t response)
 {
-    (void)req;
-    Finish(VIRTIO_SCSI_S_OK);
-    queue_notify(this, VSCSI_QUEUE_REQUEST);
+    int count = 0;
+    for (auto it = fInFlight.begin(); it != fInFlight.end();) {
+        VSCSICommand *cmd = it->get();
+        if (!match(cmd)) {
+            ++it;
+            continue;
+        }
+        cmd->unit->Cancel(&cmd->req);
+        Respond(cmd, response, nullptr);
+        it = fInFlight.erase(it);
+        count++;
+    }
+    return count;
 }
 
 
-int VIRTIOSCSIDevice::Command(int desc_idx, int read_size, int write_size)
+void VIRTIOSCSIDevice::CommandDone(VSCSICommand *cmd)
+{
+    std::unique_ptr<VSCSICommand> done = TakeInFlight(cmd);
+    Finish(done.get(), VIRTIO_SCSI_S_OK);
+}
+
+
+void VIRTIOSCSIDevice::Command(int desc_idx, int read_size, int write_size)
 {
     uint8_t hdr[VSCSI_REQ_CMD_HDR];
     uint32_t req_hdr = VSCSI_REQ_CMD_HDR + fCdbSize;
@@ -316,81 +360,81 @@ int VIRTIOSCSIDevice::Command(int desc_idx, int read_size, int write_size)
     int target;
     uint32_t lun;
 
-    if (fBusy) {
-        return -1;
-    }
     if ((uint32_t)read_size < req_hdr || (uint32_t)write_size < resp_hdr) {
         /* No room for the headers: nothing can be said about it, but it is
            still handed back so the ring keeps moving. */
         virtio_consume_desc(this, VSCSI_QUEUE_REQUEST, desc_idx, 0);
-        return 0;
+        return;
     }
 
+    auto cmd = std::make_unique<VSCSICommand>(*this);
+    SCSIRequest &req = cmd->req;
     uint32_t data_out = read_size - req_hdr;
     uint32_t data_in = write_size - resp_hdr;
-    fDescIdx = desc_idx;
-    fDataIn = data_in > 0;
-    fDataLen = fDataIn ? data_in : data_out;
+    cmd->desc_idx = desc_idx;
+    cmd->data_in = data_in > 0;
+    cmd->data_len = cmd->data_in ? data_in : data_out;
 
-    fRequest = SCSIRequest();
     memcpy_from_queue(this, hdr, VSCSI_QUEUE_REQUEST, desc_idx, 0,
                       sizeof(hdr));
-    memcpy_from_queue(this, fRequest.cdb, VSCSI_QUEUE_REQUEST, desc_idx,
+    memcpy_from_queue(this, req.cdb, VSCSI_QUEUE_REQUEST, desc_idx,
                       VSCSI_REQ_CMD_HDR,
                       fCdbSize < SCSI_MAX_CDB ? fCdbSize : SCSI_MAX_CDB);
 
     if (!vscsi_decode_lun(hdr, &target, &lun) || !HasTarget(target)) {
-        Respond(desc_idx, VIRTIO_SCSI_S_BAD_TARGET, nullptr);
-        return 0;
+        Respond(cmd.get(), VIRTIO_SCSI_S_BAD_TARGET, nullptr);
+        return;
     }
-    if ((data_in > 0 && data_out > 0) || fDataLen > VSCSI_MAX_TRANSFER) {
+    if ((data_in > 0 && data_out > 0) || cmd->data_len > VSCSI_MAX_TRANSFER) {
         /* Bidirectional commands were not offered. */
-        Respond(desc_idx, VIRTIO_SCSI_S_FAILURE, nullptr);
-        return 0;
+        Respond(cmd.get(), VIRTIO_SCSI_S_FAILURE, nullptr);
+        return;
     }
 
-    if (fDataLen > 0) {
+    if (cmd->data_len > 0) {
         /* not zeroed, the unit fills what it reports */
-        fBuf.reset(new uint8_t[fDataLen]);
-        if (!fDataIn) {
-            memcpy_from_queue(this, fBuf.get(), VSCSI_QUEUE_REQUEST, desc_idx,
-                              req_hdr, fDataLen);
+        cmd->buf.reset(new uint8_t[cmd->data_len]);
+        if (!cmd->data_in) {
+            memcpy_from_queue(this, cmd->buf.get(), VSCSI_QUEUE_REQUEST,
+                              desc_idx, req_hdr, cmd->data_len);
         }
     }
 
-    int cdb_len = scsi_cdb_len(fRequest.cdb[0]);
-    fRequest.cdb_len = cdb_len != 0 ? cdb_len : SCSI_MAX_CDB;
-    fRequest.lun = lun;
-    fRequest.dir = fDataLen == 0 ? SCSI_DIR_NONE
-                                 : (fDataIn ? SCSI_DIR_FROM_DEV
-                                            : SCSI_DIR_TO_DEV);
-    fRequest.buf = fBuf.get();
-    fRequest.buf_len = fDataLen;
-    fRequest.completion = this;
+    int cdb_len = scsi_cdb_len(req.cdb[0]);
+    req.cdb_len = cdb_len != 0 ? cdb_len : SCSI_MAX_CDB;
+    req.lun = lun;
+    req.dir = cmd->data_len == 0 ? SCSI_DIR_NONE
+                                 : (cmd->data_in ? SCSI_DIR_FROM_DEV
+                                                 : SCSI_DIR_TO_DEV);
+    req.buf = cmd->buf.get();
+    req.buf_len = cmd->data_len;
+    req.completion = cmd.get();
 
-    fId = get_le64(hdr + 8);
-    fTarget = target;
-    fLun = lun;
-    fUnit = Unit(target, lun);
+    cmd->id = get_le64(hdr + 8);
+    cmd->target = target;
+    cmd->lun = lun;
+    cmd->unit = Unit(target, lun);
 
-    if (fRequest.cdb[0] == SCSI_REPORT_LUNS) {
-        scsi_set_good(&fRequest,
-                      scsi_report_luns(fBuf.get(), fDataIn ? fDataLen : 0,
+    if (req.cdb[0] == SCSI_REPORT_LUNS) {
+        scsi_set_good(&req,
+                      scsi_report_luns(cmd->buf.get(),
+                                       cmd->data_in ? cmd->data_len : 0,
                                        fUnits[target], SCSI_MAX_LUN));
-        Finish(VIRTIO_SCSI_S_OK);
-        return 0;
+        Finish(cmd.get(), VIRTIO_SCSI_S_OK);
+        return;
     }
-    if (fUnit == nullptr) {
-        scsi_no_unit(&fRequest);
-        Finish(VIRTIO_SCSI_S_OK);
-        return 0;
+    if (cmd->unit == nullptr) {
+        scsi_no_unit(&req);
+        Finish(cmd.get(), VIRTIO_SCSI_S_OK);
+        return;
     }
 
-    fBusy = true;
-    if (fUnit->Submit(&fRequest)) {
-        Finish(VIRTIO_SCSI_S_OK);
+    /* Listed first, as the unit may answer before Submit() returns. */
+    VSCSICommand *c = cmd.get();
+    fInFlight.push_back(std::move(cmd));
+    if (c->unit->Submit(&c->req)) {
+        CommandDone(c);
     }
-    return 0;
 }
 
 
@@ -405,7 +449,15 @@ uint8_t VIRTIOSCSIDevice::TaskManagement(uint32_t subtype, const uint8_t *lun,
     }
 
     SCSIDevice *unit = Unit(target, unit_lun);
-    bool running = fBusy && fTarget == target && fLun == unit_lun;
+    auto on_target = [target](const VSCSICommand *c) {
+        return c->target == target;
+    };
+    auto on_unit = [target, unit_lun](const VSCSICommand *c) {
+        return c->target == target && c->lun == unit_lun;
+    };
+    auto is_task = [target, unit_lun, id](const VSCSICommand *c) {
+        return c->target == target && c->lun == unit_lun && c->id == id;
+    };
 
     if (subtype == VIRTIO_SCSI_T_TMF_I_T_NEXUS_RESET) {
         for (int i = 0; i < SCSI_MAX_LUN; i++) {
@@ -413,9 +465,7 @@ uint8_t VIRTIOSCSIDevice::TaskManagement(uint32_t subtype, const uint8_t *lun,
                 fUnits[target][i]->Reset();
             }
         }
-        if (fBusy && fTarget == target) {
-            Abort(VIRTIO_SCSI_S_RESET);
-        }
+        Abort(on_target, VIRTIO_SCSI_S_RESET);
         return VIRTIO_SCSI_S_FUNCTION_COMPLETE;
     }
     if (unit == nullptr) {
@@ -424,32 +474,34 @@ uint8_t VIRTIOSCSIDevice::TaskManagement(uint32_t subtype, const uint8_t *lun,
 
     switch (subtype) {
     case VIRTIO_SCSI_T_TMF_ABORT_TASK:
-        if (running && fId == id) {
-            Abort(VIRTIO_SCSI_S_ABORTED);
-        }
+        Abort(is_task, VIRTIO_SCSI_S_ABORTED);
         return VIRTIO_SCSI_S_FUNCTION_COMPLETE;
 
     case VIRTIO_SCSI_T_TMF_ABORT_TASK_SET:
     case VIRTIO_SCSI_T_TMF_CLEAR_TASK_SET:
-        if (running) {
-            Abort(VIRTIO_SCSI_S_ABORTED);
-        }
+        Abort(on_unit, VIRTIO_SCSI_S_ABORTED);
         return VIRTIO_SCSI_S_FUNCTION_COMPLETE;
 
     case VIRTIO_SCSI_T_TMF_LOGICAL_UNIT_RESET:
         unit->Reset();
-        if (running) {
-            Abort(VIRTIO_SCSI_S_RESET);
-        }
+        Abort(on_unit, VIRTIO_SCSI_S_RESET);
         return VIRTIO_SCSI_S_FUNCTION_COMPLETE;
 
     case VIRTIO_SCSI_T_TMF_QUERY_TASK:
-        return running && fId == id ? VIRTIO_SCSI_S_FUNCTION_SUCCEEDED
-                                    : VIRTIO_SCSI_S_FUNCTION_COMPLETE;
+        return std::any_of(fInFlight.begin(), fInFlight.end(),
+                           [&](const std::unique_ptr<VSCSICommand> &c) {
+                               return is_task(c.get());
+                           })
+                   ? VIRTIO_SCSI_S_FUNCTION_SUCCEEDED
+                   : VIRTIO_SCSI_S_FUNCTION_COMPLETE;
 
     case VIRTIO_SCSI_T_TMF_QUERY_TASK_SET:
-        return running ? VIRTIO_SCSI_S_FUNCTION_SUCCEEDED
-                       : VIRTIO_SCSI_S_FUNCTION_COMPLETE;
+        return std::any_of(fInFlight.begin(), fInFlight.end(),
+                           [&](const std::unique_ptr<VSCSICommand> &c) {
+                               return on_unit(c.get());
+                           })
+                   ? VIRTIO_SCSI_S_FUNCTION_SUCCEEDED
+                   : VIRTIO_SCSI_S_FUNCTION_COMPLETE;
 
     case VIRTIO_SCSI_T_TMF_CLEAR_ACA:
         /* ACA is never established here */
@@ -475,16 +527,11 @@ void VIRTIOSCSIDevice::Control(int desc_idx, int read_size, int write_size)
         if (read_size >= 24 && write_size >= 1 &&
             memcpy_from_queue(this, buf, VSCSI_QUEUE_CONTROL, desc_idx, 0,
                               24) == 0) {
-            bool was_busy = fBusy;
             uint8_t response = TaskManagement(get_le32(buf + 4), buf + 8,
                                               get_le64(buf + 16));
             memcpy_to_queue(this, VSCSI_QUEUE_CONTROL, desc_idx, 0,
                             &response, 1);
             virtio_consume_desc(this, VSCSI_QUEUE_CONTROL, desc_idx, 1);
-            if (was_busy && !fBusy) {
-                /* the aborted command held up the ones behind it */
-                queue_notify(this, VSCSI_QUEUE_REQUEST);
-            }
             return;
         }
         break;
@@ -515,7 +562,8 @@ int VIRTIOSCSIDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
         Control(desc_idx, read_size, write_size);
         return 0;
     case VSCSI_QUEUE_REQUEST:
-        return Command(desc_idx, read_size, write_size);
+        Command(desc_idx, read_size, write_size);
+        return 0;
     }
     /* A queue that does not exist: hand the buffer back unused. */
     virtio_consume_desc(this, queue_idx, desc_idx, 0);
