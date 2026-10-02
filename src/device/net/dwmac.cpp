@@ -202,10 +202,10 @@ DwmacDevice::DwmacDevice(DeviceContext *ctx, std::unique_ptr<HostEthernet> net,
                          uint32_t quirks):
     Device("dwmac"),
     fCtx(ctx),
-    fNet(std::move(net)),
     fCompatible(compatible),
     fPhyMode(phy_mode),
-    fQuirks(quirks)
+    fQuirks(quirks),
+    fNet(std::move(net))
 {
 }
 
