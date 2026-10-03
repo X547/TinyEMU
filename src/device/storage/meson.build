@@ -2,6 +2,7 @@ storage_sources = files(
   'ata_disk.cpp',
   'mmc_card.cpp',
   'nvme.cpp',
+  'scsi_cd.cpp',
   'scsi_disk.cpp',
   'sd_card.cpp',
   'usb_storage.cpp',

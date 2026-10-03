@@ -44,8 +44,10 @@ public:
 
     /* The back ends one device takes over. They report their own errors and
        return nullptr. */
+    /* 'read_only' is for a device that never writes, such as a CD drive: the
+       image is opened read only whatever mode the others are opened in. */
     virtual std::unique_ptr<HostBlockDevice> OpenBlockDevice(
-        const char *path) = 0;
+        const char *path, bool read_only) = 0;
     /* 'ifname' is the host interface, for a driver that attaches to one;
        'forwards' are the host ports a driver that translates addresses
        publishes the guest's services on. */

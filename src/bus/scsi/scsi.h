@@ -61,8 +61,15 @@ class HostBlockDevice;
 #define SCSI_ASC_UNRECOVERED_READ_ERROR     0x1100
 #define SCSI_ASC_WRITE_ERROR                0x0c00
 #define SCSI_ASC_MEDIUM_NOT_PRESENT         0x3a00
+#define SCSI_ASC_MEDIUM_NOT_PRESENT_CLOSED  0x3a01
+#define SCSI_ASC_MEDIUM_NOT_PRESENT_OPEN    0x3a02
 #define SCSI_ASC_POWER_ON_RESET             0x2900
+#define SCSI_ASC_MEDIUM_CHANGED             0x2800
 #define SCSI_ASC_WRITE_PROTECTED            0x2700
+#define SCSI_ASC_INCOMPATIBLE_MEDIUM        0x3002
+#define SCSI_ASC_SAVING_NOT_SUPPORTED       0x3900
+#define SCSI_ASC_MEDIUM_REMOVAL_PREVENTED   0x5302
+#define SCSI_ASC_ILLEGAL_MODE_FOR_TRACK     0x6400
 
 /* Command operation codes. */
 #define SCSI_TEST_UNIT_READY        0x00
@@ -93,6 +100,22 @@ class HostBlockDevice;
 #define SCSI_READ_12                0xa8
 #define SCSI_WRITE_12               0xaa
 #define SCSI_VERIFY_12              0xaf
+
+/* Multimedia (MMC) operation codes, which optical drives add. */
+#define SCSI_READ_SUB_CHANNEL       0x42
+#define SCSI_READ_TOC               0x43
+#define SCSI_GET_CONFIGURATION      0x46
+#define SCSI_GET_EVENT_STATUS       0x4a
+#define SCSI_READ_DISC_INFORMATION  0x51
+#define SCSI_READ_TRACK_INFORMATION 0x52
+#define SCSI_READ_DVD_STRUCTURE     0xad
+#define SCSI_SET_CD_SPEED           0xbb
+#define SCSI_MECHANISM_STATUS       0xbd
+#define SCSI_READ_CD                0xbe
+
+/* Peripheral device types, as INQUIRY reports them. */
+#define SCSI_TYPE_DISK  0x00
+#define SCSI_TYPE_CDROM 0x05
 
 
 typedef enum {
@@ -167,6 +190,19 @@ public:
 
     virtual uint32_t BlockSize() = 0;
     virtual uint64_t BlockCount() = 0;
+
+    /* What INQUIRY reports in byte 0 and in the removable bit. A transport
+       that describes the unit itself, as ATAPI does, takes them from here. */
+    virtual uint8_t PeripheralType() = 0;
+    virtual bool Removable() = 0;
+
+    /* The data phase a CDB has: which way the data goes and how many bytes
+       the command moves at most. Only a transport that is not told, as ATAPI
+       is not, needs to ask. Returns false for a command the unit does not
+       know; it then goes in with no data, for the unit to refuse. The default
+       knows the primary and block commands. */
+    virtual bool DataPhase(const uint8_t *cdb, SCSIDirEnum *dir,
+                           uint32_t *len);
 };
 
 
@@ -233,6 +269,12 @@ void scsi_set_good(SCSIRequest *req, uint32_t length);
 /* Refuse a command whose data phase does not fit it, without running it. */
 void scsi_set_phase_error(SCSIRequest *req);
 
+/* Copy a reply into the initiator's buffer, clamped to the room it has, and
+   return how much was copied. Coming up short is a short transfer, not an
+   error: the transport reports the residue and the host decides what to make
+   of it. */
+uint32_t scsi_reply(SCSIRequest *req, const uint8_t *data, uint32_t len);
+
 /* Answer a command to a unit number nothing is attached to, on a target that
    exists. INQUIRY has to succeed and say so, which is how an initiator
    scanning the target learns the unit is absent. */
@@ -253,3 +295,9 @@ uint32_t scsi_report_luns(uint8_t *buf, uint32_t buf_len,
 /* scsi_disk.cpp; 'read_only' reports the unit write protected */
 Device *scsi_disk_node_create(std::unique_ptr<HostBlockDevice> bs, int target,
                               int lun, bool read_only);
+
+/* scsi_cd.cpp; a null 'bs' is a drive with no disc in it. Reports and returns
+   nullptr when the image is not one the drive can read. */
+std::unique_ptr<SCSIDevice> scsi_cd_create(std::unique_ptr<HostBlockDevice> bs);
+Device *scsi_cd_node_create(std::unique_ptr<HostBlockDevice> bs, int target,
+                            int lun);

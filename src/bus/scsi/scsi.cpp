@@ -61,6 +61,18 @@ void scsi_set_phase_error(SCSIRequest *req)
 }
 
 
+uint32_t scsi_reply(SCSIRequest *req, const uint8_t *data, uint32_t len)
+{
+    if (len > req->buf_len) {
+        len = req->buf_len;
+    }
+    if (len > 0 && req->buf != nullptr) {
+        memcpy(req->buf, data, len);
+    }
+    return len;
+}
+
+
 void scsi_no_unit(SCSIRequest *req)
 {
     uint8_t buf[36];
@@ -139,6 +151,110 @@ uint32_t scsi_report_luns(uint8_t *buf, uint32_t buf_len,
         put_be32(buf, len - 8);
     }
     return len < buf_len ? len : buf_len;
+}
+
+
+//#pragma mark - SCSIDevice
+
+bool SCSIDevice::DataPhase(const uint8_t *cdb, SCSIDirEnum *dir,
+                           uint32_t *len)
+{
+    uint64_t blocks;
+
+    *dir = SCSI_DIR_NONE;
+    *len = 0;
+
+    switch (cdb[0]) {
+    case SCSI_TEST_UNIT_READY:
+    case SCSI_START_STOP_UNIT:
+    case SCSI_PREVENT_ALLOW_REMOVAL:
+    case SCSI_SEEK_10:
+    case SCSI_SYNCHRONIZE_CACHE_10:
+    case SCSI_SYNCHRONIZE_CACHE_16:
+        return true;
+
+    /* Allocation lengths: the most the initiator will take. */
+    case SCSI_REQUEST_SENSE:
+    case SCSI_MODE_SENSE_6:
+        *dir = SCSI_DIR_FROM_DEV;
+        *len = cdb[4];
+        return true;
+    case SCSI_INQUIRY:
+        *dir = SCSI_DIR_FROM_DEV;
+        *len = get_be16(cdb + 3);
+        return true;
+    case SCSI_MODE_SENSE_10:
+        *dir = SCSI_DIR_FROM_DEV;
+        *len = get_be16(cdb + 7);
+        return true;
+    case SCSI_READ_CAPACITY_10:
+        *dir = SCSI_DIR_FROM_DEV;
+        *len = 8;
+        return true;
+    case SCSI_SERVICE_ACTION_IN_16:
+        *dir = SCSI_DIR_FROM_DEV;
+        *len = get_be32(cdb + 10);
+        return true;
+    case SCSI_REPORT_LUNS:
+        *dir = SCSI_DIR_FROM_DEV;
+        *len = get_be32(cdb + 6);
+        return true;
+
+    /* Parameter lists the initiator sends. */
+    case SCSI_MODE_SELECT_6:
+        *dir = SCSI_DIR_TO_DEV;
+        *len = cdb[4];
+        return true;
+    case SCSI_MODE_SELECT_10:
+        *dir = SCSI_DIR_TO_DEV;
+        *len = get_be16(cdb + 7);
+        return true;
+
+    /* Block transfers. The six byte forms count 0 as 256 blocks. */
+    case SCSI_READ_6:
+    case SCSI_WRITE_6:
+        blocks = cdb[4] == 0 ? 256 : cdb[4];
+        *dir = cdb[0] == SCSI_READ_6 ? SCSI_DIR_FROM_DEV : SCSI_DIR_TO_DEV;
+        break;
+    case SCSI_READ_10:
+    case SCSI_WRITE_10:
+        blocks = get_be16(cdb + 7);
+        *dir = cdb[0] == SCSI_READ_10 ? SCSI_DIR_FROM_DEV : SCSI_DIR_TO_DEV;
+        break;
+    case SCSI_READ_12:
+    case SCSI_WRITE_12:
+        blocks = get_be32(cdb + 6);
+        *dir = cdb[0] == SCSI_READ_12 ? SCSI_DIR_FROM_DEV : SCSI_DIR_TO_DEV;
+        break;
+    case SCSI_READ_16:
+    case SCSI_WRITE_16:
+        blocks = get_be32(cdb + 10);
+        *dir = cdb[0] == SCSI_READ_16 ? SCSI_DIR_FROM_DEV : SCSI_DIR_TO_DEV;
+        break;
+
+    /* VERIFY carries data only when it compares bytes (BYTCHK). */
+    case SCSI_VERIFY_10:
+        blocks = (cdb[1] & 0x02) != 0 ? get_be16(cdb + 7) : 0;
+        *dir = blocks != 0 ? SCSI_DIR_TO_DEV : SCSI_DIR_NONE;
+        break;
+    case SCSI_VERIFY_12:
+        blocks = (cdb[1] & 0x02) != 0 ? get_be32(cdb + 6) : 0;
+        *dir = blocks != 0 ? SCSI_DIR_TO_DEV : SCSI_DIR_NONE;
+        break;
+    case SCSI_VERIFY_16:
+        blocks = (cdb[1] & 0x02) != 0 ? get_be32(cdb + 10) : 0;
+        *dir = blocks != 0 ? SCSI_DIR_TO_DEV : SCSI_DIR_NONE;
+        break;
+
+    default:
+        return false;
+    }
+
+    /* Too long for one data phase: no initiator can stage it, so the
+       transport refuses it rather than wrapping the length. */
+    uint64_t bytes = blocks * BlockSize();
+    *len = bytes > 0xffffffff ? 0xffffffff : (uint32_t)bytes;
+    return true;
 }
 
 

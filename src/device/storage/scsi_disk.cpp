@@ -91,6 +91,8 @@ public:
 
     uint32_t BlockSize() override {return SCSI_DISK_BLOCK_SIZE;}
     uint64_t BlockCount() override {return fBlockDev->SectorCount();}
+    uint8_t PeripheralType() override {return SCSI_TYPE_DISK;}
+    bool Removable() override {return false;}
 };
 
 
@@ -133,21 +135,6 @@ void SCSIDisk::Good(SCSIRequest *req, uint32_t length)
     memset(fSense, 0, sizeof(fSense));
     fSense[0] = 0x70;
     fSense[7] = SCSI_SENSE_LEN - 8;
-}
-
-
-/* Copy a reply into the initiator's buffer, clamped to the room it has. Coming
-   up short is a short transfer, not an error: the transport reports the
-   residue and the host decides what to make of it. */
-static uint32_t scsi_reply(SCSIRequest *req, const uint8_t *data, uint32_t len)
-{
-    if (len > req->buf_len) {
-        len = req->buf_len;
-    }
-    if (len > 0 && req->buf != nullptr) {
-        memcpy(req->buf, data, len);
-    }
-    return len;
 }
 
 
@@ -206,7 +193,7 @@ bool SCSIDisk::Inquiry(SCSIRequest *req)
     }
 
     /* Standard inquiry data. */
-    buf[0] = 0x00; /* direct access block device, connected */
+    buf[0] = SCSI_TYPE_DISK; /* direct access block device, connected */
     buf[1] = 0x00; /* not removable: the image is always there */
     buf[2] = 0x05; /* claims conformance to SPC-3 */
     buf[3] = 0x02; /* response data format 2, as everything since SCSI-2 */

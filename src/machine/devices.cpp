@@ -75,7 +75,8 @@ static bool node_int_opt(const VMDeviceNode *node, const char *name, int *pval,
 /* The node's "file", relative to the configuration file, opened as a disk
    image. Reports and returns nullptr on failure. */
 static std::unique_ptr<HostBlockDevice> node_open_block(const VMDeviceNode *node,
-                                                        DeviceContext *ctx)
+                                                        DeviceContext *ctx,
+                                                        bool read_only = false)
 {
     std::unique_ptr<HostBlockDevice> bs;
     char *fname;
@@ -85,7 +86,7 @@ static std::unique_ptr<HostBlockDevice> node_open_block(const VMDeviceNode *node
         return nullptr;
     }
     fname = get_file_path(ctx->params->cfg_filename, node->filename.c_str());
-    bs = ctx->platform->OpenBlockDevice(fname);
+    bs = ctx->platform->OpenBlockDevice(fname, read_only);
     free(fname);
     if (bs == nullptr) {
         vm_error("%s: could not open\n", node->filename.c_str());
@@ -781,6 +782,23 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
         }
         return scsi_disk_node_create(std::move(bs), target, lun,
                                      read_only != 0);
+    }
+
+    if (strcmp(type, "scsi-cd") == 0) {
+        int target, lun;
+        if (!node_int_opt(node, "target", &target, -1) ||
+            !node_int_opt(node, "lun", &lun, -1)) {
+            return nullptr;
+        }
+        /* Without a file the drive is there with no disc in it. */
+        std::unique_ptr<HostBlockDevice> bs;
+        if (!node->filename.empty()) {
+            bs = node_open_block(node, ctx, true);
+            if (bs == nullptr) {
+                return nullptr;
+            }
+        }
+        return scsi_cd_node_create(std::move(bs), target, lun);
     }
 
     if (strcmp(type, "dwmac") == 0) {

@@ -78,7 +78,7 @@ public:
     HostKeyboard *Keyboard() override {return fDisplay.get();}
     HostPointer *Pointer() override {return fDisplay.get();}
     std::unique_ptr<HostBlockDevice> OpenBlockDevice(
-        const char *path) override;
+        const char *path, bool read_only) override;
     std::unique_ptr<HostEthernet> OpenEthernet(
         const char *driver, const char *ifname,
         const std::vector<EthernetForward> &forwards) override;

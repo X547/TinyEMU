@@ -77,12 +77,14 @@ void HostPlatform::QuitGui()
 }
 
 
-std::unique_ptr<HostBlockDevice> HostPlatform::OpenBlockDevice(const char *path)
+std::unique_ptr<HostBlockDevice> HostPlatform::OpenBlockDevice(const char *path,
+                                                              bool read_only)
 {
     if (url_backend_matches(path)) {
         return url_block_open(fLoop, path);
     }
-    return file_block_open(fLoop, path, fOptions.block_mode);
+    return file_block_open(fLoop, path,
+                           read_only ? BLOCK_MODE_RO : fOptions.block_mode);
 }
 
 
