@@ -26,6 +26,7 @@
 #include <string.h>
 
 #include "bits.h"
+#include "config_props.h"
 #include "cutils.h"
 #include "fdt.h"
 
@@ -997,3 +998,40 @@ void DwmacDevice::BuildFDT(FDTContext &ctx)
 
     fdt->EndNode(); /* ethernet */
 }
+
+
+//#pragma mark - class
+
+class DwmacClass final: public DeviceClass {
+public:
+    DwmacClass(): DeviceClass("dwmac") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        const char *compatible, *phy_mode;
+        uint32_t quirks;
+
+        /* Which controller this claims to be decides which driver binds to
+           it, so it is worth setting from the configuration rather than
+           being fixed here. */
+        if (!cfg.GetStrOpt("compatible", &compatible) ||
+            !cfg.GetStrOpt("phy_mode", &phy_mode) ||
+            !config_get_quirks(cfg, dwmac_quirks_from_name, &quirks)) {
+            return nullptr;
+        }
+        if (compatible == nullptr) {
+            compatible = DWMAC_DEFAULT_COMPATIBLE;
+        }
+        if (phy_mode == nullptr) {
+            phy_mode = DWMAC_DEFAULT_PHY_MODE;
+        }
+        auto net = config_open_ethernet(cfg, ctx);
+        if (net == nullptr) {
+            return nullptr;
+        }
+        return new DwmacDevice(ctx, std::move(net), compatible, phy_mode,
+                               quirks);
+    }
+};
+
+static const DwmacClass sDwmacClass;

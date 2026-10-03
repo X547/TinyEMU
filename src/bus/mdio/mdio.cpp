@@ -24,6 +24,7 @@
 #include "mdio.h"
 
 #include "bits.h"
+#include "device_class.h"
 #include "fdt.h"
 #include "machine.h"
 
@@ -229,3 +230,27 @@ void PHYDevice::BuildFDT(FDTContext &ctx)
     }
     ctx.fdt->EndNode();
 }
+
+
+//#pragma mark - class
+
+class PHYClass final: public DeviceClass {
+public:
+    PHYClass(): DeviceClass("ethernet-phy") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int address, phy_id;
+
+        (void)ctx;
+        /* Without an address the bus places the PHY, exactly as the MMIO
+           allocator places a device that names no base. */
+        if (!cfg.GetInt("reg", &address, -1) ||
+            !cfg.GetInt("phy_id", &phy_id, PHY_GENERIC_ID)) {
+            return nullptr;
+        }
+        return new PHYDevice(address, (uint32_t)phy_id);
+    }
+};
+
+static const PHYClass sPHYClass;

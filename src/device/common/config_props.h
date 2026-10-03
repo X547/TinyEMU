@@ -27,6 +27,7 @@
 #include "device_class.h"
 #include "host_audio.h"
 #include "host_block.h"
+#include "host_ethernet.h"
 
 /* The device's "file", relative to the configuration file, opened as a disk
    image. Reports and returns nullptr on failure. */
@@ -48,3 +49,8 @@ bool config_get_quirks(const DeviceConfig &cfg,
 std::unique_ptr<HostAudio> config_open_audio(const DeviceConfig &cfg,
                                              DeviceContext *ctx,
                                              AudioDirectionEnum direction);
+
+/* The network back end the device's "driver" names, with the ports its
+   "forward" entries open. Reports and returns nullptr on failure. */
+std::unique_ptr<HostEthernet> config_open_ethernet(const DeviceConfig &cfg,
+                                                   DeviceContext *ctx);

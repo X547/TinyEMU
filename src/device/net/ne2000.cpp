@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "bits.h"
+#include "config_props.h"
 #include "cutils.h"
 
 /* What the RTL8029AS answers in the two registers a driver identifies it by,
@@ -684,3 +685,30 @@ void NE2000Device::SetBar(int bar_num, uint64_t addr, bool enabled)
         fIoRange->SetAddr(addr, enabled);
     }
 }
+
+
+//#pragma mark - class
+
+class NE2000Class final: public DeviceClass {
+public:
+    NE2000Class(): DeviceClass("ne2000") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int port, irq;
+
+        /* Only a card jumpered onto a port based machine names either; on
+           PCI the guest places both. */
+        if (!cfg.GetInt("reg", &port, -1) || !cfg.GetInt("irq", &irq, -1)) {
+            return nullptr;
+        }
+        auto net = config_open_ethernet(cfg, ctx);
+        if (net == nullptr) {
+            return nullptr;
+        }
+        return new NE2000Device(ctx, std::move(net), cfg.IdOr("ne2000"),
+                                port, irq);
+    }
+};
+
+static const NE2000Class sNE2000Class;
