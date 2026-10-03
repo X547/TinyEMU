@@ -24,6 +24,7 @@
 #include <math.h>
 #include <string.h>
 
+#include "config_props.h"
 #include "hda.h"
 #include "machine.h"
 
@@ -1006,30 +1007,137 @@ void HDAOutputPort::AudioTick()
 }
 
 
-//#pragma mark - factories
+//#pragma mark - classes
 
-Device *hda_codec_node_create(const char *name, int address,
-                              uint32_t vendor_id, uint32_t subsystem_id,
-                              uint32_t revision_id)
+/* A port's pin and converter. Reports and returns false on anything it
+   cannot read. */
+static bool parse_port_config(const DeviceConfig &cfg, HDAPortConfig *out)
 {
-    return new HDACodecDevice(name, address, vendor_id, subsystem_id,
-                              revision_id);
-}
+    const char *type = cfg.Type();
+    const char *kind, *location;
+    int plugged;
 
-
-Device *hda_audio_group_node_create(const char *name)
-{
-    return new HDAAudioGroupDevice(name);
-}
-
-
-Device *hda_output_node_create(const char *name, const HDAPortConfig &config,
-                               std::unique_ptr<HostAudio> audio)
-{
-    if (!is_output_kind(config.kind)) {
-        vm_error("%s: 'kind' must be \"line-out\", \"speaker\" or "
-                 "\"headphone\"\n", name);
-        return nullptr;
+    if (!cfg.GetStrOpt("kind", &kind) ||
+        !cfg.GetStrOpt("location", &location) ||
+        !cfg.GetInt("association", &out->association, 1) ||
+        !cfg.GetInt("sequence", &out->sequence, 0) ||
+        !cfg.GetInt("channels", &out->channels, 2) ||
+        !cfg.GetInt("plugged", &plugged, 1)) {
+        return false;
     }
-    return new HDAOutputPort(name, config, std::move(audio));
+    if (kind != nullptr && !hda_pin_kind_from_name(kind, &out->kind)) {
+        vm_error("%s: unknown kind '%s'\n", type, kind);
+        return false;
+    }
+    if (location != nullptr &&
+        !hda_pin_location_from_name(location, &out->location)) {
+        vm_error("%s: unknown location '%s'\n", type, location);
+        return false;
+    }
+    if (out->association < 1 || out->association > 15) {
+        vm_error("%s: 'association' must be between 1 and 15\n", type);
+        return false;
+    }
+    if (out->sequence < 0 || out->sequence > 15) {
+        vm_error("%s: 'sequence' must be between 0 and 15\n", type);
+        return false;
+    }
+    if (out->channels < 1 || out->channels > 16) {
+        vm_error("%s: 'channels' must be between 1 and 16\n", type);
+        return false;
+    }
+    out->plugged = plugged != 0;
+
+    JSONValue list = cfg.Get("rates");
+    if (!json_is_undefined(list)) {
+        if (list.type != JSON_ARRAY) {
+            vm_error("%s: 'rates' must be an array of sample rates\n", type);
+            return false;
+        }
+        for (int i = 0; i < list.u.array->Length(); i++) {
+            JSONValue item = json_array_get(list, i);
+            if (item.type != JSON_INT || hda_rate_index(item.u.int32) < 0) {
+                vm_error("%s: 'rates' may only hold rates the link carries, "
+                         "8000 to 192000\n", type);
+                return false;
+            }
+            out->rates.push_back(item.u.int32);
+        }
+    }
+    return true;
 }
+
+
+/* A codec on an HDA link; without an "address" it takes the first free
+   one. */
+class HDACodecClass final: public DeviceClass {
+public:
+    HDACodecClass(): DeviceClass("hda-codec") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int address, vendor_id, subsystem_id, revision_id;
+
+        (void)ctx;
+        if (!cfg.GetInt("address", &address, -1) ||
+            !cfg.GetInt("vendor_id", &vendor_id,
+                        HDA_CODEC_DEFAULT_VENDOR_ID) ||
+            !cfg.GetInt("subsystem_id", &subsystem_id, 0) ||
+            !cfg.GetInt("revision_id", &revision_id, 0x00100100)) {
+            return nullptr;
+        }
+        if (!cfg.HasChildren()) {
+            vm_error("hda-codec: needs a nested bus with a function group on "
+                     "it\n");
+            return nullptr;
+        }
+        return new HDACodecDevice(cfg.IdOr("hda-codec"), address, vendor_id,
+                                  subsystem_id, revision_id);
+    }
+};
+
+static const HDACodecClass sHDACodecClass;
+
+
+/* The audio function group of a codec, which its ports hang from. */
+class HDAAudioGroupClass final: public DeviceClass {
+public:
+    HDAAudioGroupClass(): DeviceClass("hda-audio-group") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        (void)ctx;
+        return new HDAAudioGroupDevice(cfg.IdOr("hda-audio-group"));
+    }
+};
+
+static const HDAAudioGroupClass sHDAAudioGroupClass;
+
+
+/* A converter and the pin it drives, playing to the host. */
+class HDAOutputClass final: public DeviceClass {
+public:
+    HDAOutputClass(): DeviceClass("hda-output") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        HDAPortConfig config;
+        const char *name = cfg.IdOr("hda-output");
+
+        if (!parse_port_config(cfg, &config)) {
+            return nullptr;
+        }
+        auto audio = config_open_audio(cfg, ctx, AUDIO_RENDER);
+        if (audio == nullptr) {
+            return nullptr;
+        }
+        if (!is_output_kind(config.kind)) {
+            vm_error("%s: 'kind' must be \"line-out\", \"speaker\" or "
+                     "\"headphone\"\n", name);
+            return nullptr;
+        }
+        return new HDAOutputPort(name, config, std::move(audio));
+    }
+};
+
+static const HDAOutputClass sHDAOutputClass;

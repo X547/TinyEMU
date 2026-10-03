@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "cutils.h"
+#include "device_class.h"
 #include "hda.h"
 #include "host_time.h"
 #include "machine.h"
@@ -1088,18 +1089,35 @@ bool IntelHDADevice::Realize()
 }
 
 
-//#pragma mark - factory
+//#pragma mark - class
 
-Device *intel_hda_node_create(const char *name, int input_streams,
-                              int output_streams)
-{
-    if (input_streams < 0 || output_streams < 0 ||
-        input_streams > 15 || output_streams > 15 ||
-        input_streams + output_streams > INTEL_HDA_MAX_STREAMS) {
-        vm_error("%s: 'input_streams' and 'output_streams' must each be "
-                 "between 0 and 15, and %d together at most\n", name,
-                 INTEL_HDA_MAX_STREAMS);
-        return nullptr;
+/* An ICH6 HD Audio controller on a PCI bus, and the link it provides. */
+class IntelHDAClass final: public DeviceClass {
+public:
+    IntelHDAClass(): DeviceClass("intel-hda") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int input_streams, output_streams;
+        const char *name = cfg.IdOr("hda");
+
+        (void)ctx;
+        if (!cfg.GetInt("input_streams", &input_streams,
+                        INTEL_HDA_DEFAULT_STREAMS) ||
+            !cfg.GetInt("output_streams", &output_streams,
+                        INTEL_HDA_DEFAULT_STREAMS)) {
+            return nullptr;
+        }
+        if (input_streams < 0 || output_streams < 0 ||
+            input_streams > 15 || output_streams > 15 ||
+            input_streams + output_streams > INTEL_HDA_MAX_STREAMS) {
+            vm_error("%s: 'input_streams' and 'output_streams' must each be "
+                     "between 0 and 15, and %d together at most\n", name,
+                     INTEL_HDA_MAX_STREAMS);
+            return nullptr;
+        }
+        return new IntelHDADevice(name, input_streams, output_streams);
     }
-    return new IntelHDADevice(name, input_streams, output_streams);
-}
+};
+
+static const IntelHDAClass sIntelHDAClass;

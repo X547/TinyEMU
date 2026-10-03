@@ -25,6 +25,7 @@
 #include <memory>
 
 #include "device_class.h"
+#include "host_audio.h"
 #include "host_block.h"
 
 /* The device's "file", relative to the configuration file, opened as a disk
@@ -40,3 +41,10 @@ std::unique_ptr<HostBlockDevice> config_open_block(const DeviceConfig &cfg,
 bool config_get_quirks(const DeviceConfig &cfg,
                        uint32_t (*from_name)(const char *name),
                        uint32_t *out);
+
+/* The device's "host" object: where its sound goes to or comes from. Without
+   one it is the host's own audio system. Reports and returns nullptr on
+   failure. */
+std::unique_ptr<HostAudio> config_open_audio(const DeviceConfig &cfg,
+                                             DeviceContext *ctx,
+                                             AudioDirectionEnum direction);

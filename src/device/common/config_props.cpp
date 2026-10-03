@@ -82,3 +82,49 @@ bool config_get_quirks(const DeviceConfig &cfg,
     *out = quirks;
     return true;
 }
+
+
+std::unique_ptr<HostAudio> config_open_audio(const DeviceConfig &cfg,
+                                             DeviceContext *ctx,
+                                             AudioDirectionEnum direction)
+{
+    const char *type = cfg.Type();
+    AudioSettings settings;
+    const char *driver = nullptr, *device = nullptr, *file = nullptr;
+    int loop = 0, latency = settings.latency_ms;
+
+    settings.direction = direction;
+    JSONValue host = cfg.Get("host");
+    if (!json_is_undefined(host)) {
+        if (host.type != JSON_OBJ) {
+            vm_error("%s: 'host' must be an object\n", type);
+            return nullptr;
+        }
+        if (vm_get_str_opt(host, "driver", &driver) < 0 ||
+            vm_get_str_opt(host, "device", &device) < 0 ||
+            vm_get_str_opt(host, "file", &file) < 0 ||
+            vm_get_int_opt(host, "loop", &loop, 0) < 0 ||
+            vm_get_int_opt(host, "latency", &latency, latency) < 0) {
+            return nullptr;
+        }
+    }
+    if (latency < 1 || latency > 1000) {
+        vm_error("%s: 'latency' must be between 1 and 1000 ms\n", type);
+        return nullptr;
+    }
+    if (driver != nullptr) {
+        settings.driver = driver;
+    }
+    settings.device = device;
+    settings.loop = loop != 0;
+    settings.latency_ms = latency;
+
+    char *path = nullptr;
+    if (file != nullptr) {
+        path = cfg.ResolvePath(file);
+        settings.file = path;
+    }
+    auto audio = ctx->platform->OpenAudio(settings);
+    free(path);
+    return audio;
+}

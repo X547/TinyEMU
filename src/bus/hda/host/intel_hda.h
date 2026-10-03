@@ -27,7 +27,3 @@
 /* Input and output streams together; the interrupt registers have a bit for
    each of thirty. */
 #define INTEL_HDA_MAX_STREAMS 30
-
-/* An ICH6 HD Audio controller on a PCI bus, and the link it provides. */
-Device *intel_hda_node_create(const char *name, int input_streams,
-                              int output_streams);

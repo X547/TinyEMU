@@ -60,16 +60,3 @@ struct HDAPortConfig {
 /* Names as the configuration spells them; false for one that is not. */
 bool hda_pin_kind_from_name(const char *name, HDAPinDeviceEnum *out);
 bool hda_pin_location_from_name(const char *name, int *out);
-
-
-/* A codec on an HDA link; 'address' < 0 takes the first free one. */
-Device *hda_codec_node_create(const char *name, int address,
-                              uint32_t vendor_id, uint32_t subsystem_id,
-                              uint32_t revision_id);
-
-/* The audio function group of a codec, which its ports hang from. */
-Device *hda_audio_group_node_create(const char *name);
-
-/* A converter and the pin it drives, playing to 'audio'. */
-Device *hda_output_node_create(const char *name, const HDAPortConfig &config,
-                               std::unique_ptr<HostAudio> audio);
