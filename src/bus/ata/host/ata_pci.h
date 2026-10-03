@@ -83,6 +83,12 @@
 #define ATA_PCI_PROGIF_LEGACY 0x80
 #define ATA_PCI_PROGIF_NATIVE 0x8f
 
+/* The PIIX IDE timing registers, one per channel. Of all they hold only the
+   decode enable bit means anything here. */
+#define ATA_PCI_IDETIM0       0x40
+#define ATA_PCI_IDETIM1       0x42
+#define ATA_PCI_IDETIM_DECODE 0x8000
+
 
 class ATAPCIController;
 

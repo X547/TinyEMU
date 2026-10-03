@@ -107,6 +107,11 @@ bool ATAPCIController::RegisterPCI(PCIBus *pci_bus, int devfn)
                            fLegacy ? ATA_PCI_PROGIF_LEGACY
                                    : ATA_PCI_PROGIF_NATIVE);
     pci_device_set_config8(fPciDev, PCI_INTERRUPT_PIN, 1);
+    /* Both channels decode from reset, as firmware would have set them up.
+       A guest started without firmware finds a channel whose decode bit is
+       clear disabled, and does not look for drives on it. */
+    pci_device_set_config16(fPciDev, ATA_PCI_IDETIM0, ATA_PCI_IDETIM_DECODE);
+    pci_device_set_config16(fPciDev, ATA_PCI_IDETIM1, ATA_PCI_IDETIM_DECODE);
 
     fPortMap = pci_device_get_port_map(fPciDev);
     if (fPortMap == nullptr) {
