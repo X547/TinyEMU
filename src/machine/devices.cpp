@@ -39,21 +39,11 @@
 #include "mdio.h"
 #include "ne2000.h"
 #include "nvme.h"
-#include "pci_bridge.h"
-#include "pci_host_dw.h"
-#include "pci_host_plda.h"
-#include "pci_host_ecam.h"
 #include "scsi.h"
 #include "sd.h"
 #include "sdhci.h"
 #include "usb.h"
 #include "xhci.h"
-
-/* The PC's own parts. They are built only with the x86 machine, because none
-   of them models anything a device tree machine has. */
-#ifdef CONFIG_X86EMU
-#include "pci_host_i440fx.h"
-#endif
 
 
 //#pragma mark - factory
@@ -334,45 +324,9 @@ static bool node_parse_hda_port(const DeviceConfig &cfg, HDAPortConfig *out)
 }
 
 
-/* An "io_size" in KB as a byte count. A PCI to PCI bridge forwards I/O in
-   4 KB units and the window registers hold a power of two, so an aperture
-   that is neither is one no guest could place devices in. 0 asks for a host
-   bridge with no I/O aperture at all, which is what every machine had before
-   there was one. */
-static bool pci_host_io_size(const char *type, int size_kb, uint64_t *out)
-{
-    if (size_kb == 0) {
-        *out = 0;
-        return true;
-    }
-    if (size_kb < 4 || size_kb > 65536 ||
-        (size_kb & (size_kb - 1)) != 0) {
-        vm_error("%s: 'io_size' must be 0 or a power of two between 4 and "
-                 "65536 KB\n", type);
-        return false;
-    }
-    *out = (uint64_t)size_kb << 10;
-    return true;
-}
-
-
 static Device *device_create(const DeviceConfig &cfg, DeviceContext *ctx)
 {
     const char *type = cfg.Type();
-
-#ifdef CONFIG_X86EMU
-    if (strcmp(type, "pci-host-i440fx") == 0 ||
-        strcmp(type, "pci-host-cloudhv") == 0) {
-        if (ctx->pc_pci_space == nullptr) {
-            vm_error("%s: only the pc machine has one\n", type);
-            return nullptr;
-        }
-        I440FXVariant variant = strcmp(type, "pci-host-cloudhv") == 0 ?
-            I440FX_CLOUD_HYPERVISOR : I440FX_PC;
-        return i440fx_node_create(cfg.IdOr("i440fx"), variant,
-                                  *ctx->pc_pci_space);
-    }
-#endif
 
     if (strcmp(type, "pci-ide") == 0) {
         if (!cfg.HasChildren()) {
@@ -401,79 +355,6 @@ static Device *device_create(const DeviceConfig &cfg, DeviceContext *ctx)
             return nullptr;
         }
         return atapi_node_create();
-    }
-
-    if (strcmp(type, "pci-host-ecam-generic") == 0) {
-        int bus_count, mmio_size_mb, mmio64_size_mb, io_size_kb;
-        if (!cfg.GetInt("bus_count", &bus_count,
-                          PCIE_ECAM_DEFAULT_BUS_COUNT) ||
-            !cfg.GetInt("mmio_size", &mmio_size_mb,
-                          PCIE_ECAM_DEFAULT_MMIO_SIZE >> 20) ||
-            !cfg.GetInt("mmio64_size", &mmio64_size_mb,
-                          PCIE_ECAM_DEFAULT_MMIO64_SIZE >> 20) ||
-            !cfg.GetInt("io_size", &io_size_kb,
-                          PCIE_ECAM_DEFAULT_IO_SIZE >> 10)) {
-            return nullptr;
-        }
-        uint64_t io_size;
-        if (!pci_host_io_size(type, io_size_kb, &io_size)) {
-            return nullptr;
-        }
-        return new PCIHostECAMDevice(cfg.IdOr("pcie"),
-                                     bus_count, (uint64_t)mmio_size_mb << 20,
-                                     (uint64_t)mmio64_size_mb << 20, io_size);
-    }
-
-    if (strcmp(type, "pci-host-designware") == 0) {
-        int mmio_size_mb, mmio64_size_mb, io_size_kb, bus_count;
-        const char *compatible;
-        if (!cfg.GetInt("mmio_size", &mmio_size_mb,
-                          PCIE_DW_DEFAULT_MMIO_SIZE >> 20) ||
-            !cfg.GetInt("mmio64_size", &mmio64_size_mb,
-                          PCIE_DW_DEFAULT_MMIO64_SIZE >> 20) ||
-            !cfg.GetInt("io_size", &io_size_kb,
-                          PCIE_DW_DEFAULT_IO_SIZE >> 10) ||
-            !cfg.GetInt("bus_count", &bus_count,
-                          PCIE_DW_DEFAULT_BUS_COUNT)) {
-            return nullptr;
-        }
-        uint64_t io_size;
-        if (!pci_host_io_size(type, io_size_kb, &io_size)) {
-            return nullptr;
-        }
-        /* Which controller this claims to be decides which driver binds to
-           it, so it is worth setting from the configuration rather than
-           being fixed here. */
-        if (!cfg.GetStrOpt("compatible", &compatible)) {
-            return nullptr;
-        }
-        if (compatible == nullptr) {
-            compatible = PCIE_DW_DEFAULT_COMPATIBLE;
-        }
-        return new PCIHostDWDevice(cfg.IdOr("pcie"),
-                                   compatible, (uint64_t)mmio_size_mb << 20,
-                                   (uint64_t)mmio64_size_mb << 20, io_size,
-                                   bus_count);
-    }
-
-    if (strcmp(type, "pci-host-plda") == 0) {
-        int mmio_size_mb, mmio64_size_mb, bus_count;
-        if (!cfg.GetInt("mmio_size", &mmio_size_mb,
-                          PCIE_PLDA_DEFAULT_MMIO_SIZE >> 20) ||
-            !cfg.GetInt("mmio64_size", &mmio64_size_mb,
-                          PCIE_PLDA_DEFAULT_MMIO64_SIZE >> 20) ||
-            !cfg.GetInt("bus_count", &bus_count,
-                          PCIE_PLDA_DEFAULT_BUS_COUNT)) {
-            return nullptr;
-        }
-        return new PCIHostPLDADevice(cfg.IdOr("pcie"),
-                                     (uint64_t)mmio_size_mb << 20,
-                                     (uint64_t)mmio64_size_mb << 20,
-                                     bus_count);
-    }
-
-    if (strcmp(type, "pci-bridge") == 0) {
-        return pci_bridge_node_create(cfg.IdOr("pci-bridge"));
     }
 
     if (strcmp(type, "nvme") == 0) {
@@ -920,17 +801,9 @@ public:
 };
 
 static const LegacyDeviceClass sLegacyClasses[] = {
-#ifdef CONFIG_X86EMU
-    LegacyDeviceClass("pci-host-i440fx"),
-    LegacyDeviceClass("pci-host-cloudhv"),
-#endif
     LegacyDeviceClass("pci-ide"),
     LegacyDeviceClass("ata-disk"),
     LegacyDeviceClass("atapi"),
-    LegacyDeviceClass("pci-host-ecam-generic"),
-    LegacyDeviceClass("pci-host-designware"),
-    LegacyDeviceClass("pci-host-plda"),
-    LegacyDeviceClass("pci-bridge"),
     LegacyDeviceClass("nvme"),
     LegacyDeviceClass("nvme-ns"),
     LegacyDeviceClass("sdhci"),

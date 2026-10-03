@@ -28,6 +28,7 @@
 #include <string.h>
 
 #include "cutils.h"
+#include "device_class.h"
 #include "fdt.h"
 #include "machine.h"
 
@@ -243,3 +244,52 @@ void PCIHostECAMDevice::BuildFDT(FDTContext &ctx)
 
     fdt->EndNode();
 }
+
+
+//#pragma mark - class
+
+bool pci_host_io_size(const char *type, int size_kb, uint64_t *out)
+{
+    if (size_kb == 0) {
+        *out = 0;
+        return true;
+    }
+    if (size_kb < 4 || size_kb > 65536 ||
+        (size_kb & (size_kb - 1)) != 0) {
+        vm_error("%s: 'io_size' must be 0 or a power of two between 4 and "
+                 "65536 KB\n", type);
+        return false;
+    }
+    *out = (uint64_t)size_kb << 10;
+    return true;
+}
+
+
+class PCIHostECAMClass final: public DeviceClass {
+public:
+    PCIHostECAMClass(): DeviceClass("pci-host-ecam-generic") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int bus_count, mmio_size_mb, mmio64_size_mb, io_size_kb;
+        uint64_t io_size;
+
+        (void)ctx;
+        if (!cfg.GetInt("bus_count", &bus_count,
+                        PCIE_ECAM_DEFAULT_BUS_COUNT) ||
+            !cfg.GetInt("mmio_size", &mmio_size_mb,
+                        PCIE_ECAM_DEFAULT_MMIO_SIZE >> 20) ||
+            !cfg.GetInt("mmio64_size", &mmio64_size_mb,
+                        PCIE_ECAM_DEFAULT_MMIO64_SIZE >> 20) ||
+            !cfg.GetInt("io_size", &io_size_kb,
+                        PCIE_ECAM_DEFAULT_IO_SIZE >> 10) ||
+            !pci_host_io_size(cfg.Type(), io_size_kb, &io_size)) {
+            return nullptr;
+        }
+        return new PCIHostECAMDevice(cfg.IdOr("pcie"), bus_count,
+                                     (uint64_t)mmio_size_mb << 20,
+                                     (uint64_t)mmio64_size_mb << 20, io_size);
+    }
+};
+
+static const PCIHostECAMClass sPCIHostECAMClass;

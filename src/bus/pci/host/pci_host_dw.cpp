@@ -29,6 +29,7 @@
 
 #include "bits.h"
 #include "cutils.h"
+#include "device_class.h"
 #include "fdt.h"
 #include "machine.h"
 
@@ -647,3 +648,46 @@ void PCIHostDWDevice::BuildFDT(FDTContext &ctx)
 
     fdt->EndNode();
 }
+
+
+//#pragma mark - class
+
+class PCIHostDWClass final: public DeviceClass {
+public:
+    PCIHostDWClass(): DeviceClass("pci-host-designware") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int mmio_size_mb, mmio64_size_mb, io_size_kb, bus_count;
+        uint64_t io_size;
+        const char *compatible;
+
+        (void)ctx;
+        if (!cfg.GetInt("mmio_size", &mmio_size_mb,
+                        PCIE_DW_DEFAULT_MMIO_SIZE >> 20) ||
+            !cfg.GetInt("mmio64_size", &mmio64_size_mb,
+                        PCIE_DW_DEFAULT_MMIO64_SIZE >> 20) ||
+            !cfg.GetInt("io_size", &io_size_kb,
+                        PCIE_DW_DEFAULT_IO_SIZE >> 10) ||
+            !cfg.GetInt("bus_count", &bus_count,
+                        PCIE_DW_DEFAULT_BUS_COUNT) ||
+            !pci_host_io_size(cfg.Type(), io_size_kb, &io_size)) {
+            return nullptr;
+        }
+        /* Which controller this claims to be decides which driver binds to
+           it, so it is worth setting from the configuration rather than
+           being fixed here. */
+        if (!cfg.GetStrOpt("compatible", &compatible)) {
+            return nullptr;
+        }
+        if (compatible == nullptr) {
+            compatible = PCIE_DW_DEFAULT_COMPATIBLE;
+        }
+        return new PCIHostDWDevice(cfg.IdOr("pcie"), compatible,
+                                   (uint64_t)mmio_size_mb << 20,
+                                   (uint64_t)mmio64_size_mb << 20, io_size,
+                                   bus_count);
+    }
+};
+
+static const PCIHostDWClass sPCIHostDWClass;

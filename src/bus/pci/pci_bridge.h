@@ -59,12 +59,3 @@ public:
 
    Returns null on failure. */
 std::unique_ptr<Bus> pci_attach_bus_create(Device *owner, PCIBus *bus);
-
-
-/* The "pci-bridge" configuration node: one PCI Express switch, or a plain
-   bridge on a conventional bus. It is a port on the bus above and, behind it,
-   the bus the nested devices go on -- each on a downstream port of its own,
-   because the bus below a port is a link. The guest numbers the buses and
-   programs the forwarding windows. Nesting one of these inside another is how
-   a deeper hierarchy is described. */
-Device *pci_bridge_node_create(const char *name);

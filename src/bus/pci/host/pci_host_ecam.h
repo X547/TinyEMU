@@ -89,3 +89,11 @@ public:
                     &PCIHostECAMDevice::EcamWrite> fEcamIo {*this};
     PCIIOWindow fIoWindow;
 };
+
+
+/* A host bridge's "io_size" in KB as a byte count. A PCI to PCI bridge
+   forwards I/O in 4 KB units and the window registers hold a power of two, so
+   an aperture that is neither is one no guest could place devices in. 0 asks
+   for a host bridge with no I/O aperture at all. Reports and returns false
+   otherwise. */
+bool pci_host_io_size(const char *type, int size_kb, uint64_t *out);

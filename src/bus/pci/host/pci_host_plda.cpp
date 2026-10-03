@@ -27,6 +27,7 @@
 
 #include "bits.h"
 #include "cutils.h"
+#include "device_class.h"
 #include "fdt.h"
 #include "machine.h"
 #include "pci_host_ecam.h"
@@ -464,3 +465,32 @@ void PCIHostPLDADevice::BuildFDT(FDTContext &ctx)
 
     fdt->EndNode();
 }
+
+
+//#pragma mark - class
+
+class PCIHostPLDAClass final: public DeviceClass {
+public:
+    PCIHostPLDAClass(): DeviceClass("pci-host-plda") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int mmio_size_mb, mmio64_size_mb, bus_count;
+
+        (void)ctx;
+        if (!cfg.GetInt("mmio_size", &mmio_size_mb,
+                        PCIE_PLDA_DEFAULT_MMIO_SIZE >> 20) ||
+            !cfg.GetInt("mmio64_size", &mmio64_size_mb,
+                        PCIE_PLDA_DEFAULT_MMIO64_SIZE >> 20) ||
+            !cfg.GetInt("bus_count", &bus_count,
+                        PCIE_PLDA_DEFAULT_BUS_COUNT)) {
+            return nullptr;
+        }
+        return new PCIHostPLDADevice(cfg.IdOr("pcie"),
+                                     (uint64_t)mmio_size_mb << 20,
+                                     (uint64_t)mmio64_size_mb << 20,
+                                     bus_count);
+    }
+};
+
+static const PCIHostPLDAClass sPCIHostPLDAClass;

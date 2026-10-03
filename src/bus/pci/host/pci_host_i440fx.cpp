@@ -30,6 +30,7 @@
 
 #include "bits.h"
 #include "cutils.h"
+#include "devices.h"
 #include "machine.h"
 #include "pci_bridge.h"
 
@@ -271,11 +272,34 @@ public:
 };
 
 
-Device *i440fx_node_create(const char *name, I440FXVariant variant,
-                           const PcPciApertures &space)
-{
-    return new I440FXDevice(name, variant, space);
-}
+/* The host bridge of a PC. It decodes the CF8/CFC configuration ports and the
+   apertures, carries the host bridge function and the PIIX3 ISA bridge whose
+   PIRQ registers route the four INTx lines onto the PIC, and provides the PCI
+   bus the machine's devices hang from. The apertures are what the machine
+   leaves free: below 4 GB from the end of RAM to its device window, and above
+   RAM up to what the processors can address. */
+class I440FXClass final: public DeviceClass {
+private:
+    I440FXVariant fVariant;
+
+public:
+    I440FXClass(const char *name, I440FXVariant variant):
+        DeviceClass(name), fVariant(variant) {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        if (ctx->pc_pci_space == nullptr) {
+            vm_error("%s: only the pc machine has one\n", cfg.Type());
+            return nullptr;
+        }
+        return new I440FXDevice(cfg.IdOr("i440fx"), fVariant,
+                                *ctx->pc_pci_space);
+    }
+};
+
+static const I440FXClass sI440FXClass("pci-host-i440fx", I440FX_PC);
+static const I440FXClass sCloudHVClass("pci-host-cloudhv",
+                                       I440FX_CLOUD_HYPERVISOR);
 
 
 I440FXState *i440fx_node_state(Device *dev)

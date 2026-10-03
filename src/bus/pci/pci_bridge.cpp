@@ -25,6 +25,7 @@
 
 #include <stdio.h>
 
+#include "device_class.h"
 #include "machine.h"
 
 
@@ -235,9 +236,23 @@ public:
 };
 
 
-//#pragma mark - factory
+//#pragma mark - class
 
-Device *pci_bridge_node_create(const char *name)
-{
-    return new PCIBridgeDevice(name);
-}
+/* One PCI Express switch, or a plain bridge on a conventional bus. It is a
+   port on the bus above and, behind it, the bus the nested devices go on --
+   each on a downstream port of its own, because the bus below a port is a
+   link. The guest numbers the buses and programs the forwarding windows.
+   Nesting one of these inside another is how a deeper hierarchy is
+   described. */
+class PCIBridgeClass final: public DeviceClass {
+public:
+    PCIBridgeClass(): DeviceClass("pci-bridge") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        (void)ctx;
+        return new PCIBridgeDevice(cfg.IdOr("pci-bridge"));
+    }
+};
+
+static const PCIBridgeClass sPCIBridgeClass;
