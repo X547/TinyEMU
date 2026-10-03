@@ -27,8 +27,6 @@
 
 #include "device.h"
 
-struct DeviceContext;
-
 /* How many functions one transport may carry. A USB HID device gives each of
    them an interface of its own. */
 #define HID_MAX_FUNCTIONS 4
@@ -188,19 +186,3 @@ public:
 
     bool Realize() override;
 };
-
-
-/* Each HID function builds its own node, so the factory in devices.cpp stays
-   a table of names. 'index' is -1 for the first free one. */
-
-/* hid_keyboard.cpp */
-Device *hid_keyboard_node_create(DeviceContext *ctx, int index);
-
-/* hid_tablet.cpp */
-Device *hid_tablet_node_create(DeviceContext *ctx, int index);
-
-/* usb_hid.cpp */
-Device *usb_hid_node_create(int port);
-
-/* i2c_hid.cpp; 'address' is -1 for the first free one */
-Device *i2c_hid_node_create(int address);

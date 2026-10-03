@@ -199,7 +199,20 @@ public:
 };
 
 
-Device *hid_tablet_node_create(DeviceContext *ctx, int index)
-{
-    return new HIDTabletNode(new HIDTablet(), ctx, index);
-}
+/* "index" is the function it takes on its transport, or -1 for the first
+   free one. */
+class HIDTabletClass final: public DeviceClass {
+public:
+    HIDTabletClass(): DeviceClass("hid-tablet") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int index;
+        if (!cfg.GetInt("index", &index, -1)) {
+            return nullptr;
+        }
+        return new HIDTabletNode(new HIDTablet(), ctx, index);
+    }
+};
+
+static const HIDTabletClass sHIDTabletClass;

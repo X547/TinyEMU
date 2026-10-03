@@ -28,6 +28,7 @@
 
 #include "bits.h"
 #include "cutils.h"
+#include "device_class.h"
 #include "hid.h"
 #include "machine.h"
 #include "usb.h"
@@ -475,13 +476,32 @@ void USBHID::Cancel(URB *urb)
 }
 
 
-//#pragma mark - factory
+//#pragma mark - class
 
-Device *usb_hid_node_create(int port)
-{
-    USBHID *hid = new USBHID();
-    USBDeviceNode *node = new USBDeviceNode("usb-hid", hid, port);
+/* "port" is the port asked for, or 0 for the first free one. */
+class USBHIDClass final: public DeviceClass {
+public:
+    USBHIDClass(): DeviceClass("usb-hid") {}
 
-    node->SetChildBus(new HIDBus(node, hid));
-    return node;
-}
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int port;
+
+        (void)ctx;
+        if (!cfg.GetInt("port", &port, 0)) {
+            return nullptr;
+        }
+        if (!cfg.HasChildren()) {
+            vm_error("usb-hid: needs a nested HID bus with at least one "
+                     "function on it\n");
+            return nullptr;
+        }
+        USBHID *hid = new USBHID();
+        USBDeviceNode *node = new USBDeviceNode("usb-hid", hid, port);
+
+        node->SetChildBus(new HIDBus(node, hid));
+        return node;
+    }
+};
+
+static const USBHIDClass sUSBHIDClass;

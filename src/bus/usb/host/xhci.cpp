@@ -28,6 +28,7 @@
 
 #include "bits.h"
 #include "cutils.h"
+#include "device_class.h"
 #include "host_time.h"
 #include "machine.h"
 #include "pci.h"
@@ -2401,9 +2402,23 @@ bool XHCIDevice::Realize()
 }
 
 
-//#pragma mark - factory
+//#pragma mark - class
 
-Device *xhci_node_create(const char *name, int usb2_ports, int usb3_ports)
-{
-    return new XHCIDevice(name, usb2_ports, usb3_ports);
-}
+class XHCIClass final: public DeviceClass {
+public:
+    XHCIClass(): DeviceClass("xhci") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int usb2_ports, usb3_ports;
+
+        (void)ctx;
+        if (!cfg.GetInt("usb2_ports", &usb2_ports, XHCI_DEFAULT_USB2_PORTS) ||
+            !cfg.GetInt("usb3_ports", &usb3_ports, XHCI_DEFAULT_USB3_PORTS)) {
+            return nullptr;
+        }
+        return new XHCIDevice(cfg.IdOr("xhci"), usb2_ports, usb3_ports);
+    }
+};
+
+static const XHCIClass sXHCIClass;

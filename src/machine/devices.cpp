@@ -328,29 +328,6 @@ static Device *device_create(const DeviceConfig &cfg, DeviceContext *ctx)
 {
     const char *type = cfg.Type();
 
-    if (strcmp(type, "dw-i2c") == 0) {
-        const char *compatible;
-        if (!cfg.GetStrOpt("compatible", &compatible)) {
-            return nullptr;
-        }
-        if (compatible == nullptr) {
-            compatible = DW_I2C_DEFAULT_COMPATIBLE;
-        }
-        return dw_i2c_node_create(cfg.IdOr("dw-i2c"), compatible);
-    }
-
-    if (strcmp(type, "xhci") == 0) {
-        int usb2_ports, usb3_ports;
-        if (!cfg.GetInt("usb2_ports", &usb2_ports,
-                          XHCI_DEFAULT_USB2_PORTS) ||
-            !cfg.GetInt("usb3_ports", &usb3_ports,
-                          XHCI_DEFAULT_USB3_PORTS)) {
-            return nullptr;
-        }
-        return xhci_node_create(cfg.IdOr("xhci"),
-                                usb2_ports, usb3_ports);
-    }
-
     if (strcmp(type, "intel-hda") == 0) {
         int input_streams, output_streams;
         if (!cfg.GetInt("input_streams", &input_streams,
@@ -396,59 +373,6 @@ static Device *device_create(const DeviceConfig &cfg, DeviceContext *ctx)
         }
         return hda_output_node_create(cfg.IdOr("hda-output"), config,
                                       std::move(audio));
-    }
-
-    if (strcmp(type, "usb-hub") == 0) {
-        int ports, port;
-        if (!cfg.GetInt("ports", &ports, 4) ||
-            !cfg.GetInt("port", &port, 0)) {
-            return nullptr;
-        }
-        if (ports < 1 || ports > USB_MAX_PORTS) {
-            vm_error("usb-hub: 'ports' must be between 1 and %d\n",
-                     USB_MAX_PORTS);
-            return nullptr;
-        }
-        return usb_hub_node_create(ports, port);
-    }
-
-    if (strcmp(type, "usb-hid") == 0) {
-        int port;
-        if (!cfg.GetInt("port", &port, 0)) {
-            return nullptr;
-        }
-        if (!cfg.HasChildren()) {
-            vm_error("usb-hid: needs a nested HID bus with at least one "
-                     "function on it\n");
-            return nullptr;
-        }
-        return usb_hid_node_create(port);
-    }
-
-    if (strcmp(type, "i2c-hid") == 0) {
-        int address;
-        /* Without an address the bus places the target, as it does an
-           Ethernet PHY. */
-        if (!cfg.GetInt("reg", &address, -1)) {
-            return nullptr;
-        }
-        if (!cfg.HasChildren()) {
-            vm_error("i2c-hid: needs a nested HID bus with a function on "
-                     "it\n");
-            return nullptr;
-        }
-        return i2c_hid_node_create(address);
-    }
-
-    if (strcmp(type, "hid-keyboard") == 0 || strcmp(type, "hid-tablet") == 0) {
-        int index;
-        if (!cfg.GetInt("index", &index, -1)) {
-            return nullptr;
-        }
-        if (strcmp(type, "hid-keyboard") == 0) {
-            return hid_keyboard_node_create(ctx, index);
-        }
-        return hid_tablet_node_create(ctx, index);
     }
 
     if (strcmp(type, "dwmac") == 0) {
@@ -613,17 +537,10 @@ public:
 };
 
 static const LegacyDeviceClass sLegacyClasses[] = {
-    LegacyDeviceClass("dw-i2c"),
-    LegacyDeviceClass("xhci"),
     LegacyDeviceClass("intel-hda"),
     LegacyDeviceClass("hda-codec"),
     LegacyDeviceClass("hda-audio-group"),
     LegacyDeviceClass("hda-output"),
-    LegacyDeviceClass("usb-hub"),
-    LegacyDeviceClass("usb-hid"),
-    LegacyDeviceClass("i2c-hid"),
-    LegacyDeviceClass("hid-keyboard"),
-    LegacyDeviceClass("hid-tablet"),
     LegacyDeviceClass("dwmac"),
     LegacyDeviceClass("ne2000"),
     LegacyDeviceClass("ethernet-phy"),

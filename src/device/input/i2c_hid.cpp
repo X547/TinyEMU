@@ -23,6 +23,7 @@
 
 #include "bits.h"
 #include "cutils.h"
+#include "device_class.h"
 #include "fdt.h"
 #include "hid.h"
 #include "i2c.h"
@@ -447,9 +448,29 @@ void I2CHID::BuildFDT(FDTContext &ctx)
 }
 
 
-//#pragma mark - factory
+//#pragma mark - class
 
-Device *i2c_hid_node_create(int address)
-{
-    return new I2CHID(address);
-}
+class I2CHIDClass final: public DeviceClass {
+public:
+    I2CHIDClass(): DeviceClass("i2c-hid") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int address;
+
+        (void)ctx;
+        /* Without an address the bus places the target, as it does an
+           Ethernet PHY. */
+        if (!cfg.GetInt("reg", &address, -1)) {
+            return nullptr;
+        }
+        if (!cfg.HasChildren()) {
+            vm_error("i2c-hid: needs a nested HID bus with a function on "
+                     "it\n");
+            return nullptr;
+        }
+        return new I2CHID(address);
+    }
+};
+
+static const I2CHIDClass sI2CHIDClass;

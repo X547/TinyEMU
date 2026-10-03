@@ -36,5 +36,3 @@
 /* One nibble of a route string addresses a port, and the register file below
    is sized for the total. */
 #define XHCI_MAX_PORTS 15
-
-Device *xhci_node_create(const char *name, int usb2_ports, int usb3_ports);

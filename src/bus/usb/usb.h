@@ -287,11 +287,3 @@ public:
    asynchronously calls this from its own callback; one that answered on the
    spot never needs it. */
 void usb_urb_complete(URB *urb, USBStatusEnum status, uint32_t actual_length);
-
-
-/* Each USB device type builds its own node, so the factory in devices.cpp
-   stays a table of names and these keep their internals to themselves. 'port'
-   is the port asked for in the configuration, or 0 for the first free one. */
-
-/* usb_hub.cpp */
-Device *usb_hub_node_create(int port_count, int port);

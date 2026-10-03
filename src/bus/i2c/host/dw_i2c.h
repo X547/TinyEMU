@@ -27,5 +27,3 @@
 #define DW_I2C_REG_SIZE 0x1000
 
 #define DW_I2C_DEFAULT_COMPATIBLE "snps,designware-i2c"
-
-Device *dw_i2c_node_create(const char *name, const char *compatible);

@@ -294,7 +294,20 @@ public:
 };
 
 
-Device *hid_keyboard_node_create(DeviceContext *ctx, int index)
-{
-    return new HIDKeyboardNode(new HIDKeyboard(), ctx, index);
-}
+/* "index" is the function it takes on its transport, or -1 for the first
+   free one. */
+class HIDKeyboardClass final: public DeviceClass {
+public:
+    HIDKeyboardClass(): DeviceClass("hid-keyboard") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int index;
+        if (!cfg.GetInt("index", &index, -1)) {
+            return nullptr;
+        }
+        return new HIDKeyboardNode(new HIDKeyboard(), ctx, index);
+    }
+};
+
+static const HIDKeyboardClass sHIDKeyboardClass;

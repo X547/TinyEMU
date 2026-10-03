@@ -26,6 +26,7 @@
 #include <algorithm>
 
 #include "bits.h"
+#include "device_class.h"
 #include "fdt.h"
 #include "i2c.h"
 #include "machine.h"
@@ -637,9 +638,25 @@ void DWI2CDevice::BuildFDT(FDTContext &ctx)
 }
 
 
-//#pragma mark - factory
+//#pragma mark - class
 
-Device *dw_i2c_node_create(const char *name, const char *compatible)
-{
-    return new DWI2CDevice(name, compatible);
-}
+class DWI2CClass final: public DeviceClass {
+public:
+    DWI2CClass(): DeviceClass("dw-i2c") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        const char *compatible;
+
+        (void)ctx;
+        if (!cfg.GetStrOpt("compatible", &compatible)) {
+            return nullptr;
+        }
+        if (compatible == nullptr) {
+            compatible = DW_I2C_DEFAULT_COMPATIBLE;
+        }
+        return new DWI2CDevice(cfg.IdOr("dw-i2c"), compatible);
+    }
+};
+
+static const DWI2CClass sDWI2CClass;

@@ -28,6 +28,7 @@
 
 #include "bits.h"
 #include "cutils.h"
+#include "device_class.h"
 #include "machine.h"
 #include "usb.h"
 #include "usb_desc.h"
@@ -487,13 +488,33 @@ void USBHub::Cancel(URB *urb)
 }
 
 
-//#pragma mark - factory
+//#pragma mark - class
 
-Device *usb_hub_node_create(int port_count, int port)
-{
-    USBHub *hub = new USBHub(port_count);
-    USBDeviceNode *node = new USBDeviceNode("usb-hub", hub, port);
+/* "ports" is how many it has, and "port" the port it is plugged into, or 0
+   for the first free one. */
+class USBHubClass final: public DeviceClass {
+public:
+    USBHubClass(): DeviceClass("usb-hub") {}
 
-    node->SetChildBus(new USBBus(node, hub));
-    return node;
-}
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int ports, port;
+
+        (void)ctx;
+        if (!cfg.GetInt("ports", &ports, 4) || !cfg.GetInt("port", &port, 0)) {
+            return nullptr;
+        }
+        if (ports < 1 || ports > USB_MAX_PORTS) {
+            vm_error("usb-hub: 'ports' must be between 1 and %d\n",
+                     USB_MAX_PORTS);
+            return nullptr;
+        }
+        USBHub *hub = new USBHub(ports);
+        USBDeviceNode *node = new USBDeviceNode("usb-hub", hub, port);
+
+        node->SetChildBus(new USBBus(node, hub));
+        return node;
+    }
+};
+
+static const USBHubClass sUSBHubClass;
