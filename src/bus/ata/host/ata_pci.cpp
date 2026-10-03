@@ -29,6 +29,7 @@
 
 #include "bits.h"
 #include "cutils.h"
+#include "device_class.h"
 #include "machine.h"
 
 //#define DEBUG_ATA_DMA
@@ -514,9 +515,45 @@ void ATAPCIController::WindowWrite(int channel, ATAPCIWindow::KindEnum kind,
 }
 
 
-//#pragma mark - factory
+//#pragma mark - class
 
-Device *ata_pci_node_create(const char *name)
-{
-    return new ATAPCIController(name);
-}
+/* The drives nested inside fill the channels in the order they appear: the
+   first two are the master and slave of the first channel, the next two of
+   the second. */
+class ATAPCIClass final: public DeviceClass {
+public:
+    ATAPCIClass(): DeviceClass("pci-ide") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        (void)ctx;
+        if (!cfg.HasChildren()) {
+            vm_error("pci-ide: needs a nested ATA bus with at least one "
+                     "drive on it\n");
+            return nullptr;
+        }
+        return new ATAPCIController(cfg.IdOr("ide"));
+    }
+};
+
+static const ATAPCIClass sATAPCIClass;
+
+
+/* What the controller and its drive were declared as before there was an ATA
+   bus. */
+class RetiredIDEClass final: public DeviceClass {
+public:
+    RetiredIDEClass(): DeviceClass("ide") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        (void)cfg;
+        (void)ctx;
+        vm_error("'ide' is now a 'pci-ide' controller carrying an 'ata-disk' "
+                 "on the ATA bus it provides, declared inside the PCI bus of "
+                 "a host bridge\n");
+        return nullptr;
+    }
+};
+
+static const RetiredIDEClass sRetiredIDEClass;

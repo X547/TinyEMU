@@ -339,8 +339,3 @@ void ata_put_dma_modes(uint8_t *buf, uint8_t dma_mode);
    than letting them fail one at a time in the back end. */
 std::unique_ptr<ATADevice> ata_disk_create(std::unique_ptr<HostBlockDevice> bs,
                                            bool read_only);
-Device *ata_disk_node_create(std::unique_ptr<HostBlockDevice> bs, bool read_only);
-
-/* A packet device: a bridge that carries the SCSI commands of the one unit on
-   the SCSI bus it provides, a CD drive or anything else. */
-Device *atapi_node_create();

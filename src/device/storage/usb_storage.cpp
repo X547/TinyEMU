@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "cutils.h"
+#include "device_class.h"
 #include "machine.h"
 #include "scsi.h"
 #include "usb.h"
@@ -513,13 +514,31 @@ void USBStorage::Cancel(URB *urb)
 }
 
 
-//#pragma mark - factory
+//#pragma mark - class
 
-Device *usb_storage_node_create(int port)
-{
-    USBStorage *storage = new USBStorage();
-    USBDeviceNode *node = new USBDeviceNode("usb-storage", storage, port);
+/* "port" is the port asked for, or 0 for the first free one. */
+class USBStorageClass final: public DeviceClass {
+public:
+    USBStorageClass(): DeviceClass("usb-storage") {}
 
-    node->SetChildBus(new SCSIBus(node, storage));
-    return node;
-}
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int port;
+        (void)ctx;
+        if (!cfg.GetInt("port", &port, 0)) {
+            return nullptr;
+        }
+        if (!cfg.HasChildren()) {
+            vm_error("usb-storage: needs a nested SCSI bus with at least one "
+                     "device on it\n");
+            return nullptr;
+        }
+        USBStorage *storage = new USBStorage();
+        USBDeviceNode *node = new USBDeviceNode("usb-storage", storage, port);
+
+        node->SetChildBus(new SCSIBus(node, storage));
+        return node;
+    }
+};
+
+static const USBStorageClass sUSBStorageClass;

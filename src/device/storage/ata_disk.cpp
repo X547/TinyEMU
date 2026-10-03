@@ -27,6 +27,7 @@
 
 #include "bits.h"
 #include "ata.h"
+#include "config_props.h"
 #include "cutils.h"
 #include "virtio.h"
 
@@ -780,8 +781,25 @@ std::unique_ptr<ATADevice> ata_disk_create(std::unique_ptr<HostBlockDevice> bs,
 }
 
 
-Device *ata_disk_node_create(std::unique_ptr<HostBlockDevice> bs, bool read_only)
-{
-    return new ATADeviceNode("ata-disk",
-                             ata_disk_create(std::move(bs), read_only));
-}
+/* "read_only" refuses writes the way a jumpered drive would. */
+class ATADiskClass final: public DeviceClass {
+public:
+    ATADiskClass(): DeviceClass("ata-disk") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int read_only;
+        if (!cfg.GetInt("read_only", &read_only, 0)) {
+            return nullptr;
+        }
+        auto bs = config_open_block(cfg, ctx);
+        if (bs == nullptr) {
+            return nullptr;
+        }
+        return new ATADeviceNode("ata-disk",
+                                 ata_disk_create(std::move(bs),
+                                                 read_only != 0));
+    }
+};
+
+static const ATADiskClass sATADiskClass;

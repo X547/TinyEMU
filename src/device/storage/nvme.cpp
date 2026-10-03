@@ -28,6 +28,7 @@
 #include <string.h>
 
 #include "bits.h"
+#include "config_props.h"
 #include "cutils.h"
 #include "machine.h"
 #include "pci.h"
@@ -1697,15 +1698,49 @@ uint32_t nvme_quirks_from_name(const char *name)
 }
 
 
-Device *nvme_node_create(const char *name, uint32_t quirks)
-{
-    return new NVMeDevice(name, quirks);
-}
+class NVMeClass final: public DeviceClass {
+public:
+    NVMeClass(): DeviceClass("nvme") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        uint32_t quirks;
+        (void)ctx;
+        if (!config_get_quirks(cfg, nvme_quirks_from_name, &quirks)) {
+            return nullptr;
+        }
+        if (!cfg.HasChildren()) {
+            vm_error("nvme: needs a nested NVMe bus with at least one "
+                     "namespace on it\n");
+            return nullptr;
+        }
+        return new NVMeDevice(cfg.IdOr("nvme"), quirks);
+    }
+};
+
+static const NVMeClass sNVMeClass;
 
 
-Device *nvme_namespace_node_create(std::unique_ptr<HostBlockDevice> bs, int nsid,
-                                   bool read_only)
-{
-    return new NVMeNamespaceNode(
-        std::make_unique<NVMeNamespace>(std::move(bs), read_only), nsid);
-}
+/* "read_only" reports the namespace write protected. */
+class NVMeNamespaceClass final: public DeviceClass {
+public:
+    NVMeNamespaceClass(): DeviceClass("nvme-ns") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int nsid, read_only;
+        if (!cfg.GetInt("nsid", &nsid, -1) ||
+            !cfg.GetInt("read_only", &read_only, 0)) {
+            return nullptr;
+        }
+        auto bs = config_open_block(cfg, ctx);
+        if (bs == nullptr) {
+            return nullptr;
+        }
+        return new NVMeNamespaceNode(
+            std::make_unique<NVMeNamespace>(std::move(bs), read_only != 0),
+            nsid);
+    }
+};
+
+static const NVMeNamespaceClass sNVMeNamespaceClass;

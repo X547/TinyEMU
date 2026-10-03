@@ -27,6 +27,7 @@
 
 #include "ata.h"
 #include "cutils.h"
+#include "device_class.h"
 #include "machine.h"
 #include "scsi.h"
 
@@ -619,14 +620,28 @@ void ATAPIDevice::DmaComplete(bool ok)
 }
 
 
-//#pragma mark - factory
+//#pragma mark - class
 
-Device *atapi_node_create()
-{
-    auto dev = std::make_unique<ATAPIDevice>();
-    ATAPIDevice *atapi = dev.get();
-    ATADeviceNode *node = new ATADeviceNode("atapi", std::move(dev));
+/* A packet device: a bridge that carries the SCSI commands of the one unit on
+   the SCSI bus it provides, a CD drive or anything else. */
+class ATAPIClass final: public DeviceClass {
+public:
+    ATAPIClass(): DeviceClass("atapi") {}
 
-    node->SetChildBus(std::make_unique<SCSIBus>(node, atapi));
-    return node;
-}
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        (void)ctx;
+        if (!cfg.HasChildren()) {
+            vm_error("atapi: needs a nested SCSI bus with a device on it\n");
+            return nullptr;
+        }
+        auto dev = std::make_unique<ATAPIDevice>();
+        ATAPIDevice *atapi = dev.get();
+        ATADeviceNode *node = new ATADeviceNode("atapi", std::move(dev));
+
+        node->SetChildBus(std::make_unique<SCSIBus>(node, atapi));
+        return node;
+    }
+};
+
+static const ATAPIClass sATAPIClass;

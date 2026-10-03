@@ -328,81 +328,6 @@ static Device *device_create(const DeviceConfig &cfg, DeviceContext *ctx)
 {
     const char *type = cfg.Type();
 
-    if (strcmp(type, "pci-ide") == 0) {
-        if (!cfg.HasChildren()) {
-            vm_error("pci-ide: needs a nested ATA bus with at least one "
-                     "drive on it\n");
-            return nullptr;
-        }
-        return ata_pci_node_create(cfg.IdOr("ide"));
-    }
-
-    if (strcmp(type, "ata-disk") == 0) {
-        int read_only;
-        if (!cfg.GetInt("read_only", &read_only, 0)) {
-            return nullptr;
-        }
-        auto bs = node_open_block(cfg, ctx);
-        if (bs == nullptr) {
-            return nullptr;
-        }
-        return ata_disk_node_create(std::move(bs), read_only != 0);
-    }
-
-    if (strcmp(type, "atapi") == 0) {
-        if (!cfg.HasChildren()) {
-            vm_error("atapi: needs a nested SCSI bus with a device on it\n");
-            return nullptr;
-        }
-        return atapi_node_create();
-    }
-
-    if (strcmp(type, "nvme") == 0) {
-        /* Deviations a guest needs are asked for by name, so that a
-           conformant guest gets a conformant controller. */
-        uint32_t quirks = 0;
-        JSONValue list = cfg.Get("quirks");
-        if (!json_is_undefined(list)) {
-            if (list.type != JSON_ARRAY) {
-                vm_error("nvme: 'quirks' must be an array of names\n");
-                return nullptr;
-            }
-            for (int i = 0; i < list.u.array->Length(); i++) {
-                JSONValue item = json_array_get(list, i);
-                if (item.type != JSON_STR) {
-                    vm_error("nvme: 'quirks' must be an array of names\n");
-                    return nullptr;
-                }
-                uint32_t bits = nvme_quirks_from_name(item.u.str->data);
-                if (bits == 0) {
-                    vm_error("nvme: unknown quirk '%s'\n", item.u.str->data);
-                    return nullptr;
-                }
-                quirks |= bits;
-            }
-        }
-        if (!cfg.HasChildren()) {
-            vm_error("nvme: needs a nested NVMe bus with at least one "
-                     "namespace on it\n");
-            return nullptr;
-        }
-        return nvme_node_create(cfg.IdOr("nvme"),
-                                quirks);
-    }
-
-    if (strcmp(type, "nvme-ns") == 0) {
-        int nsid, read_only;
-        if (!cfg.GetInt("nsid", &nsid, -1) ||
-            !cfg.GetInt("read_only", &read_only, 0)) {
-            return nullptr;
-        }
-        auto bs = node_open_block(cfg, ctx);
-        if (bs == nullptr) {
-            return nullptr;
-        }
-        return nvme_namespace_node_create(std::move(bs), nsid, read_only != 0);
-    }
-
     if (strcmp(type, "sdhci") == 0) {
         const char *compatible;
         int clock_mhz;
@@ -587,51 +512,6 @@ static Device *device_create(const DeviceConfig &cfg, DeviceContext *ctx)
         return hid_tablet_node_create(ctx, index);
     }
 
-    if (strcmp(type, "usb-storage") == 0) {
-        int port;
-        if (!cfg.GetInt("port", &port, 0)) {
-            return nullptr;
-        }
-        if (!cfg.HasChildren()) {
-            vm_error("usb-storage: needs a nested SCSI bus with at least one "
-                     "device on it\n");
-            return nullptr;
-        }
-        return usb_storage_node_create(port);
-    }
-
-    if (strcmp(type, "scsi-disk") == 0) {
-        int target, lun, read_only;
-        if (!cfg.GetInt("target", &target, -1) ||
-            !cfg.GetInt("lun", &lun, -1) ||
-            !cfg.GetInt("read_only", &read_only, 0)) {
-            return nullptr;
-        }
-        auto bs = node_open_block(cfg, ctx);
-        if (bs == nullptr) {
-            return nullptr;
-        }
-        return scsi_disk_node_create(std::move(bs), target, lun,
-                                     read_only != 0);
-    }
-
-    if (strcmp(type, "scsi-cd") == 0) {
-        int target, lun;
-        if (!cfg.GetInt("target", &target, -1) ||
-            !cfg.GetInt("lun", &lun, -1)) {
-            return nullptr;
-        }
-        /* Without a file the drive is there with no disc in it. */
-        std::unique_ptr<HostBlockDevice> bs;
-        if (!json_is_undefined(cfg.Get("file"))) {
-            bs = node_open_block(cfg, ctx, true);
-            if (bs == nullptr) {
-                return nullptr;
-            }
-        }
-        return scsi_cd_node_create(std::move(bs), target, lun);
-    }
-
     if (strcmp(type, "dwmac") == 0) {
         const char *compatible, *phy_mode;
         /* Which controller this claims to be decides which driver binds to
@@ -779,13 +659,6 @@ static Device *device_create(const DeviceConfig &cfg, DeviceContext *ctx)
         return virtio_gpu_node_create(ctx, width, height);
     }
 
-    if (strcmp(type, "ide") == 0) {
-        vm_error("'ide' is now a 'pci-ide' controller carrying an 'ata-disk' "
-                 "on the ATA bus it provides, declared inside the PCI bus of "
-                 "a host bridge\n");
-        return nullptr;
-    }
-
     vm_error("unsupported device type: %s\n", type);
     return nullptr;
 }
@@ -801,11 +674,6 @@ public:
 };
 
 static const LegacyDeviceClass sLegacyClasses[] = {
-    LegacyDeviceClass("pci-ide"),
-    LegacyDeviceClass("ata-disk"),
-    LegacyDeviceClass("atapi"),
-    LegacyDeviceClass("nvme"),
-    LegacyDeviceClass("nvme-ns"),
     LegacyDeviceClass("sdhci"),
     LegacyDeviceClass("dw-mmc"),
     LegacyDeviceClass("dw-i2c"),
@@ -821,9 +689,6 @@ static const LegacyDeviceClass sLegacyClasses[] = {
     LegacyDeviceClass("i2c-hid"),
     LegacyDeviceClass("hid-keyboard"),
     LegacyDeviceClass("hid-tablet"),
-    LegacyDeviceClass("usb-storage"),
-    LegacyDeviceClass("scsi-disk"),
-    LegacyDeviceClass("scsi-cd"),
     LegacyDeviceClass("dwmac"),
     LegacyDeviceClass("ne2000"),
     LegacyDeviceClass("ethernet-phy"),
@@ -834,7 +699,6 @@ static const LegacyDeviceClass sLegacyClasses[] = {
     LegacyDeviceClass("virtio-9p"),
     LegacyDeviceClass("virtio-input"),
     LegacyDeviceClass("virtio-gpu"),
-    LegacyDeviceClass("ide"),
 };
 
 

@@ -293,12 +293,6 @@ int scsi_cdb_len(uint8_t opcode);
 uint32_t scsi_report_luns(uint8_t *buf, uint32_t buf_len,
                           SCSIDevice *const *units, int count);
 
-/* scsi_disk.cpp; 'read_only' reports the unit write protected */
-Device *scsi_disk_node_create(std::unique_ptr<HostBlockDevice> bs, int target,
-                              int lun, bool read_only);
-
 /* scsi_cd.cpp; a null 'bs' is a drive with no disc in it. Reports and returns
    nullptr when the image is not one the drive can read. */
 std::unique_ptr<SCSIDevice> scsi_cd_create(std::unique_ptr<HostBlockDevice> bs);
-Device *scsi_cd_node_create(std::unique_ptr<HostBlockDevice> bs, int target,
-                            int lun);

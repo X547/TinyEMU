@@ -254,6 +254,7 @@ inc = include_directories(
   'src/cpu/x86',
   'src/device/audio',
   'src/device/char',
+  'src/device/common',
   'src/device/display',
   'src/device/fs',
   'src/device/input',
@@ -314,6 +315,7 @@ subdir('src/bus/usb')
 subdir('src/bus/virtio')
 subdir('src/device/audio')
 subdir('src/device/char')
+subdir('src/device/common')
 subdir('src/device/display')
 subdir('src/device/fs')
 subdir('src/device/input')

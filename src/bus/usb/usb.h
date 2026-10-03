@@ -295,6 +295,3 @@ void usb_urb_complete(URB *urb, USBStatusEnum status, uint32_t actual_length);
 
 /* usb_hub.cpp */
 Device *usb_hub_node_create(int port_count, int port);
-
-/* usb_storage.cpp */
-Device *usb_storage_node_create(int port);

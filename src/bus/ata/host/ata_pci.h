@@ -193,9 +193,3 @@ public:
     void WindowWrite(int channel, ATAPCIWindow::KindEnum kind,
                      uint32_t offset, uint32_t val, int size_log2);
 };
-
-
-/* The "pci-ide" configuration node. The drives nested inside fill the
-   channels in the order they appear: the first two are the master and slave
-   of the first channel, the next two of the second. */
-Device *ata_pci_node_create(const char *name);

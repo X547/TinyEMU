@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <vector>
 
+#include "config_props.h"
 #include "cutils.h"
 #include "machine.h"
 #include "scsi.h"
@@ -462,13 +463,30 @@ bool SCSIDisk::Submit(SCSIRequest *req)
 }
 
 
-//#pragma mark - factory
+//#pragma mark - class
 
-Device *scsi_disk_node_create(std::unique_ptr<HostBlockDevice> bs, int target,
-                              int lun, bool read_only)
-{
-    return new SCSIDeviceNode("scsi-disk",
-                              std::make_unique<SCSIDisk>(std::move(bs),
-                                                         read_only),
-                              target, lun);
-}
+/* "read_only" reports the unit write protected. */
+class SCSIDiskClass final: public DeviceClass {
+public:
+    SCSIDiskClass(): DeviceClass("scsi-disk") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int target, lun, read_only;
+        if (!cfg.GetInt("target", &target, -1) ||
+            !cfg.GetInt("lun", &lun, -1) ||
+            !cfg.GetInt("read_only", &read_only, 0)) {
+            return nullptr;
+        }
+        auto bs = config_open_block(cfg, ctx);
+        if (bs == nullptr) {
+            return nullptr;
+        }
+        return new SCSIDeviceNode("scsi-disk",
+                                  std::make_unique<SCSIDisk>(std::move(bs),
+                                                             read_only != 0),
+                                  target, lun);
+    }
+};
+
+static const SCSIDiskClass sSCSIDiskClass;

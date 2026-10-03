@@ -24,6 +24,7 @@
 #include <memory>
 #include <vector>
 
+#include "config_props.h"
 #include "cutils.h"
 #include "machine.h"
 #include "scsi.h"
@@ -1130,12 +1131,31 @@ std::unique_ptr<SCSIDevice> scsi_cd_create(std::unique_ptr<HostBlockDevice> bs)
 }
 
 
-Device *scsi_cd_node_create(std::unique_ptr<HostBlockDevice> bs, int target,
-                            int lun)
-{
-    auto dev = scsi_cd_create(std::move(bs));
-    if (dev == nullptr) {
-        return nullptr;
+class SCSICDClass final: public DeviceClass {
+public:
+    SCSICDClass(): DeviceClass("scsi-cd") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int target, lun;
+        if (!cfg.GetInt("target", &target, -1) ||
+            !cfg.GetInt("lun", &lun, -1)) {
+            return nullptr;
+        }
+        /* Without a file the drive is there with no disc in it. */
+        std::unique_ptr<HostBlockDevice> bs;
+        if (!json_is_undefined(cfg.Get("file"))) {
+            bs = config_open_block(cfg, ctx, true);
+            if (bs == nullptr) {
+                return nullptr;
+            }
+        }
+        auto dev = scsi_cd_create(std::move(bs));
+        if (dev == nullptr) {
+            return nullptr;
+        }
+        return new SCSIDeviceNode("scsi-cd", std::move(dev), target, lun);
     }
-    return new SCSIDeviceNode("scsi-cd", std::move(dev), target, lun);
-}
+};
+
+static const SCSICDClass sSCSICDClass;
