@@ -1822,13 +1822,6 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     }
     options.cpu_count = p->cpu_count;
     options.hypervisor_interrupt_controllers = p->hypervisor_intc;
-    /* The nesting in the file is the nesting of the buses, so the root one
-       has to be the kind this machine provides. */
-    if (p->root_bus_type != NULL && strcmp(p->root_bus_type, "pc") != 0) {
-        vm_error("pc: the root bus must be a 'pc' bus, not '%s'\n",
-                 p->root_bus_type);
-        return nullptr;
-    }
 
     assert(p->ram_size >= (1 << 20));
 
@@ -1997,7 +1990,14 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     ctx.machine = s;
     ctx.pc_pci_space = &pci_space;
 
-    if (!device_build_tree(s->bus, p->root_devices, &ctx) ||
+    /* The nesting in the file is the nesting of the buses, so the root one
+       has to be the kind this machine provides. */
+    SystemBus *root = s->bus;
+    if (!bus_config_attach(p->root_bus, "the pc machine",
+                           [root](const char *type) -> Bus * {
+                               return strcmp(type, "pc") == 0 ? root
+                                                              : nullptr;
+                           }, &ctx) ||
         !s->bus->AllocateAll() || !s->bus->RealizeAll()) {
         return nullptr;
     }

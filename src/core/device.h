@@ -23,10 +23,12 @@
  */
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <string>
 
 #include "iomem.h"
+#include "json.h"
 #include "resource.h"
 
 #define BUS_MAX_DEVICES 32
@@ -35,6 +37,7 @@
 class Bus;
 class Device;
 class FDTBuilder;
+struct DeviceContext;
 class I2CBus;
 class MDIOBus;
 class PCIMsiTarget;
@@ -111,6 +114,11 @@ public:
     virtual void BuildFDT(FDTContext &ctx) {(void)ctx;}
 
     virtual Bus *ChildBus() {return nullptr;}
+
+    /* The bus this device provides under the name a configuration file gives
+       it, or nullptr if it provides none of that kind. By default the child
+       bus, under its own type. Only valid once Prepare() has run. */
+    virtual Bus *ResolveBus(const char *type);
 };
 
 
@@ -139,6 +147,11 @@ public:
     /* Assign the resource records a child declared. */
     virtual bool AssignResources(Device *dev) = 0;
 
+    /* Create the devices of a configuration file's "devices" array (which
+       must be one), by the classes their types name, and add them here
+       along with any bus each of them declares. */
+    bool Attach(JSONValue devices, DeviceContext *ctx);
+
     /* Non-null only for a PCI bus, so that bus-agnostic devices such as
        virtio can pick their transport. */
     virtual PCIBus *AsPCIBus() {return nullptr;}
@@ -161,6 +174,14 @@ public:
     bool RealizeAll();
     void BuildFDTAll(FDTContext &ctx);
 };
+
+
+/* A configuration file's "bus" object, { type: "...", devices: [...] }. The
+   owner maps the type to one of its buses with 'resolve', and the devices are
+   attached there; 'owner' names it in the message when it has no such bus. */
+bool bus_config_attach(JSONValue bus_obj, const char *owner,
+                       const std::function<Bus *(const char *)> &resolve,
+                       DeviceContext *ctx);
 
 
 /* The root bus of a machine: owns the host MMIO map, the port space and the

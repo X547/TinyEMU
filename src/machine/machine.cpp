@@ -207,105 +207,6 @@ static const VirtMachineClass *virt_machine_find_class(const char *machine_name)
     return NULL;
 }
 
-//#pragma mark - device tree
-
-VMDeviceNode::~VMDeviceNode() = default;
-
-void vm_walk_devices(VMDeviceNode *node, VMDeviceNodeVisitor visit,
-                     void *opaque)
-{
-    for (; node != NULL; node = node->next.get()) {
-        visit(node, opaque);
-        vm_walk_devices(node->children.get(), visit, opaque);
-    }
-}
-
-static int parse_bus(JSONValue bus_obj, VMDeviceNode *owner,
-                     std::unique_ptr<VMDeviceNode> *list_out);
-
-/* A device is { type: "...", id: "...", <device properties> }, plus an
-   optional "bus" object when the device provides one. */
-static std::unique_ptr<VMDeviceNode> parse_device(JSONValue obj,
-                                                  VMDeviceNode *parent)
-{
-    const char *str;
-    JSONValue bus;
-
-    if (obj.type != JSON_OBJ) {
-        vm_error("device: object expected\n");
-        return nullptr;
-    }
-
-    auto node = std::make_unique<VMDeviceNode>();
-    node->props = obj;
-    node->parent = parent;
-
-    if (vm_get_str(obj, "type", &str) < 0)
-        return nullptr;
-    node->type = str;
-
-    if (vm_get_str_opt(obj, "id", &str) < 0)
-        return nullptr;
-    if (str)
-        node->id = str;
-
-    if (vm_get_str_opt(obj, "file", &str) < 0)
-        return nullptr;
-    if (str)
-        node->filename = str;
-
-    bus = json_object_get(obj, "bus");
-    if (!json_is_undefined(bus)) {
-        if (parse_bus(bus, node.get(), &node->children) < 0)
-            return nullptr;
-    }
-    return node;
-}
-
-/* A bus is { type: "...", devices: [ ... ] }. */
-static int parse_bus(JSONValue bus_obj, VMDeviceNode *owner,
-                     std::unique_ptr<VMDeviceNode> *list_out)
-{
-    const char *bus_type;
-    JSONValue devices;
-    std::unique_ptr<VMDeviceNode> first;
-    std::unique_ptr<VMDeviceNode> *tail = &first;
-    int count = 0;
-
-    list_out->reset();
-
-    if (bus_obj.type != JSON_OBJ) {
-        vm_error("bus: object expected\n");
-        return -1;
-    }
-    if (vm_get_str(bus_obj, "type", &bus_type) < 0)
-        return -1;
-    /* Kept so that the machine can check it against the bus the owning device
-       really provides, rather than accepting any name at all. */
-    if (owner != NULL)
-        owner->child_bus_type = bus_type;
-
-    devices = json_object_get(bus_obj, "devices");
-    if (json_is_undefined(devices))
-        return 0;
-    if (devices.type != JSON_ARRAY) {
-        vm_error("%s bus: 'devices' must be an array\n", bus_type);
-        return -1;
-    }
-
-    for (int i = 0; i < devices.u.array->Length(); i++) {
-        *tail = parse_device(json_array_get(devices, i), owner);
-        if (*tail == nullptr)
-            return -1;
-        tail = &(*tail)->next;
-        count++;
-    }
-    if (owner != NULL)
-        owner->child_count = count;
-    *list_out = std::move(first);
-    return 0;
-}
-
 //#pragma mark - configuration
 
 static int virt_machine_parse_config(VirtMachineParams *p,
@@ -385,20 +286,14 @@ static int virt_machine_parse_config(VirtMachineParams *p,
         p->cmdline = cmdline_subst(str);
     }
     
+    /* The devices are left to the buses they are declared on, once the
+       machine has made its root bus. */
     obj = json_object_get(cfg, "bus");
     if (json_is_undefined(obj)) {
         vm_error("expecting a 'bus' property describing the root bus\n");
         goto tag_fail;
     }
-    if (vm_get_str(obj, "type", &str) < 0)
-        goto tag_fail;
-    p->root_bus_type = strdup(str);
-    {
-        std::unique_ptr<VMDeviceNode> root_devices;
-        if (parse_bus(obj, NULL, &root_devices) < 0)
-            goto tag_fail;
-        p->root_devices = root_devices.release();
-    }
+    p->root_bus = obj;
 
     if (vm_get_str_opt(cfg, "vga_bios", &str) < 0)
         goto tag_fail;
@@ -439,13 +334,12 @@ static int virt_machine_parse_config(VirtMachineParams *p,
         p->rtc_local_time = el.u.b;
     }
 
-    /* The device nodes hold JSONValues pointing into this tree, so it stays
-       alive until virt_machine_free_config(). */
+    /* root_bus points into this tree, so it stays alive until
+       virt_machine_free_config(). */
     p->cfg_json = cfg;
     return 0;
  tag_fail:
-    delete p->root_devices;
-    p->root_devices = NULL;
+    p->root_bus = json_undefined_new();
     json_free(cfg);
     return -1;
 }
@@ -690,10 +584,7 @@ void virt_machine_free_config(VirtMachineParams *p)
         free(p->files[i].filename);
         free(p->files[i].buf);
     }
-    delete p->root_devices;
-    p->root_devices = NULL;
-    free(p->root_bus_type);
-    p->root_bus_type = NULL;
+    p->root_bus = json_undefined_new();
     json_free(p->cfg_json);
     p->cfg_json = json_undefined_new();
     free(p->cfg_filename);
@@ -831,5 +722,6 @@ void virt_machine_set_defaults(VirtMachineParams *p)
     memset(p, 0, sizeof(*p));
     /* a zeroed JSONValue is a JSON_STR with a null payload, not "nothing" */
     p->cfg_json = json_undefined_new();
+    p->root_bus = json_undefined_new();
     p->hypervisor_intc = true;
 }

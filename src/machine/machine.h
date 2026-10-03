@@ -98,38 +98,7 @@ typedef struct {
     int len;
 } VMFileEntry;
 
-typedef struct VMDeviceNode VMDeviceNode;
 class VirtMachineClass;
-
-/* One node of the configuration's device tree. A node that declares child
-   devices provides a bus; the nesting in the config file is the nesting of
-   the buses in the machine.
-
-   'props' points into the parsed configuration, which VirtMachineParams keeps
-   alive for as long as the tree exists. The back ends are opened between
-   parsing and machine construction, by whoever can open files and sockets,
-   and the device built from the node takes them over. */
-struct VMDeviceNode {
-    std::string type;
-    std::string id; /* empty when not given */
-    JSONValue props {};
-
-    VMDeviceNode *parent = nullptr;
-    std::unique_ptr<VMDeviceNode> next; /* next sibling */
-    std::unique_ptr<VMDeviceNode> children;
-    int child_count = 0;
-    /* The bus type the configuration declared for those children, checked
-       against the bus the device actually provides. */
-    std::string child_bus_type;
-
-    /* resolved back ends */
-    std::string filename; /* empty when not given */
-
-    ~VMDeviceNode();
-
-    const char *IdOr(const char *def) const
-        {return id.empty() ? def : id.c_str();}
-};
 
 typedef struct {
     char *cfg_filename;
@@ -152,11 +121,9 @@ typedef struct {
     char *cmdline; /* bios or kernel command line */
     bool accel_enable; /* enable acceleration (KVM) */
 
-    /* The device tree the configuration declares, and the type its root bus
-       was given. Every machine builds from these. */
-    VMDeviceNode *root_devices;
-    char *root_bus_type;
-    /* the parsed configuration, kept alive because the nodes point into it */
+    /* The configuration's root "bus" object, which every machine attaches to
+       its root bus. It points into cfg_json. */
+    JSONValue root_bus;
     JSONValue cfg_json;
 
     /* kernel, bios and other auxiliary files */
@@ -251,11 +218,6 @@ int vm_get_int(JSONValue obj, const char *name, int *pval);
 int vm_get_int_opt(JSONValue obj, const char *name, int *pval, int def_val);
 int vm_get_str(JSONValue obj, const char *name, const char **pstr);
 int vm_get_str_opt(JSONValue obj, const char *name, const char **pstr);
-
-/* Depth first walk over the configuration's device tree. */
-typedef void (*VMDeviceNodeVisitor)(VMDeviceNode *node, void *opaque);
-void vm_walk_devices(VMDeviceNode *node, VMDeviceNodeVisitor visit,
-                     void *opaque);
 
 void virt_machine_set_defaults(VirtMachineParams *p);
 void virt_machine_load_config_file(VirtMachineParams *p,

@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "device.h"
+#include "device_class.h"
 #include "machine.h"
 #include "platform.h"
 #include "uart.h"
@@ -72,14 +73,6 @@ struct DeviceContext {
     uint64_t vmport_base = 0;
 };
 
-
-/* Instantiate one configuration node. Returns nullptr and reports if the type
-   is unknown or the node is missing something it needs. */
-Device *device_create(const VMDeviceNode *node, DeviceContext *ctx);
-
-/* Instantiate a sibling list onto 'bus', recursing into the child bus of any
-   device that provides one. */
-bool device_build_tree(Bus *bus, VMDeviceNode *nodes, DeviceContext *ctx);
 
 /* Hand the realized devices to the platform's host objects. */
 void device_context_connect(DeviceContext *ctx);

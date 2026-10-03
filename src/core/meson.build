@@ -5,6 +5,7 @@ emu_libs += static_library('core',
   cutils_src,
   files(
     'device.cpp',
+    'device_class.cpp',
     'fdt.cpp',
     'iomem.cpp',
     'json.cpp',

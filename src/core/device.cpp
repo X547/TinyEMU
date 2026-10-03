@@ -23,9 +23,12 @@
  */
 #include "device.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "device_class.h"
+#include "devices.h"
 #include "fdt.h"
 #include "machine.h"
 
@@ -98,6 +101,16 @@ Resource *Device::FindResource(ResourceTypeEnum type, int index)
 }
 
 
+Bus *Device::ResolveBus(const char *type)
+{
+    Bus *child = ChildBus();
+    if (child == nullptr || strcmp(child->Type(), type) != 0) {
+        return nullptr;
+    }
+    return child;
+}
+
+
 //#pragma mark - Bus
 
 Bus::~Bus()
@@ -127,6 +140,79 @@ bool Bus::AddDevice(std::unique_ptr<Device> dev)
         return false;
     }
     return true;
+}
+
+
+bool Bus::Attach(JSONValue devices, DeviceContext *ctx)
+{
+    for (int i = 0; i < devices.u.array->Length(); i++) {
+        JSONValue obj = json_array_get(devices, i);
+        const char *type, *id;
+
+        if (obj.type != JSON_OBJ) {
+            vm_error("device: object expected\n");
+            return false;
+        }
+        if (vm_get_str(obj, "type", &type) < 0 ||
+            vm_get_str_opt(obj, "id", &id) < 0) {
+            return false;
+        }
+        const DeviceClass *cls = DeviceRoster::Default().Find(type);
+        if (cls == nullptr) {
+            vm_error("unsupported device type: %s\n", type);
+            return false;
+        }
+
+        DeviceConfig cfg(obj, type, ctx->params->cfg_filename);
+        std::unique_ptr<Device> owned(cls->Create(cfg, ctx));
+        Device *dev = owned.get();
+        if (dev == nullptr || !AddDevice(std::move(owned))) {
+            return false;
+        }
+
+        JSONValue bus = cfg.Get("bus");
+        if (!json_is_undefined(bus)) {
+            std::string owner = std::string(dev->Name()) + ": device type '" +
+                type + "'";
+            if (!bus_config_attach(bus, owner.c_str(),
+                                   [dev](const char *bus_type) {
+                                       return dev->ResolveBus(bus_type);
+                                   }, ctx)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+
+bool bus_config_attach(JSONValue bus_obj, const char *owner,
+                       const std::function<Bus *(const char *)> &resolve,
+                       DeviceContext *ctx)
+{
+    const char *type;
+
+    if (bus_obj.type != JSON_OBJ) {
+        vm_error("bus: object expected\n");
+        return false;
+    }
+    if (vm_get_str(bus_obj, "type", &type) < 0) {
+        return false;
+    }
+    Bus *bus = resolve(type);
+    if (bus == nullptr) {
+        vm_error("%s has no '%s' bus\n", owner, type);
+        return false;
+    }
+    JSONValue devices = json_object_get(bus_obj, "devices");
+    if (json_is_undefined(devices)) {
+        return true;
+    }
+    if (devices.type != JSON_ARRAY) {
+        vm_error("%s bus: 'devices' must be an array\n", type);
+        return false;
+    }
+    return bus->Attach(devices, ctx);
 }
 
 

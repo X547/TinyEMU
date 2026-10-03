@@ -923,20 +923,19 @@ riscv_machine_init(const VirtMachineParams *p)
         return nullptr;
     }
 
-    /* The nesting in the file is the nesting of the buses, so the root one
-       has to be the kind this machine provides. */
-    if (p->root_bus_type != nullptr &&
-        strcmp(p->root_bus_type, "fdt") != 0) {
-        vm_error("%s: the root bus must be an 'fdt' bus, not '%s'\n",
-                 p->machine_name, p->root_bus_type);
-        return nullptr;
-    }
-
     ctx.params = p;
     ctx.platform = p->platform;
     ctx.machine = s.get();
 
-    if (!device_build_tree(s->bus.get(), p->root_devices, &ctx)) {
+    /* The nesting in the file is the nesting of the buses, so the root one
+       has to be the kind this machine provides. */
+    std::string owner = std::string("the ") + p->machine_name + " machine";
+    SystemBus *root = s->bus.get();
+    if (!bus_config_attach(p->root_bus, owner.c_str(),
+                           [root](const char *type) -> Bus * {
+                               return strcmp(type, "fdt") == 0 ? root
+                                                               : nullptr;
+                           }, &ctx)) {
         return nullptr;
     }
     if (!s->bus->AllocateAll()) {
