@@ -453,6 +453,14 @@ Device *device_create(const VMDeviceNode *node, DeviceContext *ctx)
         return ata_disk_node_create(std::move(bs), read_only != 0);
     }
 
+    if (strcmp(type, "atapi") == 0) {
+        if (node->children == nullptr) {
+            vm_error("atapi: needs a nested SCSI bus with a device on it\n");
+            return nullptr;
+        }
+        return atapi_node_create();
+    }
+
     if (strcmp(type, "pci-host-ecam-generic") == 0) {
         int bus_count, mmio_size_mb, mmio64_size_mb, io_size_kb;
         if (!node_int_opt(node, "bus_count", &bus_count,

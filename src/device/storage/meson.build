@@ -1,5 +1,6 @@
 storage_sources = files(
   'ata_disk.cpp',
+  'atapi.cpp',
   'mmc_card.cpp',
   'nvme.cpp',
   'scsi_cd.cpp',

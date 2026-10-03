@@ -51,6 +51,7 @@ class HostBlockDevice;
 #define SCSI_SENSE_ILLEGAL_REQUEST  0x05
 #define SCSI_SENSE_UNIT_ATTENTION   0x06
 #define SCSI_SENSE_DATA_PROTECT     0x07
+#define SCSI_SENSE_ABORTED_COMMAND  0x0b
 
 /* Additional sense code / qualifier pairs, packed as (ASC << 8) | ASCQ. */
 #define SCSI_ASC_NO_ADDITIONAL_SENSE        0x0000

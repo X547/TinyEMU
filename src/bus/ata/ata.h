@@ -303,12 +303,18 @@ public:
 class ATADeviceNode final: public Device {
 private:
     std::unique_ptr<ATADevice> fDev;
+    /* The bus a bridge to another kind of device provides. After the device,
+       so that what is attached to it goes first. */
+    std::unique_ptr<Bus> fChildBus;
 
 public:
     ATADeviceNode(const char *name, std::unique_ptr<ATADevice> dev);
     ~ATADeviceNode() override;
 
     ATADevice *Dev() const {return fDev.get();}
+
+    void SetChildBus(std::unique_ptr<Bus> bus) {fChildBus = std::move(bus);}
+    Bus *ChildBus() override {return fChildBus.get();}
 
     bool Realize() override;
 };
@@ -334,3 +340,7 @@ void ata_put_dma_modes(uint8_t *buf, uint8_t dma_mode);
 std::unique_ptr<ATADevice> ata_disk_create(std::unique_ptr<HostBlockDevice> bs,
                                            bool read_only);
 Device *ata_disk_node_create(std::unique_ptr<HostBlockDevice> bs, bool read_only);
+
+/* A packet device: a bridge that carries the SCSI commands of the one unit on
+   the SCSI bus it provides, a CD drive or anything else. */
+Device *atapi_node_create();
