@@ -279,6 +279,8 @@ Device types:
                          and elsewhere in native mode, where every window is a
                          base address register and the interrupt is INTx
   ata-disk               ATA disk; "file", and "read_only"
+  atapi                  ATAPI packet device: a nested SCSI bus carrying one
+                         device, whose commands it passes over the ATA bus
   virtio-block           "file", and "read_only"
   virtio-9p              "file", "tag"
   virtio-net             "driver" ("user" or "tap"), "ifname" for tap, and
@@ -306,6 +308,11 @@ Device types:
   scsi-disk              SCSI direct access block device; "file", "lun"
                          (default the first free logical unit), and
                          "read_only"
+  scsi-cd                SCSI CD/DVD-ROM drive; "file" (a plain ISO image of
+                         2048 byte blocks, opened read only; without one the
+                         drive is empty) and "lun" as above. An image larger
+                         than 80 minutes of blocks is a DVD. The guest can
+                         eject the disc and load it again
   nvme                   NVM Express controller on PCI; "quirks" (see below)
                          and a nested NVMe bus
   nvme-ns                NVMe namespace; "file", "nsid" (default the first
@@ -389,6 +396,14 @@ without them is a shape some guest drivers handle poorly.
 A "usb-storage" with no SCSI device below it is an error rather than an empty
 drive, and the bus type named in each nested "bus" object is checked against
 the bus the device above it actually provides.
+
+An ATAPI drive is a SCSI device behind an ATA one, so a CD drive on a PC's
+IDE controller nests the same way:
+
+    pci-ide -> ATA bus -> atapi -> SCSI bus -> scsi-cd
+
+The same "scsi-cd" works on any SCSI bus, under "virtio-scsi" or
+"usb-storage" as well.
 
 Input devices nest the same way:
 
