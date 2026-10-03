@@ -27,7 +27,6 @@
 
 class Device;
 class VirtMachine;
-struct DeviceContext;
 
 
 /* Where a PC's chipset has it. */
@@ -107,9 +106,5 @@ public:
 };
 
 
-/* The "hpet" configuration node: the HPET at HPET_ADDR. */
-Device *hpet_node_create(DeviceContext *ctx);
-
-/* The HPET of a node hpet_node_create() made, or nullptr for another
-   device. */
+/* The HPET of an "hpet" device, or nullptr for another device. */
 HPET *hpet_node_state(Device *dev);

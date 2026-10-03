@@ -451,10 +451,19 @@ public:
 };
 
 
-Device *hpet_node_create(DeviceContext *ctx)
-{
-    return new HPETDevice(ctx);
-}
+/* The HPET at HPET_ADDR. */
+class HPETClass final: public DeviceClass {
+public:
+    HPETClass(): DeviceClass("hpet") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        (void)cfg;
+        return new HPETDevice(ctx);
+    }
+};
+
+static const HPETClass sHPETClass;
 
 
 HPET *hpet_node_state(Device *dev)

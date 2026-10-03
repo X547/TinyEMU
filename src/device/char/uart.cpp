@@ -248,9 +248,23 @@ public:
 };
 
 
-//#pragma mark - factory
+//#pragma mark - class
 
-Device *uart_node_create(DeviceContext *ctx, int port, int irq)
-{
-    return new UartDevice(ctx, port, irq);
-}
+/* On a machine whose devices are addressed by port number the registers go at
+   "reg" on line "irq"; on one that maps them into memory both are
+   allocated. */
+class UartClass final: public DeviceClass {
+public:
+    UartClass(): DeviceClass("ns16550a") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int port, irq;
+        if (!cfg.GetInt("reg", &port, -1) || !cfg.GetInt("irq", &irq, -1)) {
+            return nullptr;
+        }
+        return new UartDevice(ctx, port, irq);
+    }
+};
+
+static const UartClass sUartClass;

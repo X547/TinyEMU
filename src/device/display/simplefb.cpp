@@ -135,9 +135,20 @@ public:
 };
 
 
-//#pragma mark - factory
+//#pragma mark - class
 
-Device *simplefb_node_create(DeviceContext *ctx, int width, int height)
-{
-    return new SimpleFBDevice(ctx, width, height);
-}
+class SimpleFBClass final: public DeviceClass {
+public:
+    SimpleFBClass(): DeviceClass("simplefb") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int width, height;
+        if (!cfg.GetInt("width", &width) || !cfg.GetInt("height", &height)) {
+            return nullptr;
+        }
+        return new SimpleFBDevice(ctx, width, height);
+    }
+};
+
+static const SimpleFBClass sSimpleFBClass;

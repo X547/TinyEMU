@@ -140,9 +140,20 @@ void SysconPoweroffDevice::Write(uint32_t offset, uint32_t val, int size_log2)
 }
 
 
-//#pragma mark - factory
+//#pragma mark - class
 
-Device *syscon_poweroff_node_create(DeviceContext *ctx)
-{
-    return new SysconPoweroffDevice(ctx);
-}
+/* One register on the FDT bus that stops the emulator, described as a
+   "syscon" block together with the "syscon-poweroff" node firmware and
+   kernels look for. */
+class SysconPoweroffClass final: public DeviceClass {
+public:
+    SysconPoweroffClass(): DeviceClass("syscon-poweroff") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        (void)cfg;
+        return new SysconPoweroffDevice(ctx);
+    }
+};
+
+static const SysconPoweroffClass sSysconPoweroffClass;

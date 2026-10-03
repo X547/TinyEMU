@@ -1290,14 +1290,32 @@ void BansheeDevice::Refresh(HostScreen *screen)
 }
 
 
-//#pragma mark - the configuration node
+//#pragma mark - class
 
-Device *banshee_node_create(DeviceContext *ctx, const char *name,
-                            const char *model, int vram_mb, int width,
-                            int height)
+/* A Voodoo Banshee on a PCI bus. "vram" is the video memory in megabytes,
+   "model" is "banshee" or "voodoo3", which changes only what a driver matches
+   on, and "width" and "height" are the size the window opens at before a
+   driver has set a mode. */
+class BansheeClass final: public DeviceClass {
+public:
+    BansheeClass(): DeviceClass("banshee") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override;
+};
+
+
+Device *BansheeClass::Create(const DeviceConfig &cfg, DeviceContext *ctx) const
 {
+    const char *model;
+    int vram_mb, width, height;
     uint16_t device_id;
 
+    if (!cfg.GetStrOpt("model", &model) ||
+        !cfg.GetInt("vram", &vram_mb, BANSHEE_DEFAULT_VRAM_MB) ||
+        !cfg.GetInt("width", &width, 1024) ||
+        !cfg.GetInt("height", &height, 768)) {
+        return nullptr;
+    }
     if (model == nullptr || strcmp(model, "banshee") == 0) {
         device_id = BANSHEE_PCI_BANSHEE_ID;
     } else if (strcmp(model, "voodoo3") == 0) {
@@ -1316,5 +1334,8 @@ Device *banshee_node_create(DeviceContext *ctx, const char *name,
         vm_error("banshee: 'width' and 'height' must be positive\n");
         return nullptr;
     }
-    return new BansheeDevice(ctx, name, device_id, vram_mb, width, height);
+    return new BansheeDevice(ctx, cfg.IdOr("banshee"), device_id, vram_mb,
+                             width, height);
 }
+
+static const BansheeClass sBansheeClass;

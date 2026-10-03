@@ -7,8 +7,6 @@
 #include "host_console.h"
 #include "iomem.h"
 
-struct DeviceContext;
-
 /* The window the device tree node publishes. Only the first eight bytes
    decode, but a 16550 is conventionally given a page of its own. */
 #define UART_REG_SIZE 0x100
@@ -92,9 +90,3 @@ public:
 
     DeviceIOAdapter<SerialState, &SerialState::Read, &SerialState::Write> fIo {*this};
 };
-
-
-/* The "ns16550a" configuration node. On a machine whose devices are addressed
-   by port number the registers go at 'port' on line 'irq'; on one that maps
-   them into memory both are allocated and -1 is what to pass. */
-Device *uart_node_create(DeviceContext *ctx, int port, int irq);

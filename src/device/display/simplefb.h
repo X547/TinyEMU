@@ -27,8 +27,6 @@
 #include "device.h"
 #include "machine.h"
 
-struct DeviceContext;
-
 FBDevice *simplefb_init(PhysMemoryMap *map, uint64_t phys_addr,
                         int width, int height);
 
@@ -83,5 +81,3 @@ void fb_walk_dirty(PhysMemoryRange *mem_range, int page_count,
     if (y0 != y1)
         draw(y0, y1);
 }
-
-Device *simplefb_node_create(DeviceContext *ctx, int width, int height);

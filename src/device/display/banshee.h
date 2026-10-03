@@ -456,12 +456,3 @@ public:
     DeviceIOAdapter<BansheeDevice, &BansheeDevice::PortRead,
                     &BansheeDevice::PortWrite> fPortIo {*this};
 };
-
-
-/* The "banshee" configuration node: a Voodoo Banshee on a PCI bus. "vram" is
-   the video memory in megabytes, "model" is "banshee" or "voodoo3", which
-   changes only what a driver matches on, and "width" and "height" are the
-   size the window opens at before a driver has set a mode. */
-Device *banshee_node_create(DeviceContext *ctx, const char *name,
-                            const char *model, int vram_mb, int width,
-                            int height);

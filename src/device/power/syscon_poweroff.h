@@ -23,17 +23,8 @@
  */
 #pragma once
 
-#include "device.h"
-
-struct DeviceContext;
-
 /* Values written to the register, as the SiFive test device takes them. */
 #define SYSCON_POWEROFF_PASS  0x5555
 /* The exit code goes in the upper 16 bits. */
 #define SYSCON_POWEROFF_FAIL  0x3333
 #define SYSCON_POWEROFF_RESET 0x7777
-
-/* The "syscon-poweroff" configuration node: one register on the FDT bus that
-   stops the emulator, described as a "syscon" block together with the
-   "syscon-poweroff" node firmware and kernels look for. */
-Device *syscon_poweroff_node_create(DeviceContext *ctx);

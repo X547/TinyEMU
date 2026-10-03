@@ -35,7 +35,6 @@
 #include "devices.h"
 #include "iomem.h"
 #include "simplefb.h"
-#include "vga.h"
 #include "virtio.h"
 #include "machine.h"
 
@@ -1127,7 +1126,22 @@ public:
 };
 
 
-Device *vga_node_create(DeviceContext *ctx, int width, int height)
-{
-    return new VGADevice(ctx, width, height);
-}
+/* The 1234:1111 standard VGA, on a PCI bus. It also decodes the legacy VGA
+   and VBE ports, which is what lets a video BIOS and a guest that has not yet
+   loaded a driver use it. The ROM it answers with is the machine's vga_bios
+   file. */
+class VGAClass final: public DeviceClass {
+public:
+    VGAClass(): DeviceClass("vga") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int width, height;
+        if (!cfg.GetInt("width", &width) || !cfg.GetInt("height", &height)) {
+            return nullptr;
+        }
+        return new VGADevice(ctx, width, height);
+    }
+};
+
+static const VGAClass sVGAClass;

@@ -28,7 +28,6 @@
 
 #include "ata.h"
 #include "ata_pci.h"
-#include "banshee.h"
 #include "cutils.h"
 #include "dw_i2c.h"
 #include "dw_mmc.h"
@@ -48,18 +47,14 @@
 #include "scsi.h"
 #include "sd.h"
 #include "sdhci.h"
-#include "simplefb.h"
-#include "syscon_poweroff.h"
 #include "usb.h"
 #include "xhci.h"
 
 /* The PC's own parts. They are built only with the x86 machine, because none
    of them models anything a device tree machine has. */
 #ifdef CONFIG_X86EMU
-#include "hpet.h"
 #include "i8042.h"
 #include "pci_host_i440fx.h"
-#include "vga.h"
 #endif
 
 
@@ -367,46 +362,6 @@ static Device *device_create(const DeviceConfig &cfg, DeviceContext *ctx)
 {
     const char *type = cfg.Type();
 
-    if (strcmp(type, "ns16550a") == 0) {
-        int port, irq;
-        if (!cfg.GetInt("reg", &port, -1) ||
-            !cfg.GetInt("irq", &irq, -1)) {
-            return nullptr;
-        }
-        return uart_node_create(ctx, port, irq);
-    }
-
-    if (strcmp(type, "simplefb") == 0 || strcmp(type, "vga") == 0) {
-        int width, height;
-        if (!cfg.GetInt("width", &width) ||
-            !cfg.GetInt("height", &height)) {
-            return nullptr;
-        }
-#ifdef CONFIG_X86EMU
-        if (strcmp(type, "vga") == 0) {
-            return vga_node_create(ctx, width, height);
-        }
-#endif
-        return simplefb_node_create(ctx, width, height);
-    }
-
-    if (strcmp(type, "banshee") == 0) {
-        const char *model;
-        int vram_mb, width, height;
-        if (!cfg.GetStrOpt("model", &model) ||
-            !cfg.GetInt("vram", &vram_mb, BANSHEE_DEFAULT_VRAM_MB) ||
-            !cfg.GetInt("width", &width, 1024) ||
-            !cfg.GetInt("height", &height, 768)) {
-            return nullptr;
-        }
-        return banshee_node_create(ctx, cfg.IdOr("banshee"), model, vram_mb,
-                                   width, height);
-    }
-
-    if (strcmp(type, "syscon-poweroff") == 0) {
-        return syscon_poweroff_node_create(ctx);
-    }
-
 #ifdef CONFIG_X86EMU
     if (strcmp(type, "i8042") == 0) {
         int vmmouse;
@@ -426,10 +381,6 @@ static Device *device_create(const DeviceConfig &cfg, DeviceContext *ctx)
             I440FX_CLOUD_HYPERVISOR : I440FX_PC;
         return i440fx_node_create(cfg.IdOr("i440fx"), variant,
                                   *ctx->pc_pci_space);
-    }
-
-    if (strcmp(type, "hpet") == 0) {
-        return hpet_node_create(ctx);
     }
 #endif
 
@@ -997,16 +948,10 @@ public:
 };
 
 static const LegacyDeviceClass sLegacyClasses[] = {
-    LegacyDeviceClass("ns16550a"),
-    LegacyDeviceClass("simplefb"),
-    LegacyDeviceClass("vga"),
-    LegacyDeviceClass("banshee"),
-    LegacyDeviceClass("syscon-poweroff"),
 #ifdef CONFIG_X86EMU
     LegacyDeviceClass("i8042"),
     LegacyDeviceClass("pci-host-i440fx"),
     LegacyDeviceClass("pci-host-cloudhv"),
-    LegacyDeviceClass("hpet"),
 #endif
     LegacyDeviceClass("pci-ide"),
     LegacyDeviceClass("ata-disk"),
