@@ -314,6 +314,21 @@ public:
 };
 
 
+/* IDENTIFY data, which every kind of drive fills in the same way: strings
+   with the bytes of each word swapped, and little endian words. */
+void ata_put_string(uint8_t *buf, const char *src, int len);
+void ata_put_word(uint8_t *buf, int index, uint16_t val);
+
+/* Whether SET FEATURES may select transfer mode 'mode', a class from the
+   ATA_XFER_ values plus the mode number. */
+bool ata_transfer_mode_valid(uint8_t mode);
+/* Whether 'mode' is a DMA mode, which IDENTIFY reports as selected. A PIO
+   mode is chosen separately and must not displace it. */
+bool ata_transfer_mode_is_dma(uint8_t mode);
+/* IDENTIFY words 63 and 88: the multiword and Ultra DMA modes there are,
+   and which one of them 'dma_mode' selected. */
+void ata_put_dma_modes(uint8_t *buf, uint8_t dma_mode);
+
 /* A disk. 'read_only' refuses writes the way a jumpered drive would, rather
    than letting them fail one at a time in the back end. */
 std::unique_ptr<ATADevice> ata_disk_create(std::unique_ptr<HostBlockDevice> bs,

@@ -286,23 +286,6 @@ bool ATADiskDevice::LbaInRange(int64_t lba, int count) const
 
 //#pragma mark - IDENTIFY
 
-static void ata_put_string(uint8_t *buf, const char *src, int len)
-{
-    /* ATA strings travel with the two bytes of each word swapped. */
-    for (int i = 0; i < len; i++) {
-        char c = *src != '\0' ? *src++ : ' ';
-        buf[i ^ 1] = c;
-    }
-}
-
-
-static void ata_put_word(uint8_t *buf, int index, uint16_t val)
-{
-    buf[index * 2] = val & 0xff;
-    buf[index * 2 + 1] = val >> 8;
-}
-
-
 void ATADiskDevice::Identify()
 {
     uint8_t *p = fBuffer;
@@ -346,13 +329,7 @@ void ATADiskDevice::Identify()
     ata_put_word(p, 60, lba_sectors);
     ata_put_word(p, 61, lba_sectors >> 16);
 
-    /* Multiword DMA: the modes there are, and the one selected. Only one of
-       this and word 88 ever carries a selection. */
-    uint16_t mwdma = ATA_MWDMA_MODES;
-    if ((fDmaMode & ~0x07) == ATA_XFER_MWDMA) {
-        mwdma |= 1 << (8 + (fDmaMode & 0x07));
-    }
-    ata_put_word(p, 63, mwdma);
+    ata_put_dma_modes(p, fDmaMode); /* words 63 and 88 */
     ata_put_word(p, 64, 0x0003); /* PIO modes 3 and 4 */
     ata_put_word(p, 65, 120);    /* minimum multiword DMA cycle time */
     ata_put_word(p, 66, 120);
@@ -373,13 +350,6 @@ void ATADiskDevice::Identify()
     ata_put_word(p, 85, (1 << 3) | (1 << 5) | (1 << 6) | (1 << 14));
     ata_put_word(p, 86, (1 << 12));
     ata_put_word(p, 87, (1 << 14));
-
-    /* Ultra DMA, likewise. */
-    uint16_t udma = ATA_UDMA_MODES;
-    if ((fDmaMode & ~0x07) == ATA_XFER_UDMA) {
-        udma |= 1 << (8 + (fDmaMode & 0x07));
-    }
-    ata_put_word(p, 88, udma);
 
     /* Device 0 passed, and the cable is the 80 conductor one. Without the
        cable bit a driver holds Ultra DMA to mode 2. */
@@ -645,24 +615,12 @@ void ATADiskDevice::SetFeatures()
     switch (fFeature) {
     case ATA_FEATURE_SET_TRANSFER: {
         uint8_t mode = fNsector & 0xff;
-        uint8_t cls = mode & ~0x07;
-        uint8_t index = mode & 0x07;
-        bool ok;
-        switch (cls) {
-        case ATA_XFER_PIO_SLOW: ok = index <= 1; break;
-        case ATA_XFER_PIO:      ok = index <= 4; break;
-        case ATA_XFER_MWDMA:    ok = get_bit(ATA_MWDMA_MODES, index); break;
-        case ATA_XFER_UDMA:     ok = get_bit(ATA_UDMA_MODES, index); break;
-        default:                ok = false; break;
-        }
-        if (!ok) {
+        if (!ata_transfer_mode_valid(mode)) {
             AbortCommand();
             RaiseIrq();
             return;
         }
-        if (cls == ATA_XFER_MWDMA || cls == ATA_XFER_UDMA) {
-            /* A guest selects a PIO mode and a DMA one in turn, so a PIO
-               mode must not displace the DMA mode IDENTIFY reports. */
+        if (ata_transfer_mode_is_dma(mode)) {
             fDmaMode = mode;
         }
         break;

@@ -29,6 +29,63 @@
 #include "machine.h"
 
 
+//#pragma mark - IDENTIFY
+
+void ata_put_string(uint8_t *buf, const char *src, int len)
+{
+    /* ATA strings travel with the two bytes of each word swapped. */
+    for (int i = 0; i < len; i++) {
+        char c = *src != '\0' ? *src++ : ' ';
+        buf[i ^ 1] = c;
+    }
+}
+
+
+void ata_put_word(uint8_t *buf, int index, uint16_t val)
+{
+    buf[index * 2] = val & 0xff;
+    buf[index * 2 + 1] = val >> 8;
+}
+
+
+bool ata_transfer_mode_valid(uint8_t mode)
+{
+    uint8_t index = mode & 0x07;
+
+    switch (mode & ~0x07) {
+    case ATA_XFER_PIO_SLOW: return index <= 1;
+    case ATA_XFER_PIO:      return index <= 4;
+    case ATA_XFER_MWDMA:    return get_bit(ATA_MWDMA_MODES, index);
+    case ATA_XFER_UDMA:     return get_bit(ATA_UDMA_MODES, index);
+    default:                return false;
+    }
+}
+
+
+bool ata_transfer_mode_is_dma(uint8_t mode)
+{
+    uint8_t cls = mode & ~0x07;
+    return cls == ATA_XFER_MWDMA || cls == ATA_XFER_UDMA;
+}
+
+
+void ata_put_dma_modes(uint8_t *buf, uint8_t dma_mode)
+{
+    /* Only one of the two words ever carries a selection. */
+    uint16_t mwdma = ATA_MWDMA_MODES;
+    if ((dma_mode & ~0x07) == ATA_XFER_MWDMA) {
+        mwdma |= 1 << (8 + (dma_mode & 0x07));
+    }
+    ata_put_word(buf, 63, mwdma);
+
+    uint16_t udma = ATA_UDMA_MODES;
+    if ((dma_mode & ~0x07) == ATA_XFER_UDMA) {
+        udma |= 1 << (8 + (dma_mode & 0x07));
+    }
+    ata_put_word(buf, 88, udma);
+}
+
+
 //#pragma mark - ATADevice
 
 void ATADevice::Attach(ATAChannel *channel, int unit)
