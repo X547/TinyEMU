@@ -29,6 +29,7 @@
 
 #include "bits.h"
 #include "cutils.h"
+#include "device_class.h"
 #include "fdt.h"
 #include "machine.h"
 #include "pci.h"
@@ -1578,10 +1579,36 @@ void SDHCIDevice::BuildFDT(FDTContext &ctx)
 }
 
 
-//#pragma mark - factory
+//#pragma mark - class
 
-Device *sdhci_node_create(const char *name, const char *compatible,
-                          uint32_t clock_hz)
-{
-    return new SDHCIDevice(name, compatible, clock_hz);
-}
+class SDHCIClass final: public DeviceClass {
+public:
+    SDHCIClass(): DeviceClass("sdhci") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        const char *compatible;
+        int clock_mhz;
+
+        (void)ctx;
+        /* On a device tree machine the node has to name a controller some
+           driver binds to, exactly as the DesignWare host bridge does. On
+           PCI the class code does that job and the property is unused. */
+        if (!cfg.GetStrOpt("compatible", &compatible) ||
+            !cfg.GetInt("clock", &clock_mhz,
+                        SDHCI_DEFAULT_CLOCK_HZ / 1000000)) {
+            return nullptr;
+        }
+        if (compatible == nullptr) {
+            compatible = SDHCI_DEFAULT_COMPATIBLE;
+        }
+        if (clock_mhz < 1 || clock_mhz > 255) {
+            vm_error("sdhci: 'clock' must be between 1 and 255 MHz\n");
+            return nullptr;
+        }
+        return new SDHCIDevice(cfg.IdOr("sdhci"), compatible,
+                               (uint32_t)clock_mhz * 1000000);
+    }
+};
+
+static const SDHCIClass sSDHCIClass;

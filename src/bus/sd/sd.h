@@ -473,13 +473,3 @@ uint8_t sd_crc7(const uint8_t *data, int len);
    tabulated in the specifications as bit ranges of one big register, and this
    is what lets those tables be transcribed the way they are numbered. */
 void sd_reg_set_bits(uint8_t *reg, int size, int hi, int lo, uint64_t value);
-
-
-/* Each card type builds its own node, so the factory in devices.cpp stays a
-   table of names. */
-
-/* sd_card.cpp */
-Device *sd_card_node_create(std::unique_ptr<HostBlockDevice> bs, bool read_only);
-
-/* mmc_card.cpp */
-Device *mmc_card_node_create(std::unique_ptr<HostBlockDevice> bs, bool read_only);

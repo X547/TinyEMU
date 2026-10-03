@@ -328,52 +328,6 @@ static Device *device_create(const DeviceConfig &cfg, DeviceContext *ctx)
 {
     const char *type = cfg.Type();
 
-    if (strcmp(type, "sdhci") == 0) {
-        const char *compatible;
-        int clock_mhz;
-        /* On a device tree machine the node has to name a controller some
-           driver binds to, exactly as the DesignWare host bridge does. On
-           PCI the class code does that job and the property is unused. */
-        if (!cfg.GetStrOpt("compatible", &compatible) ||
-            !cfg.GetInt("clock", &clock_mhz,
-                          SDHCI_DEFAULT_CLOCK_HZ / 1000000)) {
-            return nullptr;
-        }
-        if (compatible == nullptr) {
-            compatible = SDHCI_DEFAULT_COMPATIBLE;
-        }
-        if (clock_mhz < 1 || clock_mhz > 255) {
-            vm_error("sdhci: 'clock' must be between 1 and 255 MHz\n");
-            return nullptr;
-        }
-        return sdhci_node_create(cfg.IdOr("sdhci"),
-                                 compatible, (uint32_t)clock_mhz * 1000000);
-    }
-
-    if (strcmp(type, "dw-mmc") == 0) {
-        const char *compatible;
-        int clock_mhz, dma;
-        if (!cfg.GetStrOpt("compatible", &compatible) ||
-            !cfg.GetInt("clock", &clock_mhz,
-                          DW_MMC_DEFAULT_CLOCK_HZ / 1000000) ||
-            !cfg.GetInt("dma", &dma, DW_MMC_DEFAULT_DMA_BITS)) {
-            return nullptr;
-        }
-        if (compatible == nullptr) {
-            compatible = DW_MMC_DEFAULT_COMPATIBLE;
-        }
-        if (clock_mhz < 1 || clock_mhz > 1000) {
-            vm_error("dw-mmc: 'clock' must be between 1 and 1000 MHz\n");
-            return nullptr;
-        }
-        if (dma != 0 && dma != 32 && dma != 64) {
-            vm_error("dw-mmc: 'dma' must be 0, 32 or 64\n");
-            return nullptr;
-        }
-        return dw_mmc_node_create(cfg.IdOr("dw-mmc"), compatible,
-                                  (uint32_t)clock_mhz * 1000000, dma);
-    }
-
     if (strcmp(type, "dw-i2c") == 0) {
         const char *compatible;
         if (!cfg.GetStrOpt("compatible", &compatible)) {
@@ -383,21 +337,6 @@ static Device *device_create(const DeviceConfig &cfg, DeviceContext *ctx)
             compatible = DW_I2C_DEFAULT_COMPATIBLE;
         }
         return dw_i2c_node_create(cfg.IdOr("dw-i2c"), compatible);
-    }
-
-    if (strcmp(type, "sd-card") == 0 || strcmp(type, "mmc-card") == 0) {
-        int read_only;
-        if (!cfg.GetInt("read_only", &read_only, 0)) {
-            return nullptr;
-        }
-        auto bs = node_open_block(cfg, ctx);
-        if (bs == nullptr) {
-            return nullptr;
-        }
-        if (strcmp(type, "sd-card") == 0) {
-            return sd_card_node_create(std::move(bs), read_only != 0);
-        }
-        return mmc_card_node_create(std::move(bs), read_only != 0);
     }
 
     if (strcmp(type, "xhci") == 0) {
@@ -674,11 +613,7 @@ public:
 };
 
 static const LegacyDeviceClass sLegacyClasses[] = {
-    LegacyDeviceClass("sdhci"),
-    LegacyDeviceClass("dw-mmc"),
     LegacyDeviceClass("dw-i2c"),
-    LegacyDeviceClass("sd-card"),
-    LegacyDeviceClass("mmc-card"),
     LegacyDeviceClass("xhci"),
     LegacyDeviceClass("intel-hda"),
     LegacyDeviceClass("hda-codec"),

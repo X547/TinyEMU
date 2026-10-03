@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "bits.h"
+#include "config_props.h"
 #include "cutils.h"
 #include "machine.h"
 #include "sd.h"
@@ -493,14 +494,30 @@ int MMCCard::Command(const SDCommand &cmd, uint8_t *response)
 }
 
 
-//#pragma mark - factory
+//#pragma mark - class
 
-Device *mmc_card_node_create(std::unique_ptr<HostBlockDevice> bs, bool read_only)
-{
-    if (bs->SectorCount() < 4) {
-        vm_error("mmc-card: the image is too small to be a device\n");
-        return nullptr;
+class MMCCardClass final: public DeviceClass {
+public:
+    MMCCardClass(): DeviceClass("mmc-card") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int read_only;
+        if (!cfg.GetInt("read_only", &read_only, 0)) {
+            return nullptr;
+        }
+        auto bs = config_open_block(cfg, ctx);
+        if (bs == nullptr) {
+            return nullptr;
+        }
+        if (bs->SectorCount() < 4) {
+            vm_error("mmc-card: the image is too small to be a device\n");
+            return nullptr;
+        }
+        return new SDDeviceNode(
+            "mmc-card",
+            std::make_unique<MMCCard>(std::move(bs), read_only != 0));
     }
-    return new SDDeviceNode(
-        "mmc-card", std::make_unique<MMCCard>(std::move(bs), read_only));
-}
+};
+
+static const MMCCardClass sMMCCardClass;

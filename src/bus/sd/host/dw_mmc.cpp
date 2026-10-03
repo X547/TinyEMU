@@ -27,6 +27,7 @@
 
 #include "bits.h"
 #include "cutils.h"
+#include "device_class.h"
 #include "fdt.h"
 #include "machine.h"
 #include "sd.h"
@@ -1292,10 +1293,40 @@ void DWMMCDevice::BuildFDT(FDTContext &ctx)
 }
 
 
-//#pragma mark - factory
+//#pragma mark - class
 
-Device *dw_mmc_node_create(const char *name, const char *compatible,
-                           uint32_t clock_hz, int dma_bits)
-{
-    return new DWMMCDevice(name, compatible, clock_hz, dma_bits);
-}
+/* "dma" is 32 or 64, or 0 for a controller built without the internal DMA
+   controller, which moves data through the FIFO only. */
+class DWMMCClass final: public DeviceClass {
+public:
+    DWMMCClass(): DeviceClass("dw-mmc") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        const char *compatible;
+        int clock_mhz, dma;
+
+        (void)ctx;
+        if (!cfg.GetStrOpt("compatible", &compatible) ||
+            !cfg.GetInt("clock", &clock_mhz,
+                        DW_MMC_DEFAULT_CLOCK_HZ / 1000000) ||
+            !cfg.GetInt("dma", &dma, DW_MMC_DEFAULT_DMA_BITS)) {
+            return nullptr;
+        }
+        if (compatible == nullptr) {
+            compatible = DW_MMC_DEFAULT_COMPATIBLE;
+        }
+        if (clock_mhz < 1 || clock_mhz > 1000) {
+            vm_error("dw-mmc: 'clock' must be between 1 and 1000 MHz\n");
+            return nullptr;
+        }
+        if (dma != 0 && dma != 32 && dma != 64) {
+            vm_error("dw-mmc: 'dma' must be 0, 32 or 64\n");
+            return nullptr;
+        }
+        return new DWMMCDevice(cfg.IdOr("dw-mmc"), compatible,
+                               (uint32_t)clock_mhz * 1000000, dma);
+    }
+};
+
+static const DWMMCClass sDWMMCClass;

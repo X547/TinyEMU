@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "bits.h"
+#include "config_props.h"
 #include "machine.h"
 #include "sd.h"
 #include "virtio.h"
@@ -582,16 +583,33 @@ int SDCard::AppCommand(const SDCommand &cmd, uint8_t *response)
 }
 
 
-//#pragma mark - factory
+//#pragma mark - class
 
-Device *sd_card_node_create(std::unique_ptr<HostBlockDevice> bs, bool read_only)
-{
-    /* The smallest capacity a version 1 CSD can describe is four blocks, and
-       an image below that would have the card claiming more than it holds. */
-    if (bs->SectorCount() < 4) {
-        vm_error("sd-card: the image is too small to be a card\n");
-        return nullptr;
+class SDCardClass final: public DeviceClass {
+public:
+    SDCardClass(): DeviceClass("sd-card") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int read_only;
+        if (!cfg.GetInt("read_only", &read_only, 0)) {
+            return nullptr;
+        }
+        auto bs = config_open_block(cfg, ctx);
+        if (bs == nullptr) {
+            return nullptr;
+        }
+        /* The smallest capacity a version 1 CSD can describe is four
+           blocks, and an image below that would have the card claiming more
+           than it holds. */
+        if (bs->SectorCount() < 4) {
+            vm_error("sd-card: the image is too small to be a card\n");
+            return nullptr;
+        }
+        return new SDDeviceNode("sd-card",
+                                std::make_unique<SDCard>(std::move(bs),
+                                                         read_only != 0));
     }
-    return new SDDeviceNode("sd-card",
-                            std::make_unique<SDCard>(std::move(bs), read_only));
-}
+};
+
+static const SDCardClass sSDCardClass;

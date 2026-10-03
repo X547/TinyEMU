@@ -36,8 +36,3 @@
 /* The address width of the internal DMA controller's descriptors. The
    JH7110 has the 32 bit one, which is also all some firmware drives. */
 #define DW_MMC_DEFAULT_DMA_BITS 32
-
-/* 'dma_bits' is 32 or 64, or 0 for a controller built without the internal
-   DMA controller, which moves data through the FIFO only. */
-Device *dw_mmc_node_create(const char *name, const char *compatible,
-                           uint32_t clock_hz, int dma_bits);

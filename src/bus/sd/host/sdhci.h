@@ -42,6 +42,3 @@
    "compatible" in the configuration overrides it for a guest whose driver
    probes for something else. */
 #define SDHCI_DEFAULT_COMPATIBLE "arasan,sdhci-8.9a"
-
-Device *sdhci_node_create(const char *name, const char *compatible,
-                          uint32_t clock_hz);
