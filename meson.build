@@ -335,11 +335,11 @@ subdir('tools')
 # ----------------------------------------------------------------------------
 # targets
 #
-# link_whole, not link_with: these libraries reference each other both ways --
-# machine/devices.cpp constructs every device, while the host bridges call back
-# into machine -- and a cycle between static archives does not resolve in a
-# single left to right link pass. Pulling every object in makes the order
-# irrelevant, and costs nothing when the executable links all of it anyway.
+# link_whole, not link_with: a device class registers itself from a static
+# object nothing else refers to, which a plain archive link would leave out.
+# Pulling every object in also lets these libraries refer to each other both
+# ways -- the host bridges call back into machine -- without ordering them
+# for a single left to right link pass.
 
 executable('temu',
   link_whole: emu_libs,

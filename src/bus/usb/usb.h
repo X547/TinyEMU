@@ -259,7 +259,7 @@ public:
 
 
 /* Attaches one USB device to the bus it was declared on. Which device this is
-   comes from the factory, so there is one node class rather than one per
+   comes from the device class, so there is one node class rather than one per
    device type; the node knows only how to plug the device in and, when it
    provides a bus of its own, to hand that on. */
 class USBDeviceNode final: public Device {
@@ -274,8 +274,8 @@ public:
 
     USBDevice *Dev() const {return fDev;}
 
-    /* Takes ownership. Called by the factory, before the node is added to a
-       bus, for a device that provides one. */
+    /* Takes ownership. Called by the device class, before the node is added
+       to a bus, for a device that provides one. */
     void SetChildBus(Bus *bus) {fChildBus = bus;}
 
     bool Realize() override;

@@ -119,26 +119,4 @@ std::unique_ptr<VIRTIODevice> virtio_gpu_init(VIRTIOBusDef *bus, int width,
                                               int height);
 ScreenSource *virtio_gpu_screen_source(VIRTIODevice *s);
 
-/* device tree nodes */
-
-class Device;
-struct DeviceContext;
-
-/* One wrapper serves every virtio device on either transport: which resources
-   it takes is decided by the bus it is attached to, so the same node works on
-   an MMIO machine and behind a PCI bridge. */
-Device *virtio_block_node_create(DeviceContext *ctx,
-                                 std::unique_ptr<HostBlockDevice> bs,
-                                 bool read_only);
-/* Provides a SCSI bus for the units declared inside it. */
-Device *virtio_scsi_node_create(DeviceContext *ctx);
-Device *virtio_net_node_create(DeviceContext *ctx,
-                               std::unique_ptr<HostEthernet> net);
-Device *virtio_console_node_create(DeviceContext *ctx);
-Device *virtio_9p_node_create(DeviceContext *ctx,
-                              std::unique_ptr<HostFileSystem> fs,
-                              const char *mount_tag);
-Device *virtio_input_node_create(DeviceContext *ctx, VirtioInputTypeEnum type);
-Device *virtio_gpu_node_create(DeviceContext *ctx, int width, int height);
-
 #endif /* VIRTIO_H */

@@ -1,5 +1,5 @@
 /*
- * Configurable device objects
+ * The context devices are created in, and their connection to the host
  *
  * Copyright (c) 2016-2018 Fabrice Bellard
  *
@@ -27,17 +27,17 @@
 
 #include "device.h"
 #include "device_class.h"
+#include "host_console.h"
+#include "host_ethernet.h"
 #include "machine.h"
 #include "platform.h"
-#include "uart.h"
-#include "virtio.h"
 
 struct PcPciApertures;
 
 
 /* The machine-level objects a device may attach to, and the back references
-   the machine collects while the tree is realized. Passed to every factory so
-   that no device needs to know the machine type it lives in. */
+   the machine collects while the tree is realized. Passed to every device
+   class so that no device needs to know the machine type it lives in. */
 struct DeviceContext {
     const VirtMachineParams *params = nullptr;
     /* for a device that stops the emulator */

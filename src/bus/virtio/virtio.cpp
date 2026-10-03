@@ -29,6 +29,7 @@
 #include <stdarg.h>
 #include <atomic>
 
+#include "config_props.h"
 #include "cutils.h"
 #include "devices.h"
 #include "fdt.h"
@@ -1254,63 +1255,167 @@ public:
 };
 
 
-//#pragma mark - factory
+//#pragma mark - classes
 
-Device *virtio_block_node_create(DeviceContext *ctx,
-                                 std::unique_ptr<HostBlockDevice> bs,
-                                 bool read_only)
-{
-    VirtioDevice *dev = new VirtioDevice("virtio-block", VIRTIO_KIND_BLOCK,
-                                         ctx);
-    dev->SetBlockDevice(std::move(bs), read_only);
-    return dev;
-}
+/* One wrapper serves every virtio device on either transport: which resources
+   it takes is decided by the bus it is attached to, so the same device works
+   on an MMIO machine and behind a PCI bridge. */
 
+class VirtioBlockClass final: public DeviceClass {
+public:
+    VirtioBlockClass(): DeviceClass("virtio-block") {}
 
-Device *virtio_scsi_node_create(DeviceContext *ctx)
-{
-    return new VirtioDevice("virtio-scsi", VIRTIO_KIND_SCSI, ctx);
-}
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int read_only;
+        if (!cfg.GetInt("read_only", &read_only, 0)) {
+            return nullptr;
+        }
+        auto bs = config_open_block(cfg, ctx);
+        if (bs == nullptr) {
+            return nullptr;
+        }
+        VirtioDevice *dev = new VirtioDevice("virtio-block",
+                                             VIRTIO_KIND_BLOCK, ctx);
+        dev->SetBlockDevice(std::move(bs), read_only != 0);
+        return dev;
+    }
+};
 
-
-Device *virtio_net_node_create(DeviceContext *ctx,
-                               std::unique_ptr<HostEthernet> net)
-{
-    VirtioDevice *dev = new VirtioDevice("virtio-net", VIRTIO_KIND_NET, ctx);
-    dev->SetEthernet(std::move(net));
-    return dev;
-}
-
-
-Device *virtio_console_node_create(DeviceContext *ctx)
-{
-    return new VirtioDevice("virtio-console", VIRTIO_KIND_CONSOLE, ctx);
-}
+static const VirtioBlockClass sVirtioBlockClass;
 
 
-Device *virtio_9p_node_create(DeviceContext *ctx,
-                              std::unique_ptr<HostFileSystem> fs,
-                              const char *mount_tag)
-{
-    VirtioDevice *dev = new VirtioDevice("virtio-9p", VIRTIO_KIND_9P, ctx);
-    dev->SetFileSystem(std::move(fs));
-    dev->SetTag(mount_tag);
-    return dev;
-}
+/* Provides a SCSI bus for the units declared inside it. */
+class VirtioSCSIClass final: public DeviceClass {
+public:
+    VirtioSCSIClass(): DeviceClass("virtio-scsi") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        (void)cfg;
+        return new VirtioDevice("virtio-scsi", VIRTIO_KIND_SCSI, ctx);
+    }
+};
+
+static const VirtioSCSIClass sVirtioSCSIClass;
 
 
-Device *virtio_input_node_create(DeviceContext *ctx, VirtioInputTypeEnum type)
-{
-    VirtioDevice *dev = new VirtioDevice("virtio-input", VIRTIO_KIND_INPUT,
-                                         ctx);
-    dev->SetInputType(type);
-    return dev;
-}
+class VirtioNetClass final: public DeviceClass {
+public:
+    VirtioNetClass(): DeviceClass("virtio-net") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        auto net = config_open_ethernet(cfg, ctx);
+        if (net == nullptr) {
+            return nullptr;
+        }
+        VirtioDevice *dev = new VirtioDevice("virtio-net", VIRTIO_KIND_NET,
+                                             ctx);
+        dev->SetEthernet(std::move(net));
+        return dev;
+    }
+};
+
+static const VirtioNetClass sVirtioNetClass;
 
 
-Device *virtio_gpu_node_create(DeviceContext *ctx, int width, int height)
-{
-    VirtioDevice *dev = new VirtioDevice("virtio-gpu", VIRTIO_KIND_GPU, ctx);
-    dev->SetSize(width, height);
-    return dev;
-}
+class VirtioConsoleClass final: public DeviceClass {
+public:
+    VirtioConsoleClass(): DeviceClass("virtio-console") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        (void)cfg;
+        return new VirtioDevice("virtio-console", VIRTIO_KIND_CONSOLE, ctx);
+    }
+};
+
+static const VirtioConsoleClass sVirtioConsoleClass;
+
+
+/* "tag" is the name the guest mounts the directory by. */
+class Virtio9PClass final: public DeviceClass {
+public:
+    Virtio9PClass(): DeviceClass("virtio-9p") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        const char *tag;
+        if (!cfg.GetStr("tag", &tag)) {
+            return nullptr;
+        }
+        auto fs = config_open_fs(cfg, ctx);
+        if (fs == nullptr) {
+            return nullptr;
+        }
+        VirtioDevice *dev = new VirtioDevice("virtio-9p", VIRTIO_KIND_9P,
+                                             ctx);
+        dev->SetFileSystem(std::move(fs));
+        dev->SetTag(tag);
+        return dev;
+    }
+};
+
+static const Virtio9PClass sVirtio9PClass;
+
+
+class VirtioInputClass final: public DeviceClass {
+public:
+    VirtioInputClass(): DeviceClass("virtio-input") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        const char *kind;
+        VirtioInputTypeEnum input_type;
+
+        if (!cfg.GetStr("kind", &kind)) {
+            return nullptr;
+        }
+        if (strcmp(kind, "keyboard") == 0) {
+            input_type = VIRTIO_INPUT_TYPE_KEYBOARD;
+        } else if (strcmp(kind, "mouse") == 0) {
+            input_type = VIRTIO_INPUT_TYPE_MOUSE;
+        } else if (strcmp(kind, "tablet") == 0) {
+            input_type = VIRTIO_INPUT_TYPE_TABLET;
+        } else {
+            vm_error("virtio-input: unsupported kind '%s'\n", kind);
+            return nullptr;
+        }
+        VirtioDevice *dev = new VirtioDevice("virtio-input",
+                                             VIRTIO_KIND_INPUT, ctx);
+        dev->SetInputType(input_type);
+        return dev;
+    }
+};
+
+static const VirtioInputClass sVirtioInputClass;
+
+
+/* "width" x "height" is the display size first offered to the guest. */
+class VirtioGPUClass final: public DeviceClass {
+public:
+    VirtioGPUClass(): DeviceClass("virtio-gpu") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int width, height;
+
+        if (!cfg.GetInt("width", &width, 1024) ||
+            !cfg.GetInt("height", &height, 768)) {
+            return nullptr;
+        }
+        if (width < VIRTIO_GPU_MIN_SIZE || width > VIRTIO_GPU_MAX_SIZE ||
+            height < VIRTIO_GPU_MIN_SIZE || height > VIRTIO_GPU_MAX_SIZE) {
+            vm_error("virtio-gpu: 'width' and 'height' must be between %d "
+                     "and %d\n", VIRTIO_GPU_MIN_SIZE, VIRTIO_GPU_MAX_SIZE);
+            return nullptr;
+        }
+        VirtioDevice *dev = new VirtioDevice("virtio-gpu", VIRTIO_KIND_GPU,
+                                             ctx);
+        dev->SetSize(width, height);
+        return dev;
+    }
+};
+
+static const VirtioGPUClass sVirtioGPUClass;

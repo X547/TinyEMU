@@ -295,6 +295,8 @@ static int virt_machine_parse_config(VirtMachineParams *p,
     }
     p->root_bus = obj;
 
+    /* The ROM of the "vga" device. It belongs to that device, but is still
+       read here, with the other files the machine loads before it starts. */
     if (vm_get_str_opt(cfg, "vga_bios", &str) < 0)
         goto tag_fail;
     if (str) {

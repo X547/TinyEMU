@@ -28,6 +28,7 @@
 #include "host_audio.h"
 #include "host_block.h"
 #include "host_ethernet.h"
+#include "host_fs.h"
 
 /* The device's "file", relative to the configuration file, opened as a disk
    image. Reports and returns nullptr on failure. */
@@ -54,3 +55,8 @@ std::unique_ptr<HostAudio> config_open_audio(const DeviceConfig &cfg,
    "forward" entries open. Reports and returns nullptr on failure. */
 std::unique_ptr<HostEthernet> config_open_ethernet(const DeviceConfig &cfg,
                                                    DeviceContext *ctx);
+
+/* The device's "file", relative to the configuration file, opened as a
+   directory tree to share. Reports and returns nullptr on failure. */
+std::unique_ptr<HostFileSystem> config_open_fs(const DeviceConfig &cfg,
+                                               DeviceContext *ctx);

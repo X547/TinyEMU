@@ -247,3 +247,24 @@ std::unique_ptr<HostEthernet> config_open_ethernet(const DeviceConfig &cfg,
 
     return ctx->platform->OpenEthernet(driver, ifname, forwards);
 }
+
+
+std::unique_ptr<HostFileSystem> config_open_fs(const DeviceConfig &cfg,
+                                               DeviceContext *ctx)
+{
+    std::unique_ptr<HostFileSystem> fs;
+    const char *file;
+    char *fname;
+
+    if (!cfg.GetStrOpt("file", &file)) {
+        return nullptr;
+    }
+    if (file == nullptr) {
+        vm_error("%s: expecting a 'file' property\n", cfg.Type());
+        return nullptr;
+    }
+    fname = cfg.ResolvePath(file);
+    fs = ctx->platform->OpenFileSystem(fname);
+    free(fname);
+    return fs;
+}
