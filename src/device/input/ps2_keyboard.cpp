@@ -23,6 +23,7 @@
  */
 #include <stdint.h>
 
+#include "device_class.h"
 #include "ps2.h"
 
 /* Keyboard commands */
@@ -211,8 +212,20 @@ void PS2KeyboardDevice::Write(uint8_t val)
 }
 
 
-Device *ps2_keyboard_node_create(int port)
-{
-    return new PS2DeviceNode("ps2-keyboard",
-                             std::make_unique<PS2KeyboardDevice>(), port);
-}
+class PS2KeyboardClass final: public DeviceClass {
+public:
+    PS2KeyboardClass(): DeviceClass("ps2-keyboard") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int port;
+        (void)ctx;
+        if (!cfg.GetInt("port", &port, -1)) {
+            return nullptr;
+        }
+        return new PS2DeviceNode("ps2-keyboard",
+                                 std::make_unique<PS2KeyboardDevice>(), port);
+    }
+};
+
+static const PS2KeyboardClass sPS2KeyboardClass;

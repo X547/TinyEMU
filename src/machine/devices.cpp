@@ -43,7 +43,6 @@
 #include "pci_host_dw.h"
 #include "pci_host_plda.h"
 #include "pci_host_ecam.h"
-#include "ps2.h"
 #include "scsi.h"
 #include "sd.h"
 #include "sdhci.h"
@@ -53,7 +52,6 @@
 /* The PC's own parts. They are built only with the x86 machine, because none
    of them models anything a device tree machine has. */
 #ifdef CONFIG_X86EMU
-#include "i8042.h"
 #include "pci_host_i440fx.h"
 #endif
 
@@ -363,14 +361,6 @@ static Device *device_create(const DeviceConfig &cfg, DeviceContext *ctx)
     const char *type = cfg.Type();
 
 #ifdef CONFIG_X86EMU
-    if (strcmp(type, "i8042") == 0) {
-        int vmmouse;
-        if (!cfg.GetInt("vmmouse", &vmmouse, 1)) {
-            return nullptr;
-        }
-        return i8042_node_create(ctx, vmmouse != 0);
-    }
-
     if (strcmp(type, "pci-host-i440fx") == 0 ||
         strcmp(type, "pci-host-cloudhv") == 0) {
         if (ctx->pc_pci_space == nullptr) {
@@ -908,24 +898,6 @@ static Device *device_create(const DeviceConfig &cfg, DeviceContext *ctx)
         return virtio_gpu_node_create(ctx, width, height);
     }
 
-    if (strcmp(type, "ps2-keyboard") == 0 || strcmp(type, "ps2-mouse") == 0) {
-        int port;
-        if (!cfg.GetInt("port", &port, -1)) {
-            return nullptr;
-        }
-        if (strcmp(type, "ps2-keyboard") == 0) {
-            return ps2_keyboard_node_create(port);
-        }
-        return ps2_mouse_node_create(port);
-    }
-
-    if (strcmp(type, "ps2") == 0) {
-        vm_error("'ps2' is now an 'i8042' controller carrying a "
-                 "'ps2-keyboard' and a 'ps2-mouse' on the PS/2 bus it "
-                 "provides\n");
-        return nullptr;
-    }
-
     if (strcmp(type, "ide") == 0) {
         vm_error("'ide' is now a 'pci-ide' controller carrying an 'ata-disk' "
                  "on the ATA bus it provides, declared inside the PCI bus of "
@@ -949,7 +921,6 @@ public:
 
 static const LegacyDeviceClass sLegacyClasses[] = {
 #ifdef CONFIG_X86EMU
-    LegacyDeviceClass("i8042"),
     LegacyDeviceClass("pci-host-i440fx"),
     LegacyDeviceClass("pci-host-cloudhv"),
 #endif
@@ -990,9 +961,6 @@ static const LegacyDeviceClass sLegacyClasses[] = {
     LegacyDeviceClass("virtio-9p"),
     LegacyDeviceClass("virtio-input"),
     LegacyDeviceClass("virtio-gpu"),
-    LegacyDeviceClass("ps2-keyboard"),
-    LegacyDeviceClass("ps2-mouse"),
-    LegacyDeviceClass("ps2"),
     LegacyDeviceClass("ide"),
 };
 

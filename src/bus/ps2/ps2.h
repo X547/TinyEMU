@@ -180,8 +180,3 @@ public:
 
     bool Realize() override;
 };
-
-
-/* The "ps2-keyboard" and "ps2-mouse" configuration nodes. */
-Device *ps2_keyboard_node_create(int port);
-Device *ps2_mouse_node_create(int port);

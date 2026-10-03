@@ -27,8 +27,6 @@
 #include "iomem.h"
 #include "ps2.h"
 
-struct DeviceContext;
-
 /* Where a PC's controller answers: the data port, the command and status port
    four above it, and the two lines the two devices interrupt on. */
 #define I8042_IO_BASE 0x60
@@ -132,10 +130,3 @@ public:
     DeviceIOAdapter<I8042Controller, &I8042Controller::StatusRead,
                     &I8042Controller::CommandWrite> fCmdIo {*this};
 };
-
-
-/* The "i8042" configuration node: the controller on the addresses a PC has
-   always had it on, and a PS/2 bus carrying the devices declared on its
-   ports. 'vmmouse' adds the backdoor port the pointer's absolute protocol is
-   read through. */
-Device *i8042_node_create(DeviceContext *ctx, bool vmmouse);

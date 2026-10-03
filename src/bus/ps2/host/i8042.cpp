@@ -577,9 +577,43 @@ public:
 };
 
 
-//#pragma mark - factory
+//#pragma mark - classes
 
-Device *i8042_node_create(DeviceContext *ctx, bool vmmouse)
-{
-    return new I8042Device(ctx, vmmouse);
-}
+/* The controller on the addresses a PC has always had it on, and a PS/2 bus
+   carrying the devices declared on its ports. "vmmouse" adds the backdoor
+   port the pointer's absolute protocol is read through. */
+class I8042Class final: public DeviceClass {
+public:
+    I8042Class(): DeviceClass("i8042") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int vmmouse;
+        if (!cfg.GetInt("vmmouse", &vmmouse, 1)) {
+            return nullptr;
+        }
+        return new I8042Device(ctx, vmmouse != 0);
+    }
+};
+
+static const I8042Class sI8042Class;
+
+
+/* What the controller and its devices were declared as before there was a
+   PS/2 bus. */
+class RetiredPS2Class final: public DeviceClass {
+public:
+    RetiredPS2Class(): DeviceClass("ps2") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        (void)cfg;
+        (void)ctx;
+        vm_error("'ps2' is now an 'i8042' controller carrying a "
+                 "'ps2-keyboard' and a 'ps2-mouse' on the PS/2 bus it "
+                 "provides\n");
+        return nullptr;
+    }
+};
+
+static const RetiredPS2Class sRetiredPS2Class;

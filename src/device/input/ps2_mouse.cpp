@@ -25,6 +25,7 @@
 #include <stdio.h>
 
 #include "bits.h"
+#include "device_class.h"
 #include "ps2.h"
 
 /* debug PS/2 mouse */
@@ -310,8 +311,20 @@ void PS2MouseDevice::Write(uint8_t val)
 }
 
 
-Device *ps2_mouse_node_create(int port)
-{
-    return new PS2DeviceNode("ps2-mouse", std::make_unique<PS2MouseDevice>(),
-                             port);
-}
+class PS2MouseClass final: public DeviceClass {
+public:
+    PS2MouseClass(): DeviceClass("ps2-mouse") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int port;
+        (void)ctx;
+        if (!cfg.GetInt("port", &port, -1)) {
+            return nullptr;
+        }
+        return new PS2DeviceNode("ps2-mouse",
+                                 std::make_unique<PS2MouseDevice>(), port);
+    }
+};
+
+static const PS2MouseClass sPS2MouseClass;
