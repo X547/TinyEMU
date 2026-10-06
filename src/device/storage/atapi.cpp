@@ -50,8 +50,10 @@
 #define ATAPI_FEATURE_DMA 0x01
 #define ATAPI_FEATURE_OVL 0x02
 
-/* Nothing here is timed, so the fastest DMA mode is the one reported. */
-#define ATAPI_DEFAULT_DMA (ATA_XFER_UDMA | 5)
+/* Nothing here is timed, so the mode only has to be one every driver knows:
+   multiword DMA 2 is what a PIIX3 does, and some drivers predate Ultra DMA
+   modes past 4 and fall back to PIO on finding one selected. */
+#define ATAPI_DEFAULT_DMA (ATA_XFER_MWDMA | 2)
 
 #define ATAPI_FIRMWARE "1.0"
 #define ATAPI_SERIAL   "TEMU00000000000000001"

@@ -56,8 +56,10 @@
 
 /* The mode IDENTIFY reports as selected until a guest picks another. A
    driver that finds none selected takes the drive for one that will not
-   answer DMA commands and stays on PIO. */
-#define ATA_DISK_DEFAULT_DMA (ATA_XFER_UDMA | 5)
+   answer DMA commands and stays on PIO, and so does one that predates the
+   Ultra DMA mode selected; multiword DMA 2 is what a PIIX3 does and every
+   driver knows it. */
+#define ATA_DISK_DEFAULT_DMA (ATA_XFER_MWDMA | 2)
 
 
 class ATADiskDevice final: public ATADevice {
