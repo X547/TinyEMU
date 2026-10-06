@@ -295,8 +295,12 @@ Device types:
   ata-disk               ATA disk; "file", and "read_only"
   atapi                  ATAPI packet device: a nested SCSI bus carrying one
                          device, whose commands it passes over the ATA bus
+  buslogic               BusLogic BT-958 PCI SCSI host adapter, and a nested
+                         SCSI bus with targets 0 to 15 (7 is the adapter's
+                         own) and units 0 to 7. It has no BIOS, so the guest
+                         cannot boot from it
   virtio-block           "file", and "read_only"
-  virtio-9p              "file", "tag"
+  virtio-9p             "file", "tag"
   virtio-net             "driver" ("user" or "tap"), "ifname" for tap, and
                          "forward" (see below) for user
   virtio-console         uses the emulator console
@@ -419,7 +423,7 @@ IDE controller nests the same way:
 
     pci-ide -> ATA bus -> atapi -> SCSI bus -> scsi-cd
 
-The same "scsi-cd" works on any SCSI bus, under "virtio-scsi" or
+The same "scsi-cd" works on any SCSI bus, under "virtio-scsi", "buslogic" or
 "usb-storage" as well.
 
 Input devices nest the same way:
