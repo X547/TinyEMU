@@ -27,7 +27,7 @@
 
 /* The SuperSpeed ports come first, as they do on real controllers and in the
    Supported Protocol capabilities this publishes. Nothing is ever plugged into
-   them -- the device models here are all high speed -- but a controller with
+   them -- the device models here are all full or high speed -- but a controller with
    no SuperSpeed root hub at all is a shape some drivers handle poorly, and the
    empty ports cost nothing to model. */
 #define XHCI_DEFAULT_USB3_PORTS 2

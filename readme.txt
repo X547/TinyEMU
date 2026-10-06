@@ -302,6 +302,9 @@ Device types:
                          above, and a nested SCSI bus
   usb-hid                USB HID class device, the HID bus over USB; "port" as
                          above, and a nested HID bus
+  usb-audio              USB Audio Class 1.0 device; "port" as above, and a
+                         nested bus carrying its outputs
+  usb-audio-output       playback path of a "usb-audio" (see below)
   hid-keyboard           HID keyboard; "index" (which function of the
                          transport to be, default the first free one)
   hid-tablet             HID absolute pointing device; "index" as above
@@ -389,9 +392,9 @@ the PCI bus down to the image file is spelled out in the file:
 A hub may be inserted between the controller and a device, which puts that
 device one tier further down; the controller reaches it by the route string
 the guest programs, exactly as real hardware does. The controller advertises
-both a USB 2.0 and a USB 3.0 port set. The device models are high speed, so
-they occupy the USB 2.0 ports; the SuperSpeed ports exist because a controller
-without them is a shape some guest drivers handle poorly.
+both a USB 2.0 and a USB 3.0 port set. The device models are full or high
+speed, so they occupy the USB 2.0 ports; the SuperSpeed ports exist because a
+controller without them is a shape some guest drivers handle poorly.
 
 A "usb-storage" with no SCSI device below it is an error rather than an empty
 drive, and the bus type named in each nested "bus" object is checked against
@@ -550,6 +553,28 @@ A stream moves at the pace of the host end's own clock rather than the
 emulator's: the host device asks for frames and the controller fetches them
 from the guest's buffers as it does, so the two never drift apart and nothing
 is resampled.
+
+USB audio nests like the other USB devices, with its outputs on a bus of its
+own:
+
+    PCI bus -> xhci -> USB bus -> usb-audio -> USB audio bus
+            -> usb-audio-output
+
+A "usb-audio" is a full speed USB Audio Class 1.0 device carrying up to four
+outputs, each a streaming interface the guest sees as a playback device of
+its own. An output takes "host" as "hda-output" does, and:
+
+  kind         "speaker" (default), "headphone" or "line-out", the output
+               terminal the guest is told about
+  channels     1 to 8 (default 2), 16 bit samples
+  rates        the sample rates offered, e.g. [44100, 48000], from 8000 to
+               96000; by default only the rate the host end runs at
+
+The output has a master mute and volume, and works as real asynchronous
+hardware does. The controller delivers the guest's packets in the USB frames
+they are scheduled for, the host end's clock drains them from a FIFO, and a
+feedback endpoint reports how many frames per USB frame that clock takes, so
+the guest sends exactly what the host plays and nothing is resampled.
 
 The Banshee is the display to reach for when a guest is old enough to have a
 driver for it and new enough to want its drawing accelerated. Where the
