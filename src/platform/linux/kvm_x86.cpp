@@ -21,6 +21,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -124,6 +125,7 @@ private:
     int fCpuCount;
     int fMaxPhysAddressBits;
     int fPhysAddressBits = 36;
+    std::vector<HostX86CpuidLeaf> fCpuid;
     int fKvmFd;
     int fVmFd = -1;
     std::vector<std::unique_ptr<KvmX86Vcpu>> fVcpus;
@@ -136,7 +138,8 @@ public:
         fTarget(target), fLock(lock), fLocalApic(options.local_apic),
         fIrqchip(options.hypervisor_interrupt_controllers),
         fCpuCount(options.cpu_count),
-        fMaxPhysAddressBits(options.max_phys_address_bits), fKvmFd(kvm_fd) {}
+        fMaxPhysAddressBits(options.max_phys_address_bits),
+        fCpuid(options.cpuid), fKvmFd(kvm_fd) {}
     ~KvmX86Hypervisor() override;
 
     void Init();
@@ -414,6 +417,34 @@ void KvmX86Vcpu::SetCpuid(int index)
     struct kvm_cpuid_entry2 *ent;
 
     kvm_cpuid = kvm_supported_cpuid(fOwner.fKvmFd);
+    /* The processor shown in place of the host's: its leaves and KVM's
+       own, with no other. */
+    if (!fOwner.fCpuid.empty()) {
+        std::vector<struct kvm_cpuid_entry2> ents;
+        for (i = 0; i < kvm_cpuid->nent; i++) {
+            ent = &kvm_cpuid->entries[i];
+            if (ent->function >= 0x40000000 && ent->function < 0x50000000)
+                ents.push_back(*ent);
+        }
+        for (const HostX86CpuidLeaf &leaf: fOwner.fCpuid) {
+            struct kvm_cpuid_entry2 e {};
+            e.function = leaf.leaf;
+            for (i = 0; i < kvm_cpuid->nent; i++) {
+                if (kvm_cpuid->entries[i].function == leaf.leaf &&
+                    kvm_cpuid->entries[i].index == 0) {
+                    e = kvm_cpuid->entries[i];
+                    break;
+                }
+            }
+            uint32_t *regs[4] = {&e.eax, &e.ebx, &e.ecx, &e.edx};
+            for (int r = 0; r < 4; r++)
+                *regs[r] = (*regs[r] & leaf.host_mask[r]) | leaf.value[r];
+            ents.push_back(e);
+        }
+        assert(ents.size() <= kvm_cpuid->nent);
+        std::copy(ents.begin(), ents.end(), kvm_cpuid->entries);
+        kvm_cpuid->nent = ents.size();
+    }
     for(i = 0; i < kvm_cpuid->nent; i++) {
         ent = &kvm_cpuid->entries[i];
         /* remove the APIC (unless the machine has one) & ACPI to be in

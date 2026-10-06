@@ -46,6 +46,8 @@
 #define CPUID_TSC_DEADLINE bit_at(24)
 #define RFLAGS_IF bit_at(9)
 #define MSR_IA32_APIC_BASE 0x1b
+#define MSR_IA32_MISC_ENABLE 0x1a0
+#define EXCP_GP 13
 
 /* The longest a run lasts, in case the request to end it came just before
    it started. */
@@ -148,7 +150,8 @@ private:
     bool AcceptsPicInterrupt();
     bool InjectInterrupt();
     void SyncApic();
-    void InjectGeneralProtection();
+    void InjectGeneralProtection(uint32_t error_code = 0);
+    void ExitGeneralProtection(const WHV_RUN_VP_EXIT_CONTEXT &ctx);
     void ExitCpuid(const WHV_RUN_VP_EXIT_CONTEXT &ctx);
     void ExitMsr(const WHV_RUN_VP_EXIT_CONTEXT &ctx);
 
@@ -205,6 +208,7 @@ private:
     bool fApicEmulation;
     int fCpuCount;
     int fPhysAddressBits;
+    std::vector<HostX86CpuidLeaf> fCpuid;
     WHV_PARTITION_HANDLE fPartition = nullptr;
     std::vector<std::unique_ptr<WhpX86Vcpu>> fVcpus;
     /* where each slot is mapped; the platform knows ranges, not slots */
@@ -222,7 +226,8 @@ public:
                        options.hypervisor_interrupt_controllers),
         fCpuCount(options.cpu_count),
         fPhysAddressBits(std::min(host_phys_address_bits(),
-                                  options.max_phys_address_bits)) {}
+                                  options.max_phys_address_bits)),
+        fCpuid(options.cpuid) {}
     ~WhpX86Hypervisor() override;
 
     bool Init();
@@ -281,17 +286,32 @@ bool WhpX86Hypervisor::Init()
     }
 
     /* CPUID comes to us for the leaves that report the APIC and ACPI, which
-       the machine may not have, and for the physical address width. */
+       the machine may not have, for the physical address width, and for
+       those of the processor shown in place of the host's. */
     WHV_EXTENDED_VM_EXITS exits {};
     exits.X64CpuidExit = 1;
     /* the machine's local APIC hears of a write to IA32_APIC_BASE */
     if (fLocalApic && !fApicEmulation)
         exits.X64MsrExit = 1;
+    /* A guest shown another processor may use its MSRs, which the host's
+       may not have; the hypervisor raises #GP for those, unhandled MSR
+       exit or not. */
+    if (!fCpuid.empty())
+        exits.ExceptionExit = 1;
     hr = WHvSetPartitionProperty(fPartition,
                                  WHvPartitionPropertyCodeExtendedVmExits,
                                  &exits, sizeof(exits));
     if (FAILED(hr))
         whp_fail("enabling CPUID exits", hr);
+    if (exits.ExceptionExit) {
+        UINT64 exception_exits = bit_at(EXCP_GP);
+        hr = WHvSetPartitionProperty(fPartition,
+                                     WHvPartitionPropertyCodeExceptionExitBitmap,
+                                     &exception_exits,
+                                     sizeof(exception_exits));
+        if (FAILED(hr))
+            whp_fail("setting the exception exit bitmap", hr);
+    }
     if (exits.X64MsrExit) {
         WHV_X64_MSR_EXIT_BITMAP msr_exits {};
         msr_exits.ApicBaseMsrWrite = 1;
@@ -301,10 +321,17 @@ bool WhpX86Hypervisor::Init()
         if (FAILED(hr))
             whp_fail("setting the MSR exit bitmap", hr);
     }
-    static const UINT32 cpuid_leaves[] = {1, 0x80000001, 0x80000008};
+    std::vector<UINT32> cpuid_leaves = {1, 0x80000001, 0x80000008};
+    for (const HostX86CpuidLeaf &ent: fCpuid) {
+        if (std::find(cpuid_leaves.begin(), cpuid_leaves.end(), ent.leaf) ==
+            cpuid_leaves.end()) {
+            cpuid_leaves.push_back(ent.leaf);
+        }
+    }
     hr = WHvSetPartitionProperty(fPartition,
                                  WHvPartitionPropertyCodeCpuidExitList,
-                                 cpuid_leaves, sizeof(cpuid_leaves));
+                                 cpuid_leaves.data(),
+                                 cpuid_leaves.size() * sizeof(UINT32));
     if (FAILED(hr))
         whp_fail("setting the CPUID exit list", hr);
 
@@ -726,6 +753,14 @@ void WhpX86Vcpu::ExitCpuid(const WHV_RUN_VP_EXIT_CONTEXT &ctx)
     values[2].Reg64 = c.DefaultResultRbx;
     values[3].Reg64 = c.DefaultResultRcx;
     values[4].Reg64 = c.DefaultResultRdx;
+    for (const HostX86CpuidLeaf &ent: fOwner.fCpuid) {
+        if (ent.leaf != c.Rax)
+            continue;
+        for (int i = 0; i < 4; i++) {
+            values[1 + i].Reg64 = (values[1 + i].Reg64 & ent.host_mask[i]) |
+                ent.value[i];
+        }
+    }
     /* remove the APIC (unless the machine has one) & ACPI to be in sync
        with the emulator */
     if (c.Rax == 1 || c.Rax == 0x80000001) {
@@ -778,7 +813,7 @@ void WhpX86Vcpu::SyncApic()
 }
 
 
-void WhpX86Vcpu::InjectGeneralProtection()
+void WhpX86Vcpu::InjectGeneralProtection(uint32_t error_code)
 {
     WHV_REGISTER_NAME name = WHvRegisterPendingInterruption;
     WHV_REGISTER_VALUE value {};
@@ -786,8 +821,43 @@ void WhpX86Vcpu::InjectGeneralProtection()
     value.PendingInterruption.InterruptionPending = 1;
     value.PendingInterruption.InterruptionType = WHvX64PendingException;
     value.PendingInterruption.DeliverErrorCode = 1;
-    value.PendingInterruption.InterruptionVector = 13;
+    value.PendingInterruption.InterruptionVector = EXCP_GP;
+    value.PendingInterruption.ErrorCode = error_code;
     SetVpRegisters(&name, 1, &value);
+}
+
+
+/* Only with another processor shown in place of the host's: RDMSR or WRMSR
+   at CPL 0 of an MSR the host's lacks is treated as the partition treats
+   one it does not know (reads 0, writes ignored); IA32_MISC_ENABLE reads as
+   an Intel processor's. Any other #GP goes to the guest. */
+void WhpX86Vcpu::ExitGeneralProtection(const WHV_RUN_VP_EXIT_CONTEXT &ctx)
+{
+    const WHV_VP_EXCEPTION_CONTEXT &e = ctx.VpException;
+    const uint8_t *insn = e.InstructionBytes;
+
+    if (e.ExceptionType != EXCP_GP || ctx.VpContext.ExecutionState.Cpl != 0 ||
+        e.ErrorCode != 0 || e.InstructionByteCount < 2 || insn[0] != 0x0f ||
+        (insn[1] != 0x30 && insn[1] != 0x32)) {
+        InjectGeneralProtection(e.ErrorCode);
+        return;
+    }
+    static const WHV_REGISTER_NAME names[] = {
+        WHvX64RegisterRip, WHvX64RegisterRax, WHvX64RegisterRdx,
+        WHvX64RegisterRcx,
+    };
+    WHV_REGISTER_VALUE values[4] {};
+    GetVpRegisters(names, 4, values);
+    values[0].Reg64 = ctx.VpContext.Rip + 2;
+    if (insn[1] == 0x32) {
+        uint64_t val = 0;
+        /* fast strings, and no BTS or PEBS */
+        if ((uint32_t)values[3].Reg64 == MSR_IA32_MISC_ENABLE)
+            val = bit_at(0) | bit_at(11) | bit_at(12);
+        values[1].Reg64 = (uint32_t)val;
+        values[2].Reg64 = val >> 32;
+    }
+    SetVpRegisters(names, 3, values);
 }
 
 
@@ -927,6 +997,9 @@ void WhpX86Vcpu::Run()
         fWindowRequested = false;
         break;
     case WHvRunVpExitReasonCanceled:
+        break;
+    case WHvRunVpExitReasonException:
+        ExitGeneralProtection(ctx);
         break;
     case WHvRunVpExitReasonUnrecoverableException: {
         DeviceLocker locker(lock);

@@ -326,6 +326,10 @@ static int virt_machine_parse_config(VirtMachineParams *p,
         p->hypervisor_intc = el.u.b;
     }
 
+    if (vm_get_str_opt(cfg, "hypervisor_cpuid", &str) < 0)
+        goto tag_fail;
+    p->hypervisor_cpuid = strdup_null(str);
+
     tag_name = "rtc_local_time";
     el = json_object_get(cfg, tag_name);
     if (!json_is_undefined(el)) {
@@ -581,6 +585,7 @@ void virt_machine_free_config(VirtMachineParams *p)
 
     free(p->machine_name);
     free(p->interrupt_controller);
+    free(p->hypervisor_cpuid);
     free(p->cmdline);
     for(i = 0; i < VM_FILE_COUNT; i++) {
         free(p->files[i].filename);

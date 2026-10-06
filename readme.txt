@@ -173,6 +173,20 @@ run, so IPIs cost more than with the hypervisor's local APIC. Without a
 hypervisor, and with NVMM, which has no interrupt controllers, the machine's
 are used whatever the setting.
 
+"hypervisor_cpuid" chooses the processor a hardware hypervisor shows the
+PC's guest in CPUID:
+
+  host         the host's (the default)
+  interpreter  the interpreter's: a GenuineIntel family 6 processor with
+               MMX, SSE and SSE2 and the highest leaf 1, keeping only the
+               features the host has too
+
+The second is for old systems that take a new processor, or one that is not
+Intel's, for something it is not: BeOS R5 turns SSE on only on Intel
+processors, and dies when it then uses SSE on an AMD host. Under WHP every
+#GP then exits to the emulator, which makes RDMSR and WRMSR of an Intel MSR
+an AMD host lacks read 0 and do nothing instead of faulting.
+
 The root bus of an FDT machine is declared as:
 
 bus: { type: "fdt", devices: [ ... ] }

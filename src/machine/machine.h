@@ -112,6 +112,9 @@ typedef struct {
     /* the hypervisor's interrupt controllers may be used, whichever kinds it
        has; false keeps them all in the machine */
     bool hypervisor_intc;
+    /* the processor a hypervisor shows the guest: "host" or "interpreter";
+       NULL when the configuration does not say */
+    char *hypervisor_cpuid;
     bool rtc_real_time;
     bool rtc_local_time;
     Platform *platform;

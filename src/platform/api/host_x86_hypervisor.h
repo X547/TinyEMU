@@ -25,6 +25,7 @@
 #include <stdint.h>
 
 #include <memory>
+#include <vector>
 
 class DeviceLock;
 
@@ -35,6 +36,16 @@ struct HostX86Regs {
     uint64_t gpr[8];
     uint64_t rip;
     uint64_t rflags;
+};
+
+
+/* A CPUID leaf reported in place of the host's: each register is the host's
+   value in the bits of 'host_mask' and 'value' in the others. The hypervisor
+   then adjusts it as it would the host's (APIC, address width). */
+struct HostX86CpuidLeaf {
+    uint32_t leaf;
+    uint32_t host_mask[4]; /* eax, ebx, ecx, edx */
+    uint32_t value[4];
 };
 
 
@@ -51,6 +62,10 @@ struct HostX86Options {
     /* the widest physical address the processors report in CPUID
        0x80000008, in bits */
     int max_phys_address_bits = 40;
+    /* The processor the guest is shown, empty for the host's. A leaf not
+       listed may still be the host's, for a guest that reads past the
+       highest ones leaves 0 and 0x80000000 report. */
+    std::vector<HostX86CpuidLeaf> cpuid;
 };
 
 

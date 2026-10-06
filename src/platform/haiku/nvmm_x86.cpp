@@ -158,6 +158,7 @@ private:
     bool fTprExits = false;
     int fCpuCount;
     int fPhysAddressBits;
+    std::vector<HostX86CpuidLeaf> fCpuid;
     struct nvmm_machine fMach {};
     bool fMachCreated = false;
     std::vector<std::unique_ptr<NvmmX86Vcpu>> fVcpus;
@@ -175,7 +176,8 @@ public:
         fTarget(target), fLock(lock), fLocalApic(options.local_apic),
         fCpuCount(options.cpu_count),
         fPhysAddressBits(std::min(host_phys_address_bits(),
-                                  options.max_phys_address_bits)) {}
+                                  options.max_phys_address_bits)),
+        fCpuid(options.cpuid) {}
     ~NvmmX86Hypervisor() override;
 
     bool Init();
@@ -271,25 +273,68 @@ NvmmX86Vcpu::NvmmX86Vcpu(NvmmX86Hypervisor &owner, struct nvmm_machine *mach,
         nvmm_fail("nvmm_vcpu_getstate");
     fResetState = *fVcpu.vcpu.state;
 
+    /* Each leaf is configured once, as the bits it deletes from the host's
+       and those it sets: first the processor shown in place of the host's,
+       then the changes below. */
+    std::vector<struct nvmm_vcpu_conf_cpuid> leaves;
+    auto leaf_conf = [&](uint32_t leaf) -> struct nvmm_vcpu_conf_cpuid & {
+        for (struct nvmm_vcpu_conf_cpuid &c: leaves) {
+            if (c.leaf == leaf)
+                return c;
+        }
+        struct nvmm_vcpu_conf_cpuid c;
+        memset(&c, 0, sizeof(c));
+        c.mask = 1;
+        c.leaf = leaf;
+        leaves.push_back(c);
+        return leaves.back();
+    };
+    for (const HostX86CpuidLeaf &ent: owner.fCpuid) {
+        struct nvmm_vcpu_conf_cpuid &c = leaf_conf(ent.leaf);
+        c.u.mask.del.eax = ~ent.host_mask[0];
+        c.u.mask.del.ebx = ~ent.host_mask[1];
+        c.u.mask.del.ecx = ~ent.host_mask[2];
+        c.u.mask.del.edx = ~ent.host_mask[3];
+        c.u.mask.set.eax = ent.value[0];
+        c.u.mask.set.ebx = ent.value[1];
+        c.u.mask.set.ecx = ent.value[2];
+        c.u.mask.set.edx = ent.value[3];
+    }
+
     /* remove the APIC, unless the machine has one, & ACPI to be in sync with
        the emulator */
-    static const uint32_t leaves[] = {1, 0x80000001};
-    for (uint32_t leaf: leaves) {
-        struct nvmm_vcpu_conf_cpuid cpuid;
-        memset(&cpuid, 0, sizeof(cpuid));
-        cpuid.mask = 1;
-        cpuid.leaf = leaf;
-        cpuid.u.mask.del.edx = CPUID_ACPI;
+    static const uint32_t apic_leaves[] = {1, 0x80000001};
+    for (uint32_t leaf: apic_leaves) {
+        struct nvmm_vcpu_conf_cpuid &c = leaf_conf(leaf);
+        uint32_t del = CPUID_ACPI;
         if (!owner.fLocalApic)
-            cpuid.u.mask.del.edx |= CPUID_APIC;
+            del |= CPUID_APIC;
+        c.u.mask.del.edx |= del;
+        c.u.mask.set.edx &= ~del;
         /* The kernel passes the topology leaves through from the host
            processor the vcpu happens to run on, APIC IDs included, so the
            guest is not told they exist. */
-        if (leaf == 0x80000001)
-            cpuid.u.mask.del.ecx = CPUID_TOPOEXT;
+        if (leaf == 0x80000001) {
+            c.u.mask.del.ecx |= CPUID_TOPOEXT;
+            c.u.mask.set.ecx &= ~CPUID_TOPOEXT;
+        }
+    }
+
+    /* the physical address width, with no separate guest width */
+    struct nvmm_vcpu_conf_cpuid &width = leaf_conf(0x80000008);
+    width.u.mask.del.eax |= 0x00ff00ff;
+    width.u.mask.set.eax = (width.u.mask.set.eax & ~0x00ff00ffu) |
+        owner.fPhysAddressBits;
+
+    /* the kernel refuses a bit both set and deleted */
+    for (struct nvmm_vcpu_conf_cpuid &c: leaves) {
+        c.u.mask.del.eax &= ~c.u.mask.set.eax;
+        c.u.mask.del.ebx &= ~c.u.mask.set.ebx;
+        c.u.mask.del.ecx &= ~c.u.mask.set.ecx;
+        c.u.mask.del.edx &= ~c.u.mask.set.edx;
         if (nvmm_vcpu_configure(fMach, &fVcpu.vcpu, NVMM_VCPU_CONF_CPUID,
-                                &cpuid) == -1) {
-            nvmm_fail("masking CPUID");
+                                &c) == -1) {
+            nvmm_fail("configuring CPUID");
         }
     }
 
@@ -303,19 +348,6 @@ NvmmX86Vcpu::NvmmX86Vcpu(NvmmX86Hypervisor &owner, struct nvmm_machine *mach,
                                 &tpr) == -1) {
             nvmm_fail("asking for CR8 exits");
         }
-    }
-
-    /* the physical address width, with no separate guest width; the kernel
-       refuses a bit both set and deleted */
-    struct nvmm_vcpu_conf_cpuid cpuid;
-    memset(&cpuid, 0, sizeof(cpuid));
-    cpuid.mask = 1;
-    cpuid.leaf = 0x80000008;
-    cpuid.u.mask.set.eax = owner.fPhysAddressBits;
-    cpuid.u.mask.del.eax = 0x00ff00ff & ~cpuid.u.mask.set.eax;
-    if (nvmm_vcpu_configure(fMach, &fVcpu.vcpu, NVMM_VCPU_CONF_CPUID,
-                            &cpuid) == -1) {
-        nvmm_fail("setting the physical address width");
     }
 }
 

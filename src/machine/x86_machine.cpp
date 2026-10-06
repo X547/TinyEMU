@@ -1822,6 +1822,15 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     }
     options.cpu_count = p->cpu_count;
     options.hypervisor_interrupt_controllers = p->hypervisor_intc;
+    if (p->hypervisor_cpuid != nullptr &&
+        strcmp(p->hypervisor_cpuid, "interpreter") == 0) {
+        options.cpuid = x86_cpu_hypervisor_cpuid();
+    } else if (p->hypervisor_cpuid != nullptr &&
+               strcmp(p->hypervisor_cpuid, "host") != 0) {
+        vm_error("pc: hypervisor_cpuid must be \"host\" or \"interpreter\", "
+                 "not \"%s\"\n", p->hypervisor_cpuid);
+        return nullptr;
+    }
 
     assert(p->ram_size >= (1 << 20));
 

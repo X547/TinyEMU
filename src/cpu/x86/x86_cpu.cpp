@@ -1056,10 +1056,10 @@ static uint32_t cpuid_chars(const char *str)
     return get_le32((const uint8_t *)str);
 }
 
-void cpu_cpuid(X86CPUState *s)
+/* The processor's identity, without its local APIC. */
+static void cpuid_model(uint32_t leaf, uint32_t regs[4])
 {
     static const char brand[48] = "TinyEMU x86-64 CPU";
-    uint32_t leaf = s->regs[REG_EAX];
     uint32_t a = 0, b = 0, c = 0, d = 0;
 
     switch (leaf) {
@@ -1079,11 +1079,6 @@ void cpu_cpuid(X86CPUState *s)
             bit_at(CPUID_CMOV) | bit_at(CPUID_PAT) | bit_at(CPUID_CLFSH) |
             bit_at(CPUID_MMX) | bit_at(CPUID_FXSR) | bit_at(CPUID_SSE) |
             bit_at(CPUID_SSE2);
-        if (s->local_apic != nullptr) {
-            DeviceLocker locker(*s->device_lock);
-            d |= bit_at(CPUID_APIC);
-            b = set_bits(b, 24, 8, s->local_apic->ApicId());
-        }
         break;
     case 0x80000000:
         a = 0x80000008;
@@ -1107,10 +1102,62 @@ void cpu_cpuid(X86CPUState *s)
         a = X86_CPU_PHYS_ADDRESS_BITS | LINEAR_ADDRESS_BITS << 8;
         break;
     }
-    s->regs[REG_EAX] = a;
-    s->regs[REG_EBX] = b;
-    s->regs[REG_ECX] = c;
-    s->regs[REG_EDX] = d;
+    regs[0] = a;
+    regs[1] = b;
+    regs[2] = c;
+    regs[3] = d;
+}
+
+void cpu_cpuid(X86CPUState *s)
+{
+    uint32_t leaf = s->regs[REG_EAX];
+    uint32_t regs[4];
+
+    cpuid_model(leaf, regs);
+    if (leaf == 1 && s->local_apic != nullptr) {
+        DeviceLocker locker(*s->device_lock);
+        regs[3] |= bit_at(CPUID_APIC);
+        regs[1] = set_bits(regs[1], 24, 8, s->local_apic->ApicId());
+    }
+    s->regs[REG_EAX] = regs[0];
+    s->regs[REG_EBX] = regs[1];
+    s->regs[REG_ECX] = regs[2];
+    s->regs[REG_EDX] = regs[3];
+}
+
+std::vector<HostX86CpuidLeaf> x86_cpu_hypervisor_cpuid()
+{
+    static const uint32_t leaves[] = {
+        0, 1, 0x80000000, 0x80000001, 0x80000002, 0x80000003, 0x80000004,
+        0x80000008,
+    };
+    std::vector<HostX86CpuidLeaf> table;
+
+    for (uint32_t leaf: leaves) {
+        HostX86CpuidLeaf ent {};
+        ent.leaf = leaf;
+        cpuid_model(leaf, ent.value);
+        switch (leaf) {
+        case 1:
+            /* the APIC and its ID are the hypervisor's to report */
+            ent.host_mask[1] = field_mask<uint32_t>(24, 8);
+            ent.value[3] |= bit_at(CPUID_APIC);
+            [[fallthrough]];
+        case 0x80000001:
+            /* the features the host has too */
+            ent.host_mask[2] = ent.value[2];
+            ent.host_mask[3] = ent.value[3];
+            ent.value[2] = ent.value[3] = 0;
+            break;
+        case 0x80000008:
+            /* and the host's physical address width */
+            ent.host_mask[0] = 0xff;
+            ent.value[0] &= ~0xffu;
+            break;
+        }
+        table.push_back(ent);
+    }
+    return table;
 }
 
 uint64_t cpu_get_tsc(X86CPUState *s)
