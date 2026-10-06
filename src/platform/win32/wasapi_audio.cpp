@@ -327,8 +327,10 @@ void WasapiAudio::QueryCaps()
             SUCCEEDED(dev->Activate(kIidAudioClient, CLSCTX_ALL, nullptr,
                                     (void **)&client)) &&
             SUCCEEDED(client->GetMixFormat(&mix))) {
+            /* Other rates would be converted on the way to the endpoint. */
             fCaps.rate = mix->nSamplesPerSec;
             fCaps.channels = mix->nChannels;
+            fCaps.any_rate = false;
         } else {
             fprintf(stderr, "audio: no output device yet\n");
         }

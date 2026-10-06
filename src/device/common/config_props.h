@@ -44,12 +44,13 @@ bool config_get_quirks(const DeviceConfig &cfg,
                        uint32_t (*from_name)(const char *name),
                        uint32_t *out);
 
-/* The device's "host" object: where its sound goes to or comes from. Without
-   one it is the host's own audio system. Reports and returns nullptr on
-   failure. */
+/* The device's "host" object, or the one 'key' names: where its sound goes to
+   or comes from. Without one it is the host's own audio system. Reports and
+   returns nullptr on failure. */
 std::unique_ptr<HostAudio> config_open_audio(const DeviceConfig &cfg,
                                              DeviceContext *ctx,
-                                             AudioDirectionEnum direction);
+                                             AudioDirectionEnum direction,
+                                             const char *key = "host");
 
 /* The network back end the device's "driver" names, with the ports its
    "forward" entries open. Reports and returns nullptr on failure. */

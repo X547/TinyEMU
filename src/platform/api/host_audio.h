@@ -69,7 +69,8 @@ struct AudioSettings {
 struct AudioCaps {
     uint32_t rate = 48000;
     int channels = 2;
-    /* The rate is merely a preference: any rate is taken as it is. */
+    /* The rate is merely a preference: any rate is taken as it is, without
+       conversion. Only for an end with no clock of its own. */
     bool any_rate = false;
 };
 

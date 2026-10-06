@@ -24,6 +24,7 @@
 #include <math.h>
 #include <string.h>
 
+#include "audio_gain.h"
 #include "config_props.h"
 #include "hda.h"
 #include "machine.h"
@@ -131,9 +132,6 @@
 
 /* A converter's format after a reset: 48 kHz, 16 bit, stereo. */
 #define FORMAT_DEFAULT         0x0011
-
-/* How long a change of gain takes, so that it is not heard as a click. */
-#define GAIN_RAMP_MS           5
 
 
 class HDACodecDevice;
@@ -794,8 +792,7 @@ private:
     bool fRunning = false;
     AudioFormat fFormat; /* what the host stream runs at */
     uint64_t fMoved = 0;
-    /* the gain applied last, per channel of a stereo pair */
-    float fGain[2] = {0.0f, 0.0f};
+    GainRamp fGain;
     std::vector<uint8_t> fOut;
 
     float TargetGain(int ch) const;
@@ -928,19 +925,13 @@ void HDAOutputPort::Play(const uint8_t *data, size_t frames,
     int in_bytes = fmt.ContainerBytes();
     int out_bytes = fFormat.ContainerBytes();
     int first = fConverter->Channel();
-    size_t ramp = fFormat.rate * GAIN_RAMP_MS / 1000 + 1;
-    float target[2] = {TargetGain(0), TargetGain(1)};
 
+    fGain.Begin(TargetGain(0), TargetGain(1), fFormat.rate);
     fOut.assign(frames * fFormat.FrameBytes(), 0);
     for (size_t i = 0; i < frames; i++) {
         const uint8_t *src = data + i * fmt.FrameBytes();
         uint8_t *dst = &fOut[i * fFormat.FrameBytes()];
-        float gain[2];
-        for (int g = 0; g < 2; g++) {
-            gain[g] = i < ramp ? fGain[g] + (target[g] - fGain[g]) *
-                                                (float)(i + 1) / (float)ramp
-                               : target[g];
-        }
+        float gain[2] = {fGain.At(0, i), fGain.At(1, i)};
         for (int c = 0; c < fFormat.channels; c++) {
             if (first + c >= fmt.channels) {
                 break;
@@ -952,11 +943,7 @@ void HDAOutputPort::Play(const uint8_t *data, size_t frames,
             sample_put(dst + c * out_bytes, out_bytes, s);
         }
     }
-    for (int g = 0; g < 2; g++) {
-        fGain[g] = frames >= ramp ? target[g]
-                   : fGain[g] + (target[g] - fGain[g]) * (float)frames /
-                                    (float)ramp;
-    }
+    fGain.End(frames);
     fAudio->Write(fOut.data(), frames);
     fMoved += frames;
 }

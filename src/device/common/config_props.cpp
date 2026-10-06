@@ -89,7 +89,8 @@ bool config_get_quirks(const DeviceConfig &cfg,
 
 std::unique_ptr<HostAudio> config_open_audio(const DeviceConfig &cfg,
                                              DeviceContext *ctx,
-                                             AudioDirectionEnum direction)
+                                             AudioDirectionEnum direction,
+                                             const char *key)
 {
     const char *type = cfg.Type();
     AudioSettings settings;
@@ -97,10 +98,10 @@ std::unique_ptr<HostAudio> config_open_audio(const DeviceConfig &cfg,
     int loop = 0, latency = settings.latency_ms;
 
     settings.direction = direction;
-    JSONValue host = cfg.Get("host");
+    JSONValue host = cfg.Get(key);
     if (!json_is_undefined(host)) {
         if (host.type != JSON_OBJ) {
-            vm_error("%s: 'host' must be an object\n", type);
+            vm_error("%s: '%s' must be an object\n", type, key);
             return nullptr;
         }
         if (vm_get_str_opt(host, "driver", &driver) < 0 ||

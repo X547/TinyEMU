@@ -595,6 +595,7 @@ bool MediaAudio::Init()
         mixer_out.format.u.raw_audio.frame_rate > 0) {
         fCaps.rate = (uint32_t)mixer_out.format.u.raw_audio.frame_rate;
         fCaps.channels = mixer_out.format.u.raw_audio.channel_count;
+        fCaps.any_rate = false;
     }
     return true;
 }
