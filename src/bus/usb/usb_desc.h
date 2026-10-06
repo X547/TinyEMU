@@ -37,6 +37,10 @@
 #define USB_ENDPOINT_ATTR_ISOCH     0x01
 #define USB_ENDPOINT_ATTR_BULK      0x02
 #define USB_ENDPOINT_ATTR_INTERRUPT 0x03
+/* How an isochronous endpoint keeps its data rate in step with the bus. */
+#define USB_ENDPOINT_SYNC_ASYNC     0x04
+#define USB_ENDPOINT_SYNC_ADAPTIVE  0x08
+#define USB_ENDPOINT_SYNC_SYNC      0x0c
 
 
 /* The fields of a device descriptor, in the order they are written. The
@@ -115,6 +119,12 @@ public:
     void BeginInterface(const USBInterfaceDescInfo &info);
     void Endpoint(uint8_t address, uint8_t attributes, uint16_t max_packet,
                   uint8_t interval);
+    /* The nine byte form USB Audio 1.0 uses: how often a feedback endpoint
+       reports, as a power of two in frames, and which endpoint carries the
+       feedback for this one. */
+    void AudioEndpoint(uint8_t address, uint8_t attributes,
+                       uint16_t max_packet, uint8_t interval, uint8_t refresh,
+                       uint8_t synch_address);
 
     /* Where the descriptor last opened begins, so that a device answering a
        request for it can find it again in the finished blob. */

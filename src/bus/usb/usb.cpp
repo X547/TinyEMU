@@ -60,10 +60,22 @@ void USBDevice::SetStringDescriptor(int index, const char *str)
 }
 
 
+void USBDevice::ResetAltSettings()
+{
+    for (int i = 0; i < USB_MAX_INTERFACES; i++) {
+        if (fAltSettings[i] != 0) {
+            SetInterface(i, 0);
+            fAltSettings[i] = 0;
+        }
+    }
+}
+
+
 void USBDevice::Reset()
 {
     fAddress = 0;
     fConfigValue = 0;
+    ResetAltSettings();
 }
 
 
@@ -176,6 +188,9 @@ USBStatusEnum USBDevice::HandleStandardControl(URB *urb)
             return usb_control_reply(urb, buf, 1);
 
         case USB_REQ_SET_CONFIGURATION:
+            /* Even setting the same configuration again puts every
+               interface back on its default setting. */
+            ResetAltSettings();
             fConfigValue = get_bits(setup.value, 0, 8);
             urb->actual_length = 0;
             return USB_STATUS_OK;
@@ -189,22 +204,32 @@ USBStatusEnum USBDevice::HandleStandardControl(URB *urb)
         }
         break;
 
-    case USB_TYPE_STANDARD | USB_RECIP_INTERFACE:
+    case USB_TYPE_STANDARD | USB_RECIP_INTERFACE: {
+        int iface = get_bits(setup.index, 0, 8);
         switch (setup.request) {
         case USB_REQ_GET_STATUS:
             put_le16(buf, 0);
             return usb_control_reply(urb, buf, 2);
 
         case USB_REQ_GET_INTERFACE:
-            /* One alternate setting per interface, so always zero. */
-            buf[0] = 0;
+            if (iface >= USB_MAX_INTERFACES) {
+                break;
+            }
+            buf[0] = fAltSettings[iface];
             return usb_control_reply(urb, buf, 1);
 
-        case USB_REQ_SET_INTERFACE:
+        case USB_REQ_SET_INTERFACE: {
+            int alt = get_bits(setup.value, 0, 8);
+            if (iface >= USB_MAX_INTERFACES || !SetInterface(iface, alt)) {
+                break;
+            }
+            fAltSettings[iface] = alt;
             urb->actual_length = 0;
             return USB_STATUS_OK;
         }
+        }
         break;
+    }
 
     case USB_TYPE_STANDARD | USB_RECIP_ENDPOINT:
         switch (setup.request) {

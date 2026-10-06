@@ -35,6 +35,9 @@
 /* Index 0 holds the language table, so 1..7 are available to a device. */
 #define USB_MAX_STRINGS 8
 
+/* Interfaces of one configuration whose alternate setting is tracked. */
+#define USB_MAX_INTERFACES 16
+
 /* Descriptor types. */
 #define USB_DT_DEVICE               0x01
 #define USB_DT_CONFIG               0x02
@@ -139,7 +142,11 @@ public:
    asynchronously keeps the pointer only until it calls the completion. The
    payload is a DataBuffer rather than a pointer so that a controller can
    describe the guest's scattered descriptor chain without copying it first,
-   and so that a device never has to know how the transfer reached it. */
+   and so that a device never has to know how the transfer reached it.
+
+   An isochronous URB is one service interval's worth of data, submitted in
+   the microframe the controller scheduled it for. The device must answer it
+   on the spot: the bus moves the packet then or not at all. */
 struct URB {
     USBDevice *dev = nullptr;
     uint8_t endpoint = 0; /* endpoint number, 0..15; direction is 'is_in' */
@@ -148,6 +155,11 @@ struct URB {
 
     USBSetup setup {};       /* control transfers only */
     DataBuffer *buffer = nullptr; /* null for a zero length transfer */
+
+    /* Isochronous only: the bus time the packet moved at, in 125 us
+       microframes from an arbitrary origin, as start of frame packets would
+       tell a device. */
+    uint64_t microframe = 0;
 
     uint32_t actual_length = 0;   /* filled in by the device */
     USBStatusEnum status = USB_STATUS_OK;
@@ -170,10 +182,13 @@ private:
 
     uint8_t fAddress = 0;
     uint8_t fConfigValue = 0;
+    uint8_t fAltSettings[USB_MAX_INTERFACES] {};
 
     const uint8_t *fDeviceDesc = nullptr;
     const uint8_t *fConfigDesc = nullptr;
     const char *fStrings[USB_MAX_STRINGS] {};
+
+    void ResetAltSettings();
 
 protected:
     /* Both blobs are the bytes that go on the wire, and both must outlive the
@@ -188,6 +203,12 @@ protected:
        does with a request it does not implement. */
     USBStatusEnum HandleStandardControl(URB *urb);
 
+    /* The host selects an alternate setting of an interface; false stalls the
+       request. Also called with 0 for every interface left on another
+       setting when the configuration changes or the device is reset. The
+       default knows only setting 0. */
+    virtual bool SetInterface(int iface, int alt) {(void)iface; return alt == 0;}
+
 public:
     USBDevice(const char *name, USBSpeedEnum speed);
     virtual ~USBDevice() = default;
@@ -196,6 +217,7 @@ public:
     USBSpeedEnum Speed() const {return fSpeed;}
     uint8_t Address() const {return fAddress;}
     uint8_t ConfigValue() const {return fConfigValue;}
+    uint8_t AltSetting(int iface) const {return fAltSettings[iface];}
 
     USBPort *Port() const {return fPort;}
     void SetPort(USBPort *port) {fPort = port;}
@@ -204,7 +226,8 @@ public:
        does. An override must call up. */
     virtual void Reset();
 
-    /* USB_STATUS_ASYNC means the answer arrives through urb->completion. */
+    /* USB_STATUS_ASYNC means the answer arrives through urb->completion. It
+       is not an answer an isochronous URB may get. */
     virtual USBStatusEnum Submit(URB *urb) = 0;
 
     /* Give back an URB the submitter no longer wants: the endpoint was

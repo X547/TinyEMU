@@ -26,10 +26,16 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <algorithm>
+#include <memory>
+#include <vector>
+
 #include "bits.h"
 #include "cutils.h"
 #include "device_class.h"
+#include "devices.h"
 #include "host_time.h"
+#include "host_timer.h"
 #include "machine.h"
 #include "pci.h"
 #include "usb.h"
@@ -199,6 +205,8 @@
 #define TRB_CR_DC       bit_at(9)
 #define TRB_TYPE_SHIFT  10
 #define TRB_TYPE(c)     get_bits(c, TRB_TYPE_SHIFT, 6)
+#define TRB_ISOCH_SIA   bit_at(31)
+#define TRB_ISOCH_FRAME_ID(c) get_bits(c, 20, 11)
 
 #define TRB_LEN_MASK    0x1ffff
 
@@ -213,8 +221,11 @@
 #define CC_SLOT_NOT_ENABLED 11
 #define CC_EP_NOT_ENABLED 12
 #define CC_SHORT_PACKET 13
+#define CC_RING_UNDERRUN 14
+#define CC_RING_OVERRUN 15
 #define CC_PARAMETER_ERROR 17
 #define CC_CONTEXT_STATE_ERROR 19
+#define CC_MISSED_SERVICE 23
 #define CC_COMMAND_RING_STOPPED 24
 #define CC_STOPPED      26
 #define CC_STOPPED_LENGTH_INVALID 27
@@ -258,6 +269,11 @@
 #define XHCI_EVENT_FIFO_SIZE 256
 
 #define XHCI_DCI_COUNT 32
+
+/* How late an isochronous service opportunity may still be taken, in
+   microframes. The scheduler runs from a host timer that can be late by a
+   few milliseconds; a packet later than this was missed. */
+#define XHCI_ISOCH_LATE_UFRAMES (32 * 8)
 
 
 //#pragma mark - structures
@@ -349,6 +365,17 @@ struct XHCIEndpoint final: public URBCompletion {
     bool kicking = false;
     XHCITransfer xfer {};
 
+    /* Isochronous: the service interval in microframes, the TD fetched and
+       waiting for its microframe, and where a running schedule goes next. */
+    uint32_t interval = 1;
+    bool td_pending = false;
+    uint64_t td_uframe = 0;
+    bool scheduled = false;
+    uint64_t next_uframe = 0;
+
+    bool IsIsoch() const
+        {return type == EP_TYPE_ISOCH_IN || type == EP_TYPE_ISOCH_OUT;}
+
     void Complete(URB *urb) override;
 };
 
@@ -371,7 +398,7 @@ struct XHCIRootPort {
 //#pragma mark - XHCIDevice
 
 class XHCIDevice final: public Device, public PCIBarTarget, public DeviceIO,
-                        public USBPortTarget {
+                        public USBPortTarget, public TimerTarget {
 private:
     int fUsb2Ports;
     int fUsb3Ports;
@@ -421,6 +448,10 @@ private:
 
     uint64_t fStartUs = 0;
 
+    /* The bus clock that services the isochronous endpoints. */
+    std::unique_ptr<HostTimer> fTimer;
+    std::vector<XHCIEndpoint *> fIsochEps;
+
     /* register file */
     uint32_t CapRead(uint32_t offset);
     uint32_t ExtCapRead(uint32_t offset);
@@ -437,7 +468,8 @@ private:
     /* controller */
     void Reset();
     void SetRunning(bool running);
-    uint32_t MfIndex() const;
+    uint64_t Microframe() const;
+    uint32_t MfIndex() const {return get_bits(Microframe(), 0, 14);}
 
     /* interrupts */
     void IntrRaise();
@@ -489,11 +521,21 @@ private:
 
     /* transfers */
     int FetchTD(XHCIEndpoint *ep);
+    void PrepareURB(XHCIEndpoint *ep);
     void XferReport(XHCIEndpoint *ep);
     void HaltEndpoint(XHCIEndpoint *ep);
 
+    /* isochronous schedule */
+    uint64_t IsochTarget(XHCIEndpoint *ep, uint64_t now);
+    void IsochTransfer(XHCIEndpoint *ep);
+    void IsochRingEmpty(XHCIEndpoint *ep);
+    void ServiceIsoch(XHCIEndpoint *ep, uint64_t now);
+    void UnscheduleIsoch(XHCIEndpoint *ep);
+    void ArmIsochTimer();
+
 public:
-    XHCIDevice(const char *name, int usb2_ports, int usb3_ports);
+    XHCIDevice(const char *name, int usb2_ports, int usb3_ports,
+               std::unique_ptr<HostTimer> timer);
     ~XHCIDevice() override;
 
     /* DMA, page at a time, in the shape virtio_memcpy_from_ram uses. */
@@ -513,12 +555,17 @@ public:
 
     int FindFreePort(USBSpeedEnum speed) override;
     bool AttachDevice(USBDevice *dev, int port) override;
+
+    void TimerExpired() override;
 };
 
 
-XHCIDevice::XHCIDevice(const char *name, int usb2_ports, int usb3_ports):
-    Device(name), fUsb2Ports(usb2_ports), fUsb3Ports(usb3_ports)
+XHCIDevice::XHCIDevice(const char *name, int usb2_ports, int usb3_ports,
+                       std::unique_ptr<HostTimer> timer):
+    Device(name), fUsb2Ports(usb2_ports), fUsb3Ports(usb3_ports),
+    fTimer(std::move(timer))
 {
+    fTimer->target = this;
     fPortCount = fUsb2Ports + fUsb3Ports;
 
     /* The SuperSpeed set comes first, matching the Supported Protocol
@@ -951,6 +998,8 @@ XHCIEndpoint *XHCIDevice::EnableEndpoint(int slot_id, int dci)
     ep->slot_id = slot_id;
     ep->dci = dci;
     ep->busy = false;
+    ep->td_pending = false;
+    ep->scheduled = false;
     return ep;
 }
 
@@ -968,6 +1017,8 @@ void XHCIDevice::DisableEndpoint(int slot_id, int dci)
         }
         ep->busy = false;
     }
+    ep->td_pending = false;
+    ep->scheduled = false;
     ep->state = EP_DISABLED;
 }
 
@@ -1269,9 +1320,65 @@ static uint32_t xhci_map_status(USBStatusEnum status)
 }
 
 
+/* Describe the fetched TD to the device. */
+void XHCIDevice::PrepareURB(XHCIEndpoint *ep)
+{
+    XHCITransfer *x = &ep->xfer;
+    URB *urb = &x->urb;
+
+    *urb = URB();
+    x->cc = CC_SUCCESS;
+    x->actual_length = 0;
+    x->buffer.Init(this, x->trbs, x->trb_count);
+
+    urb->dev = fSlots[ep->slot_id].dev;
+    urb->buffer = &x->buffer;
+    urb->completion = ep;
+
+    if (ep->dci == 1) {
+        /* Control: the setup packet is the first TRB's parameter field, and
+           the direction the request itself declares is the one that
+           counts. */
+        uint8_t setup[8];
+        put_le64(setup, x->trbs[0].parameter);
+        urb->type = USB_ENDPOINT_CONTROL;
+        urb->endpoint = 0;
+        urb->setup.request_type = setup[0];
+        urb->setup.request = setup[1];
+        urb->setup.value = get_le16(setup + 2);
+        urb->setup.index = get_le16(setup + 4);
+        urb->setup.length = get_le16(setup + 6);
+        urb->is_in = (setup[0] & USB_DIR_IN) != 0;
+        return;
+    }
+
+    urb->endpoint = ep->dci >> 1;
+    urb->is_in = (ep->dci & 1) != 0;
+    switch (ep->type) {
+    case EP_TYPE_ISOCH_IN:
+    case EP_TYPE_ISOCH_OUT:
+        urb->type = USB_ENDPOINT_ISOCH;
+        break;
+    case EP_TYPE_INTR_IN:
+    case EP_TYPE_INTR_OUT:
+        urb->type = USB_ENDPOINT_INTERRUPT;
+        break;
+    default:
+        urb->type = USB_ENDPOINT_BULK;
+        break;
+    }
+}
+
+
 void XHCIDevice::KickEndpoint(XHCIEndpoint *ep)
 {
     if (ep == nullptr || ep->state != EP_RUNNING || ep->busy) {
+        return;
+    }
+    if (ep->IsIsoch()) {
+        /* Isochronous TDs wait for their microframe. */
+        ServiceIsoch(ep, Microframe());
+        ArmIsochTimer();
         return;
     }
     if (ep->kicking) {
@@ -1289,50 +1396,12 @@ void XHCIDevice::KickEndpoint(XHCIEndpoint *ep)
 
         XHCITransfer *x = &ep->xfer;
         URB *urb = &x->urb;
-        *urb = URB();
-        x->cc = CC_SUCCESS;
-        x->actual_length = 0;
-        x->buffer.Init(this, x->trbs, x->trb_count);
+        PrepareURB(ep);
 
-        urb->dev = dev;
-        urb->buffer = &x->buffer;
-        urb->completion = ep;
-
-        if (ep->dci == 1) {
-            /* Control: the setup packet is the first TRB's parameter field,
-               and the direction the request itself declares is the one that
-               counts. */
-            if (TRB_TYPE(x->trbs[0].control) != TR_SETUP) {
-                x->cc = CC_TRB_ERROR;
-                XferReport(ep);
-                continue;
-            }
-            uint8_t setup[8];
-            put_le64(setup, x->trbs[0].parameter);
-            urb->type = USB_ENDPOINT_CONTROL;
-            urb->endpoint = 0;
-            urb->setup.request_type = setup[0];
-            urb->setup.request = setup[1];
-            urb->setup.value = get_le16(setup + 2);
-            urb->setup.index = get_le16(setup + 4);
-            urb->setup.length = get_le16(setup + 6);
-            urb->is_in = (setup[0] & USB_DIR_IN) != 0;
-        } else {
-            urb->endpoint = ep->dci >> 1;
-            urb->is_in = (ep->dci & 1) != 0;
-            switch (ep->type) {
-            case EP_TYPE_ISOCH_IN:
-            case EP_TYPE_ISOCH_OUT:
-                urb->type = USB_ENDPOINT_ISOCH;
-                break;
-            case EP_TYPE_INTR_IN:
-            case EP_TYPE_INTR_OUT:
-                urb->type = USB_ENDPOINT_INTERRUPT;
-                break;
-            default:
-                urb->type = USB_ENDPOINT_BULK;
-                break;
-            }
+        if (ep->dci == 1 && TRB_TYPE(x->trbs[0].control) != TR_SETUP) {
+            x->cc = CC_TRB_ERROR;
+            XferReport(ep);
+            continue;
         }
 
         if (dev == nullptr) {
@@ -1383,6 +1452,180 @@ void XHCIDevice::EndpointComplete(XHCIEndpoint *ep, URB *urb)
 void XHCIEndpoint::Complete(URB *urb)
 {
     xhci->EndpointComplete(this, urb);
+}
+
+
+//#pragma mark - isochronous schedule
+
+/* The microframe a freshly fetched TD is due in. With Start Isoch ASAP it
+   follows the one before it, or opens a schedule at the next service
+   interval; otherwise its Frame ID names a 1 ms frame within a second or so
+   of now, either way. */
+uint64_t XHCIDevice::IsochTarget(XHCIEndpoint *ep, uint64_t now)
+{
+    uint32_t control = ep->xfer.trbs[0].control;
+
+    if (TRB_TYPE(control) != TR_ISOCH || (control & TRB_ISOCH_SIA) != 0) {
+        if (ep->scheduled) {
+            return ep->next_uframe;
+        }
+        return (now / ep->interval + 1) * ep->interval;
+    }
+
+    uint64_t frame = now >> 3;
+    int32_t diff = (int32_t)((TRB_ISOCH_FRAME_ID(control) - frame) & 0x7ff);
+    if (diff >= 0x400) {
+        diff -= 0x800;
+    }
+    return (uint64_t)((int64_t)frame + diff) << 3;
+}
+
+
+/* Move the pending TD now: its microframe has come. The device answers on
+   the spot, and a refusal is a transaction error rather than a halt, since an
+   isochronous endpoint has no handshake to stall with. */
+void XHCIDevice::IsochTransfer(XHCIEndpoint *ep)
+{
+    XHCITransfer *x = &ep->xfer;
+    URB *urb = &x->urb;
+    USBDevice *dev = fSlots[ep->slot_id].dev;
+
+    PrepareURB(ep);
+    urb->microframe = ep->td_uframe;
+
+    if (dev == nullptr) {
+        x->cc = CC_USB_TRANSACTION_ERROR;
+        XferReport(ep);
+        return;
+    }
+
+    USBStatusEnum status = dev->Submit(urb);
+    if (status == USB_STATUS_ASYNC) {
+        vm_error("xhci: %s answered an isochronous transfer later\n",
+                 dev->Name());
+        dev->Cancel(urb);
+        status = USB_STATUS_IOERROR;
+    }
+    x->cc = status == USB_STATUS_OK ? CC_SUCCESS
+            : status == USB_STATUS_IOERROR ? CC_DATA_BUFFER_ERROR
+                                           : CC_USB_TRANSACTION_ERROR;
+    x->actual_length = urb->actual_length;
+    XferReport(ep);
+}
+
+
+/* A service interval came and the ring had nothing for it. The schedule ends,
+   and the next TD opens a new one. */
+void XHCIDevice::IsochRingEmpty(XHCIEndpoint *ep)
+{
+    XHCIEvent ev;
+    uint32_t cc = (ep->dci & 1) != 0 ? CC_RING_OVERRUN : CC_RING_UNDERRUN;
+
+    ev.parameter = 0;
+    ev.status = cc << 24;
+    ev.control = (ER_TRANSFER << TRB_TYPE_SHIFT) |
+                 ((uint32_t)ep->dci << 16) | ((uint32_t)ep->slot_id << 24);
+    PostEvent(ev, false);
+    ep->scheduled = false;
+}
+
+
+/* Take every service opportunity of one endpoint up to 'now'. A late timer
+   catches up in order, each packet tagged with the microframe it was due in,
+   much as a controller's own buffering would hide the delay. */
+void XHCIDevice::ServiceIsoch(XHCIEndpoint *ep, uint64_t now)
+{
+    if (ep->state != EP_RUNNING || !ep->IsIsoch() ||
+        (fUsbCmd & USBCMD_RS) == 0) {
+        return;
+    }
+
+    for (;;) {
+        if (!ep->td_pending) {
+            int count = FetchTD(ep);
+            if (count < 0) {
+                return;
+            }
+            if (count == 0) {
+                if (ep->scheduled && ep->next_uframe <= now) {
+                    IsochRingEmpty(ep);
+                }
+                return;
+            }
+            ep->td_pending = true;
+            ep->td_uframe = IsochTarget(ep, now);
+        }
+        if (ep->td_uframe > now) {
+            return;
+        }
+
+        ep->td_pending = false;
+        if (now - ep->td_uframe > XHCI_ISOCH_LATE_UFRAMES) {
+            XHCITransfer *x = &ep->xfer;
+            x->cc = CC_MISSED_SERVICE;
+            x->actual_length = 0;
+            XferReport(ep);
+        } else {
+            IsochTransfer(ep);
+        }
+        ep->next_uframe = ep->td_uframe + ep->interval;
+        ep->scheduled = true;
+        if (ep->state != EP_RUNNING) {
+            return;
+        }
+    }
+}
+
+
+/* Put a TD that was fetched but never moved back on the ring, so that a
+   stopped endpoint resumes with it. */
+void XHCIDevice::UnscheduleIsoch(XHCIEndpoint *ep)
+{
+    if (ep->td_pending) {
+        ep->ring.deq = ep->xfer.snap_deq;
+        ep->ring.ccs = ep->xfer.snap_ccs;
+        ep->td_pending = false;
+    }
+    ep->scheduled = false;
+}
+
+
+/* Wake for the earliest microframe any isochronous endpoint has business
+   in: a pending TD, or the next interval of a running schedule, which either
+   takes a TD the guest queued since or finds the ring empty. */
+void XHCIDevice::ArmIsochTimer()
+{
+    uint64_t due = UINT64_MAX;
+
+    if ((fUsbCmd & USBCMD_RS) != 0) {
+        for (XHCIEndpoint *ep : fIsochEps) {
+            if (ep->state != EP_RUNNING || !ep->IsIsoch()) {
+                continue;
+            }
+            if (ep->td_pending && ep->td_uframe < due) {
+                due = ep->td_uframe;
+            } else if (!ep->td_pending && ep->scheduled &&
+                       ep->next_uframe < due) {
+                due = ep->next_uframe;
+            }
+        }
+    }
+    if (due == UINT64_MAX) {
+        fTimer->Disarm();
+        return;
+    }
+    fTimer->Arm(fStartUs + due * 125);
+}
+
+
+void XHCIDevice::TimerExpired()
+{
+    uint64_t now = Microframe();
+
+    for (XHCIEndpoint *ep : fIsochEps) {
+        ServiceIsoch(ep, now);
+    }
+    ArmIsochTimer();
 }
 
 
@@ -1567,9 +1810,18 @@ int XHCIDevice::CmdConfigureEndpoint(int slot_id, const XHCITRB &trb)
         xhci_copy_ctx(this, out_ep, in_ep);
 
         XHCIEndpoint *ep = EnableEndpoint(slot_id, dci);
+        uint32_t dw0 = CtxRead(in_ep, 0);
         uint32_t dw1 = CtxRead(in_ep, 1);
         ep->type = get_bits(dw1, 3, 3);
         ep->max_packet = dw1 >> 16;
+        /* 2^Interval microframes, whatever the device's speed. */
+        uint32_t interval = get_bits(dw0, 16, 8);
+        ep->interval = 1u << (interval > 15 ? 15 : interval);
+        if (ep->IsIsoch() &&
+            std::find(fIsochEps.begin(), fIsochEps.end(), ep) ==
+                fIsochEps.end()) {
+            fIsochEps.push_back(ep);
+        }
         uint32_t deq_lo = CtxRead(in_ep, 2);
         ep->ring.deq =
             concat_bits(CtxRead(in_ep, 3), deq_lo, 32) & ~0xfULL;
@@ -1647,6 +1899,7 @@ int XHCIDevice::CmdResetEndpoint(int slot_id, int dci)
     }
     /* A host can reach here with an endpoint that is not halted, and refusing
        the command there only confuses its recovery. */
+    UnscheduleIsoch(ep);
     ep->state = EP_STOPPED;
     SetEpState(slot_id, dci, EP_STOPPED);
     return CC_SUCCESS;
@@ -1674,6 +1927,9 @@ int XHCIDevice::CmdStopEndpoint(int slot_id, int dci)
         ep->ring.deq = ep->xfer.snap_deq;
         ep->ring.ccs = ep->xfer.snap_ccs;
     }
+    /* A TD still waiting for its microframe never started, so it has no
+       event to report. */
+    UnscheduleIsoch(ep);
 
     ep->state = EP_STOPPED;
     SetEpState(slot_id, dci, EP_STOPPED);
@@ -1817,10 +2073,11 @@ void XHCIDevice::RunCommandRing()
 
 //#pragma mark - controller
 
-uint32_t XHCIDevice::MfIndex() const
+/* The bus clock: microframes since the controller was created. MFINDEX is its
+   low bits. */
+uint64_t XHCIDevice::Microframe() const
 {
-    uint64_t us = host_monotonic_us();
-    return get_bits((us - fStartUs) / 125, 0, 14);
+    return (host_monotonic_us() - fStartUs) / 125;
 }
 
 
@@ -1859,6 +2116,7 @@ void XHCIDevice::Reset()
     fErSegOffset = 0;
     fErPcs = true;
     fEventFifoCount = 0;
+    fTimer->Disarm();
 
     /* A host controller reset resets the ports too, which leaves an attached
        device reported as newly connected. */
@@ -1893,6 +2151,10 @@ void XHCIDevice::SetRunning(bool running)
                 }
             }
         }
+        for (XHCIEndpoint *ep : fIsochEps) {
+            UnscheduleIsoch(ep);
+        }
+        fTimer->Disarm();
         fUsbSts |= USBSTS_HCH;
     }
 }
@@ -2412,12 +2674,12 @@ public:
     {
         int usb2_ports, usb3_ports;
 
-        (void)ctx;
         if (!cfg.GetInt("usb2_ports", &usb2_ports, XHCI_DEFAULT_USB2_PORTS) ||
             !cfg.GetInt("usb3_ports", &usb3_ports, XHCI_DEFAULT_USB3_PORTS)) {
             return nullptr;
         }
-        return new XHCIDevice(cfg.IdOr("xhci"), usb2_ports, usb3_ports);
+        return new XHCIDevice(cfg.IdOr("xhci"), usb2_ports, usb3_ports,
+                              ctx->platform->OpenTimer());
     }
 };
 

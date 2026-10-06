@@ -138,7 +138,9 @@ void USBDescBuilder::BeginInterface(const USBInterfaceDescInfo &info)
     Byte(info.iface_protocol);
     Byte(info.iface_str);
 
-    if (fConfigStart >= 0) {
+    /* An alternate setting is another face of an interface already
+       counted. */
+    if (fConfigStart >= 0 && info.alternate == 0) {
         fData[fConfigStart + USB_CONFIG_NUM_IFACE]++;
     }
 }
@@ -152,6 +154,25 @@ void USBDescBuilder::Endpoint(uint8_t address, uint8_t attributes,
     Byte(attributes);
     Word(max_packet);
     Byte(interval);
+    CloseDescriptor();
+
+    if (fIfaceStart >= 0) {
+        fData[fIfaceStart + USB_IFACE_NUM_EP]++;
+    }
+}
+
+
+void USBDescBuilder::AudioEndpoint(uint8_t address, uint8_t attributes,
+                                   uint16_t max_packet, uint8_t interval,
+                                   uint8_t refresh, uint8_t synch_address)
+{
+    BeginDescriptor(USB_DT_ENDPOINT);
+    Byte(address);
+    Byte(attributes);
+    Word(max_packet);
+    Byte(interval);
+    Byte(refresh);
+    Byte(synch_address);
     CloseDescriptor();
 
     if (fIfaceStart >= 0) {
