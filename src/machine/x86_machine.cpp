@@ -1573,11 +1573,14 @@ PhysMemoryRange *HypervisorPhysMemoryMap::RegisterRam(uint64_t addr,
         exit(1);
     }
     if (devram_flags & DEVRAM_FLAG_DIRTY_BITS) {
-        /* the hypervisor fills whole 64 bit words */
+        /* The hypervisor fills whole 64 bit words of the second bitmap with
+           what the guest wrote; the first holds what devices wrote. */
         int n_pages = size >> DEVRAM_PAGE_SIZE_LOG2;
         pr->dirty_bits_size = ((n_pages + 63) / 64) * 8;
-        pr->dirty_bits_tab[0] = std::make_unique<uint32_t[]>(
-            pr->dirty_bits_size / sizeof(uint32_t));
+        for (int i = 0; i < 2; i++) {
+            pr->dirty_bits_tab[i] = std::make_unique<uint32_t[]>(
+                pr->dirty_bits_size / sizeof(uint32_t));
+        }
         pr->dirty_bits = pr->dirty_bits_tab[0].get();
     }
 
@@ -1607,15 +1610,22 @@ void HypervisorPhysMemoryMap::SetRamAddr(PhysMemoryRange *pr, uint64_t addr,
     }
 }
 
+/* The pages the guest wrote, from the hypervisor's log, and those devices
+   wrote, such as a 2D engine drawing into video memory. */
 const uint32_t *HypervisorPhysMemoryMap::GetDirtyBits(PhysMemoryRange *pr)
 {
+    uint32_t *log = pr->dirty_bits_tab[1].get();
+
     if (pr->size == 0) {
-        /* not mapped: we assume no modification was made */
-        memset(pr->dirty_bits, 0, pr->dirty_bits_size);
+        /* not mapped: the guest wrote nothing */
+        memset(log, 0, pr->dirty_bits_size);
     } else {
-        fHypervisor.GetDirtyLog(IndexOfRange(pr), pr->dirty_bits);
+        fHypervisor.GetDirtyLog(IndexOfRange(pr), log);
     }
-    return pr->dirty_bits;
+    size_t n = pr->dirty_bits_size / sizeof(uint32_t);
+    for (size_t i = 0; i < n; i++)
+        log[i] |= __atomic_exchange_n(&pr->dirty_bits[i], 0, __ATOMIC_ACQ_REL);
+    return log;
 }
 
 void HypervisorIRQTarget::SetIRQ(int irq_num, int level)
