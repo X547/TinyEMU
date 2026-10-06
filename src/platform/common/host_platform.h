@@ -85,4 +85,5 @@ public:
     std::unique_ptr<HostFileSystem> OpenFileSystem(const char *path) override;
     std::unique_ptr<HostAudio> OpenAudio(
         const AudioSettings &settings) override;
+    std::unique_ptr<HostTimer> OpenTimer() override;
 };

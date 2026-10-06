@@ -145,3 +145,9 @@ std::unique_ptr<HostAudio> HostPlatform::OpenAudio(
     fprintf(stderr, "Unsupported audio driver '%s'\n", settings.driver);
     return nullptr;
 }
+
+
+std::unique_ptr<HostTimer> HostPlatform::OpenTimer()
+{
+    return loop_timer_open(fLoop);
+}

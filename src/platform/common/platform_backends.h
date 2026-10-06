@@ -30,6 +30,7 @@
 #include "host_fs.h"
 #include "host_input.h"
 #include "host_screen.h"
+#include "host_timer.h"
 
 class DeviceLock;
 class EventLoop;
@@ -99,3 +100,6 @@ std::unique_ptr<HostAudio> wav_audio_open(EventLoop &loop,
                                           const AudioSettings &settings);
 std::unique_ptr<HostAudio> null_audio_open(EventLoop &loop,
                                            const AudioSettings &settings);
+
+/* fires from the event loop */
+std::unique_ptr<HostTimer> loop_timer_open(EventLoop &loop);

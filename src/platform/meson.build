@@ -33,6 +33,7 @@ platform_sources = files(
   'common/console_escape.cpp',
   'common/event_loop.cpp',
   'common/host_platform.cpp',
+  'common/loop_timer.cpp',
   'common/paced_audio.cpp',
   'common/wav_audio.cpp',
 )

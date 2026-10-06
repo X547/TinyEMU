@@ -30,6 +30,7 @@
 #include "host_fs.h"
 #include "host_input.h"
 #include "host_screen.h"
+#include "host_timer.h"
 
 /* The host objects a machine's devices connect to. Each may be null when
    the host has none. */
@@ -58,4 +59,6 @@ public:
         const char *path) = 0;
     virtual std::unique_ptr<HostAudio> OpenAudio(
         const AudioSettings &settings) = 0;
+    /* Only while the machine is being built. */
+    virtual std::unique_ptr<HostTimer> OpenTimer() = 0;
 };
