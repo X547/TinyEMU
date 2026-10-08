@@ -84,13 +84,13 @@ public:
     /* HTIF */
     uint64_t htif_tohost = 0, htif_fromhost = 0;
     HostConsole *console = nullptr;
-    /* With more than one hart, each runs on a thread of its own, which
-       waits on its wakeup while the hart waits for an interrupt and keeps
-       its own Sstc timer; the processor thread keeps the other timers and
-       the screen. */
-    bool fHartThreads = false;
+    /* Each hart runs on a thread of its own, which waits on its wakeup while
+       the hart waits for an interrupt. The processor thread keeps the timers,
+       the harts' Sstc deadlines among them, and the screen. */
     std::vector<std::thread> fHartThreadList;
     std::unique_ptr<HostWakeup[]> fHartWakeups;
+    /* the Sstc deadline each hart was last woken for; processor thread */
+    uint64_t fSTimerKicked[RISCV_MAX_HARTS] {};
 
     ~RISCVMachine() override;
 
@@ -128,6 +128,7 @@ public:
 
     /* RtcTimeSource */
     uint64_t RtcTime() override;
+    void STimerChanged() override;
 
     /* VirtMachine */
     void ProcessorThreadStarted() override;
@@ -378,10 +379,7 @@ void RISCVMachine::SetClintLine(int hart, uint32_t mask, bool level)
 
 void RISCVMachine::KickHart(int hart)
 {
-    if (fHartThreads)
-        fHartWakeups[hart].Kick();
-    else
-        Kick();
+    fHartWakeups[hart].Kick();
 }
 
 /* The memory regions of the IMSIC interrupt files. The interrupt files
@@ -762,9 +760,14 @@ uint64_t RISCVMachine::RtcTime()
     return rtc_get_time(this);
 }
 
+/* The processor thread may sleep past the new deadline. */
+void RISCVMachine::STimerChanged()
+{
+    Kick();
+}
+
 void RISCVMachine::FlushTlbWriteRange(uint8_t *ram_addr, size_t ram_size)
 {
-    assert(fHartThreads || OnProcessorThread());
     for (int hart = 0; hart < hart_count; hart++)
         cpus[hart]->FlushTlbWriteRangeRam(ram_addr, ram_size);
 }
@@ -853,9 +856,7 @@ riscv_machine_init(const VirtMachineParams *p)
         s->cpus[hart]->SetSmp(p->cpu_count > 1);
         s->hart_count++;
     }
-    s->fHartThreads = s->hart_count > 1;
-    if (s->fHartThreads)
-        s->fHartWakeups = std::make_unique<HostWakeup[]>(s->hart_count);
+    s->fHartWakeups = std::make_unique<HostWakeup[]>(s->hart_count);
     /* RAM */
     ram_flags = 0;
     s->mem_map->RegisterRam(RAM_BASE_ADDR, p->ram_size, ram_flags);
@@ -976,12 +977,17 @@ int64_t RISCVMachine::RunTimers()
             else
                 next = timecmp[hart];
         }
-        /* the supervisor timer runs off the same counter when Sstc is
-           enabled; a hart on a thread of its own keeps it itself */
-        if (!fHartThreads) {
-            uint64_t stimecmp = cpus[hart]->UpdateSTimer();
-            if (stimecmp < next)
-                next = stimecmp;
+        /* The supervisor timer runs off the same counter when Sstc is
+           enabled. The hart raises it itself once woken, which takes the
+           deadline away. */
+        uint64_t stimer = cpus[hart]->STimerDeadline();
+        if (stimer > now) {
+            if (stimer < next)
+                next = stimer;
+        } else if (stimer != fSTimerKicked[hart]) {
+            fSTimerKicked[hart] = stimer;
+            cpus[hart]->RequestExit();
+            KickHart(hart);
         }
         if (next != UINT64_MAX) {
             uint64_t d = next > now ? next - now : 0;
@@ -994,21 +1000,20 @@ int64_t RISCVMachine::RunTimers()
     return delay;
 }
 
-/* The harts on threads of their own are never the processor thread's to
-   run. */
+/* The harts run on threads of their own. */
 bool RISCVMachine::Idle()
 {
-    return fHartThreads || cpus[0]->PowerDown();
+    return true;
 }
 
 void RISCVMachine::Interp(int max_exec_cycle)
 {
-    cpus[0]->Interp(max_exec_cycle);
+    (void)max_exec_cycle;
 }
 
 void RISCVMachine::ProcessorThreadStarted()
 {
-    for (int hart = 0; fHartThreads && hart < hart_count; hart++)
+    for (int hart = 0; hart < hart_count; hart++)
         fHartThreadList.emplace_back([this, hart]() {HartThread(hart);});
 }
 
@@ -1021,13 +1026,14 @@ void RISCVMachine::ProcessorThreadStopping()
 
 void RISCVMachine::InterruptExecution()
 {
-    for (int hart = 0; fHartThreads && hart < hart_count; hart++)
+    for (int hart = 0; hart < hart_count; hart++) {
+        cpus[hart]->RequestExit();
         fHartWakeups[hart].Kick();
+    }
 }
 
-/* Instructions a hart runs between looks at its Sstc timer and at a stop
-   request, and the longest it waits for an interrupt without looking. */
-#define HART_SLICE 100000
+/* The longest a hart waits for an interrupt without looking, should a kick
+   go astray. */
 #define HART_MAX_WAIT_US 10000
 
 void RISCVMachine::HartThread(int hart)
@@ -1038,21 +1044,12 @@ void RISCVMachine::HartThread(int hart)
     snprintf(name, sizeof(name), "cpu%d", hart);
     host_set_thread_name(name);
     while (!StopRequested()) {
-        uint64_t next = cpu->UpdateSTimer();
+        cpu->UpdateSTimer();
         if (!cpu->PowerDown()) {
-            cpu->Interp(HART_SLICE);
+            cpu->Interp();
             continue;
         }
-        /* the counter runs at RTC_FREQ, one tick per microsecond */
-        int64_t wait = HART_MAX_WAIT_US;
-        if (next != UINT64_MAX) {
-            uint64_t now = RtcTime();
-            if (next <= now)
-                continue;
-            if (next - now < (uint64_t)wait)
-                wait = next - now;
-        }
-        fHartWakeups[hart].Wait(wait);
+        fHartWakeups[hart].Wait(HART_MAX_WAIT_US);
     }
 }
 

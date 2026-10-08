@@ -45,12 +45,15 @@
 /* Supplies the machine's real time counter. The 'time' CSR and the timer
    device the firmware programs must read the same counter: firmware computes
    a deadline as "now + delta" from one and writes it to the other, so two
-   clocks with different origins put every deadline arbitrarily far away. */
+   clocks with different origins put every deadline arbitrarily far away.
+   The machine also keeps the time for the harts' Sstc deadlines. */
 class RtcTimeSource {
 public:
     virtual ~RtcTimeSource() = default;
 
     virtual uint64_t RtcTime() = 0;
+    /* A hart's Sstc deadline moved earlier. On the hart's thread. */
+    virtual void STimerChanged() = 0;
 };
 
 
@@ -70,14 +73,17 @@ enum RISCVInterruptArch {
    each and each build keeps its implementation class internal.
 
    The hart belongs to the thread that runs it. SetIrqLine(),
-   ImsicSetPending() and FlushTlbWriteRangeRam() may be called from any
-   thread; the hart takes the first two in before it next looks at its
-   interrupts. */
+   ImsicSetPending(), RequestExit(), STimerDeadline() and
+   FlushTlbWriteRangeRam() may be called from any thread; the hart takes
+   the interrupts in before it next looks at them. */
 class RISCVCPU {
 public:
     virtual ~RISCVCPU() = default;
 
-    virtual void Interp(int n_cycles) = 0;
+    /* Runs the hart until it waits for an interrupt or is asked to stop. */
+    virtual void Interp() = 0;
+    /* Makes Interp() return soon. */
+    virtual void RequestExit() = 0;
     virtual uint64_t Cycles() = 0;
     /* The level of the interrupt lines in 'mask' that a device drives: MSIP,
        MTIP, and MEIP and SEIP unless an IMSIC drives those. */
@@ -86,6 +92,8 @@ public:
        counter and returns when the next one falls due, or UINT64_MAX when the
        comparator is not driving it. On the thread that runs the hart. */
     virtual uint64_t UpdateSTimer() = 0;
+    /* What UpdateSTimer() last returned, or what the hart computed since. */
+    virtual uint64_t STimerDeadline() = 0;
     /* Whether the hart waits for an interrupt, after taking in the ones
        posted to it. */
     virtual bool PowerDown() = 0;

@@ -262,6 +262,10 @@ struct RISCVCPUState: public RISCVCPU {
 
     /* Posted from other threads and taken in by process_inbox(). */
     std::atomic<bool> inbox_pending;
+    /* Interp() is to return; posted with inbox_pending */
+    std::atomic<bool> exit_request;
+    /* when the Sstc comparator next fires, for the machine's timers */
+    std::atomic<uint64_t> stimer_deadline;
     std::atomic<uint32_t> irq_lines;
     std::atomic<uint64_t> msi_pending[2][IMSIC_WORDS];
     uint32_t irq_line_mask; /* the mip bits irq_lines drives */
@@ -279,10 +283,12 @@ struct RISCVCPUState: public RISCVCPU {
     TLBEntry tlb_write[TLB_SIZE];
     TLBEntry tlb_code[TLB_SIZE];
 
-    void Interp(int n_cycles) override;
+    void Interp() override;
+    void RequestExit() override;
     uint64_t Cycles() override;
     void SetIrqLine(uint32_t mask, bool level) override;
     uint64_t UpdateSTimer() override;
+    uint64_t STimerDeadline() override;
     bool PowerDown() override;
     uint32_t Misa() override;
     void FlushTlbWriteRangeRam(uint8_t *ram_ptr, size_t ram_size) override;

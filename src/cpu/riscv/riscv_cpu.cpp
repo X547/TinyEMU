@@ -128,17 +128,27 @@ static void set_mip(RISCVCPUState *s, uint32_t mask)
 
 /* Sstc drives STIP from the stimecmp comparator instead of leaving it to the
    execution environment. Returns when the next interrupt falls due, or
-   UINT64_MAX when the comparator is not in charge or has already fired. */
+   UINT64_MAX when the comparator is not in charge or has already fired.
+   The machine wakes the hart at that time. */
 static uint64_t update_stimer(RISCVCPUState *s)
 {
-    if (!(s->menvcfg & MENVCFG_STCE))
-        return UINT64_MAX;
-    if (riscv_cpu_rtc_time(s) >= s->stimecmp) {
-        set_mip(s, MIP_STIP);
-        return UINT64_MAX;
+    uint64_t deadline = UINT64_MAX;
+
+    if (s->menvcfg & MENVCFG_STCE) {
+        if (riscv_cpu_rtc_time(s) >= s->stimecmp) {
+            set_mip(s, MIP_STIP);
+        } else {
+            s->mip &= ~MIP_STIP;
+            deadline = s->stimecmp;
+        }
     }
-    s->mip &= ~MIP_STIP;
-    return s->stimecmp;
+    uint64_t old = s->stimer_deadline.load(std::memory_order_relaxed);
+    if (deadline != old) {
+        s->stimer_deadline.store(deadline);
+        if (deadline < old && s->rtc_time_source != nullptr)
+            s->rtc_time_source->STimerChanged();
+    }
+    return deadline;
 }
 
 static void dump_regs(RISCVCPUState *s)
@@ -429,7 +439,7 @@ static uint8_t *tlb_fill_write(RISCVCPUState *s, target_ulong addr,
     s->tlb_write[tlb_idx].vaddr = addr & ~PG_MASK;
     /* Another thread may have reset the bits and flushed the entries since:
        either its flush sees this entry, or this sees the reset. */
-    if (s->smp && pr->dirty_bits != nullptr) {
+    if (pr->dirty_bits != nullptr) {
         std::atomic_thread_fence(std::memory_order_seq_cst);
         if (!pr->IsDirtyBit(paddr - pr->addr))
             s->tlb_write[tlb_idx].vaddr = -1;
@@ -2017,17 +2027,23 @@ static inline uint32_t get_field1(uint32_t val, int src_pos,
 #include "riscv_cpu_template.h"
 #endif
 
-static void glue(riscv_cpu_interp, MAX_XLEN)(RISCVCPUState *s, int n_cycles)
-{
-    uint64_t timeout;
+/* Instructions one call of the interpreter counts at most; it starts over
+   from here for as long as it runs. */
+#define INTERP_COUNT_LIMIT INT32_MAX
 
-    timeout = s->insn_counter + n_cycles;
+static void glue(riscv_cpu_interp, MAX_XLEN)(RISCVCPUState *s)
+{
+    int n_cycles = INTERP_COUNT_LIMIT;
+
     for (;;) {
         /* the interpreter returns early when something is posted */
         process_inbox(s);
-        if (s->power_down_flag || (int)(timeout - s->insn_counter) <= 0)
+        if (s->power_down_flag)
             break;
-        n_cycles = timeout - s->insn_counter;
+        if (unlikely(s->exit_request.load(std::memory_order_relaxed))) {
+            s->exit_request.store(false);
+            break;
+        }
         switch(s->cur_xlen) {
         case 32:
             riscv_cpu_interp_x32(s, n_cycles);
@@ -2082,6 +2098,7 @@ static RISCVCPUState *glue(riscv_cpu_init, MAX_XLEN)(PhysMemoryMap *mem_map,
     /* the comparator starts beyond any reachable time so that enabling Sstc
        does not immediately post a timer interrupt */
     s->stimecmp = UINT64_MAX;
+    s->stimer_deadline.store(UINT64_MAX);
     s->irq_line_mask = MIP_MSIP | MIP_MTIP | MIP_MEIP | MIP_SEIP;
     s->misa |= MCPUID_SUPER | MCPUID_USER | MCPUID_I | MCPUID_M | MCPUID_A;
 #if FLEN >= 32
@@ -2107,9 +2124,17 @@ static uint32_t glue(riscv_cpu_get_misa, MAX_XLEN)(RISCVCPUState *s)
 
 /* The interpreter and its helpers stay plain functions over RISCVCPUState;
    these overrides are the only bridge to the abstract interface. */
-void RISCVCPUState::Interp(int n_cycles)
+void RISCVCPUState::Interp()
 {
-    glue(riscv_cpu_interp, MAX_XLEN)(this, n_cycles);
+    glue(riscv_cpu_interp, MAX_XLEN)(this);
+}
+
+/* The interpreter looks at inbox_pending between blocks, then at
+   exit_request once it has taken the inbox in. */
+void RISCVCPUState::RequestExit()
+{
+    exit_request.store(true);
+    inbox_pending.store(true);
 }
 
 uint64_t RISCVCPUState::Cycles()
@@ -2129,6 +2154,11 @@ void RISCVCPUState::SetIrqLine(uint32_t mask, bool level)
 uint64_t RISCVCPUState::UpdateSTimer()
 {
     return update_stimer(this);
+}
+
+uint64_t RISCVCPUState::STimerDeadline()
+{
+    return stimer_deadline.load();
 }
 
 bool RISCVCPUState::PowerDown()
