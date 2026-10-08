@@ -461,7 +461,10 @@ struct X86CPUState {
     uint32_t lock_eflags;
     int old_exception;   /* the exception being delivered, or -1 */
     int64_t cycles;
-    int64_t cycles_end;
+    /* The run ends when cycles reach it. An exit request from another
+       thread sets it to 0, and exit_request for a run yet to start. */
+    std::atomic<int64_t> cycles_end;
+    std::atomic<bool> exit_request;
     jmp_buf jmp_env;
 
     X86TLBEntry tlb[MMU_COUNT][TLB_SIZE];

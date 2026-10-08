@@ -2421,7 +2421,8 @@ next_byte:
 template <bool L>
 static void exec_loop(X86CPUState *s)
 {
-    while (s->cycles < s->cycles_end && !s->power_down) {
+    while (s->cycles < s->cycles_end.load(std::memory_order_relaxed) &&
+           !s->power_down) {
         if (unlikely(s->irq_inhibit)) {
             s->irq_inhibit = false;
         } else if (unlikely(s->irq_level.load(std::memory_order_relaxed)) &&
@@ -2452,7 +2453,8 @@ static void exec_loop(X86CPUState *s)
 
 void x86_exec(X86CPUState *s)
 {
-    while (s->cycles < s->cycles_end && !s->power_down) {
+    while (s->cycles < s->cycles_end.load(std::memory_order_relaxed) &&
+           !s->power_down) {
         if (s->code64) {
             exec_loop<true>(s);
         } else {

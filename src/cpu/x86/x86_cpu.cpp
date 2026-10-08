@@ -410,7 +410,7 @@ static uint8_t *tlb_fill(X86CPUState *s, uint64_t lin, PhysMemoryRange *pr,
         e->write = tag;
         /* Another thread may have reset the bits and flushed the entries
            since: either its flush sees this entry, or this sees the reset. */
-        if (s->smp && pr->dirty_bits != nullptr) {
+        if (pr->dirty_bits != nullptr) {
             std::atomic_thread_fence(std::memory_order_seq_cst);
             if (!pr->IsDirtyBit(offset)) {
                 e->write = TLB_INVALID;
@@ -1416,9 +1416,15 @@ void x86_cpu_end(X86CPUState *s)
     delete s;
 }
 
-void x86_cpu_interp(X86CPUState *s, int max_cycles)
+/* Runs until the cycle count reaches 'end', the processor halts, or another
+   thread asks it to stop. A request from before the run ends it at once:
+   either it sees cycles_end set here, or this sees exit_request. */
+static void cpu_run(X86CPUState *s, int64_t end)
 {
-    s->cycles_end = s->cycles + max_cycles;
+    s->cycles_end.store(end);
+    if (s->exit_request.exchange(false)) {
+        return;
+    }
     if (s->power_down) {
         if (s->shutdown || !s->irq_level.load() ||
             !get_bit(s->eflags, EFLAGS_IF)) {
@@ -1429,6 +1435,22 @@ void x86_cpu_interp(X86CPUState *s, int max_cycles)
     /* raise_exception() comes back here once the exception is delivered */
     setjmp(s->jmp_env);
     x86_exec(s);
+}
+
+void x86_cpu_run(X86CPUState *s)
+{
+    cpu_run(s, INT64_MAX);
+}
+
+void x86_cpu_interp(X86CPUState *s, int max_cycles)
+{
+    cpu_run(s, s->cycles + max_cycles);
+}
+
+void x86_cpu_request_exit(X86CPUState *s)
+{
+    s->exit_request.store(true);
+    s->cycles_end.store(0);
 }
 
 void x86_cpu_set_irq(X86CPUState *s, bool set)

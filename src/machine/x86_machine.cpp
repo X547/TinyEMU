@@ -1115,12 +1115,10 @@ public:
     /* Otherwise the machine's: INTR as the 8259s drive it, read without the
        lock. */
     std::atomic<bool> fCpuIrq {false};
-    /* With a hypervisor, or more than one processor in the interpreter, each
-       processor runs on a thread of its own, which waits on its wakeup while
-       the processor is halted; the processor thread keeps the timers and the
-       screen. */
+    /* Each processor runs on a thread of its own, which waits on its wakeup
+       while the processor is halted; the processor thread keeps the timers
+       and the screen. */
     int fCpuCount = 1;
-    bool fInterpThreads = false;
     std::vector<std::thread> fVcpuThreads;
     std::unique_ptr<HostWakeup[]> fVcpuWakeups;
     /* The INIT and STARTUP IPIs a processor with the machine's local APIC
@@ -1140,6 +1138,9 @@ public:
     bool TakeCpuStart(int index, Reset reset, Startup startup);
     /* Makes processor 'index' look at its interrupts again. Any thread. */
     void KickVcpu(int index);
+    /* Makes processor 'index' end its run as well, to take its IPIs or a
+       stop. Any thread. */
+    void ExitVcpu(int index);
     /* The processor of the calling thread: its own, or the first on the
        processor thread. */
     int CurrentCpu() const;
@@ -1383,8 +1384,10 @@ void PCMachine::SetCPUIRQ(int level)
             KickVcpu(0);
         }
     } else {
+        /* the interpreter looks at INTR before each instruction */
         x86_cpu_set_irq(cpu_state, level);
-        Kick();
+        if (level)
+            KickVcpu(0);
     }
 }
 
@@ -1403,35 +1406,27 @@ void PCMachine::SetApicInterrupt(uint32_t id, bool pending)
         return;
     }
     x86_cpu_set_irq(fCpus[id], pending);
-    if (!fInterpThreads)
-        Kick();
-    else if (pending)
+    if (pending)
         KickVcpu(id);
 }
 
-/* The processor takes these between runs, on its own thread. A lone
-   interpreter processor ignores them. */
+/* The processor takes these between runs, on its own thread. */
 void PCMachine::ApicInit(uint32_t id)
 {
-    if (hypervisor || fInterpThreads) {
-        fCpuStarts[id].init.store(true);
-        KickVcpu(id);
-    }
+    fCpuStarts[id].init.store(true);
+    ExitVcpu(id);
 }
 
 void PCMachine::ApicStartup(uint32_t id, int vector)
 {
-    if (hypervisor || fInterpThreads) {
-        fCpuStarts[id].startup.store(vector);
-        KickVcpu(id);
-    }
+    fCpuStarts[id].startup.store(vector);
+    ExitVcpu(id);
 }
 
 /* The processor thread may be asleep until a later deadline. */
 void PCMachine::ApicTimerChanged()
 {
-    if (hypervisor || fInterpThreads)
-        Kick();
+    Kick();
 }
 
 int PCMachine::HardIntno()
@@ -1524,7 +1519,7 @@ void PCMachine::PortWrite(uint32_t port, uint32_t val, int size_log2)
     port_map->IoWrite(port, val, size_log2);
     /* Programming the PIT or the RTC can bring a timer the processor thread
        sleeps on forward. */
-    if ((hypervisor || fInterpThreads) && (port - 0x40 < 4 || port - 0x70 < 2))
+    if (port - 0x40 < 4 || port - 0x70 < 2)
         Kick();
 }
 
@@ -1750,7 +1745,6 @@ uint64_t PCMachine::Tsc()
 
 void PCMachine::FlushTlbWriteRange(uint8_t *ram_addr, size_t ram_size)
 {
-    assert(fInterpThreads || OnProcessorThread());
     for (X86CPUState *cpu : fCpus)
         x86_cpu_flush_tlb_write_range_ram(cpu, ram_addr, ram_size);
 }
@@ -1861,9 +1855,7 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     bool machine_lapics = s->fLocalApic &&
         (!s->hypervisor || !s->hypervisor->HasLocalApics());
     s->fCpuCount = options.cpu_count;
-    s->fInterpThreads = !s->hypervisor && s->fCpuCount > 1;
-    if (s->hypervisor || s->fInterpThreads)
-        s->fVcpuWakeups = std::make_unique<HostWakeup[]>(s->fCpuCount);
+    s->fVcpuWakeups = std::make_unique<HostWakeup[]>(s->fCpuCount);
     if (s->hypervisor)
         s->fPhysAddressBits = s->hypervisor->PhysAddressBits();
     if (s->fHighRamSize != 0 && PC_HIGH_RAM_BASE + s->fHighRamSize >
@@ -1891,7 +1883,7 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
             x86_cpu_set_shutdown_target(cpu, s);
             x86_cpu_set_port_io(cpu, &s->fPortIo);
             x86_cpu_set_device_lock(cpu, p->device_lock);
-            x86_cpu_set_smp(cpu, s->fInterpThreads);
+            x86_cpu_set_smp(cpu, s->fCpuCount > 1);
             s->fCpus.push_back(cpu);
         }
         s->cpu_state = s->fCpus[0];
@@ -2701,7 +2693,7 @@ void PCMachine::ProcessorThreadStarted()
 {
     for (int i = 0; hypervisor && i < fCpuCount; i++)
         fVcpuThreads.emplace_back([this, i]() {VcpuThread(i);});
-    for (int i = 0; fInterpThreads && i < fCpuCount; i++)
+    for (int i = 0; !hypervisor && i < fCpuCount; i++)
         fVcpuThreads.emplace_back([this, i]() {InterpThread(i);});
 }
 
@@ -2763,10 +2755,6 @@ void PCMachine::VcpuThread(int index)
     }
 }
 
-/* Instructions an interpreter processor runs between looks at its INIT
-   and STARTUP IPIs and at a stop request. */
-#define INTERP_SLICE 500000
-
 void PCMachine::InterpThread(int index)
 {
     X86CPUState *cpu = fCpus[index];
@@ -2781,7 +2769,7 @@ void PCMachine::InterpThread(int index)
             fVcpuWakeups[index].Wait(VCPU_MAX_WAIT_US);
             continue;
         }
-        x86_cpu_interp(cpu, INTERP_SLICE);
+        x86_cpu_run(cpu);
     }
 }
 
@@ -2790,6 +2778,14 @@ void PCMachine::KickVcpu(int index)
     if (hypervisor)
         hypervisor->Vcpu(index).InterruptRun();
     fVcpuWakeups[index].Kick();
+}
+
+/* A hypervisor's run ends at a kick already. */
+void PCMachine::ExitVcpu(int index)
+{
+    if (!hypervisor)
+        x86_cpu_request_exit(fCpus[index]);
+    KickVcpu(index);
 }
 
 /* The CMOS periodic interrupt is polled, so it has no deadline. The HPET's
@@ -2818,24 +2814,21 @@ int64_t PCMachine::RunTimers()
     return delay;
 }
 
-/* The processors on threads of their own are never the processor thread's
-   to run. */
+/* The processors run on threads of their own. */
 bool PCMachine::Idle()
 {
-    if (hypervisor || fInterpThreads)
-        return true;
-    return x86_cpu_get_power_down(cpu_state);
+    return true;
 }
 
 void PCMachine::Interp(int max_exec_cycles)
 {
-    x86_cpu_interp(cpu_state, max_exec_cycles);
+    (void)max_exec_cycles;
 }
 
 void PCMachine::InterruptExecution()
 {
-    for (int i = 0; (hypervisor || fInterpThreads) && i < fCpuCount; i++)
-        KickVcpu(i);
+    for (int i = 0; i < fCpuCount; i++)
+        ExitVcpu(i);
 }
 
 class PcMachineClass final: public VirtMachineClass {

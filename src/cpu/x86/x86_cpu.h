@@ -63,7 +63,13 @@ void x86_cpu_set_smp(X86CPUState *s, bool smp);
 /* An INIT, and a STARTUP IPI's real mode entry at page 'vector'. */
 void x86_cpu_reset(X86CPUState *s);
 void x86_cpu_startup(X86CPUState *s, int vector);
-void x86_cpu_interp(X86CPUState *s, int max_cycles1);
+/* Runs the processor until it halts or is asked to stop. */
+void x86_cpu_run(X86CPUState *s);
+/* The same, for at most 'max_cycles' instructions. */
+void x86_cpu_interp(X86CPUState *s, int max_cycles);
+/* Makes the run in progress, or else the next one, return soon. Any
+   thread. */
+void x86_cpu_request_exit(X86CPUState *s);
 /* any thread */
 void x86_cpu_set_irq(X86CPUState *s, bool set);
 void x86_cpu_set_reg(X86CPUState *s, int reg, uint32_t val);
