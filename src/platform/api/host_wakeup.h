@@ -28,8 +28,8 @@
 /* Implemented once per host; the build picks the file. */
 
 /* One thread sleeps on it until another kicks it or the timeout passes. A
-   kick that comes before the sleep is not lost, and the timeout is kept to
-   about a millisecond, since the machines' timers run from it. */
+   kick that comes before the sleep is not lost, and the timeout is kept as
+   close as the host allows, since the machines' timers run from it. */
 class HostWakeup {
 private:
     struct Impl;
@@ -39,8 +39,9 @@ public:
     HostWakeup();
     ~HostWakeup();
 
-    /* Any thread. */
+    /* Any thread. Cheap while nobody waits. */
     void Kick();
-    /* Returns once kicked since the last return, or after 'timeout_us'. */
+    /* Returns once kicked since the last return, or after 'timeout_us';
+       with a negative timeout only once kicked. */
     void Wait(int64_t timeout_us);
 };

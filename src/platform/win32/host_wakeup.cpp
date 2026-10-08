@@ -24,6 +24,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include <atomic>
+
 #include <windows.h>
 
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
@@ -31,12 +33,15 @@
 #endif
 
 
-/* An auto-reset event holds a kick until the next wait takes it. The timeout
-   is a waitable timer: std::condition_variable waits in whole system ticks,
-   about 15.6 ms, whatever timeBeginPeriod() says. */
+/* 'kicked' holds a kick until the next wait takes it, and the event is set
+   only while a wait may be sleeping. The timeout is a waitable timer:
+   std::condition_variable waits in whole system ticks, about 15.6 ms,
+   whatever timeBeginPeriod() says. */
 struct HostWakeup::Impl {
     HANDLE event;
     HANDLE timer;
+    std::atomic<bool> kicked {false};
+    std::atomic<bool> sleeping {false};
 };
 
 
@@ -66,20 +71,40 @@ HostWakeup::~HostWakeup()
 }
 
 
+/* kicked is set before sleeping is read here, and sleeping before kicked is
+   read in Wait(), so one of the two sides always sees the other. */
 void HostWakeup::Kick()
 {
-    SetEvent(fImpl->event);
+    Impl &s = *fImpl;
+
+    s.kicked.store(true);
+    if (s.sleeping.load())
+        SetEvent(s.event);
 }
 
 
+/* An event left set by a kick the wait did not need ends a later wait
+   early; it goes round again then. */
 void HostWakeup::Wait(int64_t timeout_us)
 {
-    HANDLE handles[2] = {fImpl->event, fImpl->timer};
+    Impl &s = *fImpl;
+    HANDLE handles[2] = {s.event, s.timer};
     LARGE_INTEGER due;
 
-    /* relative, in 100 ns units */
-    due.QuadPart = -(timeout_us * 10);
-    SetWaitableTimer(fImpl->timer, &due, 0, nullptr, nullptr, FALSE);
-    WaitForMultipleObjects(2, handles, FALSE, INFINITE);
-    CancelWaitableTimer(fImpl->timer);
+    if (timeout_us >= 0) {
+        /* relative, in 100 ns units */
+        due.QuadPart = -(timeout_us * 10);
+        SetWaitableTimer(s.timer, &due, 0, nullptr, nullptr, FALSE);
+    }
+    s.sleeping.store(true);
+    while (!s.kicked.load()) {
+        DWORD r = WaitForMultipleObjects(timeout_us >= 0 ? 2 : 1, handles,
+                                         FALSE, INFINITE);
+        if (r != WAIT_OBJECT_0)
+            break;
+    }
+    s.sleeping.store(false);
+    s.kicked.store(false);
+    if (timeout_us >= 0)
+        CancelWaitableTimer(s.timer);
 }

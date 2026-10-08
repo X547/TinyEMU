@@ -26,6 +26,10 @@
 #include <condition_variable>
 #include <mutex>
 
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
+
 
 struct HostWakeup::Impl {
     std::mutex mutex;
@@ -61,12 +65,24 @@ void HostWakeup::Kick()
 void HostWakeup::Wait(int64_t timeout_us)
 {
     Impl &s = *fImpl;
+#ifdef __linux__
+    /* Linux lets a sleep run 50 us late by default. */
+    static thread_local bool precise = false;
+    if (!precise) {
+        prctl(PR_SET_TIMERSLACK, 1UL, 0UL, 0UL, 0UL);
+        precise = true;
+    }
+#endif
     std::unique_lock<std::mutex> locker(s.mutex);
 
     s.sleeping.store(true);
     if (!s.kicked.load()) {
-        s.cond.wait_for(locker, std::chrono::microseconds(timeout_us),
-                        [&s]() {return s.kicked.load();});
+        auto kicked = [&s]() {return s.kicked.load();};
+        if (timeout_us < 0)
+            s.cond.wait(locker, kicked);
+        else
+            s.cond.wait_for(locker, std::chrono::microseconds(timeout_us),
+                            kicked);
     }
     s.kicked.store(false);
     s.sleeping.store(false);
