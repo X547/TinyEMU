@@ -43,6 +43,7 @@
 #include "pci.h"
 #include "plic.h"
 #include "aplic.h"
+#include "clint.h"
 
 /* RISCV machine */
 
@@ -60,7 +61,8 @@ class RISCVMachine final:
     public HartIrqTarget,
     public PCIMsiTarget,
     public TlbFlushTarget,
-    public RtcTimeSource {
+    public RtcTimeSource,
+    public ClintHost {
 public:
     std::unique_ptr<PhysMemoryMap> mem_map;
     int max_xlen = 0;
@@ -71,9 +73,7 @@ public:
     /* RTC */
     bool rtc_real_time = false;
     uint64_t rtc_start_time = 0;
-    uint64_t timecmp[RISCV_MAX_HARTS] {};
-    /* the MSIP and MTIP levels the CLINT drives */
-    uint32_t clint_lines[RISCV_MAX_HARTS] {};
+    std::unique_ptr<Clint> clint;
     /* the one selected by intc_type */
     std::unique_ptr<PLIC> plic;
     std::unique_ptr<APLIC> aplic;
@@ -94,7 +94,6 @@ public:
 
     ~RISCVMachine() override;
 
-    void SetClintLine(int hart, uint32_t mask, bool level);
     void HartThread(int hart);
     /* Makes 'hart' look at its interrupts again. Any thread. */
     void KickHart(int hart);
@@ -102,16 +101,12 @@ public:
     /* memory-mapped register blocks */
     uint32_t HtifRead(uint32_t offset, int size_log2);
     void HtifWrite(uint32_t offset, uint32_t val, int size_log2);
-    uint32_t ClintRead(uint32_t offset, int size_log2);
-    void ClintWrite(uint32_t offset, uint32_t val, int size_log2);
     uint32_t ImsicRead(uint32_t offset, int size_log2);
     void ImsicWriteM(uint32_t offset, uint32_t val, int size_log2);
     void ImsicWriteS(uint32_t offset, uint32_t val, int size_log2);
 
     DeviceIOAdapter<RISCVMachine, &RISCVMachine::HtifRead,
                     &RISCVMachine::HtifWrite> fHtifIo {*this};
-    DeviceIOAdapter<RISCVMachine, &RISCVMachine::ClintRead,
-                    &RISCVMachine::ClintWrite> fClintIo {*this};
     DeviceIOAdapter<RISCVMachine, &RISCVMachine::ImsicRead,
                     &RISCVMachine::ImsicWriteM> fImsicIoM {*this};
     DeviceIOAdapter<RISCVMachine, &RISCVMachine::ImsicRead,
@@ -130,6 +125,11 @@ public:
     uint64_t RtcTime() override;
     void STimerChanged(uint64_t deadline) override;
 
+    /* ClintHost */
+    uint64_t ClintTime() override;
+    void SetClintIrq(int hart, bool timer, bool level) override;
+    void ClintTimerChanged(uint64_t deadline) override;
+
     /* VirtMachine */
     void StartProcessors() override;
     void JoinProcessors() override;
@@ -140,11 +140,6 @@ public:
 #define LOW_RAM_SIZE   0x00010000 /* 64KB */
 #define RAM_BASE_ADDR  0x80000000
 #define CLINT_BASE_ADDR 0x02000000
-/* The size of a SiFive CLINT. It must be exactly this: firmware splits the
-   region into its ACLINT MSWI and MTIMER halves by size, so declaring a
-   larger one moves mtimecmp somewhere this CLINT does not decode and the
-   timer silently never fires. */
-#define CLINT_SIZE      0x00010000
 #define HTIF_BASE_ADDR 0x40008000
 #define HTIF_SIZE      0x00001000
 #define PLIC_BASE_ADDR 0x40100000
@@ -314,74 +309,6 @@ void RISCVMachine::HtifWrite(uint32_t offset, uint32_t val, int size_log2)
     default:
         break;
     }
-}
-
-/* CLINT register layout: one msip word and one 64 bit mtimecmp per hart */
-#define CLINT_MSIP_BASE     0x0000
-#define CLINT_MTIMECMP_BASE 0x4000
-#define CLINT_MTIME         0xbff8
-
-uint32_t RISCVMachine::ClintRead(uint32_t offset, int size_log2)
-{
-    RISCVMachine *m = this;
-    uint32_t val = 0;
-    uint32_t hart;
-
-    assert(size_log2 == 2);
-    if (offset < CLINT_MTIMECMP_BASE) {
-        hart = (offset - CLINT_MSIP_BASE) / 4;
-        if (hart < (uint32_t)m->hart_count)
-            val = (m->clint_lines[hart] & MIP_MSIP) != 0;
-    } else if (offset < CLINT_MTIME) {
-        hart = (offset - CLINT_MTIMECMP_BASE) / 8;
-        if (hart < (uint32_t)m->hart_count) {
-            if ((offset - CLINT_MTIMECMP_BASE) % 8 == 0)
-                val = m->timecmp[hart];
-            else
-                val = m->timecmp[hart] >> 32;
-        }
-    } else if (offset == CLINT_MTIME) {
-        val = rtc_get_time(m);
-    } else if (offset == CLINT_MTIME + 4) {
-        val = rtc_get_time(m) >> 32;
-    }
-    return val;
-}
-
-void RISCVMachine::ClintWrite(uint32_t offset, uint32_t val, int size_log2)
-{
-    RISCVMachine *m = this;
-    uint32_t hart;
-
-    assert(size_log2 == 2);
-    if (offset < CLINT_MTIMECMP_BASE) {
-        /* a software interrupt to that hart */
-        hart = (offset - CLINT_MSIP_BASE) / 4;
-        if (hart >= (uint32_t)m->hart_count)
-            return;
-        m->SetClintLine(hart, MIP_MSIP, val & 1);
-    } else if (offset < CLINT_MTIME) {
-        hart = (offset - CLINT_MTIMECMP_BASE) / 8;
-        if (hart >= (uint32_t)m->hart_count)
-            return;
-        uint64_t &cmp = m->timecmp[hart];
-        if ((offset - CLINT_MTIMECMP_BASE) % 8 == 0)
-            cmp = set_bits(cmp, 0, 32, val);
-        else
-            cmp = set_bits(cmp, 32, 32, val);
-        m->SetClintLine(hart, MIP_MTIP, false);
-        rtc_kick_before(m, cmp);
-    }
-}
-
-void RISCVMachine::SetClintLine(int hart, uint32_t mask, bool level)
-{
-    if (level)
-        clint_lines[hart] |= mask;
-    else
-        clint_lines[hart] &= ~mask;
-    cpus[hart]->SetIrqLine(mask, level);
-    KickHart(hart);
 }
 
 void RISCVMachine::KickHart(int hart)
@@ -772,6 +699,22 @@ void RISCVMachine::STimerChanged(uint64_t deadline)
     rtc_kick_before(this, deadline);
 }
 
+uint64_t RISCVMachine::ClintTime()
+{
+    return rtc_get_time(this);
+}
+
+void RISCVMachine::SetClintIrq(int hart, bool timer, bool level)
+{
+    cpus[hart]->SetIrqLine(timer ? MIP_MTIP : MIP_MSIP, level);
+    KickHart(hart);
+}
+
+void RISCVMachine::ClintTimerChanged(uint64_t deadline)
+{
+    rtc_kick_before(this, deadline);
+}
+
 void RISCVMachine::FlushTlbWriteRange(uint8_t *ram_addr, size_t ram_size)
 {
     for (int hart = 0; hart < hart_count; hart++)
@@ -875,7 +818,8 @@ riscv_machine_init(const VirtMachineParams *p)
     for (int hart = 0; hart < s->hart_count; hart++)
         s->cpus[hart]->SetRtcTimeSource(s.get());
 
-    s->mem_map->RegisterDevice(CLINT_BASE_ADDR, CLINT_SIZE, &s->fClintIo,
+    s->clint = std::make_unique<Clint>(*s, s->hart_count);
+    s->mem_map->RegisterDevice(CLINT_BASE_ADDR, CLINT_SIZE, s->clint.get(),
                                DEVIO_SIZE32);
     s->mem_map->RegisterDevice(HTIF_BASE_ADDR, 16, &s->fHtifIo, DEVIO_SIZE32);
     s->console = p->platform->Console();
@@ -975,14 +919,8 @@ int64_t RISCVMachine::RunTimers()
     int64_t delay = -1;
 
     for (int hart = 0; hart < hart_count; hart++) {
-        uint64_t next = UINT64_MAX;
+        uint64_t next = clint->RunTimer(hart, now);
 
-        if (!(clint_lines[hart] & MIP_MTIP)) {
-            if (now >= timecmp[hart])
-                SetClintLine(hart, MIP_MTIP, true);
-            else
-                next = timecmp[hart];
-        }
         /* The supervisor timer runs off the same counter when Sstc is
            enabled. The hart raises it itself once woken, which takes the
            deadline away. */

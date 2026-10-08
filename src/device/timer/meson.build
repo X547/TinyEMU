@@ -1,7 +1,6 @@
+timer_sources = files('clint.cpp')
 # The HPET is a PC part: only the pc machine maps one.
 if x86emu
-  emu_libs += static_library('device_timer',
-    files('hpet.cpp'),
-    kwargs: lib_kwargs,
-  )
+  timer_sources += files('hpet.cpp')
 endif
+emu_libs += static_library('device_timer', timer_sources, kwargs: lib_kwargs)
