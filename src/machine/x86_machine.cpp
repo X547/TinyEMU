@@ -307,10 +307,7 @@ uint32_t CMOSState::Read(uint32_t offset, int size_log2)
 //#define DEBUG_PIT
 
 
-typedef struct PITState PITState;
-
 typedef struct {
-    PITState *pit_state;
     uint32_t count;
     uint32_t latched_count;
     uint8_t rw_state;
@@ -321,18 +318,9 @@ typedef struct {
     int64_t last_irq_time;
 } PITChannel;
 
-/* Implemented by the machine: the PIT counts in CPU ticks. */
-class PITTickSource {
-public:
-    virtual ~PITTickSource() = default;
-
-    virtual int64_t Ticks() = 0;
-};
-
 struct PITState {
     PITChannel pit_channels[3] {};
     uint8_t speaker_data_on = 0;
-    PITTickSource *tick_source = nullptr;
     IRQSignal *irq = nullptr;
 
     uint32_t Read(uint32_t offset, int size_log2);
@@ -348,8 +336,7 @@ struct PITState {
 static void pit_load_count(PITChannel *pc, int val);
 
 std::unique_ptr<PITState> pit_init(PhysMemoryMap *port_map, int addr0,
-                                   int addr1, IRQSignal *irq,
-                                   PITTickSource *tick_source)
+                                   int addr1, IRQSignal *irq)
 {
     std::unique_ptr<PITState> s;
     PITChannel *pc;
@@ -358,11 +345,9 @@ std::unique_ptr<PITState> pit_init(PhysMemoryMap *port_map, int addr0,
     s = std::make_unique<PITState>();
 
     s->irq = irq;
-    s->tick_source = tick_source;
     
     for(i = 0; i < 3; i++) {
         pc = &s->pit_channels[i];
-        pc->pit_state = s.get();
         pc->mode = 3;
         pc->gate = (i != 2) >> 0;
         pit_load_count(pc, 0);
@@ -375,10 +360,11 @@ std::unique_ptr<PITState> pit_init(PhysMemoryMap *port_map, int addr0,
 }
 
 /* unit = PIT frequency  */
-static int64_t pit_get_time(PITChannel *pc)
+static int64_t pit_get_time()
 {
-    PITState *s = pc->pit_state;
-    return s->tick_source->Ticks();
+    uint64_t us = host_monotonic_us();
+
+    return (us / 1000000) * PIT_FREQ + (us % 1000000) * PIT_FREQ / 1000000;
 }
 
 static uint32_t pit_get_count(PITChannel *pc)
@@ -386,7 +372,7 @@ static uint32_t pit_get_count(PITChannel *pc)
     uint32_t counter;
     uint64_t d;
     
-    d = pit_get_time(pc) - pc->count_load_time;
+    d = pit_get_time() - pc->count_load_time;
     switch(pc->mode) {
     case 0:
     case 1:
@@ -407,7 +393,7 @@ static int pit_get_out(PITChannel *pc)
     int out;
     int64_t d;
     
-    d = pit_get_time(pc) - pc->count_load_time;
+    d = pit_get_time() - pc->count_load_time;
     switch(pc->mode) {
     default:
     case 0:
@@ -438,7 +424,7 @@ static void pit_load_count(PITChannel *s, int val)
 {
     if (val == 0)
         val = 0x10000;
-    s->count_load_time = pit_get_time(s);
+    s->count_load_time = pit_get_time();
     s->last_irq_time = 0;
     s->count = val;
 }
@@ -559,7 +545,7 @@ uint32_t PITState::SpeakerRead(uint32_t offset, int size_log2)
    INT64_MAX once a one-shot count has fired. */
 static int64_t pit_next_ticks(PITChannel *s)
 {
-    int64_t d = pit_get_time(s) - s->count_load_time;
+    int64_t d = pit_get_time() - s->count_load_time;
 
     switch(s->mode) {
     default:
@@ -593,7 +579,7 @@ static int64_t pit_delay_us(PITState *pit)
 static int64_t pit_update_irq(PITState *pit, bool deliver)
 {
     PITChannel *s = &pit->pit_channels[0];
-    int64_t d = pit_get_time(s) - s->count_load_time;
+    int64_t d = pit_get_time() - s->count_load_time;
 
     switch(s->mode) {
     default:
@@ -678,7 +664,6 @@ class PCMachine final:
     public VirtMachine,
     public TlbFlushTarget,
     public CPUIRQTarget,
-    public PITTickSource,
     public X86HardIntnoSource,
     public X86TscSource,
     public X86HypervisorTarget,
@@ -827,8 +812,6 @@ public:
     void FlushTlbWriteRange(uint8_t *ram_addr, size_t ram_size) override;
     /* CPUIRQTarget */
     void SetCPUIRQ(int level) override;
-    /* PITTickSource */
-    int64_t Ticks() override;
     /* X86HardIntnoSource */
     int HardIntno() override;
     /* X86TscSource */
@@ -1079,13 +1062,6 @@ void PCMachine::SendMsi(uint64_t addr, uint32_t data)
             hypervisor->SendMsi(addr, data);
     } else
         mem_map->IoWrite(addr, data, 2);
-}
-
-int64_t PCMachine::Ticks()
-{
-    uint64_t us = host_monotonic_us();
-
-    return (us / 1000000) * PIT_FREQ + (us % 1000000) * PIT_FREQ / 1000000;
 }
 
 /* The two PICs give sixteen lines, and the port space is what a 16 bit port
@@ -1578,7 +1554,7 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
         }
         for (X86CPUState *cpu : s->fCpus)
             x86_cpu_set_hard_intno_source(cpu, s);
-        s->pit_state = pit_init(s->port_map, 0x40, 0x61, &s->pic_irq[0], s);
+        s->pit_state = pit_init(s->port_map, 0x40, 0x61, &s->pic_irq[0]);
     }
 
     s->cmos_state = cmos_init(s->port_map, 0x70, &s->pic_irq[8],
