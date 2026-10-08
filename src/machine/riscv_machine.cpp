@@ -44,6 +44,7 @@
 #include "plic.h"
 #include "aplic.h"
 #include "clint.h"
+#include "htif.h"
 
 /* RISCV machine */
 
@@ -74,6 +75,7 @@ public:
     bool rtc_real_time = false;
     uint64_t rtc_start_time = 0;
     std::unique_ptr<Clint> clint;
+    std::unique_ptr<HTIF> htif;
     /* the one selected by intc_type */
     std::unique_ptr<PLIC> plic;
     std::unique_ptr<APLIC> aplic;
@@ -81,9 +83,6 @@ public:
     std::unique_ptr<SystemBus> bus;
     /* bits of the hart number in an IMSIC page address */
     int imsic_hart_bits = 0;
-    /* HTIF */
-    uint64_t htif_tohost = 0, htif_fromhost = 0;
-    HostConsole *console = nullptr;
     /* Each hart runs on a thread of its own, which waits on its wakeup while
        the hart waits for an interrupt. The machine thread keeps the timers,
        the harts' Sstc deadlines among them, and the screen. */
@@ -99,14 +98,10 @@ public:
     void KickHart(int hart);
 
     /* memory-mapped register blocks */
-    uint32_t HtifRead(uint32_t offset, int size_log2);
-    void HtifWrite(uint32_t offset, uint32_t val, int size_log2);
     uint32_t ImsicRead(uint32_t offset, int size_log2);
     void ImsicWriteM(uint32_t offset, uint32_t val, int size_log2);
     void ImsicWriteS(uint32_t offset, uint32_t val, int size_log2);
 
-    DeviceIOAdapter<RISCVMachine, &RISCVMachine::HtifRead,
-                    &RISCVMachine::HtifWrite> fHtifIo {*this};
     DeviceIOAdapter<RISCVMachine, &RISCVMachine::ImsicRead,
                     &RISCVMachine::ImsicWriteM> fImsicIoM {*this};
     DeviceIOAdapter<RISCVMachine, &RISCVMachine::ImsicRead,
@@ -215,100 +210,6 @@ static void rtc_kick_before(RISCVMachine *m, uint64_t deadline)
         m->Kick();
     else if (deadline <= UINT64_MAX - m->rtc_start_time)
         m->KickBefore(deadline + m->rtc_start_time);
-}
-
-uint32_t RISCVMachine::HtifRead(uint32_t offset, int size_log2)
-{
-    RISCVMachine *s = this;
-    uint32_t val;
-
-    assert(size_log2 == 2);
-    switch(offset) {
-    case 0:
-        val = s->htif_tohost;
-        break;
-    case 4:
-        val = s->htif_tohost >> 32;
-        break;
-    case 8:
-        val = s->htif_fromhost;
-        break;
-    case 12:
-        val = s->htif_fromhost >> 32;
-        break;
-    default:
-        val = 0;
-        break;
-    }
-    return val;
-}
-
-static void htif_handle_cmd(RISCVMachine *s)
-{
-    uint32_t device, cmd;
-
-    /* the guest keeps running until the current step ends and may repeat
-       the power off request meanwhile */
-    if (s->ShutdownRequested())
-        return;
-
-    device = get_bits(s->htif_tohost, 56, 8);
-    cmd = get_bits(s->htif_tohost, 48, 8);
-    if (device == 0 && cmd == 0 && get_bit(s->htif_tohost, 0)) {
-        /* Power off, using the spike/riscv-tests convention: the guest writes
-           (code << 1) | 1, so a plain 1 is a success exit. The exit status is
-           what makes a guest usable as an automated test: it reports pass/fail
-           without the harness having to grep the console log. */
-        uint64_t code = get_bits(s->htif_tohost, 1, 47);
-        if (code == 0) {
-            printf("\nPower off.\n");
-        } else {
-            printf("\nPower off, exit code %" PRIu64 ".\n", code);
-        }
-        /* Only the low 8 bits survive wait(2), and 0 there would turn a failure
-           into a pass, so codes that do not fit are reported as 255. */
-        s->RequestShutdown(code < 256 ? (int)code : 255);
-    } else if (device == 1 && cmd == 1) {
-        uint8_t buf[1];
-        buf[0] = get_bits(s->htif_tohost, 0, 8);
-        if (s->console != nullptr)
-            s->console->WriteData(buf, 1);
-        s->htif_tohost = 0;
-        s->htif_fromhost = set_bits(concat_bits<uint64_t>(device, 0, 56),
-                                    48, 8, cmd);
-    } else if (device == 1 && cmd == 0) {
-        /* request keyboard interrupt */
-        s->htif_tohost = 0;
-    } else if (device == 2 && cmd == 0) {
-        /* calendar time, in microseconds since the Unix epoch */
-        s->htif_fromhost = host_real_time_us();
-    } else {
-        printf("HTIF: unsupported tohost=0x%016" PRIx64 "\n", s->htif_tohost);
-    }
-}
-
-void RISCVMachine::HtifWrite(uint32_t offset, uint32_t val, int size_log2)
-{
-    RISCVMachine *s = this;
-
-    assert(size_log2 == 2);
-    switch(offset) {
-    case 0:
-        s->htif_tohost = set_bits(s->htif_tohost, 0, 32, val);
-        break;
-    case 4:
-        s->htif_tohost = set_bits(s->htif_tohost, 32, 32, val);
-        htif_handle_cmd(s);
-        break;
-    case 8:
-        s->htif_fromhost = set_bits(s->htif_fromhost, 0, 32, val);
-        break;
-    case 12:
-        s->htif_fromhost = set_bits(s->htif_fromhost, 32, 32, val);
-        break;
-    default:
-        break;
-    }
 }
 
 void RISCVMachine::KickHart(int hart)
@@ -821,8 +722,9 @@ riscv_machine_init(const VirtMachineParams *p)
     s->clint = std::make_unique<Clint>(*s, s->hart_count);
     s->mem_map->RegisterDevice(CLINT_BASE_ADDR, CLINT_SIZE, s->clint.get(),
                                DEVIO_SIZE32);
-    s->mem_map->RegisterDevice(HTIF_BASE_ADDR, 16, &s->fHtifIo, DEVIO_SIZE32);
-    s->console = p->platform->Console();
+    s->htif = std::make_unique<HTIF>(*s, p->platform->Console());
+    s->mem_map->RegisterDevice(HTIF_BASE_ADDR, HTIF_REG_SIZE, s->htif.get(),
+                               DEVIO_SIZE32);
 
     IRQTarget *irq_target;
     if (intc_type == RISCV_INTC_PLIC) {
