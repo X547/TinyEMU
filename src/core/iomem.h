@@ -91,8 +91,7 @@ public:
 
 /* Implemented by the CPU so the memory map can invalidate write TLB entries
    when a RAM mapping moves or a dirty page is reclaimed. Called with the
-   device lock held, on the processor thread or, with processors on threads
-   of their own, on any thread. */
+   device lock held, on any thread. */
 class TlbFlushTarget {
 public:
     virtual ~TlbFlushTarget() = default;
@@ -155,11 +154,11 @@ struct PhysMemoryRange {
    dirty bitmap itself; the x86 machine overrides the virtual methods to hand
    both to a host hypervisor.
 
-   The map changes only with the device lock held, on the processor thread
-   or on a thread of a processor of its own. The processors look up RAM
-   without the lock; everything else uses the map with the lock held. With
-   more than one processor thread a lookup can therefore race a change, so
-   a processor checks a device range again once it holds the lock. */
+   The map changes only with the device lock held, on the machine thread or
+   on a processor's thread. The processors look up RAM without the lock;
+   everything else uses the map with the lock held. A lookup can therefore
+   race a change, so a processor checks a device range again once it holds
+   the lock. */
 class PhysMemoryMap {
 private:
     TlbFlushTarget *fTlbFlushTarget = nullptr;

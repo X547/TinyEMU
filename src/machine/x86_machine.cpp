@@ -1116,7 +1116,7 @@ public:
        lock. */
     std::atomic<bool> fCpuIrq {false};
     /* Each processor runs on a thread of its own, which waits on its wakeup
-       while the processor is halted; the processor thread keeps the timers
+       while the processor is halted; the machine thread keeps the timers
        and the screen. */
     int fCpuCount = 1;
     std::vector<std::thread> fVcpuThreads;
@@ -1142,7 +1142,7 @@ public:
        stop. Any thread. */
     void ExitVcpu(int index);
     /* The processor of the calling thread: its own, or the first on the
-       processor thread. */
+       machine thread. */
     int CurrentCpu() const;
     LocalApic &CurrentApic() {return fLapics->Apic(CurrentCpu());}
 
@@ -1216,11 +1216,9 @@ public:
     uint64_t Tsc() override;
 
     /* VirtMachine */
-    void ProcessorThreadStarted() override;
-    void ProcessorThreadStopping() override;
+    void StartProcessors() override;
+    void JoinProcessors() override;
     int64_t RunTimers() override;
-    bool Idle() override;
-    void Interp(int max_exec_cycle) override;
     void InterruptExecution() override;
 };
 
@@ -1423,7 +1421,7 @@ void PCMachine::ApicStartup(uint32_t id, int vector)
     ExitVcpu(id);
 }
 
-/* The processor thread may be asleep until a later deadline. */
+/* The machine thread may be asleep until a later deadline. */
 void PCMachine::ApicTimerChanged()
 {
     Kick();
@@ -1517,7 +1515,7 @@ void PCMachine::PortWrite(uint32_t port, uint32_t val, int size_log2)
         printf("write port=0x%x val=0x%x s=%d\n", port, val, 1 << size_log2);
 #endif
     port_map->IoWrite(port, val, size_log2);
-    /* Programming the PIT or the RTC can bring a timer the processor thread
+    /* Programming the PIT or the RTC can bring a timer the machine thread
        sleeps on forward. */
     if (port - 0x40 < 4 || port - 0x70 < 2)
         Kick();
@@ -2689,7 +2687,7 @@ static bool pvh_load(PCMachine *s, const uint8_t *buf, int buf_len,
     return true;
 }
 
-void PCMachine::ProcessorThreadStarted()
+void PCMachine::StartProcessors()
 {
     for (int i = 0; hypervisor && i < fCpuCount; i++)
         fVcpuThreads.emplace_back([this, i]() {VcpuThread(i);});
@@ -2697,7 +2695,7 @@ void PCMachine::ProcessorThreadStarted()
         fVcpuThreads.emplace_back([this, i]() {InterpThread(i);});
 }
 
-void PCMachine::ProcessorThreadStopping()
+void PCMachine::JoinProcessors()
 {
     for (std::thread &thread : fVcpuThreads)
         thread.join();
@@ -2812,17 +2810,6 @@ int64_t PCMachine::RunTimers()
             delay = apic_delay;
     }
     return delay;
-}
-
-/* The processors run on threads of their own. */
-bool PCMachine::Idle()
-{
-    return true;
-}
-
-void PCMachine::Interp(int max_exec_cycles)
-{
-    (void)max_exec_cycles;
 }
 
 void PCMachine::InterruptExecution()

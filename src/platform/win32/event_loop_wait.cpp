@@ -299,7 +299,7 @@ bool event_loop_post(EventLoop &loop, void *key, OVERLAPPED *ov)
 EventLoop::EventLoop():
     fWaker(std::make_unique<LoopWaker>())
 {
-    /* Every timed wait in the process, the processor thread's too, rounds to
+    /* Every timed wait in the process, the machine thread's too, rounds to
        the system tick otherwise. */
     timeBeginPeriod(1);
 }

@@ -133,14 +133,12 @@ typedef struct {
     VMFileEntry files[VM_FILE_COUNT];
 } VirtMachineParams;
 
-/* The processors run on a thread of their own, which also runs the machine's
-   timers and refreshes the screen. Everything else reaches the devices with
-   the device lock held. */
+/* Each processor runs on a thread of its own. The machine thread runs the
+   machine's timers and refreshes the screen. Everything else reaches the
+   devices with the device lock held. */
 class VirtMachine {
 private:
     std::thread fThread;
-    /* the processor thread's, or no thread's while it is not running */
-    std::atomic<std::thread::id> fThreadId {};
     std::atomic<bool> fStopRequested {false};
     HostWakeup fWakeup;
 
@@ -156,23 +154,17 @@ protected:
     RunControl *fRunControl = nullptr;
 
     bool StopRequested() const {return fStopRequested.load();}
-    /* True on the processor thread, and on any thread while it is not
-       running. */
-    bool OnProcessorThread() const;
 
-    /* On the processor thread, as it starts and as it ends. */
-    virtual void ProcessorThreadStarted() {}
-    virtual void ProcessorThreadStopping() {}
+    /* On the machine thread, as it starts and as it ends: start the
+       processors' threads, and join them once StopRequested(). */
+    virtual void StartProcessors() = 0;
+    virtual void JoinProcessors() = 0;
     /* With the device lock held: runs the timers that are due and returns
        the microseconds until the next one, or -1 if there is none. */
     virtual int64_t RunTimers() = 0;
-    /* Whether every processor waits for an interrupt. */
-    virtual bool Idle() = 0;
-    /* Runs about max_exec_cycle instructions; takes the device lock for
-       each device access. */
-    virtual void Interp(int max_exec_cycle) = 0;
-    /* Makes Interp() return soon, from any thread. */
-    virtual void InterruptExecution() {}
+    /* Makes every processor look at StopRequested() soon, from any
+       thread. */
+    virtual void InterruptExecution() = 0;
 
 public:
     const VirtMachineClass *vmc = nullptr;
@@ -181,7 +173,7 @@ public:
 
     /* Takes the lock and shutdown control from the parameters. */
     void SetHost(const VirtMachineParams *p);
-    /* 'source' is refreshed on 'screen' from the processor thread. */
+    /* 'source' is refreshed on 'screen' from the machine thread. */
     void SetDisplay(HostScreen *screen, FBDevice *source);
 
     /* the first request decides the exit code */
@@ -192,11 +184,10 @@ public:
     bool ShutdownRequested() const;
 
     void Start();
-    /* Returns once the processor thread has ended. */
+    /* Returns once the machine thread and the processors' have ended. */
     void Stop();
 
-    /* Wakes the processor thread to look at its interrupts and timers again.
-       Any thread. */
+    /* Wakes the machine thread to look at its timers again. Any thread. */
     void Kick();
 };
 

@@ -85,11 +85,11 @@ public:
     uint64_t htif_tohost = 0, htif_fromhost = 0;
     HostConsole *console = nullptr;
     /* Each hart runs on a thread of its own, which waits on its wakeup while
-       the hart waits for an interrupt. The processor thread keeps the timers,
+       the hart waits for an interrupt. The machine thread keeps the timers,
        the harts' Sstc deadlines among them, and the screen. */
     std::vector<std::thread> fHartThreadList;
     std::unique_ptr<HostWakeup[]> fHartWakeups;
-    /* the Sstc deadline each hart was last woken for; processor thread */
+    /* the Sstc deadline each hart was last woken for; machine thread */
     uint64_t fSTimerKicked[RISCV_MAX_HARTS] {};
 
     ~RISCVMachine() override;
@@ -131,11 +131,9 @@ public:
     void STimerChanged() override;
 
     /* VirtMachine */
-    void ProcessorThreadStarted() override;
-    void ProcessorThreadStopping() override;
+    void StartProcessors() override;
+    void JoinProcessors() override;
     int64_t RunTimers() override;
-    bool Idle() override;
-    void Interp(int max_exec_cycle) override;
     void InterruptExecution() override;
 };
 
@@ -362,7 +360,7 @@ void RISCVMachine::ClintWrite(uint32_t offset, uint32_t val, int size_log2)
         else
             cmp = set_bits(cmp, 32, 32, val);
         m->SetClintLine(hart, MIP_MTIP, false);
-        /* the processor thread may sleep past the new deadline */
+        /* the machine thread may sleep past the new deadline */
         m->Kick();
     }
 }
@@ -760,7 +758,7 @@ uint64_t RISCVMachine::RtcTime()
     return rtc_get_time(this);
 }
 
-/* The processor thread may sleep past the new deadline. */
+/* The machine thread may sleep past the new deadline. */
 void RISCVMachine::STimerChanged()
 {
     Kick();
@@ -1000,24 +998,13 @@ int64_t RISCVMachine::RunTimers()
     return delay;
 }
 
-/* The harts run on threads of their own. */
-bool RISCVMachine::Idle()
-{
-    return true;
-}
-
-void RISCVMachine::Interp(int max_exec_cycle)
-{
-    (void)max_exec_cycle;
-}
-
-void RISCVMachine::ProcessorThreadStarted()
+void RISCVMachine::StartProcessors()
 {
     for (int hart = 0; hart < hart_count; hart++)
         fHartThreadList.emplace_back([this, hart]() {HartThread(hart);});
 }
 
-void RISCVMachine::ProcessorThreadStopping()
+void RISCVMachine::JoinProcessors()
 {
     for (std::thread &thread : fHartThreadList)
         thread.join();

@@ -604,9 +604,7 @@ std::unique_ptr<VirtMachine> virt_machine_init(VirtMachineParams *p)
 
 //#pragma mark - VirtMachine
 
-/* Instructions run between two looks at the timers. */
-#define MAX_EXEC_CYCLE 500000
-/* The longest the processor thread sleeps without looking at the timers,
+/* The longest the machine thread sleeps without looking at the timers,
    for the devices that poll theirs. */
 #define MAX_SLEEP_US 10000
 #define SCREEN_REFRESH_US (1000000 / 60)
@@ -650,13 +648,6 @@ bool VirtMachine::ShutdownRequested() const
 }
 
 
-bool VirtMachine::OnProcessorThread() const
-{
-    std::thread::id id = fThreadId.load();
-    return id == std::thread::id() || id == std::this_thread::get_id();
-}
-
-
 void VirtMachine::Start()
 {
     assert(!fThread.joinable());
@@ -673,7 +664,6 @@ void VirtMachine::Stop()
     Kick();
     InterruptExecution();
     fThread.join();
-    fThreadId.store(std::thread::id());
 }
 
 
@@ -700,8 +690,7 @@ int64_t VirtMachine::RefreshScreen()
 void VirtMachine::ThreadLoop()
 {
     host_set_thread_name("machine");
-    fThreadId.store(std::this_thread::get_id());
-    ProcessorThreadStarted();
+    StartProcessors();
 
     while (!fStopRequested.load()) {
         int64_t delay, refresh_delay;
@@ -711,17 +700,13 @@ void VirtMachine::ThreadLoop()
             delay = RunTimers();
             refresh_delay = RefreshScreen();
         }
-        if (!Idle()) {
-            Interp(MAX_EXEC_CYCLE);
-            continue;
-        }
         if (delay < 0 || delay > MAX_SLEEP_US)
             delay = MAX_SLEEP_US;
         if (refresh_delay >= 0 && refresh_delay < delay)
             delay = refresh_delay;
         fWakeup.Wait(delay);
     }
-    ProcessorThreadStopping();
+    JoinProcessors();
 }
 
 void virt_machine_set_defaults(VirtMachineParams *p)
