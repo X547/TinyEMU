@@ -430,9 +430,10 @@ void AC97CodecDevice::Follow(AC97StreamEnum stream, Follower &f,
     uint64_t due = fOutMoved * rate / fOutFormat.rate;
 
     if (f.rate != rate) {
+        /* Streams started with the output keep in step with it from its
+           first frame. */
+        f.moved = f.rate == 0 ? 0 : due;
         f.rate = rate;
-        f.moved = due;
-        return;
     }
     size_t frames = frames_due(due, &f.moved, rate);
     if (frames == 0) {
