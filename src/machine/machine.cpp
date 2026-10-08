@@ -604,9 +604,6 @@ std::unique_ptr<VirtMachine> virt_machine_init(VirtMachineParams *p)
 
 //#pragma mark - VirtMachine
 
-/* The longest the machine thread sleeps without looking at the timers,
-   for the devices that poll theirs. */
-#define MAX_SLEEP_US 10000
 #define SCREEN_REFRESH_US (1000000 / 60)
 
 VirtMachine::~VirtMachine()
@@ -673,6 +670,16 @@ void VirtMachine::Kick()
 }
 
 
+/* The timer was set before fSleepUntil is read here, and fSleepUntil before
+   the machine thread sleeps, so either the thread finds the timer or it is
+   kicked. */
+void VirtMachine::KickBefore(uint64_t deadline_us)
+{
+    if (deadline_us < fSleepUntil.load())
+        fWakeup.Kick();
+}
+
+
 /* Returns the microseconds until the next refresh, or -1. */
 int64_t VirtMachine::RefreshScreen()
 {
@@ -695,15 +702,17 @@ void VirtMachine::ThreadLoop()
     while (!fStopRequested.load()) {
         int64_t delay, refresh_delay;
 
+        /* any timer set from now on may be one RunTimers() misses */
+        fSleepUntil.store(UINT64_MAX);
         {
             DeviceLocker locker(*fDeviceLock);
             delay = RunTimers();
             refresh_delay = RefreshScreen();
         }
-        if (delay < 0 || delay > MAX_SLEEP_US)
-            delay = MAX_SLEEP_US;
-        if (refresh_delay >= 0 && refresh_delay < delay)
+        if (refresh_delay >= 0 && (delay < 0 || refresh_delay < delay))
             delay = refresh_delay;
+        if (delay >= 0)
+            fSleepUntil.store(host_monotonic_us() + delay);
         fWakeup.Wait(delay);
     }
     JoinProcessors();

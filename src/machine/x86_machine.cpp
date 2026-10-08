@@ -89,7 +89,7 @@ struct CMOSState {
     uint8_t cmos_data[128] {};
     IRQSignal *irq = nullptr;
     bool use_local_time = false;
-    /* used for the periodic irq */
+    /* the periodic irq, in CMOS_FREQ ticks; no period while it is off */
     uint32_t irq_timeout = 0;
     uint32_t irq_period = 0;
 
@@ -189,27 +189,40 @@ static void cmos_update_timer(CMOSState *s)
         s->irq_period = 1 << (period_code - 1);
         s->irq_timeout = (cmos_get_timer(s) + s->irq_period) &
             ~(s->irq_period - 1);
+    } else {
+        /* off, or rate 0, which stops it on the part */
+        s->irq_period = 0;
     }
 }
 
-/* XXX: could return a delay, but we don't need high precision
-   (Windows 2000 uses it for delay calibration)
-   Without 'deliver' the flags are set but the line is left alone. */
-static void cmos_update_irq(CMOSState *s, bool deliver)
+/* The microseconds until the next periodic interrupt, rounded up, or -1. */
+static int64_t cmos_delay_us(CMOSState *s)
 {
-    uint32_t d;
-    if (s->cmos_data[RTC_REG_B] & REG_B_PIE) {
-        d = cmos_get_timer(s) - s->irq_timeout;
-        if ((int32_t)d >= 0) {
-            /* this is not what the real RTC does. Here we sent the IRQ
-               immediately */
+    if (s->irq_period == 0)
+        return -1;
+    int32_t ticks = s->irq_timeout - cmos_get_timer(s);
+    if (ticks <= 0)
+        return 0;
+    return ((int64_t)ticks * 1000000 + CMOS_FREQ - 1) / CMOS_FREQ;
+}
+
+/* Raises the periodic interrupt if it is due and returns the microseconds
+   until the next one, or -1. Periods that ran out while nobody looked are
+   one interrupt. Without 'deliver' the flags are set but the line is left
+   alone. */
+static int64_t cmos_update_irq(CMOSState *s, bool deliver)
+{
+    if (s->irq_period != 0) {
+        uint32_t now = cmos_get_timer(s);
+        if ((int32_t)(now - s->irq_timeout) >= 0) {
             s->cmos_data[RTC_REG_C] |= 0xc0;
             if (deliver)
                 s->irq->Set(1);
-            /* update for the next irq */
-            s->irq_timeout += s->irq_period;
+            s->irq_timeout += ((now - s->irq_timeout) / s->irq_period + 1) *
+                s->irq_period;
         }
     }
+    return cmos_delay_us(s);
 }
 
 void CMOSState::Write(uint32_t offset, uint32_t data, int size_log2)
@@ -954,41 +967,63 @@ uint32_t PITState::SpeakerRead(uint32_t offset, int size_log2)
     return val;
 }
 
-/* set the IRQ if necessary and return the delay in us until the next
-   IRQ. Note: The code does not handle all the PIT configurations.
-   Without 'deliver' the line is someone else's: the counting goes on, the
-   interrupts are dropped. */
-static int64_t pit_update_irq(PITState *pit, bool deliver)
+/* Channel 0's ticks until its next interrupt, which may be due already, or
+   INT64_MAX once a one-shot count has fired. */
+static int64_t pit_next_ticks(PITChannel *s)
 {
-    PITChannel *s;
-    int64_t d, delay;
-    
-    s = &pit->pit_channels[0];
-    
-    delay = PIT_FREQ; /* could be infinity delay */
-    
-    d = pit_get_time(s) - s->count_load_time;
+    int64_t d = pit_get_time(s) - s->count_load_time;
+
     switch(s->mode) {
     default:
     case 0:
     case 1:
     case 4:
     case 5:
-        if (s->last_irq_time == 0) {
-            delay = s->count - d;
-            if (delay <= 0) {
-                if (deliver) {
-                    pit->irq->Set(1);
-                    pit->irq->Set(0);
-                }
-                s->last_irq_time = d;
+        return s->last_irq_time == 0 ? s->count - d : INT64_MAX;
+    case 2: /* mode used by Linux */
+    case 3:
+        return s->last_irq_time + s->count - d;
+    }
+}
+
+/* The microseconds until channel 0's next interrupt, rounded up, or -1. */
+static int64_t pit_delay_us(PITState *pit)
+{
+    int64_t ticks = pit_next_ticks(&pit->pit_channels[0]);
+
+    if (ticks == INT64_MAX)
+        return -1;
+    if (ticks <= 0)
+        return 0;
+    return (ticks * 1000000 + PIT_FREQ - 1) / PIT_FREQ;
+}
+
+/* set the IRQ if necessary and return the delay in us until the next
+   IRQ, or -1. Note: The code does not handle all the PIT configurations.
+   Without 'deliver' the line is someone else's: the counting goes on, the
+   interrupts are dropped. */
+static int64_t pit_update_irq(PITState *pit, bool deliver)
+{
+    PITChannel *s = &pit->pit_channels[0];
+    int64_t d = pit_get_time(s) - s->count_load_time;
+
+    switch(s->mode) {
+    default:
+    case 0:
+    case 1:
+    case 4:
+    case 5:
+        if (s->last_irq_time == 0 && s->count <= d) {
+            if (deliver) {
+                pit->irq->Set(1);
+                pit->irq->Set(0);
             }
+            s->last_irq_time = d;
         }
         break;
     case 2: /* mode used by Linux */
     case 3:
-        delay = s->last_irq_time + s->count - d;
-        if (delay <= 0) {
+        if (s->last_irq_time + s->count <= d) {
             if (deliver) {
                 pit->irq->Set(1);
                 pit->irq->Set(0);
@@ -997,11 +1032,7 @@ static int64_t pit_update_irq(PITState *pit, bool deliver)
         }
         break;
     }
-
-    if (delay <= 0)
-        return 0;
-    else
-        return delay * 1000000 / PIT_FREQ;
+    return pit_delay_us(pit);
 }
     
 
@@ -1172,7 +1203,7 @@ public:
     void SetApicInterrupt(uint32_t id, bool pending) override;
     void ApicInit(uint32_t id) override;
     void ApicStartup(uint32_t id, int vector) override;
-    void ApicTimerChanged() override;
+    void ApicTimerChanged(uint64_t due) override;
     /* X86LocalApicTarget, for the calling processor */
     uint32_t ApicId() override {return CurrentApic().Id();}
     uint64_t ApicBase() override {return CurrentApic().Base();}
@@ -1422,9 +1453,9 @@ void PCMachine::ApicStartup(uint32_t id, int vector)
 }
 
 /* The machine thread may be asleep until a later deadline. */
-void PCMachine::ApicTimerChanged()
+void PCMachine::ApicTimerChanged(uint64_t due)
 {
-    Kick();
+    KickBefore(due);
 }
 
 int PCMachine::HardIntno()
@@ -1517,8 +1548,13 @@ void PCMachine::PortWrite(uint32_t port, uint32_t val, int size_log2)
     port_map->IoWrite(port, val, size_log2);
     /* Programming the PIT or the RTC can bring a timer the machine thread
        sleeps on forward. */
-    if (port - 0x40 < 4 || port - 0x70 < 2)
-        Kick();
+    int64_t delay = -1;
+    if (port - 0x40 < 4)
+        delay = pit_delay_us(pit_state.get());
+    else if (port - 0x70 < 2)
+        delay = cmos_delay_us(cmos_state.get());
+    if (delay >= 0)
+        KickBefore(host_monotonic_us() + delay);
 }
 
 uint32_t PCMachine::PortRead(uint32_t port, int size_log2)
@@ -2702,10 +2738,6 @@ void PCMachine::JoinProcessors()
     fVcpuThreads.clear();
 }
 
-/* The longest a halted processor waits without looking at its interrupts
-   again, should a kick go astray. */
-#define VCPU_MAX_WAIT_US 10000
-
 static void name_cpu_thread(int index)
 {
     char name[16];
@@ -2746,7 +2778,7 @@ void PCMachine::VcpuThread(int index)
             TakeCpuStart(index, [&]() {vcpu.Init();},
                          [&](int vector) {vcpu.Startup(vector);});
         if (!started || vcpu.Idle(InterruptRequested())) {
-            fVcpuWakeups[index].Wait(VCPU_MAX_WAIT_US);
+            fVcpuWakeups[index].Wait(-1);
             continue;
         }
         vcpu.Run();
@@ -2764,7 +2796,7 @@ void PCMachine::InterpThread(int index)
             TakeCpuStart(index, [&]() {x86_cpu_reset(cpu);},
                          [&](int vector) {x86_cpu_startup(cpu, vector);});
         if (!started || x86_cpu_get_power_down(cpu)) {
-            fVcpuWakeups[index].Wait(VCPU_MAX_WAIT_US);
+            fVcpuWakeups[index].Wait(-1);
             continue;
         }
         x86_cpu_run(cpu);
@@ -2786,29 +2818,27 @@ void PCMachine::ExitVcpu(int index)
     KickVcpu(index);
 }
 
-/* The CMOS periodic interrupt is polled, so it has no deadline. The HPET's
-   legacy replacement mode takes the PIT's and the RTC's lines over, except
-   from a PIT the hypervisor has. */
+/* The sooner of two delays, either of which may be -1 for none. */
+static int64_t sooner(int64_t a, int64_t b)
+{
+    return a < 0 || (b >= 0 && b < a) ? b : a;
+}
+
+/* The HPET's legacy replacement mode takes the PIT's and the RTC's lines
+   over, except from a PIT the hypervisor has. */
 int64_t PCMachine::RunTimers()
 {
     PCMachine *s = this;
     bool legacy = s->fHpet && s->fHpet->LegacyReplacement();
-    int64_t delay = -1;
+    int64_t delay = cmos_update_irq(s->cmos_state.get(), !legacy);
 
-    cmos_update_irq(s->cmos_state.get(), !legacy);
     if (s->fHpet)
-        delay = s->fHpet->RunTimers();
+        delay = sooner(delay, s->fHpet->RunTimers());
     /* the hypervisor has the PIT */
-    if (!s->fHypervisorIrqchip) {
-        int64_t pit_delay = pit_update_irq(s->pit_state.get(), !legacy);
-        if (delay < 0 || pit_delay < delay)
-            delay = pit_delay;
-    }
-    if (s->fLapics) {
-        int64_t apic_delay = s->fLapics->RunTimers();
-        if (apic_delay >= 0 && (delay < 0 || apic_delay < delay))
-            delay = apic_delay;
-    }
+    if (!s->fHypervisorIrqchip)
+        delay = sooner(delay, pit_update_irq(s->pit_state.get(), !legacy));
+    if (s->fLapics)
+        delay = sooner(delay, s->fLapics->RunTimers());
     return delay;
 }
 

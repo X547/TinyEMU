@@ -128,7 +128,7 @@ public:
 
     /* RtcTimeSource */
     uint64_t RtcTime() override;
-    void STimerChanged() override;
+    void STimerChanged(uint64_t deadline) override;
 
     /* VirtMachine */
     void StartProcessors() override;
@@ -210,6 +210,16 @@ static uint64_t rtc_get_time(RISCVMachine *m)
     }
     //    printf("rtc_time=%" PRId64 "\n", val);
     return val;
+}
+
+/* Wakes the machine thread for a timer due at 'deadline' on the counter,
+   which in real time counts host microseconds. */
+static void rtc_kick_before(RISCVMachine *m, uint64_t deadline)
+{
+    if (!m->rtc_real_time)
+        m->Kick();
+    else if (deadline <= UINT64_MAX - m->rtc_start_time)
+        m->KickBefore(deadline + m->rtc_start_time);
 }
 
 uint32_t RISCVMachine::HtifRead(uint32_t offset, int size_log2)
@@ -360,8 +370,7 @@ void RISCVMachine::ClintWrite(uint32_t offset, uint32_t val, int size_log2)
         else
             cmp = set_bits(cmp, 32, 32, val);
         m->SetClintLine(hart, MIP_MTIP, false);
-        /* the machine thread may sleep past the new deadline */
-        m->Kick();
+        rtc_kick_before(m, cmp);
     }
 }
 
@@ -758,10 +767,9 @@ uint64_t RISCVMachine::RtcTime()
     return rtc_get_time(this);
 }
 
-/* The machine thread may sleep past the new deadline. */
-void RISCVMachine::STimerChanged()
+void RISCVMachine::STimerChanged(uint64_t deadline)
 {
-    Kick();
+    rtc_kick_before(this, deadline);
 }
 
 void RISCVMachine::FlushTlbWriteRange(uint8_t *ram_addr, size_t ram_size)
@@ -1019,10 +1027,6 @@ void RISCVMachine::InterruptExecution()
     }
 }
 
-/* The longest a hart waits for an interrupt without looking, should a kick
-   go astray. */
-#define HART_MAX_WAIT_US 10000
-
 void RISCVMachine::HartThread(int hart)
 {
     RISCVCPU *cpu = cpus[hart].get();
@@ -1036,7 +1040,8 @@ void RISCVMachine::HartThread(int hart)
             cpu->Interp();
             continue;
         }
-        fHartWakeups[hart].Wait(HART_MAX_WAIT_US);
+        /* whatever can wake the hart kicks it */
+        fHartWakeups[hart].Wait(-1);
     }
 }
 

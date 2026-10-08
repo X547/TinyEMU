@@ -319,6 +319,18 @@ uint32_t LocalApic::CurrentCount(uint64_t now) const
 }
 
 
+/* When the period after the ones counted so far ends, rounded up to a
+   microsecond, or UINT64_MAX with no count running. */
+uint64_t LocalApic::TimerDue() const
+{
+    if (fInitialCount == 0)
+        return UINT64_MAX;
+    uint64_t ticks = (fTimerFired + 1) * fInitialCount * TimerDivisor();
+    return fTimerStart + (ticks + TIMER_HZ / 1000000 - 1) /
+        (TIMER_HZ / 1000000);
+}
+
+
 /* Periods that ran out while nobody looked are one interrupt. */
 int64_t LocalApic::RunTimer()
 {
@@ -336,10 +348,7 @@ int64_t LocalApic::RunTimer()
             return -1;
         }
     }
-    /* microseconds to the end of the current period, rounded up */
-    uint64_t period_us = (uint64_t)fInitialCount * TimerDivisor() /
-        (TIMER_HZ / 1000000);
-    uint64_t due = fTimerStart + (fTimerFired + 1) * period_us;
+    uint64_t due = TimerDue();
     return due > now ? due - now : 0;
 }
 
@@ -439,14 +448,14 @@ void LocalApic::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
         fInitialCount = val;
         fTimerStart = host_monotonic_us();
         fTimerFired = 0;
-        fHost.ApicTimerChanged();
+        fHost.ApicTimerChanged(TimerDue());
         return;
     case REG_DIVIDE:
         /* a count in progress starts over at the new rate */
         fDivide = val & 0xb;
         fTimerStart = host_monotonic_us();
         fTimerFired = 0;
-        fHost.ApicTimerChanged();
+        fHost.ApicTimerChanged(TimerDue());
         return;
     }
     if (offset >= REG_LVT_TIMER && offset <= REG_LVT_ERROR) {
@@ -456,7 +465,7 @@ void LocalApic::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
         fLvt[i] = val;
         Update();
         if (i == LVT_TIMER)
-            fHost.ApicTimerChanged();
+            fHost.ApicTimerChanged(TimerDue());
     }
     /* ID and the read only registers ignore writes; ESR has nothing to
        report */

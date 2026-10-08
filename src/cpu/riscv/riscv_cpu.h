@@ -52,8 +52,9 @@ public:
     virtual ~RtcTimeSource() = default;
 
     virtual uint64_t RtcTime() = 0;
-    /* A hart's Sstc deadline moved earlier. On the hart's thread. */
-    virtual void STimerChanged() = 0;
+    /* A hart's Sstc deadline moved earlier, to 'deadline' on the counter.
+       On the hart's thread. */
+    virtual void STimerChanged(uint64_t deadline) = 0;
 };
 
 

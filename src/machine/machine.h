@@ -141,6 +141,9 @@ private:
     std::thread fThread;
     std::atomic<bool> fStopRequested {false};
     HostWakeup fWakeup;
+    /* when the machine thread wakes up next on its own, in
+       host_monotonic_us(); UINT64_MAX while it runs the timers or has none */
+    std::atomic<uint64_t> fSleepUntil {UINT64_MAX};
 
     HostScreen *fScreen = nullptr;
     FBDevice *fScreenSource = nullptr;
@@ -189,6 +192,9 @@ public:
 
     /* Wakes the machine thread to look at its timers again. Any thread. */
     void Kick();
+    /* A timer was set for 'deadline_us', in host_monotonic_us(): wakes the
+       machine thread only if it would sleep past that. Any thread. */
+    void KickBefore(uint64_t deadline_us);
 };
 
 

@@ -50,8 +50,8 @@ public:
     virtual void ApicInit(uint32_t id) = 0;
     virtual void ApicStartup(uint32_t id, int vector) = 0;
     /* A timer was programmed and may be due sooner than RunTimers() last
-       said. */
-    virtual void ApicTimerChanged() = 0;
+       said: at 'due', in host_monotonic_us(), or never for UINT64_MAX. */
+    virtual void ApicTimerChanged(uint64_t due) = 0;
 };
 
 class LocalApicBus;
@@ -95,6 +95,7 @@ private:
     uint32_t TimerDivisor() const;
     uint64_t TimerTicks(uint64_t now) const;
     uint32_t CurrentCount(uint64_t now) const;
+    uint64_t TimerDue() const;
 
 public:
     LocalApic(LocalApicBus &bus, LocalApicHost &host, uint32_t id);

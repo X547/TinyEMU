@@ -146,7 +146,7 @@ static uint64_t update_stimer(RISCVCPUState *s)
     if (deadline != old) {
         s->stimer_deadline.store(deadline);
         if (deadline < old && s->rtc_time_source != nullptr)
-            s->rtc_time_source->STimerChanged();
+            s->rtc_time_source->STimerChanged(deadline);
     }
     return deadline;
 }
