@@ -48,6 +48,7 @@
 #include "pci.h"
 #include "pci_host_i440fx.h"
 #include "pc_acpi.h"
+#include "i8259.h"
 #include "ioapic.h"
 #include "lapic.h"
 
@@ -289,419 +290,6 @@ uint32_t CMOSState::Read(uint32_t offset, int size_log2)
 #endif
         return ret;
     }
-}
-
-/***********************************************************/
-/* 8259 pic emulation */
-
-//#define DEBUG_PIC
-
-/* Implemented by the cascade controller that owns the two 8259s. */
-class PICUpdateTarget {
-public:
-    virtual ~PICUpdateTarget() = default;
-
-    virtual void UpdatePICIRQ() = 0;
-};
-
-struct PICState {
-    uint8_t last_irr; /* edge detection */
-    uint8_t irr; /* interrupt request register */
-    uint8_t imr; /* interrupt mask register */
-    uint8_t isr; /* interrupt service register */
-    uint8_t priority_add; /* used to compute irq priority */
-    uint8_t irq_base;
-    uint8_t read_reg_select;
-    uint8_t special_mask;
-    uint8_t init_state;
-    uint8_t auto_eoi;
-    uint8_t rotate_on_autoeoi;
-    uint8_t init4; /* true if 4 byte init */
-    uint8_t elcr; /* PIIX edge/trigger selection*/
-    uint8_t elcr_mask;
-    PICUpdateTarget *update_target;
-
-    uint32_t Read(uint32_t offset, int size_log2);
-    void Write(uint32_t offset, uint32_t val, int size_log2);
-    uint32_t ElcrRead(uint32_t offset, int size_log2);
-    void ElcrWrite(uint32_t offset, uint32_t val, int size_log2);
-
-    DeviceIOAdapter<PICState, &PICState::Read, &PICState::Write> fIo {*this};
-    DeviceIOAdapter<PICState, &PICState::ElcrRead,
-                    &PICState::ElcrWrite> fElcrIo {*this};
-};
-
-static void pic_reset(PICState *s);
-
-std::unique_ptr<PICState> pic_init(PhysMemoryMap *port_map, int port,
-                                   int elcr_port,
-                                   int elcr_mask,
-                                   PICUpdateTarget *update_target)
-{
-    std::unique_ptr<PICState> s;
-
-    s = std::make_unique<PICState>();
-    s->elcr_mask = elcr_mask;
-    s->update_target = update_target;
-    port_map->RegisterDevice(port, 2, &s->fIo, DEVIO_SIZE8);
-    port_map->RegisterDevice(elcr_port, 1, &s->fElcrIo, DEVIO_SIZE8);
-    pic_reset(s.get());
-    return s;
-}
-
-static void pic_reset(PICState *s)
-{
-    /* all 8 bit registers */
-    s->last_irr = 0; /* edge detection */
-    s->irr = 0; /* interrupt request register */
-    s->imr = 0; /* interrupt mask register */
-    s->isr = 0; /* interrupt service register */
-    s->priority_add = 0; /* used to compute irq priority */
-    s->irq_base = 0;
-    s->read_reg_select = 0;
-    s->special_mask = 0;
-    s->init_state = 0;
-    s->auto_eoi = 0;
-    s->rotate_on_autoeoi = 0;
-    s->init4 = 0; /* true if 4 byte init */
-}
-
-/* set irq level. If an edge is detected, then the IRR is set to 1 */
-static void pic_set_irq1(PICState *s, int irq, int level)
-{
-    int mask;
-    mask = bit_at(irq);
-    if (s->elcr & mask) {
-        /* level triggered */
-        if (level) {
-            s->irr |= mask;
-            s->last_irr |= mask;
-        } else {
-            s->irr &= ~mask;
-            s->last_irr &= ~mask;
-        }
-    } else {
-        /* edge triggered */
-        if (level) {
-            if ((s->last_irr & mask) == 0)
-                s->irr |= mask;
-            s->last_irr |= mask;
-        } else {
-            s->last_irr &= ~mask;
-        }
-    }
-}
-    
-/* The rotated offset of the highest priority input set in 'mask', or 8 if
-   none is. Offset 0 is the highest priority one, as on the part: input 0 wins
-   over input 7, and the rotation registers move which input offset 0 names. */
-static int pic_get_priority(PICState *s, int mask)
-{
-    int priority;
-    if (mask == 0)
-        return 8;
-    priority = 0;
-    while ((mask & (1 << ((priority + s->priority_add) & 7))) == 0)
-        priority++;
-    return priority;
-}
-
-/* return the pic wanted interrupt. return -1 if none */
-static int pic_get_irq(PICState *s)
-{
-    int mask, cur_priority, priority;
-
-    mask = s->irr & ~s->imr;
-    priority = pic_get_priority(s, mask);
-    if (priority == 8)
-        return -1;
-    /* compute current priority */
-    cur_priority = pic_get_priority(s, s->isr);
-    if (priority < cur_priority) {
-        /* higher priority found: an irq should be generated */
-        return (priority + s->priority_add) & 7;
-    } else {
-        return -1;
-    }
-}
-    
-/* acknowledge interrupt 'irq' */
-static void pic_intack(PICState *s, int irq)
-{
-    if (s->auto_eoi) {
-        if (s->rotate_on_autoeoi)
-            s->priority_add = (irq + 1) & 7;
-    } else {
-        s->isr = set_bit(s->isr, irq, true);
-    }
-    /* We don't clear a level sensitive interrupt here */
-    if (!get_bit(s->elcr, irq))
-        s->irr = set_bit(s->irr, irq, false);
-}
-
-void PICState::Write(uint32_t offset, uint32_t val, int size_log2)
-{
-    PICState *s = this;
-    int priority, addr;
-    
-    addr = get_bit(offset, 0);
-#ifdef DEBUG_PIC
-    console.log("pic_write: addr=" + toHex2(addr) + " val=" + toHex2(val));
-#endif
-    if (addr == 0) {
-        if (get_bit(val, 4)) {
-            /* init */
-            pic_reset(s);
-            s->init_state = 1;
-            s->init4 = get_bit(val, 0);
-            if (get_bit(val, 1))
-                abort(); /* "single mode not supported" */
-            if (get_bit(val, 3))
-                abort(); /* "level sensitive irq not supported" */
-        } else if (get_bit(val, 3)) {
-            if (get_bit(val, 1))
-                s->read_reg_select = get_bit(val, 0);
-            if (get_bit(val, 6)) {
-                s->special_mask = get_bit(val, 5);
-                /* which requests outrank what is in service has changed */
-                s->update_target->UpdatePICIRQ();
-            }
-        } else {
-            /* Ending an interrupt, or rotating the priorities, lets a
-               request that was outranked through, so the processor is asked
-               again once the command has been carried out. */
-            switch(val) {
-            case 0x00:
-            case 0x80:
-                s->rotate_on_autoeoi = get_bit(val, 7);
-                break;
-            case 0x20: /* end of interrupt */
-            case 0xa0:
-                priority = pic_get_priority(s, s->isr);
-                if (priority < 8) {
-                    s->isr &= ~(1 << ((priority + s->priority_add) & 7));
-                }
-                if (val == 0xa0)
-                    s->priority_add = (s->priority_add + 1) & 7;
-                break;
-            case 0x60:
-            case 0x61:
-            case 0x62:
-            case 0x63:
-            case 0x64:
-            case 0x65:
-            case 0x66:
-            case 0x67:
-                priority = val & 7;
-                s->isr = set_bit(s->isr, priority, false);
-                break;
-            case 0xc0:
-            case 0xc1:
-            case 0xc2:
-            case 0xc3:
-            case 0xc4:
-            case 0xc5:
-            case 0xc6:
-            case 0xc7:
-                s->priority_add = (val + 1) & 7;
-                break;
-            case 0xe0:
-            case 0xe1:
-            case 0xe2:
-            case 0xe3:
-            case 0xe4:
-            case 0xe5:
-            case 0xe6:
-            case 0xe7:
-                priority = val & 7;
-                s->isr = set_bit(s->isr, priority, false);
-                s->priority_add = (priority + 1) & 7;
-                break;
-            }
-            s->update_target->UpdatePICIRQ();
-        }
-    } else {
-        switch(s->init_state) {
-        case 0:
-            /* normal mode */
-            s->imr = val;
-            s->update_target->UpdatePICIRQ();
-            break;
-        case 1:
-            s->irq_base = set_bits(val, 0, 3, 0);
-            s->init_state = 2;
-            break;
-        case 2:
-            if (s->init4) {
-                s->init_state = 3;
-            } else {
-                s->init_state = 0;
-            }
-            break;
-        case 3:
-            s->auto_eoi = get_bit(val, 1);
-            s->init_state = 0;
-            break;
-        }
-    }
-}
-
-uint32_t PICState::Read(uint32_t offset, int size_log2)
-{
-    PICState *s = this;
-    int addr, ret;
-
-    addr = get_bit(offset, 0);
-    if (addr == 0) {
-        if (s->read_reg_select)
-            ret = s->isr;
-        else
-            ret = s->irr;
-    } else {
-        ret = s->imr;
-    }
-#ifdef DEBUG_PIC
-    console.log("pic_read: addr=" + toHex2(addr1) + " val=" + toHex2(ret));
-#endif
-    return ret;
-}
-
-void PICState::ElcrWrite(uint32_t offset, uint32_t val, int size_log2)
-{
-    PICState *s = this;
-    s->elcr = val & s->elcr_mask;
-}
-
-uint32_t PICState::ElcrRead(uint32_t offset, int size_log2)
-{
-    PICState *s = this;
-    return s->elcr;
-}
-
-/* Implemented by the machine: raises or lowers the CPU's INTR line. */
-class CPUIRQTarget {
-public:
-    virtual ~CPUIRQTarget() = default;
-
-    virtual void SetCPUIRQ(int level) = 0;
-};
-
-struct PIC2State: public IRQTarget, public PICUpdateTarget {
-    std::unique_ptr<PICState> pics[2];
-    int irq_requested = 0;
-    CPUIRQTarget *cpu_irq_target = nullptr;
-#if defined(DEBUG_PIC)
-    uint8_t irq_level[16];
-#endif
-    IRQSignal *irqs = nullptr;
-
-    void SetIRQ(int irq, int level) override;
-    void UpdatePICIRQ() override;
-};
-
-std::unique_ptr<PIC2State> pic2_init(PhysMemoryMap *port_map, uint32_t addr0,
-                                     uint32_t addr1,
-                                     uint32_t elcr_addr0, uint32_t elcr_addr1,
-                                     CPUIRQTarget *cpu_irq_target,
-                                     IRQSignal *irqs)
-{
-    std::unique_ptr<PIC2State> s;
-    int i;
-    
-    s = std::make_unique<PIC2State>();
-
-    for(i = 0; i < 16; i++) {
-        irqs[i].Init(s.get(), i);
-    }
-    s->cpu_irq_target = cpu_irq_target;
-    s->pics[0] = pic_init(port_map, addr0, elcr_addr0, 0xf8, s.get());
-    s->pics[1] = pic_init(port_map, addr1, elcr_addr1, 0xde, s.get());
-    s->irq_requested = 0;
-    return s;
-}
-
-void pic2_set_elcr(PIC2State *s, const uint8_t *elcr)
-{
-    int i;
-    for(i = 0; i < 2; i++) {
-        s->pics[i]->elcr = elcr[i] & s->pics[i]->elcr_mask;
-    }
-}
-
-/* raise irq to CPU if necessary. must be called every time the active
-   irq may change */
-void PIC2State::UpdatePICIRQ()
-{
-    PIC2State *s = this;
-    int irq2, irq;
-
-    /* first look at slave pic */
-    irq2 = pic_get_irq(s->pics[1].get());
-    if (irq2 >= 0) {
-        /* if irq request by slave pic, signal master PIC */
-        pic_set_irq1(s->pics[0].get(), 2, 1);
-        pic_set_irq1(s->pics[0].get(), 2, 0);
-    }
-    /* look at requested irq */
-    irq = pic_get_irq(s->pics[0].get());
-#if 0
-    console.log("irr=" + toHex2(s->pics[0].irr) + " imr=" + toHex2(s->pics[0].imr) + " isr=" + toHex2(s->pics[0].isr) + " irq="+ irq);
-#endif
-    if (irq >= 0) {
-        /* raise IRQ request on the CPU */
-        s->cpu_irq_target->SetCPUIRQ(1);
-    } else {
-        /* lower irq */
-        s->cpu_irq_target->SetCPUIRQ(0);
-    }
-}
-
-void PIC2State::SetIRQ(int irq, int level)
-{
-    PIC2State *s = this;
-#if defined(DEBUG_PIC)
-    if (irq != 0 && level != s->irq_level[irq]) {
-        console.log("pic_set_irq: irq=" + irq + " level=" + level);
-        s->irq_level[irq] = level;
-    }
-#endif
-    pic_set_irq1(s->pics[irq >> 3].get(), irq & 7, level);
-    s->UpdatePICIRQ();
-}
-
-/* called from the CPU to get the hardware interrupt number */
-static int pic2_get_hard_intno(PIC2State *s)
-{
-    int irq, irq2, intno;
-
-    irq = pic_get_irq(s->pics[0].get());
-    if (irq >= 0) {
-        pic_intack(s->pics[0].get(), irq);
-        if (irq == 2) {
-            irq2 = pic_get_irq(s->pics[1].get());
-            if (irq2 >= 0) {
-                pic_intack(s->pics[1].get(), irq2);
-            } else {
-                /* spurious IRQ on slave controller */
-                irq2 = 7;
-            }
-            intno = s->pics[1]->irq_base + irq2;
-            irq = irq2 + 8;
-        } else {
-            intno = s->pics[0]->irq_base + irq;
-        }
-    } else {
-        /* spurious IRQ on host controller */
-        irq = 7;
-        intno = s->pics[0]->irq_base + irq;
-    }
-    s->UpdatePICIRQ();
-
-#if defined(DEBUG_PIC)
-    if (irq != 0 && irq != 14)
-        printf("pic_interrupt: irq=%d\n", irq);
-#endif
-    return intno;
 }
 
 /***********************************************************/
@@ -1108,7 +696,7 @@ public:
     /* the interpreter's processors, by APIC ID; cpu_state is the first */
     X86CPUState *cpu_state = nullptr;
     std::vector<X86CPUState *> fCpus;
-    std::unique_ptr<PIC2State> pic_state;
+    std::unique_ptr<I8259Pair> pic_state;
     IRQSignal pic_irq[16];
     std::unique_ptr<PITState> pit_state;
     std::unique_ptr<CMOSState> cmos_state;
@@ -1465,7 +1053,7 @@ int PCMachine::HardIntno()
         if (vector != LAPIC_EXTINT)
             return vector;
     }
-    return pic2_get_hard_intno(pic_state.get());
+    return pic_state->Acknowledge();
 }
 
 bool PCMachine::InterruptRequested()
@@ -1966,8 +1554,9 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     }
 
     if (!s->fHypervisorIrqchip) {
-        s->pic_state = pic2_init(s->port_map, 0x20, 0xa0,
-                                 0x4d0, 0x4d1, s, s->pic_irq);
+        s->pic_state = std::make_unique<I8259Pair>(s->port_map, 0x20, 0xa0,
+                                                   0x4d0, 0x4d1, *s,
+                                                   s->pic_irq);
         if (s->fLocalApic) {
             s->fIoApic = std::make_unique<IOAPIC>(*s, 0);
             s->mem_map->RegisterDevice(IOAPIC_ADDR, IOAPIC_SIZE,
@@ -2439,7 +2028,7 @@ static void map_pci_interrupts(PCMachine *s)
     i440fx_map_interrupts(s->i440fx_state, elcr, kKernelPciIrqs);
     /* XXX: hypervisor support */
     if (s->pic_state) {
-        pic2_set_elcr(s->pic_state.get(), elcr);
+        s->pic_state->SetElcr(elcr);
     }
 }
 
