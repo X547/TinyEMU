@@ -1073,6 +1073,142 @@ static void exec_group3(X86CPUState *s, Decoder &d, uint8_t b)
     }
 }
 
+/* The elements of a string operand at offset 'off' of segment 'seg', up to
+   'max', that the TLB maps for the access and that neither leave the page
+   nor wrap the offset, going down if 'down'. *ptr is the host address of
+   the first one. 0 if that one needs the slow path. */
+static uint64_t string_span(X86CPUState *s, int seg, uint64_t off,
+                            uint64_t amask, int size, bool down, bool write,
+                            uint64_t max, uint8_t **ptr)
+{
+    uint32_t bytes = size_bytes(size);
+    if (!get_bit(s->seg_fast[seg], write) || amask - off < bytes - 1) {
+        return 0;
+    }
+    uint64_t lin = s->segs[seg].base + off;
+    X86TLBEntry *e = tlb_entry(s, s->mmu_idx, lin);
+    if (!tlb_hit(write ? e->write : e->read, lin, size)) {
+        return 0;
+    }
+    uint32_t in_page = page_offset(lin);
+    uint64_t room = down ? std::min<uint64_t>(off, in_page) :
+        std::min<uint64_t>(amask - off - (bytes - 1),
+                           PAGE_SIZE - bytes - in_page);
+    *ptr = (uint8_t *)(e->addend + lin);
+    return std::min(room / bytes + 1, max);
+}
+
+/* Up to 'max' iterations of REP MOVS, STOS, CMPS or SCAS on host memory
+   at once, as far as the operands stay in pages the TLB maps. Returns how
+   many ran, 0 if the next one needs the slow path. */
+static uint64_t string_run(X86CPUState *s, const Decoder &d, int kind,
+                           int size, uint64_t amask, int src_seg, uint64_t max)
+{
+    int bytes = size_bytes(size);
+    bool down = get_bit(s->eflags, EFLAGS_DF);
+    uint8_t *src = nullptr, *dst;
+    uint64_t n = max;
+
+    if (kind == STR_MOVS || kind == STR_CMPS) {
+        n = string_span(s, src_seg, s->regs[REG_ESI] & amask, amask, size,
+                        down, false, n, &src);
+        if (n == 0) {
+            return 0;
+        }
+    }
+    n = string_span(s, SEG_ES, s->regs[REG_EDI] & amask, amask, size, down,
+                    kind == STR_MOVS || kind == STR_STOS, n, &dst);
+    if (n == 0) {
+        return 0;
+    }
+    /* from here on, the lowest address and the element in the order run */
+    uintptr_t len = n * bytes;
+    if (down) {
+        src = src != nullptr ? src - (len - bytes) : nullptr;
+        dst -= len - bytes;
+    }
+    auto at = [&](uint8_t *base, uint64_t i) {
+        return base + (down ? n - 1 - i : i) * bytes;
+    };
+    if (!HOST_ORDERS_LIKE_X86 && s->smp) {
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+    }
+    switch (kind) {
+    case STR_MOVS:
+        /* a destination just ahead of the source repeats the elements
+           copied first, as the copy of one element at a time does */
+        if ((uintptr_t)(down ? src - dst : dst - src) - 1 < len - 1) {
+            for (uint64_t i = 0; i < n; i++) {
+                host_store(at(dst, i), host_load(at(src, i), size), size);
+            }
+        } else {
+            memmove(dst, src, len);
+        }
+        break;
+    case STR_STOS: {
+        uint64_t val = reg_read(s, REG_EAX, size);
+        if (bytes == 1) {
+            memset(dst, val, len);
+            break;
+        }
+        uint8_t pattern[64];
+        for (int i = 0; i < (int)sizeof(pattern); i += bytes) {
+            host_store(pattern + i, val, size);
+        }
+        uintptr_t done = 0;
+        for (; len - done >= sizeof(pattern); done += sizeof(pattern)) {
+            memcpy(dst + done, pattern, sizeof(pattern));
+        }
+        memcpy(dst + done, pattern, len - done);
+        break;
+    }
+    case STR_SCAS: {
+        /* up to the element that ends the repeat, or the last */
+        uint64_t val = reg_read(s, REG_EAX, size), i = 0;
+        bool until_equal = d.rep == REP_NZ;
+        if (bytes == 1 && !down && until_equal) {
+            uint8_t *p = (uint8_t *)memchr(dst, val, len - 1);
+            i = p != nullptr ? p - dst : n - 1;
+        } else {
+            while (i < n - 1 &&
+                   (host_load(at(dst, i), size) == val) != until_equal) {
+                i++;
+            }
+        }
+        alu(s, ALU_CMP, val, host_load(at(dst, i), size), size);
+        n = i + 1;
+        break;
+    }
+    default: { /* STR_CMPS */
+        uint64_t i = 0;
+        bool until_equal = d.rep == REP_NZ;
+        if (!down && !until_equal && memcmp(src, dst, len) == 0) {
+            i = n - 1;
+        } else {
+            while (i < n - 1 &&
+                   (host_load(at(src, i), size) ==
+                    host_load(at(dst, i), size)) != until_equal) {
+                i++;
+            }
+        }
+        alu(s, ALU_CMP, host_load(at(src, i), size),
+            host_load(at(dst, i), size), size);
+        n = i + 1;
+        break;
+    }
+    }
+    if (!HOST_ORDERS_LIKE_X86 && s->smp) {
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+    }
+    int64_t delta = down ? -(int64_t)(n * bytes) : n * bytes;
+    if (kind == STR_MOVS || kind == STR_CMPS) {
+        reg_add_masked(s, REG_ESI, delta, amask);
+    }
+    reg_add_masked(s, REG_EDI, delta, amask);
+    reg_add_masked(s, REG_ECX, -(int64_t)n, amask);
+    return n;
+}
+
 static void exec_string(X86CPUState *s, Decoder &d, int kind, int size)
 {
     uint64_t amask = addr_mask(d);
@@ -1085,6 +1221,8 @@ static void exec_string(X86CPUState *s, Decoder &d, int kind, int size)
         kind == STR_LODS || kind == STR_OUTS;
     bool uses_dst = kind != STR_LODS && kind != STR_OUTS;
     bool writes_dst = kind == STR_MOVS || kind == STR_STOS || kind == STR_INS;
+    bool runs = rep && kind != STR_LODS && kind != STR_INS &&
+        kind != STR_OUTS;
 
     if (kind == STR_INS || kind == STR_OUTS) {
         /* ports are at most 32 bits wide, REX.W or not */
@@ -1096,13 +1234,26 @@ static void exec_string(X86CPUState *s, Decoder &d, int kind, int size)
     }
     for (int count = 0;; count++) {
         if (rep) {
-            if ((s->regs[REG_ECX] & amask) == 0) {
+            uint64_t left = s->regs[REG_ECX] & amask;
+            if (left == 0) {
                 break;
             }
-            if (count == STRING_BATCH) {
+            if (count >= STRING_BATCH) {
                 /* come back to it after looking at interrupts */
                 d.eip = s->rip;
                 break;
+            }
+            uint64_t n = runs ? string_run(s, d, kind, size, amask, src_seg,
+                                           std::min<uint64_t>(
+                                               left, STRING_BATCH - count)) :
+                0;
+            if (n != 0) {
+                if ((kind == STR_CMPS || kind == STR_SCAS) &&
+                    cc_zero(s) != (d.rep == REP_Z)) {
+                    break;
+                }
+                count += n - 1;
+                continue;
             }
         }
         uint64_t src = 0, dst = 0;
