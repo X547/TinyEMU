@@ -37,7 +37,7 @@
 #include "cutils.h"
 #include "device_lock.h"
 #include "host_memory.h"
-#include "host_x86_hypervisor.h"
+#include "hypervisor_memory_map.h"
 
 
 #define CPUID_APIC bit_at(9)
@@ -118,7 +118,7 @@ class WhpX86Hypervisor;
 /* One virtual processor. The 8259s raise INTR for processor 0 only, or the
    machine's local APIC for its own, and the vector goes in as a pending
    interruption before a run. */
-class WhpX86Vcpu final: public HostX86Vcpu {
+class WhpX86Vcpu final: public X86Vcpu {
 private:
     WhpX86Hypervisor &fOwner;
     WHV_PARTITION_HANDLE fPartition;
@@ -177,8 +177,8 @@ public:
                int index);
     ~WhpX86Vcpu() override;
 
-    void GetRegs(HostX86Regs *regs) override;
-    void SetRegs(const HostX86Regs &regs) override;
+    void GetRegs(X86Regs *regs) override;
+    void SetRegs(const X86Regs &regs) override;
     void SetFlatProtectedMode(uint32_t gdt_base, uint16_t gdt_limit,
                               uint16_t code_sel, uint16_t data_sel) override;
     void ThreadStarted() override {}
@@ -196,11 +196,11 @@ public:
    local APICs: the machine's IOAPIC and MSIs reach them through
    WHvRequestInterrupt(). Otherwise the machine has them, and a processor
    exits for their page and for a write to IA32_APIC_BASE. */
-class WhpX86Hypervisor final: public HostX86Hypervisor {
+class WhpX86Hypervisor final: public X86CpuBackend, public HostHypervisorRam {
 private:
     friend class WhpX86Vcpu;
 
-    X86HypervisorTarget &fTarget;
+    X86CpuTarget &fTarget;
     DeviceLock &fLock;
     /* the processors have local APICs */
     bool fLocalApic;
@@ -208,7 +208,7 @@ private:
     bool fApicEmulation;
     int fCpuCount;
     int fPhysAddressBits;
-    std::vector<HostX86CpuidLeaf> fCpuid;
+    std::vector<X86CpuidLeaf> fCpuid;
     /* the IA32_PAT processors start with, 0 for the hypervisor's */
     uint64_t fPat;
     WHV_PARTITION_HANDLE fPartition = nullptr;
@@ -219,10 +219,11 @@ private:
         uint64_t size;
     };
     std::vector<Slot> fSlots;
+    std::unique_ptr<HypervisorPhysMemoryMap> fMemoryMap;
 
 public:
-    WhpX86Hypervisor(X86HypervisorTarget &target, DeviceLock &lock,
-                     const HostX86Options &options):
+    WhpX86Hypervisor(X86CpuTarget &target, DeviceLock &lock,
+                     const X86CpuOptions &options):
         fTarget(target), fLock(lock), fLocalApic(options.local_apic),
         fApicEmulation(options.local_apic &&
                        options.hypervisor_interrupt_controllers),
@@ -237,6 +238,7 @@ public:
     bool HasInterruptControllers() override {return false;}
     bool HasLocalApics() override {return fApicEmulation;}
     int PhysAddressBits() override {return fPhysAddressBits;}
+    PhysMemoryMap &MemoryMap() override {return *fMemoryMap;}
     uint8_t *AllocRam(size_t size) override {return host_ram_alloc(size);}
     void FreeRam(uint8_t *ptr, size_t size) override
     {
@@ -247,12 +249,13 @@ public:
     void GetDirtyLog(int slot, uint32_t *bitmap) override;
     void SetIRQ(int irq, int level) override;
     void SendMsi(uint64_t addr, uint32_t data) override;
-    HostX86Vcpu &Vcpu(int index) override {return *fVcpus[index];}
+    X86Vcpu &Vcpu(int index) override {return *fVcpus[index];}
 };
 
 
 WhpX86Hypervisor::~WhpX86Hypervisor()
 {
+    fMemoryMap.reset();
     fVcpus.clear();
     if (fPartition != nullptr)
         WHvDeletePartition(fPartition);
@@ -324,7 +327,7 @@ bool WhpX86Hypervisor::Init()
             whp_fail("setting the MSR exit bitmap", hr);
     }
     std::vector<UINT32> cpuid_leaves = {1, 0x80000001, 0x80000008};
-    for (const HostX86CpuidLeaf &ent: fCpuid) {
+    for (const X86CpuidLeaf &ent: fCpuid) {
         if (std::find(cpuid_leaves.begin(), cpuid_leaves.end(), ent.leaf) ==
             cpuid_leaves.end()) {
             cpuid_leaves.push_back(ent.leaf);
@@ -352,6 +355,7 @@ bool WhpX86Hypervisor::Init()
 
     for (int i = 0; i < fCpuCount; i++)
         fVcpus.push_back(std::make_unique<WhpX86Vcpu>(*this, fPartition, i));
+    fMemoryMap = std::make_unique<HypervisorPhysMemoryMap>(*this);
     return true;
 }
 
@@ -510,7 +514,7 @@ void WhpX86Vcpu::SetVpRegisters(const WHV_REGISTER_NAME *names, UINT32 count,
 }
 
 
-void WhpX86Vcpu::GetRegs(HostX86Regs *regs)
+void WhpX86Vcpu::GetRegs(X86Regs *regs)
 {
     WHV_REGISTER_NAME names[10];
     WHV_REGISTER_VALUE values[10];
@@ -526,7 +530,7 @@ void WhpX86Vcpu::GetRegs(HostX86Regs *regs)
 }
 
 
-void WhpX86Vcpu::SetRegs(const HostX86Regs &regs)
+void WhpX86Vcpu::SetRegs(const X86Regs &regs)
 {
     WHV_REGISTER_NAME names[10];
     WHV_REGISTER_VALUE values[10] {};
@@ -584,7 +588,7 @@ HRESULT CALLBACK WhpX86Vcpu::IoPortCallback(
     void *context, WHV_EMULATOR_IO_ACCESS_INFO *io)
 {
     WhpX86Vcpu *v = static_cast<WhpX86Vcpu *>(context);
-    X86HypervisorTarget &target = v->fOwner.fTarget;
+    X86CpuTarget &target = v->fOwner.fTarget;
     int size_log2;
 
     switch (io->AccessSize) {
@@ -606,7 +610,7 @@ HRESULT CALLBACK WhpX86Vcpu::MemoryCallback(
     void *context, WHV_EMULATOR_MEMORY_ACCESS_INFO *mem)
 {
     WhpX86Vcpu *v = static_cast<WhpX86Vcpu *>(context);
-    X86HypervisorTarget &target = v->fOwner.fTarget;
+    X86CpuTarget &target = v->fOwner.fTarget;
 
     switch (mem->AccessSize) {
     case 1:
@@ -704,7 +708,7 @@ bool WhpX86Vcpu::AcceptsPicInterrupt()
    otherwise asks to exit once it can. False while it stays halted. */
 bool WhpX86Vcpu::InjectInterrupt()
 {
-    X86HypervisorTarget &target = fOwner.fTarget;
+    X86CpuTarget &target = fOwner.fTarget;
     WHV_REGISTER_NAME names[3];
     WHV_REGISTER_VALUE values[3] {};
     UINT32 count = 0;
@@ -761,7 +765,7 @@ void WhpX86Vcpu::ExitCpuid(const WHV_RUN_VP_EXIT_CONTEXT &ctx)
     values[2].Reg64 = c.DefaultResultRbx;
     values[3].Reg64 = c.DefaultResultRcx;
     values[4].Reg64 = c.DefaultResultRdx;
-    for (const HostX86CpuidLeaf &ent: fOwner.fCpuid) {
+    for (const X86CpuidLeaf &ent: fOwner.fCpuid) {
         if (ent.leaf != c.Rax)
             continue;
         for (int i = 0; i < 4; i++) {
@@ -798,7 +802,7 @@ void WhpX86Vcpu::ExitCpuid(const WHV_RUN_VP_EXIT_CONTEXT &ctx)
    then, since the hypervisor has no exit for it. */
 void WhpX86Vcpu::SyncApic()
 {
-    X86HypervisorTarget &target = fOwner.fTarget;
+    X86CpuTarget &target = fOwner.fTarget;
     WHV_REGISTER_NAME names[2];
     WHV_REGISTER_VALUE values[2] {};
     UINT32 count = 0;
@@ -873,7 +877,7 @@ void WhpX86Vcpu::ExitGeneralProtection(const WHV_RUN_VP_EXIT_CONTEXT &ctx)
 void WhpX86Vcpu::ExitMsr(const WHV_RUN_VP_EXIT_CONTEXT &ctx)
 {
     const WHV_X64_MSR_ACCESS_CONTEXT &m = ctx.MsrAccess;
-    X86HypervisorTarget &target = fOwner.fTarget;
+    X86CpuTarget &target = fOwner.fTarget;
     WHV_REGISTER_NAME names[2] = {WHvX64RegisterRip, WHvX64RegisterApicBase};
     WHV_REGISTER_VALUE values[2] {};
 
@@ -922,7 +926,7 @@ void WhpX86Vcpu::Startup(int vector)
 void WhpX86Vcpu::Run()
 {
     DeviceLock &lock = fOwner.fLock;
-    X86HypervisorTarget &target = fOwner.fTarget;
+    X86CpuTarget &target = fOwner.fTarget;
     WHV_RUN_VP_EXIT_CONTEXT ctx;
     WHV_EMULATOR_STATUS status;
     HRESULT hr;
@@ -1037,9 +1041,9 @@ void WhpX86Vcpu::InterruptRun()
 }
 
 
-std::unique_ptr<HostX86Hypervisor> host_x86_hypervisor_open(
-    X86HypervisorTarget &target, DeviceLock &lock,
-    const HostX86Options &options)
+std::unique_ptr<X86CpuBackend> host_x86_hypervisor_open(
+    X86CpuTarget &target, DeviceLock &lock,
+    const X86CpuOptions &options)
 {
     WHV_CAPABILITY cap;
     UINT32 size;

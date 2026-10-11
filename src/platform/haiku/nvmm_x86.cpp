@@ -41,7 +41,7 @@ extern "C" {
 #include "bits.h"
 #include "device_lock.h"
 #include "host_memory.h"
-#include "host_x86_hypervisor.h"
+#include "hypervisor_memory_map.h"
 
 
 #define CPUID_APIC bit_at(9)
@@ -91,7 +91,7 @@ struct NvmmVcpu {
    another processor at once; elsewhere the run goes on to its next exit.
    A signal that lands between the look at fKicked and the kernel entry is
    lost, and the run goes on to its next exit too. */
-class NvmmX86Vcpu final: public HostX86Vcpu {
+class NvmmX86Vcpu final: public X86Vcpu {
 private:
     NvmmX86Hypervisor &fOwner;
     struct nvmm_machine *fMach;
@@ -131,8 +131,8 @@ public:
                 int index);
     ~NvmmX86Vcpu() override;
 
-    void GetRegs(HostX86Regs *regs) override;
-    void SetRegs(const HostX86Regs &regs) override;
+    void GetRegs(X86Regs *regs) override;
+    void SetRegs(const X86Regs &regs) override;
     void SetFlatProtectedMode(uint32_t gdt_base, uint16_t gdt_limit,
                               uint16_t code_sel, uint16_t data_sel) override;
     void ThreadStarted() override;
@@ -146,11 +146,11 @@ public:
 
 /* The kernel has no interrupt controllers, so the machine keeps them all,
    the local APICs included. */
-class NvmmX86Hypervisor final: public HostX86Hypervisor {
+class NvmmX86Hypervisor final: public X86CpuBackend, public HostHypervisorRam {
 private:
     friend class NvmmX86Vcpu;
 
-    X86HypervisorTarget &fTarget;
+    X86CpuTarget &fTarget;
     DeviceLock &fLock;
     /* the machine has local APICs */
     bool fLocalApic;
@@ -158,7 +158,7 @@ private:
     bool fTprExits = false;
     int fCpuCount;
     int fPhysAddressBits;
-    std::vector<HostX86CpuidLeaf> fCpuid;
+    std::vector<X86CpuidLeaf> fCpuid;
     /* the IA32_PAT processors start with, 0 for the hypervisor's */
     uint64_t fPat;
     struct nvmm_machine fMach {};
@@ -171,10 +171,11 @@ private:
         uint8_t *host_mem;
     };
     std::vector<Slot> fSlots;
+    std::unique_ptr<HypervisorPhysMemoryMap> fMemoryMap;
 
 public:
-    NvmmX86Hypervisor(X86HypervisorTarget &target, DeviceLock &lock,
-                      const HostX86Options &options):
+    NvmmX86Hypervisor(X86CpuTarget &target, DeviceLock &lock,
+                      const X86CpuOptions &options):
         fTarget(target), fLock(lock), fLocalApic(options.local_apic),
         fCpuCount(options.cpu_count),
         fPhysAddressBits(std::min(host_phys_address_bits(),
@@ -187,6 +188,7 @@ public:
     bool HasInterruptControllers() override {return false;}
     bool HasLocalApics() override {return false;}
     int PhysAddressBits() override {return fPhysAddressBits;}
+    PhysMemoryMap &MemoryMap() override {return *fMemoryMap;}
     uint8_t *AllocRam(size_t size) override;
     void FreeRam(uint8_t *ptr, size_t size) override;
     void MapRam(int slot, uint64_t addr, uint64_t size, uint8_t *host_mem,
@@ -194,12 +196,13 @@ public:
     void GetDirtyLog(int slot, uint32_t *bitmap) override;
     void SetIRQ(int irq, int level) override;
     void SendMsi(uint64_t addr, uint32_t data) override;
-    HostX86Vcpu &Vcpu(int index) override {return *fVcpus[index];}
+    X86Vcpu &Vcpu(int index) override {return *fVcpus[index];}
 };
 
 
 NvmmX86Hypervisor::~NvmmX86Hypervisor()
 {
+    fMemoryMap.reset();
     fVcpus.clear();
     if (fMachCreated)
         nvmm_machine_destroy(&fMach);
@@ -236,6 +239,7 @@ bool NvmmX86Hypervisor::Init()
 
     for (int i = 0; i < fCpuCount; i++)
         fVcpus.push_back(std::make_unique<NvmmX86Vcpu>(*this, &fMach, i));
+    fMemoryMap = std::make_unique<HypervisorPhysMemoryMap>(*this);
 
     struct sigaction act;
     memset(&act, 0, sizeof(act));
@@ -296,7 +300,7 @@ NvmmX86Vcpu::NvmmX86Vcpu(NvmmX86Hypervisor &owner, struct nvmm_machine *mach,
         leaves.push_back(c);
         return leaves.back();
     };
-    for (const HostX86CpuidLeaf &ent: owner.fCpuid) {
+    for (const X86CpuidLeaf &ent: owner.fCpuid) {
         struct nvmm_vcpu_conf_cpuid &c = leaf_conf(ent.leaf);
         c.u.mask.del.eax = ~ent.host_mask[0];
         c.u.mask.del.ebx = ~ent.host_mask[1];
@@ -457,7 +461,7 @@ void NvmmX86Hypervisor::SendMsi(uint64_t addr, uint32_t data)
 }
 
 
-void NvmmX86Vcpu::GetRegs(HostX86Regs *regs)
+void NvmmX86Vcpu::GetRegs(X86Regs *regs)
 {
     struct nvmm_x64_state *state = fVcpu.vcpu.state;
 
@@ -470,7 +474,7 @@ void NvmmX86Vcpu::GetRegs(HostX86Regs *regs)
 }
 
 
-void NvmmX86Vcpu::SetRegs(const HostX86Regs &regs)
+void NvmmX86Vcpu::SetRegs(const X86Regs &regs)
 {
     struct nvmm_x64_state *state = fVcpu.vcpu.state;
 
@@ -533,7 +537,7 @@ void NvmmX86Vcpu::SetFlatProtectedMode(uint32_t gdt_base,
 void NvmmX86Vcpu::IoCallback(struct nvmm_io *io)
 {
     NvmmVcpu *v = reinterpret_cast<NvmmVcpu *>(io->vcpu);
-    X86HypervisorTarget &target = v->owner->fOwner.fTarget;
+    X86CpuTarget &target = v->owner->fOwner.fTarget;
     int size_log2;
 
     switch (io->size) {
@@ -556,7 +560,7 @@ void NvmmX86Vcpu::IoCallback(struct nvmm_io *io)
 void NvmmX86Vcpu::MemCallback(struct nvmm_mem *mem)
 {
     NvmmVcpu *v = reinterpret_cast<NvmmVcpu *>(mem->vcpu);
-    X86HypervisorTarget &target = v->owner->fOwner.fTarget;
+    X86CpuTarget &target = v->owner->fOwner.fTarget;
 
     switch (mem->size) {
     case 1:
@@ -605,7 +609,7 @@ void NvmmX86Vcpu::SyncTaskPriority()
 bool NvmmX86Vcpu::InjectInterrupt()
 {
     struct nvmm_vcpu *vcpu = &fVcpu.vcpu;
-    X86HypervisorTarget &target = fOwner.fTarget;
+    X86CpuTarget &target = fOwner.fTarget;
     bool intr = target.InterruptRequested();
 
     if (intr && !fEventPending && !fInterruptShadow &&
@@ -652,7 +656,7 @@ void NvmmX86Vcpu::InjectException(int vector)
 void NvmmX86Vcpu::ExitMsr(const struct nvmm_vcpu_exit *ctx)
 {
     struct nvmm_x64_state *state = fVcpu.vcpu.state;
-    X86HypervisorTarget &target = fOwner.fTarget;
+    X86CpuTarget &target = fOwner.fTarget;
     bool apic = fOwner.fLocalApic;
 
     if (nvmm_vcpu_getstate(fMach, &fVcpu.vcpu, NVMM_X64_STATE_GPRS) == -1)
@@ -840,9 +844,9 @@ bool NvmmX86Vcpu::Idle(bool intr)
 }
 
 
-std::unique_ptr<HostX86Hypervisor> host_x86_hypervisor_open(
-    X86HypervisorTarget &target, DeviceLock &lock,
-    const HostX86Options &options)
+std::unique_ptr<X86CpuBackend> host_x86_hypervisor_open(
+    X86CpuTarget &target, DeviceLock &lock,
+    const X86CpuOptions &options)
 {
     if (nvmm_init() == -1) {
         fprintf(stderr, "NVMM not available: %s\n", strerror(errno));

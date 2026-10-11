@@ -64,11 +64,14 @@ else
   platform_sources += files('common/no_tap_ethernet.cpp')
 endif
 if platform_os == 'linux' and host_machine.cpu_family() in ['x86', 'x86_64']
-  platform_sources += files('linux/kvm_x86.cpp')
+  platform_sources += files('linux/kvm_x86.cpp',
+                            'common/hypervisor_memory_map.cpp')
 elif whp_enabled
-  platform_sources += files('win32/whp_x86.cpp')
+  platform_sources += files('win32/whp_x86.cpp',
+                            'common/hypervisor_memory_map.cpp')
 elif nvmm_enabled
-  platform_sources += files('haiku/nvmm_x86.cpp')
+  platform_sources += files('haiku/nvmm_x86.cpp',
+                            'common/hypervisor_memory_map.cpp')
 else
   platform_sources += files('common/no_x86_hypervisor.cpp')
 endif

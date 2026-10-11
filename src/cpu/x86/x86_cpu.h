@@ -25,7 +25,7 @@
 
 #include <vector>
 
-#include "host_x86_hypervisor.h"
+#include "x86_vcpu.h"
 #include "iomem.h"
 
 typedef struct X86CPUState X86CPUState;
@@ -77,7 +77,7 @@ uint32_t x86_cpu_get_reg(X86CPUState *s, int reg);
 void x86_cpu_set_seg(X86CPUState *s, int seg, const X86CPUSeg *sd);
 /* This processor's CPUID, for a hypervisor to show in place of the host's:
    its features where the host has them too. */
-std::vector<HostX86CpuidLeaf> x86_cpu_hypervisor_cpuid();
+std::vector<X86CpuidLeaf> x86_cpu_hypervisor_cpuid();
 /* Implemented by the machine, which owns the interrupt controller. */
 class X86HardIntnoSource {
 public:

@@ -44,7 +44,7 @@
 #include "bits.h"
 #include "device_lock.h"
 #include "host_memory.h"
-#include "host_x86_hypervisor.h"
+#include "hypervisor_memory_map.h"
 
 
 #define CPUID_APIC bit_at(9)
@@ -61,7 +61,7 @@ class KvmX86Hypervisor;
    access for the target or InterruptRun(). Without the in-kernel interrupt
    controllers, HLT comes back here and the machine's interrupts go in
    before a run. */
-class KvmX86Vcpu final: public HostX86Vcpu {
+class KvmX86Vcpu final: public X86Vcpu {
 private:
     KvmX86Hypervisor &fOwner;
     int fFd = -1;
@@ -97,8 +97,8 @@ public:
     KvmX86Vcpu(KvmX86Hypervisor &owner, int index);
     ~KvmX86Vcpu() override;
 
-    void GetRegs(HostX86Regs *regs) override;
-    void SetRegs(const HostX86Regs &regs) override;
+    void GetRegs(X86Regs *regs) override;
+    void SetRegs(const X86Regs &regs) override;
     void SetFlatProtectedMode(uint32_t gdt_base, uint16_t gdt_limit,
                               uint16_t code_sel, uint16_t data_sel) override;
     void ThreadStarted() override;
@@ -115,11 +115,11 @@ public:
 /* The VM keeps the 8259s, the 8254, the IOAPIC and the local APICs in the
    kernel, which has them only as a set; or, when not allowed them, none,
    leaving them all to the machine. */
-class KvmX86Hypervisor final: public HostX86Hypervisor {
+class KvmX86Hypervisor final: public X86CpuBackend, public HostHypervisorRam {
 private:
     friend class KvmX86Vcpu;
 
-    X86HypervisorTarget &fTarget;
+    X86CpuTarget &fTarget;
     DeviceLock &fLock;
     /* the local APIC is shown to the guest */
     bool fLocalApic;
@@ -128,18 +128,19 @@ private:
     int fCpuCount;
     int fMaxPhysAddressBits;
     int fPhysAddressBits = 36;
-    std::vector<HostX86CpuidLeaf> fCpuid;
+    std::vector<X86CpuidLeaf> fCpuid;
     /* the IA32_PAT processors start with, 0 for the hypervisor's */
     uint64_t fPat;
     int fKvmFd;
     int fVmFd = -1;
     std::vector<std::unique_ptr<KvmX86Vcpu>> fVcpus;
+    std::unique_ptr<HypervisorPhysMemoryMap> fMemoryMap;
 
     void SetGsiRouting();
 
 public:
-    KvmX86Hypervisor(X86HypervisorTarget &target, DeviceLock &lock,
-                     const HostX86Options &options, int kvm_fd):
+    KvmX86Hypervisor(X86CpuTarget &target, DeviceLock &lock,
+                     const X86CpuOptions &options, int kvm_fd):
         fTarget(target), fLock(lock), fLocalApic(options.local_apic),
         fIrqchip(options.hypervisor_interrupt_controllers),
         fCpuCount(options.cpu_count),
@@ -152,6 +153,7 @@ public:
     bool HasInterruptControllers() override {return fIrqchip;}
     bool HasLocalApics() override {return fIrqchip;}
     int PhysAddressBits() override {return fPhysAddressBits;}
+    PhysMemoryMap &MemoryMap() override {return *fMemoryMap;}
     uint8_t *AllocRam(size_t size) override {return host_ram_alloc(size);}
     void FreeRam(uint8_t *ptr, size_t size) override
     {
@@ -162,7 +164,7 @@ public:
     void GetDirtyLog(int slot, uint32_t *bitmap) override;
     void SetIRQ(int irq, int level) override;
     void SendMsi(uint64_t addr, uint32_t data) override;
-    HostX86Vcpu &Vcpu(int index) override {return *fVcpus[index];}
+    X86Vcpu &Vcpu(int index) override {return *fVcpus[index];}
 };
 
 
@@ -192,6 +194,7 @@ static struct kvm_cpuid2 *kvm_supported_cpuid(int kvm_fd)
 
 KvmX86Hypervisor::~KvmX86Hypervisor()
 {
+    fMemoryMap.reset();
     fVcpus.clear();
     if (fVmFd >= 0)
         close(fVmFd);
@@ -288,6 +291,7 @@ void KvmX86Hypervisor::Init()
 
     for (int i = 0; i < fCpuCount; i++)
         fVcpus.push_back(std::make_unique<KvmX86Vcpu>(*this, i));
+    fMemoryMap = std::make_unique<HypervisorPhysMemoryMap>(*this);
 
     act.sa_handler = sigalrm_handler;
     sigemptyset(&act.sa_mask);
@@ -450,7 +454,7 @@ void KvmX86Vcpu::SetCpuid(int index)
             if (ent->function >= 0x40000000 && ent->function < 0x50000000)
                 ents.push_back(*ent);
         }
-        for (const HostX86CpuidLeaf &leaf: fOwner.fCpuid) {
+        for (const X86CpuidLeaf &leaf: fOwner.fCpuid) {
             struct kvm_cpuid_entry2 e {};
             e.function = leaf.leaf;
             for (i = 0; i < kvm_cpuid->nent; i++) {
@@ -520,7 +524,7 @@ void KvmX86Vcpu::SetCpuid(int index)
 }
 
 
-void KvmX86Vcpu::GetRegs(HostX86Regs *regs)
+void KvmX86Vcpu::GetRegs(X86Regs *regs)
 {
     struct kvm_regs r;
 
@@ -541,7 +545,7 @@ void KvmX86Vcpu::GetRegs(HostX86Regs *regs)
 }
 
 
-void KvmX86Vcpu::SetRegs(const HostX86Regs &regs)
+void KvmX86Vcpu::SetRegs(const X86Regs &regs)
 {
     struct kvm_regs r;
 
@@ -633,7 +637,7 @@ void KvmX86Vcpu::ThreadStarted()
 
 void KvmX86Vcpu::ExitIo()
 {
-    X86HypervisorTarget &target = fOwner.fTarget;
+    X86CpuTarget &target = fOwner.fTarget;
     struct kvm_run *run = fRun;
     uint8_t *ptr;
     int i;
@@ -677,7 +681,7 @@ void KvmX86Vcpu::ExitIo()
 
 void KvmX86Vcpu::ExitMmio()
 {
-    X86HypervisorTarget &target = fOwner.fTarget;
+    X86CpuTarget &target = fOwner.fTarget;
     struct kvm_run *run = fRun;
 
     if (run->mmio.is_write) {
@@ -695,7 +699,7 @@ void KvmX86Vcpu::ExitMmio()
    halted. */
 bool KvmX86Vcpu::InjectInterrupt()
 {
-    X86HypervisorTarget &target = fOwner.fTarget;
+    X86CpuTarget &target = fOwner.fTarget;
     struct kvm_run *run = fRun;
 
     if (fOwner.fLocalApic) {
@@ -731,7 +735,7 @@ bool KvmX86Vcpu::InjectInterrupt()
    its page where it is whatever the base says. */
 void KvmX86Vcpu::ExitApicState()
 {
-    X86HypervisorTarget &target = fOwner.fTarget;
+    X86CpuTarget &target = fOwner.fTarget;
     struct kvm_run *run = fRun;
 
     if ((int)run->cr8 == fTaskPriority && run->apic_base == fApicBase)
@@ -866,9 +870,9 @@ void KvmX86Vcpu::InterruptRun()
 }
 
 
-std::unique_ptr<HostX86Hypervisor> host_x86_hypervisor_open(
-    X86HypervisorTarget &target, DeviceLock &lock,
-    const HostX86Options &options)
+std::unique_ptr<X86CpuBackend> host_x86_hypervisor_open(
+    X86CpuTarget &target, DeviceLock &lock,
+    const X86CpuOptions &options)
 {
     int kvm_fd, ret;
 

@@ -63,26 +63,6 @@
 
 class PCMachine;
 
-/* With a hypervisor the host reads guest RAM directly and keeps the dirty
-   log, so the memory map tells it about each mapping instead of managing
-   them itself. */
-class HypervisorPhysMemoryMap final: public PhysMemoryMap {
-private:
-    HostX86Hypervisor &fHypervisor;
-
-    void MapRam(PhysMemoryRange *pr);
-
-public:
-    HypervisorPhysMemoryMap(HostX86Hypervisor &hypervisor):
-        fHypervisor(hypervisor) {}
-    ~HypervisorPhysMemoryMap() override;
-
-    PhysMemoryRange *RegisterRam(uint64_t addr, uint64_t size,
-                                 int devram_flags) override;
-    const uint32_t *GetDirtyBits(PhysMemoryRange *pr) override;
-    void SetRamAddr(PhysMemoryRange *pr, uint64_t addr, bool enabled) override;
-};
-
 /* With a hypervisor the interrupt controller is the host's, so device IRQs go
    straight there rather than through the emulated 8259s. */
 class HypervisorIRQTarget final: public IRQTarget {
@@ -113,15 +93,21 @@ class PCMachine final:
     public CPUIRQTarget,
     public X86HardIntnoSource,
     public X86TscSource,
-    public X86HypervisorTarget,
+    public X86CpuTarget,
     public X86ShutdownTarget,
     public PCIMsiTarget,
     public LocalApicHost,
     public X86LocalApicTarget {
 public:
+    /* runs the processor instead of the interpreter when the host has one;
+       it goes last, after everything that uses its memory map */
+    std::unique_ptr<X86CpuBackend> hypervisor;
+    /* the interpreter's memory map */
+    std::unique_ptr<PhysMemoryMap> fInterpMemoryMap;
     /* RAM from 0 up to the PCI hole, and the rest from 4 GB */
     uint64_t fLowRamSize;
     uint64_t fHighRamSize;
+    /* the processors' */
     PhysMemoryMap *mem_map;
     PhysMemoryMap *port_map;
     
@@ -143,8 +129,6 @@ public:
     VMPortTarget *vmport = nullptr;
     uint64_t fb_base = 0;
 
-    /* runs the processor instead of the interpreter when the host has one */
-    std::unique_ptr<HostX86Hypervisor> hypervisor;
     /* the processors have local APICs, and MSIs go to them */
     bool fLocalApic = false;
     /* the hypervisor has the 8259s and the 8254 rather than the machine */
@@ -206,7 +190,7 @@ public:
     void VmPortWrite(uint32_t addr, uint32_t val, int size_log2);
     uint32_t BiosDebugRead(uint32_t offset, int size_log2);
     void BiosDebugWrite(uint32_t offset, uint32_t val, int size_log2);
-    /* X86HypervisorTarget; the interpreter reaches the port map through
+    /* X86CpuTarget; the interpreter reaches the port map through
        fPortIo too, and the local APIC methods below serve both */
     uint32_t PortRead(uint32_t port, int size_log2) override;
     void PortWrite(uint32_t port, uint32_t val, int size_log2) override;
@@ -361,8 +345,8 @@ uint32_t PCMachine::VmPortRead(uint32_t addr, int size_log2)
     uint32_t regs[6];
 
     if (s->hypervisor) {
-        HostX86Vcpu &vcpu = s->hypervisor->Vcpu(sCurrentVcpu);
-        HostX86Regs r;
+        X86Vcpu &vcpu = s->hypervisor->Vcpu(sCurrentVcpu);
+        X86Regs r;
 
         vcpu.GetRegs(&r);
         regs[REG_EAX] = r.gpr[0];
@@ -578,96 +562,6 @@ uint32_t PCMachine::PortRead(uint32_t port, int size_log2)
     return val;
 }
 
-/* XXX: should check overlapping mappings */
-void HypervisorPhysMemoryMap::MapRam(PhysMemoryRange *pr)
-{
-    fHypervisor.MapRam(IndexOfRange(pr), pr->addr, pr->size, pr->phys_mem,
-                       (pr->devram_flags & DEVRAM_FLAG_ROM) != 0,
-                       (pr->devram_flags & DEVRAM_FLAG_DIRTY_BITS) != 0);
-}
-
-/* The base destructor cannot reach FreeRam() here, so the memory goes back
-   to the hypervisor first. */
-HypervisorPhysMemoryMap::~HypervisorPhysMemoryMap()
-{
-    for (int i = 0; i < RangeCount(); i++) {
-        PhysMemoryRange *pr = RangeAt(i);
-        if (pr->is_ram && pr->phys_mem != nullptr) {
-            fHypervisor.FreeRam(pr->phys_mem, pr->org_size);
-            pr->phys_mem = nullptr;
-        }
-    }
-}
-
-PhysMemoryRange *HypervisorPhysMemoryMap::RegisterRam(uint64_t addr,
-                                                      uint64_t size,
-                                                      int devram_flags)
-{
-    PhysMemoryRange *pr;
-
-    pr = RegisterRamEntry(addr, size, devram_flags);
-
-    pr->phys_mem = fHypervisor.AllocRam(size);
-    if (pr->phys_mem == nullptr) {
-        fprintf(stderr, "Could not allocate VM memory\n");
-        exit(1);
-    }
-    if (devram_flags & DEVRAM_FLAG_DIRTY_BITS) {
-        /* The hypervisor fills whole 64 bit words of the second bitmap with
-           what the guest wrote; the first holds what devices wrote. */
-        int n_pages = size >> DEVRAM_PAGE_SIZE_LOG2;
-        pr->dirty_bits_size = ((n_pages + 63) / 64) * 8;
-        for (int i = 0; i < 2; i++) {
-            pr->dirty_bits_tab[i] = std::make_unique<uint32_t[]>(
-                pr->dirty_bits_size / sizeof(uint32_t));
-        }
-        pr->dirty_bits = pr->dirty_bits_tab[0].get();
-    }
-
-    if (pr->size != 0) {
-        MapRam(pr);
-    }
-    return pr;
-}
-
-void HypervisorPhysMemoryMap::SetRamAddr(PhysMemoryRange *pr, uint64_t addr,
-                                         bool enabled)
-{
-    if (enabled) {
-        if (pr->size == 0 || addr != pr->addr) {
-            /* move or create the region */
-            pr->size = pr->org_size;
-            pr->addr = addr;
-            MapRam(pr);
-        }
-    } else {
-        if (pr->size != 0) {
-            pr->addr = 0;
-            pr->size = 0;
-            /* map a zero size region to disable */
-            MapRam(pr);
-        }
-    }
-}
-
-/* The pages the guest wrote, from the hypervisor's log, and those devices
-   wrote, such as a 2D engine drawing into video memory. */
-const uint32_t *HypervisorPhysMemoryMap::GetDirtyBits(PhysMemoryRange *pr)
-{
-    uint32_t *log = pr->dirty_bits_tab[1].get();
-
-    if (pr->size == 0) {
-        /* not mapped: the guest wrote nothing */
-        memset(log, 0, pr->dirty_bits_size);
-    } else {
-        fHypervisor.GetDirtyLog(IndexOfRange(pr), log);
-    }
-    size_t n = pr->dirty_bits_size / sizeof(uint32_t);
-    for (size_t i = 0; i < n; i++)
-        log[i] |= __atomic_exchange_n(&pr->dirty_bits[i], 0, __ATOMIC_ACQ_REL);
-    return log;
-}
-
 void HypervisorIRQTarget::SetIRQ(int irq_num, int level)
 {
     fMachine.hypervisor->SetIRQ(irq_num, level);
@@ -847,7 +741,7 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
         vm_error("unsupported machine: %s\n", p->machine_name);
         return nullptr;
     }
-    HostX86Options options;
+    X86CpuOptions options;
     if (p->interrupt_controller == nullptr ||
         strcmp(p->interrupt_controller, "pic") == 0) {
         options.local_apic = false;
@@ -922,7 +816,7 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     }
 
     if (s->hypervisor) {
-        s->mem_map = new HypervisorPhysMemoryMap(*s->hypervisor);
+        s->mem_map = &s->hypervisor->MemoryMap();
         s->fHypervisorIrqchip = s->hypervisor->HasInterruptControllers();
         if (s->fHypervisorIrqchip) {
             for (int i = 0; i < 16; i++) {
@@ -930,7 +824,8 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
             }
         }
     } else {
-        s->mem_map = new PhysMemoryMap();
+        s->fInterpMemoryMap = std::make_unique<PhysMemoryMap>();
+        s->mem_map = s->fInterpMemoryMap.get();
         for (int i = 0; i < s->fCpuCount; i++) {
             X86CPUState *cpu = x86_cpu_init(s->mem_map);
             x86_cpu_set_tsc_source(cpu, s);
@@ -1146,7 +1041,6 @@ PCMachine::~PCMachine()
     for (X86CPUState *cpu : s->fCpus)
         x86_cpu_end(cpu);
     delete s->bus;
-    delete s->mem_map;
     delete s->port_map;
 }
 
@@ -1415,8 +1309,8 @@ static void start_flat_protected_mode(PCMachine *s, uint32_t gdt_addr,
     uint16_t gdt_limit = BOOT_GDT_ENTRIES * 8 - 1;
 
     if (s->hypervisor) {
-        HostX86Vcpu &vcpu = s->hypervisor->Vcpu(0);
-        HostX86Regs regs;
+        X86Vcpu &vcpu = s->hypervisor->Vcpu(0);
+        X86Regs regs;
 
         vcpu.SetFlatProtectedMode(gdt_addr, gdt_limit, 2 << 3, 3 << 3);
 
@@ -1793,7 +1687,7 @@ bool PCMachine::TakeCpuStart(int index, Reset reset, Startup startup)
 
 void PCMachine::VcpuThread(int index)
 {
-    HostX86Vcpu &vcpu = hypervisor->Vcpu(index);
+    X86Vcpu &vcpu = hypervisor->Vcpu(index);
 
     name_cpu_thread(index);
     sCurrentVcpu = index;

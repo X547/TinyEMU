@@ -23,9 +23,9 @@
 
 
 /* The interpreter is the normal case here, so this is silent. */
-std::unique_ptr<HostX86Hypervisor> host_x86_hypervisor_open(
-    X86HypervisorTarget &target, DeviceLock &lock,
-    const HostX86Options &options)
+std::unique_ptr<X86CpuBackend> host_x86_hypervisor_open(
+    X86CpuTarget &target, DeviceLock &lock,
+    const X86CpuOptions &options)
 {
     (void)target;
     (void)lock;

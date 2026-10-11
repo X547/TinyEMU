@@ -1125,16 +1125,16 @@ void cpu_cpuid(X86CPUState *s)
     s->regs[REG_EDX] = regs[3];
 }
 
-std::vector<HostX86CpuidLeaf> x86_cpu_hypervisor_cpuid()
+std::vector<X86CpuidLeaf> x86_cpu_hypervisor_cpuid()
 {
     static const uint32_t leaves[] = {
         0, 1, 0x80000000, 0x80000001, 0x80000002, 0x80000003, 0x80000004,
         0x80000008,
     };
-    std::vector<HostX86CpuidLeaf> table;
+    std::vector<X86CpuidLeaf> table;
 
     for (uint32_t leaf: leaves) {
-        HostX86CpuidLeaf ent {};
+        X86CpuidLeaf ent {};
         ent.leaf = leaf;
         cpuid_model(leaf, ent.value);
         switch (leaf) {
