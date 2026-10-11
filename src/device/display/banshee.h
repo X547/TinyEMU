@@ -53,6 +53,11 @@
 #define BANSHEE_REG_3D_END   0x600000
 #define REG3D_STATUS         0x000
 #define REG3D_INTRCTRL       0x004
+/* The 3D registers the video overlay is flipped through: the next buffer is
+   written to leftOverlayBuf and shown once a swap command is executed. */
+#define REG3D_SWAPBUFFERCMD  0x128
+#define REG3D_SWAPPEND       0x24c
+#define REG3D_LEFTOVERLAYBUF 0x250
 
 /* Video memory a card was populated with, in megabytes. */
 #define BANSHEE_DEFAULT_VRAM_MB 16
@@ -94,8 +99,15 @@
 #define IO_VIDCHROMAMAX   0x90
 #define IO_VIDCURRENTLINE 0x94
 #define IO_VIDSCREENSIZE  0x98
+#define IO_VIDOVERLAYSTARTCOORDS 0x9c
+#define IO_VIDOVERLAYENDSCREENCOORD 0xa0
+#define IO_VIDOVERLAYDUDX 0xa4
+#define IO_VIDOVERLAYDUDXOFFSETSRCWIDTH 0xa8
+#define IO_VIDOVERLAYDVDY 0xac
+#define IO_VIDOVERLAYDVDYOFFSET 0xe0
 #define IO_VIDDESKTOPSTARTADDR 0xe4
 #define IO_VIDDESKTOPOVERLAYSTRIDE 0xe8
+#define IO_VIDINADDR0     0xec
 #define IO_REG_COUNT      (BANSHEE_IO_BAR_SIZE / 4)
 
 /* dramInit0 as the video BIOS leaves it, which is where a driver reads how
@@ -142,10 +154,19 @@
 #define VIDPROCCFG_ENABLE        bit_at(0) /* 0 leaves the VGA core showing */
 #define VIDPROCCFG_CURSOR_X11    bit_at(1)
 #define VIDPROCCFG_HALF_MODE     bit_at(4)
+#define VIDPROCCFG_CHROMA_EN     bit_at(5)
+#define VIDPROCCFG_CHROMA_INVERT bit_at(6)
 #define VIDPROCCFG_DESKTOP_EN    bit_at(7)
 #define VIDPROCCFG_OVERLAY_EN    bit_at(8)
+/* The overlay is shown from vidInAddr0 rather than from the buffer the last
+   swap command chose. */
+#define VIDPROCCFG_OVERLAY_VIDEOIN bit_at(9)
 #define VIDPROCCFG_CLUT_BYPASS   bit_at(10)
+#define VIDPROCCFG_OVERLAY_HSCALE bit_at(14)
+#define VIDPROCCFG_OVERLAY_VSCALE bit_at(15)
+#define VIDPROCCFG_OVERLAY_FILTER_SHIFT 16 /* two bits; 3 is bilinear */
 #define VIDPROCCFG_DESKTOP_FORMAT_SHIFT 18 /* three bits */
+#define VIDPROCCFG_OVERLAY_FORMAT_SHIFT 21 /* three bits */
 #define VIDPROCCFG_2X_MODE       bit_at(26)
 #define VIDPROCCFG_CURSOR_EN     bit_at(27)
 
@@ -155,17 +176,28 @@
 #define VIDPROC_FORMAT_RGB24  2
 #define VIDPROC_FORMAT_RGB32  3
 
+/* Overlay pixel formats. YUV411 is not drawn. */
+#define OVERLAY_FORMAT_RGB565        1
+#define OVERLAY_FORMAT_YUV411        4
+#define OVERLAY_FORMAT_YUYV          5
+#define OVERLAY_FORMAT_UYVY          6
+#define OVERLAY_FORMAT_RGB565_DITHER 7
+#define OVERLAY_FILTER_BILINEAR      3
+
+/* The overlay scaler's steps and offsets: 0.20 and 0.19 fixed point. */
+#define OVERLAY_STEP_BITS   20
+#define OVERLAY_OFFSET_BITS 19
+
 /* The hardware cursor is always this, and its patterns are two bitmaps
    interleaved a line at a time in a 16 byte stride. */
 #define BANSHEE_CURSOR_SIZE   64
 #define BANSHEE_CURSOR_STRIDE 16
 
 /* The command transfer and AGP block, as byte offsets into the block at
-   BANSHEE_REG_CMD_BASE. Nothing here transfers anything: no command FIFO is
-   fetched from and no AGP move is performed, because the 2D engine draws as
-   its registers are written. The registers are held so that the setup a
-   driver performs reads back as it left it, which is how one checks it is
-   talking to the part it thinks it is. */
+   BANSHEE_REG_CMD_BASE. The two command FIFOs are fetched from when they
+   live in video memory; no AGP move is performed. The registers are held so
+   that the setup a driver performs reads back as it left it, which is how
+   one checks it is talking to the part it thinks it is. */
 #define CMD_REG_SIZE  0x200
 #define CMD_REG_COUNT (CMD_REG_SIZE / 4)
 #define CMD_AGPREQSIZE        0x000
@@ -192,6 +224,31 @@
 #define CMD_HOLEINT       0x084
 #define CMD_YUVBASEADDRESS 0x100
 #define CMD_YUVSTRIDE      0x104
+#define CMD_FIFO_COUNT    2
+
+/* cmdBaseSize: the size in 4 KB pages less one, and where the FIFO lives. */
+#define CMD_BASESIZE_PAGES_BITS 8
+#define CMD_BASESIZE_ENABLE     bit_at(8)
+#define CMD_BASESIZE_AGP        bit_at(9)
+#define CMD_BASESIZE_NO_HOLES   bit_at(10) /* the driver bumps the depth */
+
+/* CMDFIFO packet headers. Bits 2:0 are the type. */
+#define CMDFIFO_TYPE_BITS     3
+#define CMDFIFO_REG_SHIFT     3  /* types 1 and 4: twelve bits */
+#define CMDFIFO_REG_2D        bit_at(11) /* within the register field */
+#define CMDFIFO_REG_NUM_BITS  8
+#define CMDFIFO_T0_FUNC_SHIFT 3  /* three bits */
+#define CMDFIFO_T0_ADDR_SHIFT 6  /* address bits 24:2 */
+#define CMDFIFO_T0_ADDR_BITS  23
+#define CMDFIFO_T0_NOP        0
+#define CMDFIFO_T0_JMP_LOCAL  3
+#define CMDFIFO_T1_INC        bit_at(15)
+#define CMDFIFO_T1_COUNT_SHIFT 16
+#define CMDFIFO_T2_BASE       BLT_CLIP0MIN /* the first register of type 2 */
+#define CMDFIFO_T2_MASK_BITS  29
+#define CMDFIFO_T4_MASK_SHIFT 15 /* fourteen bits */
+#define CMDFIFO_T4_MASK_BITS  14
+#define CMDFIFO_T4_PAD_SHIFT  29 /* three bits */
 
 /* The 2D register file, as dword indices into the block at
    BANSHEE_REG_2D_BASE. */
@@ -325,9 +382,29 @@ struct BltOp {
 };
 
 
+/* The video overlay as the registers describe it for one refresh. Every
+   field is an int so that two of them compare with memcmp. */
+struct OverlayState {
+    int on = 0;
+    int format = 0;
+    int bilinear = 0;
+    int addr = 0;
+    int stride = 0;
+    int src_width = 0;   /* pixels the scaler may fetch from a line */
+    int x0 = 0, y0 = 0;  /* the window on the screen, inclusive, clipped */
+    int x1 = 0, y1 = 0;
+    int dudx = 0, dvdy = 0; /* 0.20 */
+    int u0 = 0, v0 = 0;     /* 0.20 */
+    int chroma = 0;
+    int chroma_invert = 0;
+    int key_min = 0, key_max = 0;
+};
+
+
 /* A 3dfx Voodoo Banshee, modelled from the register level down to what a
- * driver can observe: the video processor that scans the desktop surface out
- * of video memory, the 2D drawing engine, and the hardware cursor.
+ * driver can observe: the video processor that scans the desktop surface and
+ * the video overlay out of video memory, the 2D drawing engine, and the
+ * hardware cursor.
  *
  * The VGA core a real Banshee also carries is not modelled. The card shows
  * nothing until a driver turns the video processor on, which is what
@@ -337,6 +414,10 @@ struct BltOp {
  * written or when the launch area is written, and has finished by the time
  * the write returns, so the engine reports itself idle and the FIFO empty at
  * all times.
+ *
+ * A command FIFO in video memory is read by polling. The guest writes it as
+ * ordinary memory, which nothing here can see happen, so it is parsed on
+ * each refresh and whenever a driver reads the registers it waits on.
  */
 class BansheeDevice final: public Device, public FBDevice,
                            public PCIBarTarget {
@@ -381,8 +462,24 @@ private:
     int fModeFormat = -1;
     uint32_t fModeStart = 0;
     int fModeStride = 0;
+    bool fModeOverlay = false;
     bool fFullUpdate = true;
     std::vector<uint8_t> fShadow;
+
+    /* The overlay being shown, the buffer the last swap command chose for
+       it, and source lines converted to host pixels while drawing. */
+    OverlayState fOverlay;
+    uint32_t fLeftOverlayBuf = 0;
+    uint32_t fSwappedOverlayBuf = 0;
+    std::vector<uint32_t> fOverlayLine[2];
+    int fOverlayLineY[2] = {-1, -1};
+
+    /* Per command FIFO: whether it met a packet nothing here can parse,
+       which stops it until the driver sets it up again, and the packet
+       whose last word read as zero once, which is taken as written the
+       next time it is seen. */
+    bool fCmdFifoStuck[CMD_FIFO_COUNT] {};
+    uint32_t fCmdFifoDeferred[CMD_FIFO_COUNT] {};
 
     /* The cursor image the screen was last handed. The patterns live in
        video memory, which the guest rewrites in place, so there is nothing
@@ -411,6 +508,7 @@ private:
     void CmdRegWrite(uint32_t offset, uint32_t val);
     uint32_t Reg2DRead(uint32_t offset);
     void Reg2DWrite(uint32_t offset, uint32_t val);
+    void Reg3DWrite(uint32_t offset, uint32_t val);
     uint32_t StatusRead();
     void DacDataWrite(uint32_t val);
 
@@ -437,9 +535,18 @@ private:
     void HostBltData(uint32_t val);
     bool HostBltSpan();
 
+    /* the command FIFOs */
+    void PollCmdFifos();
+    bool RunCmdPacket(int fifo);
+    void CmdRegisterWrite(uint32_t reg, uint32_t val);
+
     /* the display */
     void ApplyMode();
     void DrawRows(int y0, int y1);
+    OverlayState GatherOverlay() const;
+    bool OverlayDirty(const uint32_t *dirty_bits) const;
+    const uint32_t *OverlayLine(int y);
+    void DrawOverlayRow(int y, const uint8_t *desktop, uint32_t *out);
     bool UpdatePalette();
     void RefreshCursor(HostScreen *screen);
 

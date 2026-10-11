@@ -35,13 +35,13 @@ FBDevice *simplefb_init(PhysMemoryMap *map, uint64_t phys_addr,
    last. The displayed rows start 'offset' bytes into the mapping and are
    'stride' bytes apart, which is how the VGA device follows a mode that
    does not start at the beginning of its video memory. Runs a few rows
-   apart are drawn as one, and the dirty bits are reset. */
+   apart are drawn as one. This form walks bits already taken from the
+   mapping, for a caller that needs them for more than the rows. */
 template <typename Draw>
-void fb_walk_dirty(PhysMemoryRange *mem_range, int page_count,
-                   uint32_t offset, int stride, int height, Draw draw)
+void fb_walk_dirty_bits(const uint32_t *dirty_bits, int page_count,
+                        uint32_t offset, int stride, int height, Draw draw)
 {
     const int kMaxMergeDistance = 3;
-    const uint32_t *dirty_bits = mem_range->DirtyBits();
     int y0 = 0, y1 = 0;
 
     for (int page_index = 0; page_index < page_count; page_index += 32) {
@@ -80,4 +80,14 @@ void fb_walk_dirty(PhysMemoryRange *mem_range, int page_count,
 
     if (y0 != y1)
         draw(y0, y1);
+}
+
+
+/* The same, taking the dirty bits from the mapping, which resets them. */
+template <typename Draw>
+void fb_walk_dirty(PhysMemoryRange *mem_range, int page_count,
+                   uint32_t offset, int stride, int height, Draw draw)
+{
+    fb_walk_dirty_bits(mem_range->DirtyBits(), page_count, offset, stride,
+                       height, draw);
 }

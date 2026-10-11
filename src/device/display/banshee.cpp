@@ -21,6 +21,8 @@
  */
 #include "banshee.h"
 
+#include <algorithm>
+#include <bit>
 #include <stdio.h>
 #include <string.h>
 
@@ -137,6 +139,58 @@ static bool colorkey_passes(uint32_t val, uint32_t min, uint32_t max, int bpp)
 }
 
 
+/* Whether a desktop pixel falls in the overlay's chroma key range. Each
+   channel is tested on its own, as the desktop format packs it. */
+static bool chroma_passes(uint32_t val, uint32_t min, uint32_t max,
+                          int format)
+{
+    if (format == VIDPROC_FORMAT_8BPP) {
+        return colorkey_passes(val, min & 0xff, max & 0xff, 8);
+    }
+    if (format != VIDPROC_FORMAT_RGB565) {
+        return colorkey_passes(val, min, max, 32);
+    }
+    static const int kFields[3][2] = {{0, 5}, {5, 6}, {11, 5}};
+    for (const auto &field : kFields) {
+        uint32_t c = get_bits(val, field[0], field[1]);
+        if (c < get_bits(min, field[0], field[1]) ||
+            c > get_bits(max, field[0], field[1])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+
+static uint8_t clamp_channel(int val)
+{
+    return val < 0 ? 0 : val > 255 ? 255 : val;
+}
+
+
+/* ITU-R BT.601 with video levels, which is what video players hand an
+   overlay. */
+static uint32_t yuv_to_rgb(int y, int u, int v)
+{
+    int c = (y - 16) * 298;
+    int d = u - 128;
+    int e = v - 128;
+
+    return ((uint32_t)clamp_channel((c + 409 * e + 128) >> 8) << 16) |
+        ((uint32_t)clamp_channel((c - 100 * d - 208 * e + 128) >> 8) << 8) |
+        clamp_channel((c + 516 * d + 128) >> 8);
+}
+
+
+/* Two host pixels mixed, 'w' 256ths of the way from 'a' to 'b'. */
+static uint32_t blend(uint32_t a, uint32_t b, int w)
+{
+    uint32_t rb = ((a & 0xff00ff) * (256 - w) + (b & 0xff00ff) * w) >> 8;
+    uint32_t g = ((a & 0xff00) * (256 - w) + (b & 0xff00) * w) >> 8;
+    return (rb & 0xff00ff) | (g & 0xff00);
+}
+
+
 //#pragma mark - construction
 
 BansheeDevice::BansheeDevice(DeviceContext *ctx, const char *name,
@@ -246,8 +300,16 @@ void BansheeDevice::Reset()
     fHostActive = false;
     fHostData.clear();
     fModeFormat = -1;
+    fModeOverlay = false;
     fFullUpdate = true;
     fSeenCommands = 0;
+    fOverlay = OverlayState();
+    fLeftOverlayBuf = 0;
+    fSwappedOverlayBuf = 0;
+    for (int i = 0; i < CMD_FIFO_COUNT; i++) {
+        fCmdFifoStuck[i] = false;
+        fCmdFifoDeferred[i] = 0;
+    }
 
     /* What the video BIOS leaves for a driver to size the memory by. The
        fields cannot say more than sixteen megabytes, so a larger card is
@@ -797,6 +859,10 @@ uint32_t BansheeDevice::StatusRead()
 {
     uint32_t val = 0;
 
+    /* A driver waiting for the engine expects what it queued to have run by
+       the time it sees it idle. */
+    PollCmdFifos();
+
     /* Nothing here is ever queued or in flight: the FIFO is always empty and
        idle, and every engine reports itself idle, which is what lets a
        driver's wait loops fall straight through. */
@@ -876,6 +942,9 @@ static bool cmd_fifo_reg(uint32_t offset, uint32_t reg)
 
 uint32_t BansheeDevice::CmdRegRead(uint32_t offset)
 {
+    /* The read pointer is what a driver watches to see its packets taken. */
+    PollCmdFifos();
+
     /* Both FIFOs report themselves idle and fault free, which is all their
        status registers ever say here. */
     if (cmd_fifo_reg(offset, CMD_FIFO_STATUS)) {
@@ -887,14 +956,58 @@ uint32_t BansheeDevice::CmdRegRead(uint32_t offset)
 
 void BansheeDevice::CmdRegWrite(uint32_t offset, uint32_t val)
 {
-    /* The registers that start something rather than hold something. With no
-       FIFO fetched from and no AGP to move data over, there is nothing for
-       either to start. */
-    if (offset == CMD_AGPMOVECMD || cmd_fifo_reg(offset, CMD_FIFO_BUMP) ||
-        cmd_fifo_reg(offset, CMD_FIFO_STATUS)) {
+    /* With no AGP to move data over, there is nothing for a move to start. */
+    if (offset == CMD_AGPMOVECMD || cmd_fifo_reg(offset, CMD_FIFO_STATUS)) {
         return;
     }
+    for (int fifo = 0; fifo < CMD_FIFO_COUNT; fifo++) {
+        uint32_t base = CMD_FIFO0_BASE + fifo * CMD_FIFO_SPACING;
+        if (offset == base + CMD_FIFO_BUMP) {
+            /* How a driver that turned the hole counter off says how many
+               words it has written. */
+            fCmdRegs[(base + CMD_FIFO_DEPTH) / 4] += get_bits(val, 0, 16);
+            PollCmdFifos();
+            return;
+        }
+        if (offset == base + CMD_FIFO_BASESIZE ||
+            offset == base + CMD_FIFO_RDPTRL) {
+            /* Setting a FIFO up again starts it afresh. */
+            fCmdFifoStuck[fifo] = false;
+            fCmdFifoDeferred[fifo] = 0;
+        }
+    }
     fCmdRegs[offset / 4] = val;
+}
+
+
+void BansheeDevice::Reg3DWrite(uint32_t offset, uint32_t val)
+{
+    switch (offset) {
+    case REG3D_STATUS:
+        f2dRegs[BLT_INTRCTRL] &= ~INTRCTRL_STATUS_MASK;
+        UpdateIrq();
+        break;
+    case REG3D_INTRCTRL:
+        f2dRegs[BLT_INTRCTRL] = val;
+        UpdateIrq();
+        break;
+    case REG3D_LEFTOVERLAYBUF:
+        fLeftOverlayBuf = get_bits(val, 0, 24);
+        break;
+    case REG3D_SWAPBUFFERCMD:
+        /* Taken at once rather than at the retrace the command may ask to
+           wait for: no refresh shows it any sooner either way. */
+        fSwappedOverlayBuf = fLeftOverlayBuf;
+        break;
+    case REG3D_SWAPPEND:
+        /* Counts the swaps outstanding, of which there never are any. */
+        break;
+    default:
+        /* Nothing else in this block is modelled: there is no 3D engine, so
+           a command written here draws nothing. */
+        banshee_trace("banshee: 3D register %03x = %08x\n", offset, val);
+        break;
+    }
 }
 
 
@@ -1018,21 +1131,7 @@ void BansheeDevice::RegWrite(uint32_t offset, uint32_t val, int size_log2)
             Reg2DWrite(off, val);
         }
     } else if (offset >= BANSHEE_REG_3D_BASE && offset < BANSHEE_REG_3D_END) {
-        switch ((offset - BANSHEE_REG_3D_BASE) & ~3u) {
-        case REG3D_STATUS:
-            f2dRegs[BLT_INTRCTRL] &= ~INTRCTRL_STATUS_MASK;
-            UpdateIrq();
-            break;
-        case REG3D_INTRCTRL:
-            f2dRegs[BLT_INTRCTRL] = val;
-            UpdateIrq();
-            break;
-        default:
-            /* Nothing else in this block is modelled: there is no 3D
-               engine, so a command written here draws nothing. */
-            banshee_trace("banshee: 3D register %06x = %08x\n", offset, val);
-            break;
-        }
+        Reg3DWrite((offset - BANSHEE_REG_3D_BASE) & ~3u, val);
     } else {
         banshee_trace("banshee: write of register %06x = %08x\n", offset, val);
     }
@@ -1054,6 +1153,192 @@ void BansheeDevice::PortWrite(uint32_t offset, uint32_t val, int size_log2)
         return;
     }
     IoRegWrite(offset & ~3u, val);
+}
+
+
+//#pragma mark - the command FIFOs
+
+/* A register a packet names: twelve bits, the top one choosing the 2D
+   register file over the 3D one. The chip field of a 3D register picks
+   texture units, of which there are none to tell apart. */
+void BansheeDevice::CmdRegisterWrite(uint32_t reg, uint32_t val)
+{
+    uint32_t num = get_bits(reg, 0, CMDFIFO_REG_NUM_BITS);
+
+    if ((reg & CMDFIFO_REG_2D) != 0) {
+        if (num < BLT_PATTERN_FIRST + BLT_PATTERN_COUNT) {
+            Reg2DWrite(num * 4, val);
+        }
+        return;
+    }
+    Reg3DWrite(num * 4, val);
+}
+
+
+void BansheeDevice::PollCmdFifos()
+{
+    for (int fifo = 0; fifo < CMD_FIFO_COUNT; fifo++) {
+        /* Bounded, so that a guest filling a FIFO as fast as it is taken
+           cannot keep the device to itself. */
+        for (int i = 0; i < 4096 && RunCmdPacket(fifo); i++) {
+        }
+    }
+}
+
+
+/* Take and run the packet at a FIFO's read pointer. Returns whether there
+   was a whole one to run.
+ *
+ * With the hole counter on, the card snoops the guest's writes to see how
+ * far the FIFO is filled; nothing here sees them. So a zero word is taken as
+ * not written yet and a packet is zeroed once run, which no driver reads
+ * back to notice. A packet is whole once its last word is, since a guest
+ * writes in order; a last word that really is zero is taken when seen a
+ * second time. With the hole counter off, only the bumped depth counts. */
+bool BansheeDevice::RunCmdPacket(int fifo)
+{
+    uint32_t *regs = &fCmdRegs[(CMD_FIFO0_BASE + fifo * CMD_FIFO_SPACING) /
+                               4];
+    uint32_t base_size = regs[CMD_FIFO_BASESIZE / 4];
+
+    if ((base_size & CMD_BASESIZE_ENABLE) == 0 ||
+        (base_size & CMD_BASESIZE_AGP) != 0 || fCmdFifoStuck[fifo]) {
+        return false;
+    }
+    bool holes = (base_size & CMD_BASESIZE_NO_HOLES) == 0;
+    uint64_t start = (uint64_t)get_bits(regs[CMD_FIFO_BASEADDR / 4], 0, 24) <<
+        12;
+    uint64_t size = (uint64_t)(get_bits(base_size, 0,
+                                        CMD_BASESIZE_PAGES_BITS) + 1) << 12;
+    uint32_t pos = regs[CMD_FIFO_RDPTRL / 4];
+    if (start + size > fVramSize || pos < start || pos >= start + size ||
+        (pos & 3) != 0) {
+        return false;
+    }
+
+    /* Words are read whole, since the guest may be writing them meanwhile,
+       and the read pointer wraps at the end of the FIFO. */
+    auto word_addr = [&](uint32_t index) {
+        uint64_t addr = pos + (uint64_t)index * 4;
+        return (uint32_t)(addr >= start + size ? addr - size : addr);
+    };
+    auto word = [&](uint32_t index) {
+        return __atomic_load_n((const uint32_t *)(fVram + word_addr(index)),
+                               __ATOMIC_ACQUIRE);
+    };
+    auto stuck = [&](const char *why, uint32_t header) {
+        banshee_trace("banshee: command FIFO %d stops at %06x: %s (%08x)\n",
+                      fifo, pos, why, header);
+        fCmdFifoStuck[fifo] = true;
+        return false;
+    };
+
+    uint32_t header = word(0);
+    if (holes && header == 0) {
+        return false;
+    }
+
+    /* The words the packet takes, and how many of them carry something,
+       which leaves out the padding a type 4 packet may end with. */
+    uint32_t len, used;
+    uint32_t mask = 0;
+    int type = get_bits(header, 0, CMDFIFO_TYPE_BITS);
+    switch (type) {
+    case 0:
+        len = used = 1;
+        break;
+    case 1:
+        len = used = 1 + get_bits(header, CMDFIFO_T1_COUNT_SHIFT, 16);
+        break;
+    case 2:
+        mask = get_bits(word(1), 0, CMDFIFO_T2_MASK_BITS);
+        if (mask == 0) {
+            if (holes) {
+                return false;
+            }
+            return stuck("type 2 packet without a mask", header);
+        }
+        len = used = 2 + std::popcount(mask);
+        break;
+    case 4:
+        mask = get_bits(header, CMDFIFO_T4_MASK_SHIFT, CMDFIFO_T4_MASK_BITS);
+        used = 1 + std::popcount(mask);
+        len = used + get_bits(header, CMDFIFO_T4_PAD_SHIFT, 3);
+        break;
+    default:
+        /* Triangles, frame buffer writes and AGP transfers: nothing here
+           draws them, and without knowing how long one is, nothing after it
+           can be found either. */
+        return stuck("packet type not modelled", header);
+    }
+    if ((uint64_t)len * 4 > size) {
+        return stuck("packet longer than the FIFO", header);
+    }
+
+    if (holes) {
+        if (word(used - 1) == 0 && fCmdFifoDeferred[fifo] != (pos | 1)) {
+            fCmdFifoDeferred[fifo] = pos | 1; /* pos is aligned; 0 is none */
+            return false;
+        }
+        fCmdFifoDeferred[fifo] = 0;
+    } else {
+        if (regs[CMD_FIFO_DEPTH / 4] < len) {
+            return false;
+        }
+        regs[CMD_FIFO_DEPTH / 4] -= len;
+    }
+
+    uint32_t next = word_addr(len);
+    uint32_t reg = get_bits(header, CMDFIFO_REG_SHIFT, 12);
+    switch (type) {
+    case 0:
+        switch (get_bits(header, CMDFIFO_T0_FUNC_SHIFT, 3)) {
+        case CMDFIFO_T0_NOP:
+            break;
+        case CMDFIFO_T0_JMP_LOCAL:
+            next = get_bits(header, CMDFIFO_T0_ADDR_SHIFT,
+                            CMDFIFO_T0_ADDR_BITS) << 2;
+            break;
+        default:
+            return stuck("jump not modelled", header);
+        }
+        break;
+    case 1:
+        for (uint32_t i = 1; i < len; i++) {
+            CmdRegisterWrite(reg, word(i));
+            if ((header & CMDFIFO_T1_INC) != 0) {
+                reg++;
+            }
+        }
+        break;
+    case 2: {
+        uint32_t index = 2;
+        for (int bit = 0; bit < CMDFIFO_T2_MASK_BITS; bit++) {
+            if (get_bit(mask, bit)) {
+                Reg2DWrite((CMDFIFO_T2_BASE + bit) * 4, word(index++));
+            }
+        }
+        break;
+    }
+    case 4: {
+        uint32_t index = 1;
+        for (int bit = 0; bit < CMDFIFO_T4_MASK_BITS; bit++) {
+            if (get_bit(mask, bit)) {
+                CmdRegisterWrite(reg + bit, word(index++));
+            }
+        }
+        break;
+    }
+    }
+
+    if (holes) {
+        for (uint32_t i = 0; i < len; i++) {
+            __atomic_store_n((uint32_t *)(fVram + word_addr(i)), 0u,
+                             __ATOMIC_RELAXED);
+        }
+    }
+    regs[CMD_FIFO_RDPTRL / 4] = next;
+    return true;
 }
 
 
@@ -1088,8 +1373,10 @@ void BansheeDevice::ApplyMode()
     int new_width = 0, new_height = 0, new_format = -1;
     uint32_t new_start = 0;
     int new_stride = 0;
+    bool new_overlay = false;
 
     if ((cfg & VIDPROCCFG_ENABLE) != 0 && (cfg & VIDPROCCFG_DESKTOP_EN) != 0) {
+        new_overlay = (cfg & VIDPROCCFG_OVERLAY_EN) != 0;
         uint32_t size = fIoRegs[IO_VIDSCREENSIZE / 4];
         new_width = get_bits(size, 0, 12);
         new_height = get_bits(size, 12, 12);
@@ -1109,7 +1396,7 @@ void BansheeDevice::ApplyMode()
 
     if (new_format == fModeFormat && new_width == fModeWidth &&
         new_height == fModeHeight && new_start == fModeStart &&
-        new_stride == fModeStride) {
+        new_stride == fModeStride && new_overlay == fModeOverlay) {
         return;
     }
 
@@ -1118,6 +1405,7 @@ void BansheeDevice::ApplyMode()
     fModeHeight = new_height;
     fModeStart = new_start;
     fModeStride = new_stride;
+    fModeOverlay = new_overlay;
     fFullUpdate = true;
 
     if (new_format < 0) {
@@ -1131,8 +1419,10 @@ void BansheeDevice::ApplyMode()
                   new_width, new_height, new_format, new_stride, new_start);
     width = new_width;
     height = new_height;
-    if (new_format == VIDPROC_FORMAT_RGB32) {
-        /* The guest's pixels are what the screen takes: no copy. */
+    if (new_format == VIDPROC_FORMAT_RGB32 && !new_overlay) {
+        /* The guest's pixels are what the screen takes: no copy. With an
+           overlay to lay over them, they are copied like any other
+           format. */
         stride = new_stride;
         fb_data = fVram + new_start;
         fShadow.clear();
@@ -1146,7 +1436,7 @@ void BansheeDevice::ApplyMode()
 
 void BansheeDevice::DrawRows(int y0, int y1)
 {
-    if (fModeFormat == VIDPROC_FORMAT_RGB32) {
+    if (fModeFormat == VIDPROC_FORMAT_RGB32 && !fModeOverlay) {
         return;
     }
 
@@ -1173,9 +1463,213 @@ void BansheeDevice::DrawRows(int y0, int y1)
                     ((uint32_t)src[x * 3 + 2] << 16);
             }
             break;
+        case VIDPROC_FORMAT_RGB32:
+            memcpy(out, src, (size_t)width * 4);
+            break;
         }
+        DrawOverlayRow(y, src, out);
         src += fModeStride;
         dst += stride;
+    }
+}
+
+
+/* The overlay the registers describe over the current mode, or one that is
+   off if they describe nothing that can be shown. */
+OverlayState BansheeDevice::GatherOverlay() const
+{
+    uint32_t cfg = fIoRegs[IO_VIDPROCCFG / 4];
+    OverlayState ov;
+
+    if (!fModeOverlay || fModeFormat < 0) {
+        return OverlayState();
+    }
+
+    /* The overlay's path through the CLUT is not modelled: drivers bypass
+       it for every format they show. */
+    ov.format = get_bits(cfg, VIDPROCCFG_OVERLAY_FORMAT_SHIFT, 3);
+    switch (ov.format) {
+    case OVERLAY_FORMAT_RGB565:
+    case OVERLAY_FORMAT_RGB565_DITHER:
+    case OVERLAY_FORMAT_YUYV:
+    case OVERLAY_FORMAT_UYVY:
+        break;
+    default:
+        return OverlayState();
+    }
+
+    uint32_t start = fIoRegs[IO_VIDOVERLAYSTARTCOORDS / 4];
+    uint32_t end = fIoRegs[IO_VIDOVERLAYENDSCREENCOORD / 4];
+    ov.x0 = get_bits(start, 0, 12);
+    ov.y0 = get_bits(start, 12, 12);
+    ov.x1 = min_int(get_bits(end, 0, 12), fModeWidth - 1);
+    ov.y1 = min_int(get_bits(end, 12, 12), fModeHeight - 1);
+
+    /* The address the last swap chose, or vidInAddr0. A driver may write
+       the latter as the bus address of the buffer; only the bits that
+       address video memory are decoded. */
+    ov.addr = (cfg & VIDPROCCFG_OVERLAY_VIDEOIN) != 0
+        ? get_bits(fIoRegs[IO_VIDINADDR0 / 4], 0, 24) : fSwappedOverlayBuf;
+    ov.stride = get_bits(fIoRegs[IO_VIDDESKTOPOVERLAYSTRIDE / 4], 16, 15);
+
+    /* Every format drawn is two bytes a pixel. */
+    uint32_t src_width = fIoRegs[IO_VIDOVERLAYDUDXOFFSETSRCWIDTH / 4];
+    ov.src_width = get_bits(src_width, 19, 13) / 2;
+    if (ov.x0 > ov.x1 || ov.y0 > ov.y1 || ov.stride == 0 ||
+        ov.src_width == 0) {
+        return OverlayState();
+    }
+
+    /* Without scaling, a screen pixel steps one source pixel and the
+       initial offsets go unused. */
+    const int one = 1 << OVERLAY_STEP_BITS;
+    const int offset_shift = OVERLAY_STEP_BITS - OVERLAY_OFFSET_BITS;
+    if ((cfg & VIDPROCCFG_OVERLAY_HSCALE) != 0) {
+        ov.dudx = get_bits(fIoRegs[IO_VIDOVERLAYDUDX / 4], 0,
+                           OVERLAY_STEP_BITS);
+        ov.u0 = get_bits(src_width, 0, OVERLAY_OFFSET_BITS) << offset_shift;
+    } else {
+        ov.dudx = one;
+    }
+    if ((cfg & VIDPROCCFG_OVERLAY_VSCALE) != 0) {
+        ov.dvdy = get_bits(fIoRegs[IO_VIDOVERLAYDVDY / 4], 0,
+                           OVERLAY_STEP_BITS);
+        ov.v0 = get_bits(fIoRegs[IO_VIDOVERLAYDVDYOFFSET / 4], 0,
+                         OVERLAY_OFFSET_BITS) << offset_shift;
+    } else {
+        ov.dvdy = one;
+    }
+    /* The filter has no time for bilinear in 2X mode. */
+    ov.bilinear = get_bits(cfg, VIDPROCCFG_OVERLAY_FILTER_SHIFT, 2) ==
+        OVERLAY_FILTER_BILINEAR && (cfg & VIDPROCCFG_2X_MODE) == 0;
+
+    ov.chroma = (cfg & VIDPROCCFG_CHROMA_EN) != 0;
+    ov.chroma_invert = (cfg & VIDPROCCFG_CHROMA_INVERT) != 0;
+    ov.key_min = fIoRegs[IO_VIDCHROMAMIN / 4];
+    ov.key_max = fIoRegs[IO_VIDCHROMAMAX / 4];
+    ov.on = 1;
+    return ov;
+}
+
+
+/* The source line the last overlay row reads, plus the one after it for
+   the filter. */
+static int overlay_last_line(const OverlayState &ov)
+{
+    int64_t v = (int64_t)ov.v0 + (int64_t)(ov.y1 - ov.y0) * ov.dvdy;
+    return (int)(v >> OVERLAY_STEP_BITS) + 1;
+}
+
+
+/* Whether the guest wrote to the part of video memory the overlay is read
+   from. */
+bool BansheeDevice::OverlayDirty(const uint32_t *dirty_bits) const
+{
+    const OverlayState &ov = fOverlay;
+
+    if (!ov.on || (uint32_t)ov.addr >= fVramSize) {
+        return false;
+    }
+    uint64_t first = ov.addr;
+    uint64_t last = first + (uint64_t)overlay_last_line(ov) * ov.stride +
+        (uint64_t)ov.src_width * 2;
+    last = std::min(last, (uint64_t)fVramSize) - 1;
+    for (uint64_t page = first >> DEVRAM_PAGE_SIZE_LOG2;
+         page <= last >> DEVRAM_PAGE_SIZE_LOG2; page++) {
+        if (get_bit(dirty_bits[page >> 5], page & 31)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+
+/* One line of the overlay source as host pixels. Two are kept, one for
+   even lines and one for odd, which is what the filter reads together. */
+const uint32_t *BansheeDevice::OverlayLine(int y)
+{
+    const OverlayState &ov = fOverlay;
+    int slot = y & 1;
+    std::vector<uint32_t> &line = fOverlayLine[slot];
+
+    if (fOverlayLineY[slot] == y) {
+        return line.data();
+    }
+    fOverlayLineY[slot] = y;
+    line.resize(ov.src_width);
+
+    /* A YUV pair is fetched whole, even for a line of an odd width. */
+    uint64_t addr = (uint64_t)ov.addr + (uint64_t)y * ov.stride;
+    if (addr + (uint64_t)(ov.src_width + 1) / 2 * 4 > fVramSize) {
+        std::fill(line.begin(), line.end(), 0);
+        return line.data();
+    }
+    const uint8_t *src = fVram + addr;
+    for (int x = 0; x < ov.src_width; x++) {
+        const uint8_t *pair = src + (x & ~1) * 2;
+        switch (ov.format) {
+        case OVERLAY_FORMAT_YUYV:
+            line[x] = yuv_to_rgb(src[x * 2], pair[1], pair[3]);
+            break;
+        case OVERLAY_FORMAT_UYVY:
+            line[x] = yuv_to_rgb(src[x * 2 + 1], pair[0], pair[2]);
+            break;
+        default:
+            line[x] = pixel_to_rgb(src[x * 2] | ((uint32_t)src[x * 2 + 1] << 8),
+                                   BLT_PIXEL_16BPP, nullptr);
+            break;
+        }
+    }
+    return line.data();
+}
+
+
+/* Lay the overlay over one row the desktop has been drawn into. Where the
+   chroma key is on, the overlay shows only through desktop pixels in the
+   key's range, or outside it if the sense is inverted. */
+void BansheeDevice::DrawOverlayRow(int y, const uint8_t *desktop,
+                                   uint32_t *out)
+{
+    const OverlayState &ov = fOverlay;
+
+    if (!ov.on || y < ov.y0 || y > ov.y1) {
+        return;
+    }
+
+    int64_t v = (int64_t)ov.v0 + (int64_t)(y - ov.y0) * ov.dvdy;
+    int sy = (int)(v >> OVERLAY_STEP_BITS);
+    int fy = (int)get_bits(v, OVERLAY_STEP_BITS - 8, 8);
+    const uint32_t *line0 = OverlayLine(sy);
+    const uint32_t *line1 = ov.bilinear && fy != 0 ? OverlayLine(sy + 1)
+                                                    : nullptr;
+    int bytes = fModeFormat == VIDPROC_FORMAT_8BPP ? 1 :
+        fModeFormat == VIDPROC_FORMAT_RGB565 ? 2 :
+        fModeFormat == VIDPROC_FORMAT_RGB24 ? 3 : 4;
+
+    for (int x = ov.x0; x <= ov.x1; x++) {
+        if (ov.chroma) {
+            uint32_t pixel = 0;
+            for (int i = 0; i < bytes; i++) {
+                pixel |= (uint32_t)desktop[x * bytes + i] << (i * 8);
+            }
+            if (chroma_passes(pixel, ov.key_min, ov.key_max, fModeFormat) ==
+                (ov.chroma_invert != 0)) {
+                continue;
+            }
+        }
+
+        int64_t u = (int64_t)ov.u0 + (int64_t)(x - ov.x0) * ov.dudx;
+        int sx = min_int((int)(u >> OVERLAY_STEP_BITS), ov.src_width - 1);
+        if (!ov.bilinear) {
+            out[x] = line0[sx];
+            continue;
+        }
+        int fx = (int)get_bits(u, OVERLAY_STEP_BITS - 8, 8);
+        int sx1 = min_int(sx + 1, ov.src_width - 1);
+        uint32_t top = blend(line0[sx], line0[sx1], fx);
+        out[x] = line1 == nullptr ? top
+                                  : blend(top, blend(line1[sx], line1[sx1],
+                                                     fx), fy);
     }
 }
 
@@ -1272,6 +1766,9 @@ void BansheeDevice::Refresh(HostScreen *screen)
         UpdateIrq();
     }
 
+    /* A swap queued in a command FIFO is what moves the overlay on. */
+    PollCmdFifos();
+
     ApplyMode();
     if (fModeFormat < 0) {
         screen->SetFramebuffer(nullptr, width, height, 0);
@@ -1284,14 +1781,41 @@ void BansheeDevice::Refresh(HostScreen *screen)
     }
     screen->SetFramebuffer(fb_data, width, height, stride);
 
+    /* An overlay that moved, changed or went away redraws the rows it
+       covered and the rows it covers now. */
+    OverlayState ov = GatherOverlay();
+    int moved_y0 = height, moved_y1 = 0;
+    if (memcmp(&ov, &fOverlay, sizeof(ov)) != 0) {
+        banshee_trace("banshee: overlay %s format %d at %d,%d-%d,%d from "
+                      "%06x\n", ov.on ? "on" : "off", ov.format, ov.x0, ov.y0,
+                      ov.x1, ov.y1, ov.addr);
+        for (const OverlayState *state : {&fOverlay, &ov}) {
+            if (state->on) {
+                moved_y0 = min_int(moved_y0, state->y0);
+                moved_y1 = max_int(moved_y1, state->y1 + 1);
+            }
+        }
+    }
+    fOverlay = ov;
+    fOverlayLineY[0] = fOverlayLineY[1] = -1;
+
+    /* Taken once: the overlay's source and the desktop both read them. */
+    const uint32_t *dirty_bits = fLfbRange->DirtyBits();
     if (redraw) {
-        /* The dirty bits are taken and dropped: every row is drawn anyway. */
-        fLfbRange->DirtyBits();
         DrawRows(0, height);
         screen->Update(0, 0, width, height);
     } else {
-        fb_walk_dirty(fLfbRange, fVramPages, fModeStart, fModeStride, height,
-                      [&](int y0, int y1) {
+        if (OverlayDirty(dirty_bits)) {
+            moved_y0 = min_int(moved_y0, ov.y0);
+            moved_y1 = max_int(moved_y1, ov.y1 + 1);
+        }
+        moved_y1 = min_int(moved_y1, height);
+        if (moved_y0 < moved_y1) {
+            DrawRows(moved_y0, moved_y1);
+            screen->Update(0, moved_y0, width, moved_y1 - moved_y0);
+        }
+        fb_walk_dirty_bits(dirty_bits, fVramPages, fModeStart, fModeStride,
+                           height, [&](int y0, int y1) {
             DrawRows(y0, y1);
             screen->Update(0, y0, width, y1 - y0);
         });
