@@ -187,6 +187,20 @@ processors, and dies when it then uses SSE on an AMD host. Under WHP every
 #GP then exits to the emulator, which makes RDMSR and WRMSR of an Intel MSR
 an AMD host lacks read 0 and do nothing instead of faulting.
 
+"hypervisor_pat" chooses the IA32_PAT a hardware hypervisor's processors
+start with:
+
+  default      the hypervisor's, the power-on value (the default)
+  write-back   every entry write-back
+
+Hypervisors take the guest's memory types from its page tables and PAT, so
+a page the guest maps uncached is accessed uncached in host memory. The
+second is for systems that do so for a frame buffer and leave PAT alone:
+none of the PC's memory is a real device's, so caching it is always safe.
+BeOS R5 maps the 3dfx frame buffer uncached, counting on an MTRR to make it
+write-combining, and WHP and KVM ignore guest MTRRs. A guest that programs
+PAT itself replaces the value.
+
 The root bus of an FDT machine is declared as:
 
 bus: { type: "fdt", devices: [ ... ] }

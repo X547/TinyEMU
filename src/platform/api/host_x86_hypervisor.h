@@ -66,6 +66,8 @@ struct HostX86Options {
        listed may still be the host's, for a guest that reads past the
        highest ones leaves 0 and 0x80000000 report. */
     std::vector<HostX86CpuidLeaf> cpuid;
+    /* the IA32_PAT the processors start with, 0 for the hypervisor's */
+    uint64_t pat = 0;
 };
 
 

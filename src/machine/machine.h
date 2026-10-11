@@ -115,6 +115,9 @@ typedef struct {
     /* the processor a hypervisor shows the guest: "host" or "interpreter";
        NULL when the configuration does not say */
     char *hypervisor_cpuid;
+    /* the IA32_PAT a hypervisor's processors start with: "default" or
+       "write-back"; NULL when the configuration does not say */
+    char *hypervisor_pat;
     bool rtc_real_time;
     bool rtc_local_time;
     Platform *platform;

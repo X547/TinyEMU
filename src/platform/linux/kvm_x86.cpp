@@ -52,6 +52,8 @@
 #define CPUID_X2APIC bit_at(21)
 #define CPUID_TSC_DEADLINE bit_at(24)
 
+#define MSR_IA32_PAT 0x277
+
 
 class KvmX86Hypervisor;
 
@@ -83,6 +85,7 @@ private:
     struct kvm_fpu fResetFpu;
 
     void SetCpuid(int index);
+    void SetPat(uint64_t pat);
     void GetSregs(struct kvm_sregs *sregs);
     void SetSregs(const struct kvm_sregs &sregs);
     bool InjectInterrupt();
@@ -126,6 +129,8 @@ private:
     int fMaxPhysAddressBits;
     int fPhysAddressBits = 36;
     std::vector<HostX86CpuidLeaf> fCpuid;
+    /* the IA32_PAT processors start with, 0 for the hypervisor's */
+    uint64_t fPat;
     int fKvmFd;
     int fVmFd = -1;
     std::vector<std::unique_ptr<KvmX86Vcpu>> fVcpus;
@@ -139,7 +144,7 @@ public:
         fIrqchip(options.hypervisor_interrupt_controllers),
         fCpuCount(options.cpu_count),
         fMaxPhysAddressBits(options.max_phys_address_bits),
-        fCpuid(options.cpuid), fKvmFd(kvm_fd) {}
+        fCpuid(options.cpuid), fPat(options.pat), fKvmFd(kvm_fd) {}
     ~KvmX86Hypervisor() override;
 
     void Init();
@@ -371,6 +376,8 @@ KvmX86Vcpu::KvmX86Vcpu(KvmX86Hypervisor &owner, int index):
     }
 
     SetCpuid(index);
+    if (fOwner.fPat != 0)
+        SetPat(fOwner.fPat);
 
     /* map the kvm_run structure */
     fRunSize = ioctl(fOwner.fKvmFd, KVM_GET_VCPU_MMAP_SIZE, NULL);
@@ -397,6 +404,23 @@ KvmX86Vcpu::KvmX86Vcpu(KvmX86Hypervisor &owner, int index):
             perror("KVM_GET_FPU");
             exit(1);
         }
+    }
+}
+
+
+void KvmX86Vcpu::SetPat(uint64_t pat)
+{
+    struct {
+        struct kvm_msrs hdr;
+        struct kvm_msr_entry entry;
+    } msrs {};
+
+    msrs.hdr.nmsrs = 1;
+    msrs.entry.index = MSR_IA32_PAT;
+    msrs.entry.data = pat;
+    if (ioctl(fFd, KVM_SET_MSRS, &msrs) != 1) {
+        perror("KVM_SET_MSRS");
+        exit(1);
     }
 }
 

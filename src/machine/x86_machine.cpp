@@ -880,6 +880,15 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
                  "not \"%s\"\n", p->hypervisor_cpuid);
         return nullptr;
     }
+    if (p->hypervisor_pat != nullptr &&
+        strcmp(p->hypervisor_pat, "write-back") == 0) {
+        options.pat = 0x0606060606060606;
+    } else if (p->hypervisor_pat != nullptr &&
+               strcmp(p->hypervisor_pat, "default") != 0) {
+        vm_error("pc: hypervisor_pat must be \"default\" or \"write-back\", "
+                 "not \"%s\"\n", p->hypervisor_pat);
+        return nullptr;
+    }
 
     assert(p->ram_size >= (1 << 20));
 

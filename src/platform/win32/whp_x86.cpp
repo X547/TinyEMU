@@ -209,6 +209,8 @@ private:
     int fCpuCount;
     int fPhysAddressBits;
     std::vector<HostX86CpuidLeaf> fCpuid;
+    /* the IA32_PAT processors start with, 0 for the hypervisor's */
+    uint64_t fPat;
     WHV_PARTITION_HANDLE fPartition = nullptr;
     std::vector<std::unique_ptr<WhpX86Vcpu>> fVcpus;
     /* where each slot is mapped; the platform knows ranges, not slots */
@@ -227,7 +229,7 @@ public:
         fCpuCount(options.cpu_count),
         fPhysAddressBits(std::min(host_phys_address_bits(),
                                   options.max_phys_address_bits)),
-        fCpuid(options.cpuid) {}
+        fCpuid(options.cpuid), fPat(options.pat) {}
     ~WhpX86Hypervisor() override;
 
     bool Init();
@@ -468,6 +470,12 @@ WhpX86Vcpu::WhpX86Vcpu(WhpX86Hypervisor &owner,
     if (fTimer == nullptr)
         whp_fail("CreateThreadpoolTimer", HRESULT_FROM_WIN32(GetLastError()));
 
+    if (fOwner.fPat != 0) {
+        WHV_REGISTER_NAME name = WHvX64RegisterPat;
+        WHV_REGISTER_VALUE value {};
+        value.Reg64 = fOwner.fPat;
+        SetVpRegisters(&name, 1, &value);
+    }
     GetVpRegisters(kResetNames, RESET_REGISTER_COUNT, fResetValues);
 }
 

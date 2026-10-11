@@ -159,6 +159,8 @@ private:
     int fCpuCount;
     int fPhysAddressBits;
     std::vector<HostX86CpuidLeaf> fCpuid;
+    /* the IA32_PAT processors start with, 0 for the hypervisor's */
+    uint64_t fPat;
     struct nvmm_machine fMach {};
     bool fMachCreated = false;
     std::vector<std::unique_ptr<NvmmX86Vcpu>> fVcpus;
@@ -177,7 +179,7 @@ public:
         fCpuCount(options.cpu_count),
         fPhysAddressBits(std::min(host_phys_address_bits(),
                                   options.max_phys_address_bits)),
-        fCpuid(options.cpuid) {}
+        fCpuid(options.cpuid), fPat(options.pat) {}
     ~NvmmX86Hypervisor() override;
 
     bool Init();
@@ -271,6 +273,11 @@ NvmmX86Vcpu::NvmmX86Vcpu(NvmmX86Hypervisor &owner, struct nvmm_machine *mach,
     SetResetFpuState();
     if (nvmm_vcpu_getstate(fMach, &fVcpu.vcpu, NVMM_X64_STATE_ALL) == -1)
         nvmm_fail("nvmm_vcpu_getstate");
+    if (fOwner.fPat != 0) {
+        fVcpu.vcpu.state->msrs[NVMM_X64_MSR_PAT] = fOwner.fPat;
+        if (nvmm_vcpu_setstate(fMach, &fVcpu.vcpu, NVMM_X64_STATE_MSRS) == -1)
+            nvmm_fail("nvmm_vcpu_setstate");
+    }
     fResetState = *fVcpu.vcpu.state;
 
     /* Each leaf is configured once, as the bits it deletes from the host's
