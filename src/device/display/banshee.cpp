@@ -248,6 +248,18 @@ void BansheeDevice::Reset()
     fModeFormat = -1;
     fFullUpdate = true;
     fSeenCommands = 0;
+
+    /* What the video BIOS leaves for a driver to size the memory by. The
+       fields cannot say more than sixteen megabytes, so a larger card is
+       reported as that. */
+    uint32_t dram0 = 0;
+    if (fVramSize >= (8u << 20)) {
+        dram0 |= DRAMINIT0_SGRAM_8_CHIPS;
+    }
+    if (fVramSize >= (16u << 20)) {
+        dram0 |= DRAMINIT0_SGRAM_2MB;
+    }
+    fIoRegs[IO_DRAMINIT0 / 4] = dram0;
     if (fIrq != nullptr && fIrqLevel) {
         fIrqLevel = false;
         fIrq->Set(0);

@@ -98,6 +98,12 @@
 #define IO_VIDDESKTOPOVERLAYSTRIDE 0xe8
 #define IO_REG_COUNT      (BANSHEE_IO_BAR_SIZE / 4)
 
+/* dramInit0 as the video BIOS leaves it, which is where a driver reads how
+   much memory the card carries: four or eight chips of one or two
+   megabytes. */
+#define DRAMINIT0_SGRAM_8_CHIPS bit_at(26)
+#define DRAMINIT0_SGRAM_2MB     bit_at(27)
+
 /* status, which is the register a driver spins on.
  *
  * The 2D databook gives bits 5:0 as the free space in a 64 entry FIFO, and
