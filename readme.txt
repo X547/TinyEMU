@@ -381,7 +381,12 @@ Device types:
                          and "ifname" as for virtio-net, and "reg" (default
                          0x300) and "irq" (default 9) for the ports, which
                          only a card on the pc bus takes
-  dwmac                  Synopsys DesignWare Ethernet QoS MAC on the FDT bus;
+  eepro100               Intel EtherExpress PRO/100 (82558) Ethernet adapter
+                         on PCI, with its PHY and EEPROM; "driver" and
+                         "ifname" as for virtio-net. It moves frames by bus
+                         master DMA, so it is much faster than the ne2000
+                         under a hypervisor, for a guest with a driver for it
+  dwmac                 Synopsys DesignWare Ethernet QoS MAC on the FDT bus;
                          "driver" and "ifname" as for virtio-net,
                          "compatible" (which core the node claims to be,
                          default "snps,dwmac-5.10a"; it must name a 4.x or

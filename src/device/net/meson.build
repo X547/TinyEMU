@@ -1,6 +1,7 @@
 emu_libs += static_library('device_net',
   files(
     'dwmac.cpp',
+    'eepro100.cpp',
     'ne2000.cpp',
     'virtio_net.cpp',
   ),
