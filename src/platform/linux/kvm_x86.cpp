@@ -105,6 +105,8 @@ public:
     void Run() override;
     bool Idle(bool intr) override;
     void InterruptRun() override;
+    /* the target is asked before each run */
+    void SetInterruptRequest(bool level) override {(void)level;}
     /* only without the in-kernel local APICs, which take INIT and STARTUP
        themselves */
     void Init() override;

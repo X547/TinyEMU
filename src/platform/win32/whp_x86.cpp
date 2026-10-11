@@ -185,6 +185,8 @@ public:
     void Run() override;
     bool Idle(bool intr) override;
     void InterruptRun() override;
+    /* the target is asked before each run */
+    void SetInterruptRequest(bool level) override {(void)level;}
     /* only with the machine's local APICs; the hypervisor's take INIT and
        STARTUP themselves */
     void Init() override;

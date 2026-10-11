@@ -112,7 +112,8 @@ public:
    ThreadStarted(), Run() and Idle() are called on that thread without the
    device lock; Run() takes it around each call to the target. The register
    methods are called with the lock held, either before the processor first
-   runs or on its thread. InterruptRun() is called from any thread. */
+   runs or on its thread. InterruptRun() and SetInterruptRequest() are
+   called from any thread. */
 class X86Vcpu {
 public:
     virtual ~X86Vcpu() = default;
@@ -135,6 +136,11 @@ public:
     virtual bool Idle(bool intr) = 0;
     /* Makes Run() return soon. */
     virtual void InterruptRun() = 0;
+    /* What the target's InterruptRequested() now says for this processor.
+       The interpreter looks at it between instructions; a hypervisor asks
+       the target before each run instead, and needs InterruptRun() for a
+       request that comes during one. */
+    virtual void SetInterruptRequest(bool level) = 0;
 
     /* Only with the machine's local APICs, on the processor's thread: an
        INIT, after which the processor is as at reset, and a STARTUP, which

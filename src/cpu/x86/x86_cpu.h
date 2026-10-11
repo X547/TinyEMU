@@ -23,6 +23,7 @@
  */
 #pragma once
 
+#include <memory>
 #include <vector>
 
 #include "x86_vcpu.h"
@@ -133,3 +134,9 @@ bool x86_cpu_get_power_down(X86CPUState *s);
 /* any thread */
 void x86_cpu_flush_tlb_write_range_ram(X86CPUState *s,
                                        uint8_t *ram_ptr, size_t ram_size);
+
+/* The interpreter as the machine's processors, each run on the thread
+   that calls its Run(). */
+std::unique_ptr<X86CpuBackend> x86_interp_open(X86CpuTarget &target,
+                                               DeviceLock &lock,
+                                               const X86CpuOptions &options);
