@@ -143,7 +143,6 @@ private:
     std::atomic<bigtime_t> fLeadUs {0};
 
     /* the node thread's own */
-    size_t fDebt = 0;
     unsigned fUnderruns = 0;
 
     media_multi_audio_format MediaFormat() const;
@@ -719,7 +718,6 @@ bool MediaAudio::StartStream()
     size_t capacity = (size_t)((fLeadUs.load() + MEDIA_RING_MS * 1000LL) *
                            fFormat.rate / 1000000);
     fRing.Reset(fFormat.FrameBytes(), capacity);
-    fDebt = 0;
     fUnderruns = 0;
 
     BTimeSource *ts = fNode->TimeSource();
@@ -758,23 +756,24 @@ void MediaAudio::Write(const uint8_t *buf, size_t frames)
 }
 
 
-/* A ring that runs dry is made up for with silence, and as many frames are
-   skipped once it refills, so that the latency stays what it was. A null
+/* A ring that runs dry is made up for with silence. Whatever the ring holds
+   beyond the lead and this buffer is dropped, so that the latency comes back
+   to what it was however much of a stall the device made up for. A null
    buffer takes the frames without keeping them. */
 void MediaAudio::Fill(uint8_t *out, size_t frames)
 {
     size_t frame_bytes = fFormat.FrameBytes();
+    size_t keep = (size_t)(fLeadUs.load() * fFormat.rate / 1000000) + frames;
+    size_t avail = fRing.Available();
 
-    if (fDebt > 0) {
-        size_t avail = fRing.Available();
-        fDebt -= fRing.Read(nullptr, fDebt < avail ? fDebt : avail);
+    if (avail > keep) {
+        fRing.Read(nullptr, avail - keep);
     }
     size_t got = fRing.Read(out, frames);
     if (got < frames) {
         if (out != nullptr) {
             memset(out + got * frame_bytes, 0, (frames - got) * frame_bytes);
         }
-        fDebt += frames - got;
         fUnderruns++;
     }
 }

@@ -236,9 +236,9 @@ private:
     int fOutFrameBytes = 0;
     UINT32 fTargetPadding = 0;
     uint64_t fConsumed = 0;
+    size_t fLead = 0;
     size_t fLeadLeft = 0;
     bool fLeadDone = false;
-    size_t fDebt = 0;
     uint64_t fFallbackUs = 0;
     unsigned fUnderruns = 0;
     bool fWarned = false;
@@ -384,7 +384,6 @@ bool WasapiAudio::StartStream()
     fMaxExtrapolate.store((uint64_t)fFormat.rate * 20 / 1000);
     fConsumed = 0;
     fLeadDone = false;
-    fDebt = 0;
     fFallbackUs = 0;
     fUnderruns = 0;
     fQuit.store(false);
@@ -601,7 +600,8 @@ bool WasapiAudio::OpenClient(IMMDeviceEnumerator *en)
             size_t lead = (size_t)fFormat.rate * fLatencyMs / 1000;
             size_t min_lead = (size_t)fFormat.rate * WASAPI_MIN_LEAD_MS / 1000;
             lead = lead > fTargetPadding ? lead - fTargetPadding : 0;
-            fLeadLeft = lead > min_lead ? lead : min_lead;
+            fLead = lead > min_lead ? lead : min_lead;
+            fLeadLeft = fLead;
             fLeadDone = true;
         }
         fMaxExtrapolate.store(2 * period);
@@ -666,8 +666,9 @@ bool WasapiAudio::Render()
 
 
 /* The guest's lead first, then the ring. A ring that runs dry is made up for
-   with silence, and as many frames are skipped once it refills, so that the
-   latency stays what it was. */
+   with silence. Whatever the ring holds beyond the lead and a little slack
+   is dropped, so that the latency comes back to what it was however much of
+   a stall the device made up for. */
 void WasapiAudio::Fill(uint8_t *out, size_t frames)
 {
     size_t done = 0;
@@ -677,10 +678,13 @@ void WasapiAudio::Fill(uint8_t *out, size_t frames)
         memset(out, 0, n * fOutFrameBytes);
         fLeadLeft -= n;
         done = n;
-    }
-    if (fDebt > 0) {
+    } else {
+        size_t keep = fLead + frames +
+                      (size_t)fMaxExtrapolate.load(std::memory_order_relaxed);
         size_t avail = fRing.Available();
-        fDebt -= fRing.Read(nullptr, fDebt < avail ? fDebt : avail);
+        if (avail > keep) {
+            fRing.Read(nullptr, avail - keep);
+        }
     }
 
     size_t in_bytes = fFormat.FrameBytes();
@@ -699,7 +703,6 @@ void WasapiAudio::Fill(uint8_t *out, size_t frames)
     }
     if (done < frames) {
         memset(out + done * fOutFrameBytes, 0, (frames - done) * fOutFrameBytes);
-        fDebt += frames - done;
         fUnderruns++;
     }
 }
