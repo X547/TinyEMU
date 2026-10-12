@@ -38,6 +38,16 @@
 #define IO_REPARSE_TAG_LX_CHR     0x80000025
 #define IO_REPARSE_TAG_LX_BLK     0x80000026
 
+/* Windows 10 classes the headers hide when building for older systems;
+   where they are missing, the calls fail and the older class does. */
+#define FILE_DISPOSITION_INFO_EX_CLASS ((FILE_INFO_BY_HANDLE_CLASS)21)
+#define FILE_RENAME_INFO_EX_CLASS      ((FILE_INFO_BY_HANDLE_CLASS)22)
+#define FILE_CASE_SENSITIVE_INFO_CLASS ((FILE_INFO_BY_HANDLE_CLASS)23)
+
+#ifndef FILE_RENAME_FLAG_IGNORE_READONLY_ATTRIBUTE
+#define FILE_RENAME_FLAG_IGNORE_READONLY_ATTRIBUTE 0x00000040
+#endif
+
 /* d_type of a directory entry */
 #define DT_DIR 4
 #define DT_REG 8
@@ -145,6 +155,8 @@ static int error_to_p9(DWORD err)
     case ERROR_FILE_EXISTS:
     case ERROR_ALREADY_EXISTS:
         return P9_EEXIST;
+    case ERROR_NOT_SAME_DEVICE:
+        return P9_EXDEV;
     case ERROR_DIRECTORY:
         return P9_ENOTDIR;
     case ERROR_DIR_NOT_EMPTY:
@@ -225,6 +237,20 @@ static std::wstring compose_path(const std::wstring &dir,
     return path + name;
 }
 
+/* The path of a new or removed entry 'name' of 'dir'. */
+static int child_path(std::wstring *path, const std::wstring &dir,
+                      const char *name)
+{
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+        return -P9_EINVAL;
+    std::wstring host;
+    int err = host_name(&host, name);
+    if (err)
+        return err;
+    *path = compose_path(dir, host);
+    return 0;
+}
+
 
 //#pragma mark - host files
 
@@ -242,14 +268,17 @@ static bool is_lx_tag(DWORD tag)
     }
 }
 
+/* Files stay open to the guest's deletes and renames, as in Linux. */
+#define SHARE_ALL (FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+
 /* Opens the file 'path' names. A Linux special file is opened itself; any
    other reparse point, such as a junction, is followed, unless its target
    is missing. */
 static HANDLE open_node(const std::wstring &path, DWORD access)
 {
-    const DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
     access |= FILE_READ_ATTRIBUTES;
-    HANDLE h = CreateFileW(path.c_str(), access, share, nullptr, OPEN_EXISTING,
+    HANDLE h = CreateFileW(path.c_str(), access, SHARE_ALL, nullptr,
+                           OPEN_EXISTING,
                            FILE_FLAG_BACKUP_SEMANTICS |
                            FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
     if (h == INVALID_HANDLE_VALUE)
@@ -259,7 +288,7 @@ static HANDLE open_node(const std::wstring &path, DWORD access)
                                      sizeof(tag)) &&
         (tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
         !is_lx_tag(tag.ReparseTag)) {
-        HANDLE target = CreateFileW(path.c_str(), access, share, nullptr,
+        HANDLE target = CreateFileW(path.c_str(), access, SHARE_ALL, nullptr,
                                     OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS,
                                     nullptr);
         if (target != INVALID_HANDLE_VALUE) {
@@ -318,6 +347,90 @@ static void filetime_to_unix(LARGE_INTEGER t, uint64_t *sec, uint32_t *nsec)
     }
     *sec = s;
     *nsec = rem * 100;
+}
+
+static LARGE_INTEGER unix_to_filetime(uint64_t sec, uint64_t nsec)
+{
+    LARGE_INTEGER t;
+    t.QuadPart = (int64_t)sec * 10000000 + nsec / 100 + UNIX_EPOCH_FILETIME;
+    return t;
+}
+
+/* Opens the entry 'path' itself, never what a reparse point names, for an
+   operation on the name. */
+static HANDLE open_entry(const std::wstring &path, DWORD access)
+{
+    return CreateFileW(path.c_str(), access | FILE_READ_ATTRIBUTES, SHARE_ALL,
+                       nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS |
+                       FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+}
+
+static DWORD open_access(uint32_t flags)
+{
+    switch (flags & P9_O_NOACCESS) {
+    case P9_O_RDONLY:
+        return GENERIC_READ;
+    case P9_O_WRONLY:
+        return GENERIC_WRITE;
+    case P9_O_RDWR:
+        return GENERIC_READ | GENERIC_WRITE;
+    default:
+        return 0;
+    }
+}
+
+/* Whether the volume lacks a newer class of information, so that the older
+   one has to do. */
+static bool unsupported_class()
+{
+    DWORD err = GetLastError();
+    return err == ERROR_INVALID_PARAMETER || err == ERROR_NOT_SUPPORTED ||
+           err == ERROR_INVALID_FUNCTION;
+}
+
+/* Renames the open entry 'h' to 'to', replacing what is there, and with
+   Linux semantics where the volume has them: a file still open under the
+   old target goes on working. */
+static bool rename_entry(HANDLE h, const std::wstring &to)
+{
+    /* the system takes a native path here: \??\C:\... */
+    std::wstring native = L"\\??\\" + to.substr(4);
+    DWORD bytes = native.size() * sizeof(WCHAR);
+    std::vector<uint8_t> buf(sizeof(FILE_RENAME_INFO) + bytes);
+    auto *ri = reinterpret_cast<FILE_RENAME_INFO *>(buf.data());
+    ri->Flags = FILE_RENAME_FLAG_REPLACE_IF_EXISTS |
+                FILE_RENAME_FLAG_POSIX_SEMANTICS |
+                FILE_RENAME_FLAG_IGNORE_READONLY_ATTRIBUTE;
+    ri->RootDirectory = nullptr;
+    ri->FileNameLength = bytes;
+    memcpy(ri->FileName, native.data(), bytes);
+    if (SetFileInformationByHandle(h, FILE_RENAME_INFO_EX_CLASS, ri,
+                                   buf.size()))
+        return true;
+    if (!unsupported_class())
+        return false;
+    ri->Flags = 0;
+    ri->ReplaceIfExists = TRUE;
+    return SetFileInformationByHandle(h, FileRenameInfo, ri, buf.size());
+}
+
+/* Removes the open entry 'h' with Linux semantics where the volume has
+   them: the name goes at once, though the file is still open. */
+static bool delete_entry(HANDLE h)
+{
+    FILE_DISPOSITION_INFO_EX ex;
+    ex.Flags = FILE_DISPOSITION_FLAG_DELETE |
+               FILE_DISPOSITION_FLAG_POSIX_SEMANTICS |
+               FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE;
+    if (SetFileInformationByHandle(h, FILE_DISPOSITION_INFO_EX_CLASS, &ex,
+                                   sizeof(ex)))
+        return true;
+    if (!unsupported_class())
+        return false;
+    FILE_DISPOSITION_INFO legacy;
+    legacy.DeleteFile = TRUE;
+    return SetFileInformationByHandle(h, FileDispositionInfo, &legacy,
+                                      sizeof(legacy));
 }
 
 
@@ -420,27 +533,39 @@ int FileSystemWin::Walk(FSFile **pf, FSQID *qids, FSFile *f1, int n,
 int FileSystemWin::Mkdir(FSQID *qid, FSFile *f, const char *name,
                          uint32_t mode, uint32_t gid)
 {
-    return -P9_EROFS;
+    std::wstring path;
+    int err = child_path(&path, F(f)->path, name);
+    if (err)
+        return err;
+    if (!CreateDirectoryW(path.c_str(), nullptr))
+        return last_error();
+    HANDLE h = open_entry(path, FILE_WRITE_ATTRIBUTES);
+    if (h == INVALID_HANDLE_VALUE)
+        return last_error();
+    /* Names that differ in case only are different files in a directory
+       the guest makes, as with WSL's case=dir. A system without the WSL
+       feature refuses, and the directory stays case-insensitive. */
+    FILE_CASE_SENSITIVE_INFO cs;
+    cs.Flags = FILE_CS_FLAG_CASE_SENSITIVE_DIR;
+    SetFileInformationByHandle(h, FILE_CASE_SENSITIVE_INFO_CLASS, &cs,
+                               sizeof(cs));
+    NodeInfo info;
+    bool ok = query_node(h, &info);
+    err = ok ? 0 : last_error();
+    CloseHandle(h);
+    if (err)
+        return err;
+    node_qid(qid, info.attributes, info.ino);
+    return 0;
 }
 
 int FileSystemWin::Open(FSQID *qid, FSFile *f1, uint32_t flags,
                         FSOpenCompletion *completion)
 {
     FileWin *f = F(f1);
-    DWORD access = 0;
+    DWORD access = open_access(flags);
 
     f->Close();
-    switch (flags & P9_O_NOACCESS) {
-    case P9_O_RDONLY:
-        access = GENERIC_READ;
-        break;
-    case P9_O_WRONLY:
-        access = GENERIC_WRITE;
-        break;
-    case P9_O_RDWR:
-        access = GENERIC_READ | GENERIC_WRITE;
-        break;
-    }
     HANDLE h = open_node(f->path, access);
     if (h == INVALID_HANDLE_VALUE)
         return last_error();
@@ -474,10 +599,41 @@ int FileSystemWin::Open(FSQID *qid, FSFile *f1, uint32_t flags,
     return 0;
 }
 
-int FileSystemWin::Create(FSQID *qid, FSFile *f, const char *name,
+int FileSystemWin::Create(FSQID *qid, FSFile *f1, const char *name,
                           uint32_t flags, uint32_t mode, uint32_t gid)
 {
-    return -P9_EROFS;
+    FileWin *f = F(f1);
+    std::wstring path;
+    int err = child_path(&path, f->path, name);
+    if (err)
+        return err;
+
+    f->Close();
+    /* an existing file is opened as it is, keeping what WSL stored on it */
+    DWORD disposition = (flags & P9_O_EXCL) ? CREATE_NEW : OPEN_ALWAYS;
+    HANDLE h = CreateFileW(path.c_str(),
+                           open_access(flags) | FILE_READ_ATTRIBUTES,
+                           SHARE_ALL, nullptr, disposition,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return last_error();
+    NodeInfo info;
+    bool ok = query_node(h, &info);
+    if (ok && (flags & P9_O_TRUNC)) {
+        FILE_END_OF_FILE_INFO eof {};
+        ok = SetFileInformationByHandle(h, FileEndOfFileInfo, &eof,
+                                        sizeof(eof));
+    }
+    if (!ok) {
+        err = last_error();
+        CloseHandle(h);
+        return err;
+    }
+    f->path = std::move(path);
+    f->handle = h;
+    f->is_dir = false;
+    node_qid(qid, info.attributes, info.ino);
+    return 0;
 }
 
 int FileSystemWin::Stat(FSFile *f1, FSStat *st)
@@ -532,12 +688,64 @@ int FileSystemWin::Stat(FSFile *f1, FSStat *st)
     return 0;
 }
 
-int FileSystemWin::SetAttr(FSFile *f, uint32_t mask, uint32_t mode,
+int FileSystemWin::SetAttr(FSFile *f1, uint32_t mask, uint32_t mode,
                            uint32_t uid, uint32_t gid, uint64_t size,
                            uint64_t atime_sec, uint64_t atime_nsec,
                            uint64_t mtime_sec, uint64_t mtime_nsec)
 {
-    return -P9_EROFS;
+    FileWin *f = F(f1);
+    DWORD access = 0;
+
+    /* The mode and the owner are not kept yet; they are taken and ignored,
+       as WSL does without metadata. */
+    if (mask & P9_SETATTR_SIZE)
+        access |= GENERIC_WRITE;
+    if (mask & (P9_SETATTR_ATIME | P9_SETATTR_MTIME))
+        access |= FILE_WRITE_ATTRIBUTES;
+    if (access == 0)
+        return 0;
+
+    /* a file unlinked while open has only its handle left */
+    HANDLE h = open_node(f->path, access);
+    bool own = h != INVALID_HANDLE_VALUE;
+    if (!own) {
+        if (f->handle == INVALID_HANDLE_VALUE)
+            return last_error();
+        h = f->handle;
+    }
+    NodeInfo info;
+    bool ok = query_node(h, &info);
+    int err = ok ? 0 : last_error();
+    if (!err && (mask & P9_SETATTR_SIZE)) {
+        if (info.attributes & FILE_ATTRIBUTE_DIRECTORY) {
+            err = -P9_EISDIR;
+        } else {
+            FILE_END_OF_FILE_INFO eof;
+            eof.EndOfFile.QuadPart = size;
+            if (!SetFileInformationByHandle(h, FileEndOfFileInfo, &eof,
+                                            sizeof(eof)))
+                err = last_error();
+        }
+    }
+    if (!err && (mask & (P9_SETATTR_ATIME | P9_SETATTR_MTIME))) {
+        FILE_BASIC_INFO basic {}; /* zero leaves a field as it is */
+        LARGE_INTEGER now;
+        GetSystemTimePreciseAsFileTime(reinterpret_cast<FILETIME *>(&now));
+        if (mask & P9_SETATTR_ATIME) {
+            basic.LastAccessTime = (mask & P9_SETATTR_ATIME_SET)
+                ? unix_to_filetime(atime_sec, atime_nsec) : now;
+        }
+        if (mask & P9_SETATTR_MTIME) {
+            basic.LastWriteTime = (mask & P9_SETATTR_MTIME_SET)
+                ? unix_to_filetime(mtime_sec, mtime_nsec) : now;
+        }
+        if (!SetFileInformationByHandle(h, FileBasicInfo, &basic,
+                                        sizeof(basic)))
+            err = last_error();
+    }
+    if (own)
+        CloseHandle(h);
+    return err;
 }
 
 void FileSystemWin::Close(FSFile *f)
@@ -659,20 +867,32 @@ int FileSystemWin::Write(FSFile *f1, uint64_t offset, const uint8_t *buf,
 
 int FileSystemWin::Link(FSFile *df, FSFile *f, const char *name)
 {
-    return -P9_EROFS;
+    std::wstring path;
+    int err = child_path(&path, F(df)->path, name);
+    if (err)
+        return err;
+    if (!CreateHardLinkW(path.c_str(), F(f)->path.c_str(), nullptr)) {
+        err = last_error();
+        NodeInfo info;
+        if (stat_path(F(f)->path, &info) == 0 &&
+            (info.attributes & FILE_ATTRIBUTE_DIRECTORY))
+            return -P9_EPERM;
+        return err;
+    }
+    return 0;
 }
 
 int FileSystemWin::Symlink(FSQID *qid, FSFile *f, const char *name,
                            const char *symgt, uint32_t gid)
 {
-    return -P9_EROFS;
+    return -P9_EPERM;
 }
 
 int FileSystemWin::Mknod(FSQID *qid, FSFile *f, const char *name,
                          uint32_t mode, uint32_t major, uint32_t minor,
                          uint32_t gid)
 {
-    return -P9_EROFS;
+    return -P9_EPERM;
 }
 
 int FileSystemWin::ReadLink(char *buf, int buf_size, FSFile *f)
@@ -683,12 +903,61 @@ int FileSystemWin::ReadLink(char *buf, int buf_size, FSFile *f)
 int FileSystemWin::RenameAt(FSFile *f, const char *name, FSFile *new_f,
                             const char *new_name)
 {
-    return -P9_EROFS;
+    std::wstring from, to;
+    int err = child_path(&from, F(f)->path, name);
+    if (!err)
+        err = child_path(&to, F(new_f)->path, new_name);
+    if (err)
+        return err;
+
+    HANDLE h = open_entry(from, DELETE);
+    if (h == INVALID_HANDLE_VALUE)
+        return last_error();
+    if (rename_entry(h, to)) {
+        CloseHandle(h);
+        return 0;
+    }
+    err = last_error();
+
+    /* The system replaces no directory; Linux replaces an empty one with
+       another directory. */
+    NodeInfo src, dst;
+    if (query_node(h, &src) && stat_path(to, &dst) == 0) {
+        bool src_dir = src.attributes & FILE_ATTRIBUTE_DIRECTORY;
+        bool dst_dir = dst.attributes & FILE_ATTRIBUTE_DIRECTORY;
+        if (dst_dir && !src_dir) {
+            err = -P9_EISDIR;
+        } else if (src_dir && !dst_dir) {
+            err = -P9_ENOTDIR;
+        } else if (src_dir && dst_dir) {
+            HANDLE dh = open_entry(to, DELETE);
+            if (dh == INVALID_HANDLE_VALUE) {
+                err = last_error();
+            } else {
+                bool removed = delete_entry(dh);
+                err = removed ? 0 : last_error();
+                CloseHandle(dh);
+                if (removed && !rename_entry(h, to))
+                    err = last_error();
+            }
+        }
+    }
+    CloseHandle(h);
+    return err;
 }
 
 int FileSystemWin::UnlinkAt(FSFile *f, const char *name)
 {
-    return -P9_EROFS;
+    std::wstring path;
+    int err = child_path(&path, F(f)->path, name);
+    if (err)
+        return err;
+    HANDLE h = open_entry(path, DELETE);
+    if (h == INVALID_HANDLE_VALUE)
+        return last_error();
+    err = delete_entry(h) ? 0 : last_error();
+    CloseHandle(h);
+    return err;
 }
 
 int FileSystemWin::Lock(FSFile *f, const FSLock *lock)

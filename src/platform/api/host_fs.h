@@ -90,6 +90,7 @@
 #define P9_EACCES    13
 #define P9_EBUSY     16
 #define	P9_EEXIST    17
+#define P9_EXDEV     18
 #define	P9_ENOTDIR   20
 #define P9_EISDIR    21
 #define P9_EINVAL    22
