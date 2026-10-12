@@ -89,6 +89,9 @@ struct SymlinkReparse {
 /* WSL's symlink: this version, then the target with no NUL */
 #define LX_SYMLINK_VERSION 2
 
+/* the numeric user of an attach that names its user only by name */
+#define P9_NONUNAME 0xFFFFFFFF
+
 /* Files without metadata of their own get every permission, as in WSL. */
 #define DEFAULT_PERMISSIONS 0777
 
@@ -862,7 +865,9 @@ int FileSystemWin::Attach(FSFile **pf, FSQID *qid, uint32_t uid,
     }
     FileWin *f = new FileWin();
     f->path = fRoot;
-    f->uid = uid;
+    /* a client that gives only a user name owns what files without an
+       owner of their own have */
+    f->uid = (uid == P9_NONUNAME) ? 0 : uid;
     node_qid(qid, info);
     *pf = f;
     return 0;
