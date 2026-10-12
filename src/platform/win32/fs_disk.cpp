@@ -27,6 +27,7 @@
 #include <vector>
 
 #include <windows.h>
+#include <winioctl.h>
 #include <winternl.h>
 
 #include "cutils.h"
@@ -58,8 +59,32 @@ NTSTATUS NTAPI NtSetEaFile(HANDLE file, PIO_STATUS_BLOCK io, PVOID buffer,
 }
 
 /* d_type of a directory entry */
-#define DT_DIR 4
-#define DT_REG 8
+#define DT_UNKNOWN 0
+#define DT_FIFO    1
+#define DT_CHR     2
+#define DT_DIR     4
+#define DT_BLK     6
+#define DT_REG     8
+#define DT_LNK     10
+#define DT_SOCK    12
+
+/* a reparse point's data, header included */
+#define REPARSE_HEADER_SIZE 8
+#define REPARSE_BUFFER_SIZE (16 * 1024)
+
+/* SymbolicLinkReparseBuffer of REPARSE_DATA_BUFFER */
+struct SymlinkReparse {
+    USHORT substitute_offset;
+    USHORT substitute_length;
+    USHORT print_offset;
+    USHORT print_length;
+    ULONG flags;
+    WCHAR path[1];
+};
+#define SYMLINK_FLAG_RELATIVE 1
+
+/* WSL's symlink: this version, then the target with no NUL */
+#define LX_SYMLINK_VERSION 2
 
 /* Files without metadata of their own get every permission, as in WSL. */
 #define DEFAULT_PERMISSIONS 0777
@@ -105,6 +130,7 @@ struct LxMeta {
 /* What one query of an open file tells. */
 struct NodeInfo {
     uint32_t attributes;
+    uint32_t tag; /* of a reparse point that was not followed, else 0 */
     uint64_t ino;
     uint64_t nlink;
     uint64_t size;
@@ -295,9 +321,45 @@ static bool is_lx_tag(DWORD tag)
 /* Files stay open to the guest's deletes and renames, as in Linux. */
 #define SHARE_ALL (FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
 
-/* Opens the file 'path' names. A Linux special file is opened itself; any
-   other reparse point, such as a junction, is followed, unless its target
-   is missing. */
+/* The data of the reparse point 'h', header included. */
+static bool read_reparse(HANDLE h, std::vector<uint8_t> *buf)
+{
+    DWORD n;
+    buf->resize(REPARSE_BUFFER_SIZE);
+    if (!DeviceIoControl(h, FSCTL_GET_REPARSE_POINT, nullptr, 0, buf->data(),
+                         buf->size(), &n, nullptr))
+        return false;
+    buf->resize(n);
+    return n >= REPARSE_HEADER_SIZE;
+}
+
+static const SymlinkReparse *symlink_reparse(const std::vector<uint8_t> &buf)
+{
+    if (buf.size() < REPARSE_HEADER_SIZE + offsetof(SymlinkReparse, path) ||
+        get_le32(buf.data()) != IO_REPARSE_TAG_SYMLINK)
+        return nullptr;
+    return reinterpret_cast<const SymlinkReparse *>(
+        buf.data() + REPARSE_HEADER_SIZE);
+}
+
+/* Whether a reparse point is shown as it is rather than followed: the
+   files WSL makes, and a Windows symlink to a relative path, which reads
+   the same in the guest. */
+static bool keep_reparse(HANDLE h, DWORD tag)
+{
+    if (is_lx_tag(tag))
+        return true;
+    if (tag != IO_REPARSE_TAG_SYMLINK)
+        return false;
+    std::vector<uint8_t> buf;
+    const SymlinkReparse *sl = read_reparse(h, &buf) ? symlink_reparse(buf)
+                                                     : nullptr;
+    return sl && (sl->flags & SYMLINK_FLAG_RELATIVE);
+}
+
+/* Opens the file 'path' names. A symlink or another Linux special file is
+   opened itself; any other reparse point, such as a junction, is followed,
+   unless its target is missing. */
 static HANDLE open_node(const std::wstring &path, DWORD access)
 {
     access |= FILE_READ_ATTRIBUTES | FILE_READ_EA;
@@ -311,7 +373,7 @@ static HANDLE open_node(const std::wstring &path, DWORD access)
     if (GetFileInformationByHandleEx(h, FileAttributeTagInfo, &tag,
                                      sizeof(tag)) &&
         (tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
-        !is_lx_tag(tag.ReparseTag)) {
+        !keep_reparse(h, tag.ReparseTag)) {
         HANDLE target = CreateFileW(path.c_str(), access, SHARE_ALL, nullptr,
                                     OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS,
                                     nullptr);
@@ -329,9 +391,17 @@ static bool query_node(HANDLE h, NodeInfo *info)
     if (!GetFileInformationByHandle(h, &bh))
         return false;
     info->attributes = bh.dwFileAttributes;
+    info->tag = 0;
     info->ino = ((uint64_t)bh.nFileIndexHigh << 32) | bh.nFileIndexLow;
     info->nlink = bh.nNumberOfLinks;
     info->size = ((uint64_t)bh.nFileSizeHigh << 32) | bh.nFileSizeLow;
+    if (info->attributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+        FILE_ATTRIBUTE_TAG_INFO tag;
+        if (!GetFileInformationByHandleEx(h, FileAttributeTagInfo, &tag,
+                                          sizeof(tag)))
+            return false;
+        info->tag = tag.ReparseTag;
+    }
     return true;
 }
 
@@ -341,12 +411,69 @@ static uint64_t valid_ino(uint64_t ino)
     return ino != 0 ? ino : 1;
 }
 
-static void node_qid(FSQID *qid, uint32_t attributes, uint64_t ino)
+/* The st_mode type bits of a file with these attributes and reparse tag. */
+static uint32_t node_type(uint32_t attributes, uint32_t tag)
 {
-    qid->type = (attributes & FILE_ATTRIBUTE_DIRECTORY) ? P9_QTDIR
-                                                        : P9_QTFILE;
+    switch (tag) {
+    case IO_REPARSE_TAG_LX_SYMLINK:
+    case IO_REPARSE_TAG_SYMLINK:
+        return P9_S_IFLNK;
+    case IO_REPARSE_TAG_LX_FIFO:
+        return P9_S_IFIFO;
+    case IO_REPARSE_TAG_LX_CHR:
+        return P9_S_IFCHR;
+    case IO_REPARSE_TAG_LX_BLK:
+        return P9_S_IFBLK;
+    case IO_REPARSE_TAG_AF_UNIX:
+        return P9_S_IFSOCK;
+    default:
+        return (attributes & FILE_ATTRIBUTE_DIRECTORY) ? P9_S_IFDIR
+                                                       : P9_S_IFREG;
+    }
+}
+
+static uint32_t node_type(const NodeInfo &info)
+{
+    return node_type(info.attributes, info.tag);
+}
+
+static uint8_t mode_qid_type(uint32_t type)
+{
+    switch (type) {
+    case P9_S_IFDIR:
+        return P9_QTDIR;
+    case P9_S_IFLNK:
+        return P9_QTSYMLINK;
+    default:
+        return P9_QTFILE;
+    }
+}
+
+static uint8_t mode_d_type(uint32_t type)
+{
+    switch (type) {
+    case P9_S_IFIFO:
+        return DT_FIFO;
+    case P9_S_IFCHR:
+        return DT_CHR;
+    case P9_S_IFDIR:
+        return DT_DIR;
+    case P9_S_IFBLK:
+        return DT_BLK;
+    case P9_S_IFLNK:
+        return DT_LNK;
+    case P9_S_IFSOCK:
+        return DT_SOCK;
+    default:
+        return DT_REG;
+    }
+}
+
+static void node_qid(FSQID *qid, const NodeInfo &info)
+{
+    qid->type = mode_qid_type(node_type(info));
     qid->version = 0; /* no caching on client */
-    qid->path = valid_ino(ino);
+    qid->path = valid_ino(info.ino);
 }
 
 static int stat_path(const std::wstring &path, NodeInfo *info)
@@ -551,6 +678,98 @@ static int set_lx(HANDLE h, const LxMeta &m)
     return 0;
 }
 
+/* The target of the symlink 'h' as the guest reads it. */
+static int link_target(HANDLE h, std::string *target)
+{
+    std::vector<uint8_t> buf;
+    if (!read_reparse(h, &buf))
+        return last_error();
+    size_t len = get_le16(buf.data() + 4);
+    if (REPARSE_HEADER_SIZE + len > buf.size())
+        return -P9_EIO;
+    if (get_le32(buf.data()) == IO_REPARSE_TAG_LX_SYMLINK) {
+        if (len < 4)
+            return -P9_EIO;
+        target->assign(reinterpret_cast<const char *>(buf.data()) +
+                       REPARSE_HEADER_SIZE + 4, len - 4);
+        return 0;
+    }
+    const SymlinkReparse *sl = symlink_reparse(buf);
+    if (!sl)
+        return -P9_EINVAL;
+    size_t off = sl->print_offset;
+    size_t n = sl->print_length;
+    if (n == 0) {
+        off = sl->substitute_offset;
+        n = sl->substitute_length;
+    }
+    const uint8_t *names = reinterpret_cast<const uint8_t *>(sl->path);
+    if (names - buf.data() + off + n > buf.size())
+        return -P9_EIO;
+    std::wstring w(reinterpret_cast<const wchar_t *>(names + off),
+                   n / sizeof(WCHAR));
+    for (wchar_t &c: w) {
+        if (c == L'\\')
+            c = L'/';
+    }
+    *target = guest_name(w.data(), w.size());
+    return 0;
+}
+
+/* Creates 'path' as a file of the kind WSL marks with reparse tag 'tag',
+   with 'data' after the reparse header. */
+static HANDLE create_special(const std::wstring &path, DWORD tag,
+                             const std::vector<uint8_t> &data, int *err)
+{
+    if (REPARSE_HEADER_SIZE + data.size() > REPARSE_BUFFER_SIZE) {
+        *err = -P9_ENAMETOOLONG;
+        return INVALID_HANDLE_VALUE;
+    }
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE | DELETE |
+                           FILE_READ_ATTRIBUTES | FILE_READ_EA | FILE_WRITE_EA,
+                           SHARE_ALL, nullptr, CREATE_NEW,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+                           nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        *err = last_error();
+        return h;
+    }
+    std::vector<uint8_t> buf(REPARSE_HEADER_SIZE + data.size());
+    put_le32(buf.data(), tag);
+    put_le16(buf.data() + 4, data.size());
+    put_le16(buf.data() + 6, 0);
+    if (!data.empty())
+        memcpy(buf.data() + REPARSE_HEADER_SIZE, data.data(), data.size());
+    DWORD n;
+    if (!DeviceIoControl(h, FSCTL_SET_REPARSE_POINT, buf.data(), buf.size(),
+                         nullptr, 0, &n, nullptr)) {
+        *err = last_error();
+        delete_entry(h);
+        CloseHandle(h);
+        return INVALID_HANDLE_VALUE;
+    }
+    return h;
+}
+
+/* The qid of a file just made; closes it. */
+static int new_node_qid(HANDLE h, FSQID *qid)
+{
+    NodeInfo info;
+    bool ok = query_node(h, &info);
+    int err = ok ? 0 : last_error();
+    CloseHandle(h);
+    if (!err)
+        node_qid(qid, info);
+    return err;
+}
+
+/* st_rdev as Linux encodes a device number */
+static uint64_t encode_dev(uint32_t major, uint32_t minor)
+{
+    return (minor & 0xff) | ((uint64_t)(major & 0xfff) << 8) |
+           ((uint64_t)(minor & ~0xffu) << 12);
+}
+
 /* The metadata of a new file. */
 static LxMeta new_lx(uint32_t uid, uint32_t gid, uint32_t mode)
 {
@@ -560,12 +779,6 @@ static LxMeta new_lx(uint32_t uid, uint32_t gid, uint32_t mode)
     m.gid = gid;
     m.mode = mode;
     return m;
-}
-
-/* The st_mode type bits of a file. */
-static uint32_t node_type(uint32_t attributes)
-{
-    return (attributes & FILE_ATTRIBUTE_DIRECTORY) ? P9_S_IFDIR : P9_S_IFREG;
 }
 
 
@@ -628,7 +841,7 @@ int FileSystemWin::Attach(FSFile **pf, FSQID *qid, uint32_t uid,
     FileWin *f = new FileWin();
     f->path = fRoot;
     f->uid = uid;
-    node_qid(qid, info.attributes, info.ino);
+    node_qid(qid, info);
     *pf = f;
     return 0;
 }
@@ -656,7 +869,7 @@ int FileSystemWin::Walk(FSFile **pf, FSQID *qids, FSFile *f1, int n,
         if (stat_path(next, &info) != 0)
             break;
         path = std::move(next);
-        node_qid(&qids[i], info.attributes, info.ino);
+        node_qid(&qids[i], info);
     }
     FileWin *nf = new FileWin();
     nf->path = std::move(path);
@@ -686,14 +899,7 @@ int FileSystemWin::Mkdir(FSQID *qid, FSFile *f, const char *name,
     cs.Flags = FILE_CS_FLAG_CASE_SENSITIVE_DIR;
     SetFileInformationByHandle(h, FILE_CASE_SENSITIVE_INFO_CLASS, &cs,
                                sizeof(cs));
-    NodeInfo info;
-    bool ok = query_node(h, &info);
-    err = ok ? 0 : last_error();
-    CloseHandle(h);
-    if (err)
-        return err;
-    node_qid(qid, info.attributes, info.ino);
-    return 0;
+    return new_node_qid(h, qid);
 }
 
 int FileSystemWin::Open(FSQID *qid, FSFile *f1, uint32_t flags,
@@ -732,7 +938,7 @@ int FileSystemWin::Open(FSQID *qid, FSFile *f1, uint32_t flags,
     }
     f->handle = h;
     f->is_dir = is_dir;
-    node_qid(qid, info.attributes, info.ino);
+    node_qid(qid, info);
     return 0;
 }
 
@@ -773,7 +979,7 @@ int FileSystemWin::Create(FSQID *qid, FSFile *f1, const char *name,
     f->path = std::move(path);
     f->handle = h;
     f->is_dir = false;
-    node_qid(qid, info.attributes, info.ino);
+    node_qid(qid, info);
     return 0;
 }
 
@@ -800,16 +1006,23 @@ int FileSystemWin::Stat(FSFile *f1, FSStat *st)
               GetFileInformationByHandleEx(h, FileStandardInfo, &standard,
                                            sizeof(standard));
     int err = ok ? 0 : last_error();
-    if (ok)
+    uint64_t size = 0;
+    if (ok) {
+        size = info.size;
         query_lx(h, &lx);
+        /* a symlink's size is its target's length */
+        std::string target;
+        if (node_type(info) == P9_S_IFLNK && link_target(h, &target) == 0)
+            size = target.size();
+    }
     if (own)
         CloseHandle(h);
     if (err)
         return err;
 
-    node_qid(&st->qid, info.attributes, info.ino);
+    node_qid(&st->qid, info);
     /* the host decides the type; the guest, when it set them, the rest */
-    st->st_mode = node_type(info.attributes);
+    st->st_mode = node_type(info);
     if (lx.has_mode) {
         st->st_mode |= lx.mode & 07777;
     } else {
@@ -821,10 +1034,9 @@ int FileSystemWin::Stat(FSFile *f1, FSStat *st)
     st->st_uid = lx.uid;
     st->st_gid = lx.gid;
     st->st_nlink = info.nlink;
-    st->st_rdev = 0;
+    st->st_rdev = lx.has_dev ? encode_dev(lx.major, lx.minor) : 0;
     /* a directory's size is its index's, which nothing in Linux expects */
-    st->st_size = (info.attributes & FILE_ATTRIBUTE_DIRECTORY) ? 4096
-                                                               : info.size;
+    st->st_size = (node_type(info) == P9_S_IFDIR) ? 4096 : size;
     st->st_blksize = 4096;
     st->st_blocks = standard.AllocationSize.QuadPart / 512;
     filetime_to_unix(basic.LastAccessTime, &st->st_atime_sec,
@@ -872,7 +1084,7 @@ int FileSystemWin::SetAttr(FSFile *f1, uint32_t mask, uint32_t mode,
         lx.has_gid = mask & P9_SETATTR_GID;
         lx.gid = gid;
         lx.has_mode = mask & P9_SETATTR_MODE;
-        lx.mode = node_type(info.attributes) | (mode & 07777);
+        lx.mode = node_type(info) | (mode & 07777);
         err = set_lx(h, lx);
         /* Once the guest lets the owner write, the host's read-only
            attribute must not stop it. */
@@ -956,11 +1168,16 @@ int FileSystemWin::LoadDir(FileWin *f)
                        (len == 2 && e->FileName[0] == L'.' &&
                         e->FileName[1] == L'.');
             if (!dot) {
-                bool dir = e->FileAttributes & FILE_ATTRIBUTE_DIRECTORY;
+                /* a reparse point's tag is where its EA size would be */
+                DWORD tag = (e->FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+                            ? e->EaSize : 0;
+                uint32_t type = node_type(e->FileAttributes, tag);
+                /* whether a Windows symlink is followed is not known yet */
+                uint8_t d_type = (tag == IO_REPARSE_TAG_SYMLINK)
+                                 ? DT_UNKNOWN : mode_d_type(type);
                 f->entries.push_back({guest_name(e->FileName, len),
                                       valid_ino(e->FileId.QuadPart),
-                                      (uint8_t)(dir ? P9_QTDIR : P9_QTFILE),
-                                      (uint8_t)(dir ? DT_DIR : DT_REG)});
+                                      mode_qid_type(type), d_type});
             }
             if (e->NextEntryOffset == 0)
                 break;
@@ -1059,19 +1276,89 @@ int FileSystemWin::Link(FSFile *df, FSFile *f, const char *name)
 int FileSystemWin::Symlink(FSQID *qid, FSFile *f, const char *name,
                            const char *symgt, uint32_t gid)
 {
-    return -P9_EPERM;
+    std::wstring path;
+    int err = child_path(&path, F(f)->path, name);
+    if (err)
+        return err;
+    size_t len = strlen(symgt);
+    std::vector<uint8_t> data(4 + len);
+    put_le32(data.data(), LX_SYMLINK_VERSION);
+    memcpy(data.data() + 4, symgt, len);
+    HANDLE h = create_special(path, IO_REPARSE_TAG_LX_SYMLINK, data, &err);
+    if (h == INVALID_HANDLE_VALUE)
+        return err;
+    set_lx(h, new_lx(F(f)->uid, gid, P9_S_IFLNK | 0777));
+    return new_node_qid(h, qid);
 }
 
 int FileSystemWin::Mknod(FSQID *qid, FSFile *f, const char *name,
                          uint32_t mode, uint32_t major, uint32_t minor,
                          uint32_t gid)
 {
-    return -P9_EPERM;
+    uint32_t type = mode & P9_S_IFMT;
+    DWORD tag;
+    switch (type) {
+    case P9_S_IFIFO:
+        tag = IO_REPARSE_TAG_LX_FIFO;
+        break;
+    case P9_S_IFCHR:
+        tag = IO_REPARSE_TAG_LX_CHR;
+        break;
+    case P9_S_IFBLK:
+        tag = IO_REPARSE_TAG_LX_BLK;
+        break;
+    case P9_S_IFSOCK:
+        tag = IO_REPARSE_TAG_AF_UNIX;
+        break;
+    case 0:
+    case P9_S_IFREG:
+        type = P9_S_IFREG;
+        tag = 0;
+        break;
+    default:
+        return -P9_EINVAL;
+    }
+
+    std::wstring path;
+    int err = child_path(&path, F(f)->path, name);
+    if (err)
+        return err;
+    HANDLE h;
+    if (tag != 0) {
+        h = create_special(path, tag, {}, &err);
+    } else {
+        h = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES | FILE_WRITE_EA,
+                        SHARE_ALL, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
+                        nullptr);
+        if (h == INVALID_HANDLE_VALUE)
+            err = last_error();
+    }
+    if (h == INVALID_HANDLE_VALUE)
+        return err;
+    LxMeta lx = new_lx(F(f)->uid, gid, type | (mode & 07777));
+    if (type == P9_S_IFCHR || type == P9_S_IFBLK) {
+        lx.has_dev = true;
+        lx.major = major;
+        lx.minor = minor;
+    }
+    set_lx(h, lx);
+    return new_node_qid(h, qid);
 }
 
 int FileSystemWin::ReadLink(char *buf, int buf_size, FSFile *f)
 {
-    return -P9_EINVAL;
+    HANDLE h = open_entry(F(f)->path, 0);
+    if (h == INVALID_HANDLE_VALUE)
+        return last_error();
+    std::string target;
+    int err = link_target(h, &target);
+    CloseHandle(h);
+    if (err)
+        return err;
+    if ((int)target.size() >= buf_size)
+        return -P9_ENAMETOOLONG;
+    memcpy(buf, target.c_str(), target.size() + 1);
+    return 0;
 }
 
 int FileSystemWin::RenameAt(FSFile *f, const char *name, FSFile *new_f,
