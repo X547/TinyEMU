@@ -224,6 +224,18 @@ static int fs_attach(HostFileSystem *fs1, FSFileDisk **pf,
     return 0;
 }
 
+/* The directory holding 'path', but never one above the root. */
+static char *parent_path(FSDeviceDisk *fs, const char *path)
+{
+    const char *sep = strrchr(path, '/');
+    size_t root_len = fs->root_path.size();
+
+    if (strlen(path) <= root_len || sep == NULL ||
+        (size_t)(sep - path) < root_len)
+        return strdup(fs->root_path.c_str());
+    return strndup(path, sep - path);
+}
+
 static int fs_walk(HostFileSystem *fs, FSFileDisk **pf, FSQID *qids,
                    FSFileDisk *f, int n, char **names)
 {
@@ -233,7 +245,12 @@ static int fs_walk(HostFileSystem *fs, FSFileDisk **pf, FSQID *qids,
 
     path = strdup(f->path);
     for(i = 0; i < n; i++) {
-        path1 = compose_path(path, names[i]);
+        if (strcmp(names[i], ".") == 0)
+            path1 = strdup(path);
+        else if (strcmp(names[i], "..") == 0)
+            path1 = parent_path((FSDeviceDisk *)fs, path);
+        else
+            path1 = compose_path(path, names[i]);
         if (lstat(path1, &st) != 0) {
             free(path1);
             break;

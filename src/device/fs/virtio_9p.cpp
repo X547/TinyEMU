@@ -371,6 +371,21 @@ static void virtio_9p_send_error(VIRTIO9PDevice *s, int queue_idx,
     virtio_9p_send_reply(s, queue_idx, desc_idx, 6, tag, buf, buf_len);
 }
 
+/* A name is one path element; a '/' would let it reach outside its
+   directory. */
+static bool p9_name_ok(const char *name)
+{
+    return name[0] != '\0' && strchr(name, '/') == nullptr;
+}
+
+/* A name to create, link, rename or remove: "." and ".." name no entry of
+   their own. */
+static bool p9_entry_name_ok(const char *name)
+{
+    return p9_name_ok(name) && strcmp(name, ".") != 0 &&
+           strcmp(name, "..") != 0;
+}
+
 /* One per in-flight lopen: it carries the reply context and is itself the
    completion the filesystem calls back into. */
 struct P9OpenInfo: public FSOpenCompletion {
@@ -515,6 +530,8 @@ int VIRTIO9PDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
             f = fid_find(s, fid);
             if (!f) {
                 err = -P9_EPROTO;
+            } else if (!p9_entry_name_ok(name)) {
+                err = -P9_EINVAL;
             } else {
                 err = fs->Create(&qid, f, name, flags, mode, gid);
             }
@@ -539,6 +556,8 @@ int VIRTIO9PDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
             f = fid_find(s, fid);
             if (!f) {
                 err = -P9_EPROTO;
+            } else if (!p9_entry_name_ok(name)) {
+                err = -P9_EINVAL;
             } else {
                 err = fs->Symlink(&qid, f, name, symgt, gid);
             }
@@ -564,6 +583,8 @@ int VIRTIO9PDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
             f = fid_find(s, fid);
             if (!f) {
                 err = -P9_EPROTO;
+            } else if (!p9_entry_name_ok(name)) {
+                err = -P9_EINVAL;
             } else {
                 err = fs->Mknod(&qid, f, name, mode, major, minor, gid);
             }
@@ -754,6 +775,8 @@ int VIRTIO9PDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
             f = fid_find(s, fid);
             if (!df || !f) {
                 err = -P9_EPROTO;
+            } else if (!p9_entry_name_ok(name)) {
+                err = -P9_EINVAL;
             } else {
                 err = fs->Link(df, f, name);
             }
@@ -774,9 +797,15 @@ int VIRTIO9PDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
                            "wsww", &fid, &name, &mode, &gid))
                 goto protocol_error;
             f = fid_find(s, fid);
-            if (!f)
+            if (!f) {
+                free(name);
                 goto fid_not_found;
-            err = fs->Mkdir(&qid, f, name, mode, gid);
+            }
+            if (p9_entry_name_ok(name))
+                err = fs->Mkdir(&qid, f, name, mode, gid);
+            else
+                err = -P9_EINVAL;
+            free(name);
             if (err != 0)
                 goto error;
             buf_len = marshall(s, buf, sizeof(buf), "Q", &qid);
@@ -796,6 +825,9 @@ int VIRTIO9PDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
             new_f = fid_find(s, new_fid);
             if (!f || !new_f) {
                 err = -P9_EPROTO;
+            } else if (!p9_entry_name_ok(name) ||
+                       !p9_entry_name_ok(new_name)) {
+                err = -P9_EINVAL;
             } else {
                 err = fs->RenameAt(f, name, new_f, new_name);
             }
@@ -818,6 +850,8 @@ int VIRTIO9PDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
             f = fid_find(s, fid);
             if (!f) {
                 err = -P9_EPROTO;
+            } else if (!p9_entry_name_ok(name)) {
+                err = -P9_EINVAL;
             } else {
                 err = fs->UnlinkAt(f, name);
             }
@@ -889,13 +923,21 @@ int VIRTIO9PDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
             names = static_cast<char **>(mallocz(sizeof(names[0]) * nwname));
             qids = static_cast<FSQID *>(malloc(sizeof(qids[0]) * nwname));
             for(i = 0; i < nwname; i++) {
-                if (unmarshall(s, queue_idx, desc_idx, &offset, 
+                if (unmarshall(s, queue_idx, desc_idx, &offset,
                                "s", &names[i])) {
                     err = -P9_EPROTO;
                     goto walk_done;
                 }
             }
-            err = fs->Walk(&f, qids, f, nwname, names);
+            /* the walk ends before a name that is not one element, as
+               before a missing file; ".." is the back end's to stop at
+               its root */
+            for(i = 0; i < nwname && p9_name_ok(names[i]); i++)
+                ;
+            if (i == 0 && nwname > 0)
+                err = -P9_ENOENT;
+            else
+                err = fs->Walk(&f, qids, f, i, names);
         walk_done:
             for(i = 0; i < nwname; i++) {
                 free(names[i]);
