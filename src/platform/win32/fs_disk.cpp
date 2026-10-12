@@ -20,10 +20,13 @@
  * THE SOFTWARE.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <windows.h>
@@ -136,12 +139,30 @@ struct NodeInfo {
     uint64_t size;
 };
 
+/* A byte range one owner has locked, its end included. */
+struct LockRange {
+    uint32_t proc_id;
+    std::string client_id;
+    FileWin *fid; /* through which it was taken */
+    uint8_t type;
+    uint64_t start;
+    uint64_t end;
+};
+
+/* a file: its volume's serial number and its index there */
+typedef std::pair<uint32_t, uint64_t> FileKey;
+
 class FileSystemWin final: public HostFileSystem {
 private:
     std::wstring fRoot;
+    /* Every lock the guest holds. They are the guest's alone: programs on
+       the host neither see nor honour them. */
+    std::map<FileKey, std::vector<LockRange>> fLocks;
 
     int LoadDir(FileWin *f);
     std::wstring Parent(const std::wstring &path) const;
+    int LockedFile(FileWin *f, FileKey *key);
+    void DropLocks(FileWin *f);
 
 public:
     explicit FileSystemWin(std::wstring root): fRoot(std::move(root)) {}
@@ -813,6 +834,7 @@ std::wstring FileSystemWin::Parent(const std::wstring &path) const
 
 void FileSystemWin::Delete(FSFile *f)
 {
+    DropLocks(F(f));
     delete F(f);
 }
 
@@ -1421,14 +1443,145 @@ int FileSystemWin::UnlinkAt(FSFile *f, const char *name)
     return err;
 }
 
+/* The range a lock request covers; a length of 0 runs to the end. */
+static bool lock_range(const FSLock *lock, uint64_t *start, uint64_t *end)
+{
+    *start = lock->start;
+    if (lock->length == 0) {
+        *end = UINT64_MAX;
+        return true;
+    }
+    if (lock->length - 1 > UINT64_MAX - lock->start)
+        return false;
+    *end = lock->start + lock->length - 1;
+    return true;
+}
+
+static bool same_owner(const LockRange &r, const FSLock *lock)
+{
+    return r.proc_id == lock->proc_id &&
+           r.client_id == (lock->client_id ? lock->client_id : "");
+}
+
+/* Whether another owner's range keeps 'lock' from being taken. */
+static bool lock_conflicts(const LockRange &r, const FSLock *lock,
+                           uint64_t start, uint64_t end)
+{
+    return !same_owner(r, lock) && r.start <= end && start <= r.end &&
+           (r.type == P9_LOCK_TYPE_WRLCK || lock->type == P9_LOCK_TYPE_WRLCK);
+}
+
+int FileSystemWin::LockedFile(FileWin *f, FileKey *key)
+{
+    HANDLE h = f->handle;
+    bool own = false;
+    if (h == INVALID_HANDLE_VALUE) {
+        h = open_node(f->path, 0);
+        if (h == INVALID_HANDLE_VALUE)
+            return last_error();
+        own = true;
+    }
+    BY_HANDLE_FILE_INFORMATION bh;
+    bool ok = GetFileInformationByHandle(h, &bh);
+    int err = ok ? 0 : last_error();
+    if (own)
+        CloseHandle(h);
+    if (err)
+        return err;
+    *key = FileKey(bh.dwVolumeSerialNumber,
+                   ((uint64_t)bh.nFileIndexHigh << 32) | bh.nFileIndexLow);
+    return 0;
+}
+
+/* Drops the locks taken through 'f', which the guest no longer has. */
+void FileSystemWin::DropLocks(FileWin *f)
+{
+    for (auto it = fLocks.begin(); it != fLocks.end();) {
+        std::vector<LockRange> &ranges = it->second;
+        for (size_t i = 0; i < ranges.size();) {
+            if (ranges[i].fid == f)
+                ranges.erase(ranges.begin() + i);
+            else
+                i++;
+        }
+        if (ranges.empty())
+            it = fLocks.erase(it);
+        else
+            ++it;
+    }
+}
+
 int FileSystemWin::Lock(FSFile *f, const FSLock *lock)
 {
-    return -P9_ENOTSUP;
+    uint64_t start, end;
+    if (lock->type > P9_LOCK_TYPE_UNLCK || !lock_range(lock, &start, &end))
+        return -P9_EINVAL;
+    FileKey key;
+    int err = LockedFile(F(f), &key);
+    if (err)
+        return err;
+
+    std::vector<LockRange> &ranges = fLocks[key];
+    if (lock->type != P9_LOCK_TYPE_UNLCK) {
+        for (const LockRange &r: ranges) {
+            if (lock_conflicts(r, lock, start, end))
+                return P9_LOCK_BLOCKED; /* the client retries a blocking one */
+        }
+    }
+    /* what the owner held of the range gives way to the request */
+    std::vector<LockRange> kept;
+    for (const LockRange &r: ranges) {
+        if (!same_owner(r, lock) || r.end < start || r.start > end) {
+            kept.push_back(r);
+            continue;
+        }
+        if (r.start < start) {
+            kept.push_back(r);
+            kept.back().end = start - 1;
+        }
+        if (r.end > end) {
+            kept.push_back(r);
+            kept.back().start = end + 1;
+        }
+    }
+    if (lock->type != P9_LOCK_TYPE_UNLCK) {
+        kept.push_back({lock->proc_id,
+                        lock->client_id ? lock->client_id : "", F(f),
+                        lock->type, start, end});
+    }
+    if (kept.empty())
+        fLocks.erase(key);
+    else
+        ranges = std::move(kept);
+    return P9_LOCK_SUCCESS;
 }
 
 int FileSystemWin::GetLock(FSFile *f, FSLock *lock)
 {
-    return -P9_ENOTSUP;
+    uint64_t start, end;
+    if (lock->type > P9_LOCK_TYPE_UNLCK || !lock_range(lock, &start, &end))
+        return -P9_EINVAL;
+    FileKey key;
+    int err = LockedFile(F(f), &key);
+    if (err)
+        return err;
+
+    auto it = fLocks.find(key);
+    if (it != fLocks.end() && lock->type != P9_LOCK_TYPE_UNLCK) {
+        for (const LockRange &r: it->second) {
+            if (!lock_conflicts(r, lock, start, end))
+                continue;
+            lock->type = r.type;
+            lock->start = r.start;
+            lock->length = (r.end == UINT64_MAX) ? 0 : r.end - r.start + 1;
+            lock->proc_id = r.proc_id;
+            free(lock->client_id);
+            lock->client_id = strdup(r.client_id.c_str());
+            return 0;
+        }
+    }
+    lock->type = P9_LOCK_TYPE_UNLCK;
+    return 0;
 }
 
 
