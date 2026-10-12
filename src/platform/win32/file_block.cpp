@@ -1,5 +1,5 @@
 /*
- * Host block storage: an image file, with overlapped I/O
+ * Host block storage: an image file or a disk device, with overlapped I/O
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -19,20 +19,40 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#include <malloc.h>
 #include <stdio.h>
 #include <string.h>
 
 #include <algorithm>
 #include <memory>
+#include <new>
 #include <vector>
 
 #include <windows.h>
+#include <winioctl.h>
 
 #include "event_loop.h"
 #include "platform_backends.h"
 #include "wait_set.h"
 
 #define SECTOR_SIZE 512
+
+/* A disk device reads into and writes from memory aligned as its driver
+   asks, which is never more than a page. */
+#define BUFFER_ALIGN 4096
+
+struct AlignedFree {
+    void operator()(uint8_t *p) const {_aligned_free(p);}
+};
+typedef std::unique_ptr<uint8_t, AlignedFree> AlignedBuffer;
+
+static AlignedBuffer alloc_buffer(size_t len)
+{
+    void *p = _aligned_malloc(len, BUFFER_ALIGN);
+    if (p == nullptr)
+        throw std::bad_alloc();
+    return AlignedBuffer(static_cast<uint8_t *>(p));
+}
 
 /* Answer every request that finished at once later, from the event loop, as
    if it had not. Reads the system has cached finish at once, so this is what
@@ -52,7 +72,7 @@ struct FileRequest {
     int n = 0;
     /* where a read goes */
     uint8_t *buf = nullptr;
-    std::unique_ptr<uint8_t[]> data;
+    AlignedBuffer data;
 };
 
 
@@ -184,7 +204,7 @@ int BlockDeviceFile::ReadAsync(uint64_t sector_num, uint8_t *buf, int n,
     req->sector_num = sector_num;
     req->n = n;
     req->buf = buf;
-    req->data.reset(new uint8_t[(size_t)n * SECTOR_SIZE]);
+    req->data = alloc_buffer((size_t)n * SECTOR_SIZE);
     return Start(std::move(req));
 }
 
@@ -215,7 +235,7 @@ int BlockDeviceFile::WriteAsync(uint64_t sector_num, const uint8_t *buf, int n,
     req->is_write = true;
     req->sector_num = sector_num;
     req->n = n;
-    req->data.reset(new uint8_t[(size_t)n * SECTOR_SIZE]);
+    req->data = alloc_buffer((size_t)n * SECTOR_SIZE);
     memcpy(req->data.get(), buf, (size_t)n * SECTOR_SIZE);
     return Start(std::move(req));
 }
@@ -256,6 +276,31 @@ void BlockDeviceFile::Dispatch(WaitSet &ws)
 }
 
 
+static HANDLE open_file(const wchar_t *name, DWORD access, DWORD share)
+{
+    return CreateFileW(name, access, share, nullptr, OPEN_EXISTING,
+                       FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, nullptr);
+}
+
+
+/* A control request on 'file' before it is tied to the event loop's port;
+   fails on an image file. */
+static bool device_control(HANDLE file, DWORD code, void *out, DWORD size)
+{
+    OVERLAPPED ov {};
+    ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (ov.hEvent == nullptr)
+        return false;
+    DWORD bytes;
+    bool ok = DeviceIoControl(file, code, nullptr, 0, out, size, &bytes,
+                              &ov) ||
+              (GetLastError() == ERROR_IO_PENDING &&
+               GetOverlappedResult(file, &ov, &bytes, TRUE));
+    CloseHandle(ov.hEvent);
+    return ok;
+}
+
+
 std::unique_ptr<HostBlockDevice> file_block_open(EventLoop &loop,
                                                  const char *filename,
                                                  BlockModeEnum mode)
@@ -266,32 +311,56 @@ std::unique_ptr<HostBlockDevice> file_block_open(EventLoop &loop,
     MultiByteToWideChar(CP_UTF8, 0, filename, -1, wname.data(), wname.size());
 
     DWORD access = GENERIC_READ;
-    DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE;
-    if (mode == BLOCK_MODE_RW) {
+    if (mode == BLOCK_MODE_RW)
         access |= GENERIC_WRITE;
-        share = FILE_SHARE_READ;
-    }
-    HANDLE file = CreateFileW(wname.data(), access, share, nullptr,
-                              OPEN_EXISTING,
-                              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
-                              nullptr);
+    /* a disk or a volume opens only with writers shared */
+    HANDLE file = open_file(wname.data(), access,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE);
     if (file == INVALID_HANDLE_VALUE) {
         fprintf(stderr, "%s: cannot open (error %lu)\n", filename,
                 GetLastError());
         return nullptr;
     }
 
-    LARGE_INTEGER size;
-    if (!GetFileSizeEx(file, &size)) {
-        fprintf(stderr, "%s: cannot get the size (error %lu)\n", filename,
-                GetLastError());
-        CloseHandle(file);
-        return nullptr;
+    int64_t size;
+    GET_LENGTH_INFORMATION length;
+    if (device_control(file, IOCTL_DISK_GET_LENGTH_INFO, &length,
+                       sizeof(length))) {
+        DISK_GEOMETRY geometry;
+        if (device_control(file, IOCTL_DISK_GET_DRIVE_GEOMETRY, &geometry,
+                           sizeof(geometry)) &&
+            geometry.BytesPerSector > SECTOR_SIZE) {
+            fprintf(stderr, "%s: sectors of %lu bytes are not supported\n",
+                    filename, geometry.BytesPerSector);
+            CloseHandle(file);
+            return nullptr;
+        }
+        /* the whole volume, whatever its file system says of its size */
+        device_control(file, FSCTL_ALLOW_EXTENDED_DASD_IO, nullptr, 0);
+        size = length.Length.QuadPart;
+    } else {
+        /* an image the guest writes to has no other writer */
+        if (mode == BLOCK_MODE_RW) {
+            CloseHandle(file);
+            file = open_file(wname.data(), access, FILE_SHARE_READ);
+            if (file == INVALID_HANDLE_VALUE) {
+                fprintf(stderr, "%s: cannot open (error %lu)\n", filename,
+                        GetLastError());
+                return nullptr;
+            }
+        }
+        LARGE_INTEGER file_size;
+        if (!GetFileSizeEx(file, &file_size)) {
+            fprintf(stderr, "%s: cannot get the size (error %lu)\n", filename,
+                    GetLastError());
+            CloseHandle(file);
+            return nullptr;
+        }
+        size = file_size.QuadPart;
     }
 
     auto bf = std::make_unique<BlockDeviceFile>(loop, file,
-                                                size.QuadPart / SECTOR_SIZE,
-                                                mode);
+                                                size / SECTOR_SIZE, mode);
     if (!event_loop_attach(loop, file, bf.get())) {
         fprintf(stderr, "%s: cannot wait for I/O (error %lu)\n", filename,
                 GetLastError());

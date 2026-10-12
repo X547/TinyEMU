@@ -429,7 +429,19 @@ char *get_file_path(const char *base_filename, const char *filename)
         goto done; /* full URL */
     if (filename[0] == '/')
         goto done;
+#ifdef _WIN32
+    /* "\dir", "\\server\share", "\\?\GLOBALROOT\Device\..." */
+    if (filename[0] == '\\')
+        goto done;
+#endif
     p = strrchr(base_filename, '/');
+#ifdef _WIN32
+    {
+        const char *q = strrchr(base_filename, '\\');
+        if (q && (!p || q > p))
+            p = q;
+    }
+#endif
     if (!p) {
     done:
         return strdup(filename);
