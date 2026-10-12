@@ -33,6 +33,7 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <errno.h>
+#include <set>
 #include <string>
 
 #include "cutils.h"
@@ -44,6 +45,8 @@ struct FSFileDisk;
 
 struct FSDeviceDisk: public HostFileSystem {
     std::string root_path;
+    /* every fid the guest holds, so that a rename can carry their paths */
+    std::set<FSFileDisk *> files;
 
     void End() override;
     void Delete(FSFile *f) override;
@@ -98,6 +101,7 @@ static void fs_delete(HostFileSystem *fs, FSFileDisk *f)
 {
     if (f->is_opened)
         fs_close(fs, f);
+    ((FSDeviceDisk *)fs)->files.erase(f);
     free(f->path);
     delete f;
 }
@@ -109,7 +113,24 @@ static FSFileDisk *fid_create(HostFileSystem *s1, char *path, uint32_t uid)
     f = new FSFileDisk();
     f->path = path;
     f->uid = uid;
+    ((FSDeviceDisk *)s1)->files.insert(f);
     return f;
+}
+
+/* A fid names a file, not a path: those on the renamed entry, or below it,
+   follow it to its new name. */
+static void move_paths(FSDeviceDisk *fs, const char *from, const char *to)
+{
+    size_t from_len = strlen(from);
+
+    for (FSFileDisk *f: fs->files) {
+        if (strncmp(f->path, from, from_len) != 0 ||
+            (f->path[from_len] != '\0' && f->path[from_len] != '/'))
+            continue;
+        std::string path = std::string(to) + (f->path + from_len);
+        free(f->path);
+        f->path = strdup(path.c_str());
+    }
 }
 
 
@@ -582,6 +603,8 @@ static int fs_renameat(HostFileSystem *fs, FSFileDisk *f, const char *name,
     path = compose_path(f->path, name);
     new_path = compose_path(new_f->path, new_name);
     ret = rename(path, new_path);
+    if (ret == 0)
+        move_paths((FSDeviceDisk *)fs, path, new_path);
     free(path);
     free(new_path);
     if (ret < 0)

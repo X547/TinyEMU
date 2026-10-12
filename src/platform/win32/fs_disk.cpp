@@ -25,6 +25,7 @@
 
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -161,11 +162,15 @@ private:
     /* Every lock the guest holds. They are the guest's alone: programs on
        the host neither see nor honour them. */
     std::map<FileKey, std::vector<LockRange>> fLocks;
+    /* every fid the guest holds, so that a rename can carry their paths */
+    std::set<FileWin *> fFiles;
 
     int LoadDir(FileWin *f);
     std::wstring Parent(const std::wstring &path) const;
     int LockedFile(FileWin *f, FileKey *key);
     void DropLocks(FileWin *f);
+    FileWin *NewFile(std::wstring path, uint32_t uid);
+    void MovePaths(const std::wstring &from, const std::wstring &to);
 
 public:
     explicit FileSystemWin(std::wstring root): fRoot(std::move(root)) {}
@@ -835,9 +840,33 @@ std::wstring FileSystemWin::Parent(const std::wstring &path) const
     return path.substr(0, sep);
 }
 
+FileWin *FileSystemWin::NewFile(std::wstring path, uint32_t uid)
+{
+    FileWin *f = new FileWin();
+    f->path = std::move(path);
+    f->uid = uid;
+    fFiles.insert(f);
+    return f;
+}
+
+/* A fid names a file, not a path: those on the renamed entry, or below it,
+   follow it to its new name. */
+void FileSystemWin::MovePaths(const std::wstring &from, const std::wstring &to)
+{
+    for (FileWin *f: fFiles) {
+        if (f->path.compare(0, from.size(), from) != 0)
+            continue;
+        if (f->path.size() == from.size())
+            f->path = to;
+        else if (f->path[from.size()] == L'\\')
+            f->path = to + f->path.substr(from.size());
+    }
+}
+
 void FileSystemWin::Delete(FSFile *f)
 {
     DropLocks(F(f));
+    fFiles.erase(F(f));
     delete F(f);
 }
 
@@ -863,11 +892,9 @@ int FileSystemWin::Attach(FSFile **pf, FSQID *qid, uint32_t uid,
         *pf = nullptr;
         return err;
     }
-    FileWin *f = new FileWin();
-    f->path = fRoot;
     /* a client that gives only a user name owns what files without an
        owner of their own have */
-    f->uid = (uid == P9_NONUNAME) ? 0 : uid;
+    FileWin *f = NewFile(fRoot, (uid == P9_NONUNAME) ? 0 : uid);
     node_qid(qid, info);
     *pf = f;
     return 0;
@@ -898,10 +925,7 @@ int FileSystemWin::Walk(FSFile **pf, FSQID *qids, FSFile *f1, int n,
         path = std::move(next);
         node_qid(&qids[i], info);
     }
-    FileWin *nf = new FileWin();
-    nf->path = std::move(path);
-    nf->uid = f->uid;
-    *pf = nf;
+    *pf = NewFile(std::move(path), f->uid);
     return i;
 }
 
@@ -1403,6 +1427,7 @@ int FileSystemWin::RenameAt(FSFile *f, const char *name, FSFile *new_f,
         return last_error();
     if (rename_entry(h, to)) {
         CloseHandle(h);
+        MovePaths(from, to);
         return 0;
     }
     err = last_error();
@@ -1431,6 +1456,8 @@ int FileSystemWin::RenameAt(FSFile *f, const char *name, FSFile *new_f,
         }
     }
     CloseHandle(h);
+    if (err == 0)
+        MovePaths(from, to);
     return err;
 }
 
