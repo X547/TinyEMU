@@ -27,6 +27,7 @@
 #include <vector>
 
 #include <windows.h>
+#include <winternl.h>
 
 #include "cutils.h"
 #include "platform_backends.h"
@@ -47,6 +48,14 @@
 #ifndef FILE_RENAME_FLAG_IGNORE_READONLY_ATTRIBUTE
 #define FILE_RENAME_FLAG_IGNORE_READONLY_ATTRIBUTE 0x00000040
 #endif
+
+extern "C" {
+NTSTATUS NTAPI NtQueryEaFile(HANDLE file, PIO_STATUS_BLOCK io, PVOID buffer,
+                             ULONG length, BOOLEAN single, PVOID list,
+                             ULONG list_length, PULONG index, BOOLEAN restart);
+NTSTATUS NTAPI NtSetEaFile(HANDLE file, PIO_STATUS_BLOCK io, PVOID buffer,
+                           ULONG length);
+}
 
 /* d_type of a directory entry */
 #define DT_DIR 4
@@ -76,6 +85,21 @@ struct FileWin final: public FSFile {
 
     ~FileWin() override;
     void Close();
+};
+
+/* What WSL keeps of a file in its extended attributes, each 32-bit
+   little-endian: $LXUID, $LXGID, $LXMOD (the whole st_mode) and $LXDEV
+   (major, then minor). */
+struct LxMeta {
+    bool has_uid = false;
+    bool has_gid = false;
+    bool has_mode = false;
+    bool has_dev = false;
+    uint32_t uid = 0;
+    uint32_t gid = 0;
+    uint32_t mode = 0;
+    uint32_t major = 0;
+    uint32_t minor = 0;
 };
 
 /* What one query of an open file tells. */
@@ -276,7 +300,7 @@ static bool is_lx_tag(DWORD tag)
    is missing. */
 static HANDLE open_node(const std::wstring &path, DWORD access)
 {
-    access |= FILE_READ_ATTRIBUTES;
+    access |= FILE_READ_ATTRIBUTES | FILE_READ_EA;
     HANDLE h = CreateFileW(path.c_str(), access, SHARE_ALL, nullptr,
                            OPEN_EXISTING,
                            FILE_FLAG_BACKUP_SEMANTICS |
@@ -433,6 +457,117 @@ static bool delete_entry(HANDLE h)
                                       sizeof(legacy));
 }
 
+/* FILE_GET_EA_INFORMATION, for a name of six characters */
+struct LxEaName {
+    ULONG next;
+    UCHAR name_length;
+    CHAR name[7];
+};
+
+static const char *const lx_ea_names[] = {"$LXUID", "$LXGID", "$LXMOD",
+                                          "$LXDEV"};
+
+/* Reads what 'h' has of the metadata, which may be nothing. */
+static void query_lx(HANDLE h, LxMeta *m)
+{
+    LxEaName list[4];
+    for (int i = 0; i < 4; i++) {
+        list[i].next = i < 3 ? sizeof(LxEaName) : 0;
+        list[i].name_length = 6;
+        memcpy(list[i].name, lx_ea_names[i], 7);
+    }
+    alignas(8) uint8_t buf[256];
+    IO_STATUS_BLOCK io;
+    *m = LxMeta();
+    /* fails on a file without extended attributes, or a volume without */
+    if (!NT_SUCCESS(NtQueryEaFile(h, &io, buf, sizeof(buf), FALSE, list,
+                                  sizeof(list), nullptr, TRUE)))
+        return;
+    for (uint8_t *p = buf;;) {
+        auto *e = reinterpret_cast<FILE_FULL_EA_INFORMATION *>(p);
+        const uint8_t *value =
+            reinterpret_cast<uint8_t *>(e->EaName) + e->EaNameLength + 1;
+        if (e->EaValueLength >= 4) {
+            uint32_t v = get_le32(value);
+            if (strcmp(e->EaName, "$LXUID") == 0) {
+                m->has_uid = true;
+                m->uid = v;
+            } else if (strcmp(e->EaName, "$LXGID") == 0) {
+                m->has_gid = true;
+                m->gid = v;
+            } else if (strcmp(e->EaName, "$LXMOD") == 0) {
+                m->has_mode = true;
+                m->mode = v;
+            } else if (strcmp(e->EaName, "$LXDEV") == 0 &&
+                       e->EaValueLength >= 8) {
+                m->has_dev = true;
+                m->major = v;
+                m->minor = get_le32(value + 4);
+            }
+        }
+        if (e->NextEntryOffset == 0)
+            break;
+        p += e->NextEntryOffset;
+    }
+}
+
+/* Writes the fields 'm' has. */
+static int set_lx(HANDLE h, const LxMeta &m)
+{
+    alignas(8) uint8_t buf[128] {};
+    size_t pos = 0;
+    FILE_FULL_EA_INFORMATION *last = nullptr;
+
+    auto add = [&](const char *name, uint32_t a, uint32_t b, int len) {
+        auto *e = reinterpret_cast<FILE_FULL_EA_INFORMATION *>(buf + pos);
+        if (last)
+            last->NextEntryOffset = (uint8_t *)e - (uint8_t *)last;
+        e->EaNameLength = 6;
+        e->EaValueLength = len;
+        memcpy(e->EaName, name, 7);
+        uint8_t *value = reinterpret_cast<uint8_t *>(e->EaName) + 7;
+        put_le32(value, a);
+        if (len == 8)
+            put_le32(value + 4, b);
+        pos += (offsetof(FILE_FULL_EA_INFORMATION, EaName) + 7 + len + 3) &
+               ~3;
+        last = e;
+    };
+    if (m.has_uid)
+        add("$LXUID", m.uid, 0, 4);
+    if (m.has_gid)
+        add("$LXGID", m.gid, 0, 4);
+    if (m.has_mode)
+        add("$LXMOD", m.mode, 0, 4);
+    if (m.has_dev)
+        add("$LXDEV", m.major, m.minor, 8);
+    if (pos == 0)
+        return 0;
+
+    IO_STATUS_BLOCK io;
+    NTSTATUS status = NtSetEaFile(h, &io, buf, pos);
+    if (!NT_SUCCESS(status))
+        return -error_to_p9(RtlNtStatusToDosError(status));
+    return 0;
+}
+
+/* The metadata of a new file. */
+static LxMeta new_lx(uint32_t uid, uint32_t gid, uint32_t mode)
+{
+    LxMeta m;
+    m.has_uid = m.has_gid = m.has_mode = true;
+    m.uid = uid;
+    m.gid = gid;
+    m.mode = mode;
+    return m;
+}
+
+/* The st_mode type bits of a file. */
+static uint32_t node_type(uint32_t attributes)
+{
+    return (attributes & FILE_ATTRIBUTE_DIRECTORY) ? P9_S_IFDIR : P9_S_IFREG;
+}
+
 
 //#pragma mark - FileWin
 
@@ -539,9 +674,11 @@ int FileSystemWin::Mkdir(FSQID *qid, FSFile *f, const char *name,
         return err;
     if (!CreateDirectoryW(path.c_str(), nullptr))
         return last_error();
-    HANDLE h = open_entry(path, FILE_WRITE_ATTRIBUTES);
+    HANDLE h = open_entry(path, FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA);
     if (h == INVALID_HANDLE_VALUE)
         return last_error();
+    /* a volume without extended attributes keeps no owner */
+    set_lx(h, new_lx(F(f)->uid, gid, P9_S_IFDIR | (mode & 07777)));
     /* Names that differ in case only are different files in a directory
        the guest makes, as with WSL's case=dir. A system without the WSL
        feature refuses, and the directory stays case-insensitive. */
@@ -612,11 +749,15 @@ int FileSystemWin::Create(FSQID *qid, FSFile *f1, const char *name,
     /* an existing file is opened as it is, keeping what WSL stored on it */
     DWORD disposition = (flags & P9_O_EXCL) ? CREATE_NEW : OPEN_ALWAYS;
     HANDLE h = CreateFileW(path.c_str(),
-                           open_access(flags) | FILE_READ_ATTRIBUTES,
+                           open_access(flags) | FILE_READ_ATTRIBUTES |
+                           FILE_READ_EA | FILE_WRITE_EA,
                            SHARE_ALL, nullptr, disposition,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE)
         return last_error();
+    bool created = GetLastError() != ERROR_ALREADY_EXISTS;
+    if (created)
+        set_lx(h, new_lx(f->uid, gid, P9_S_IFREG | (mode & 07777)));
     NodeInfo info;
     bool ok = query_node(h, &info);
     if (ok && (flags & P9_O_TRUNC)) {
@@ -652,27 +793,33 @@ int FileSystemWin::Stat(FSFile *f1, FSStat *st)
     NodeInfo info;
     FILE_BASIC_INFO basic;
     FILE_STANDARD_INFO standard;
+    LxMeta lx;
     bool ok = query_node(h, &info) &&
               GetFileInformationByHandleEx(h, FileBasicInfo, &basic,
                                            sizeof(basic)) &&
               GetFileInformationByHandleEx(h, FileStandardInfo, &standard,
                                            sizeof(standard));
     int err = ok ? 0 : last_error();
+    if (ok)
+        query_lx(h, &lx);
     if (own)
         CloseHandle(h);
     if (err)
         return err;
 
     node_qid(&st->qid, info.attributes, info.ino);
-    if (info.attributes & FILE_ATTRIBUTE_DIRECTORY) {
-        st->st_mode = P9_S_IFDIR | DEFAULT_PERMISSIONS;
+    /* the host decides the type; the guest, when it set them, the rest */
+    st->st_mode = node_type(info.attributes);
+    if (lx.has_mode) {
+        st->st_mode |= lx.mode & 07777;
     } else {
-        st->st_mode = P9_S_IFREG | DEFAULT_PERMISSIONS;
-        if (info.attributes & FILE_ATTRIBUTE_READONLY)
+        st->st_mode |= DEFAULT_PERMISSIONS;
+        if ((info.attributes & FILE_ATTRIBUTE_READONLY) &&
+            !(info.attributes & FILE_ATTRIBUTE_DIRECTORY))
             st->st_mode &= ~0222;
     }
-    st->st_uid = 0;
-    st->st_gid = 0;
+    st->st_uid = lx.uid;
+    st->st_gid = lx.gid;
     st->st_nlink = info.nlink;
     st->st_rdev = 0;
     /* a directory's size is its index's, which nothing in Linux expects */
@@ -696,12 +843,13 @@ int FileSystemWin::SetAttr(FSFile *f1, uint32_t mask, uint32_t mode,
     FileWin *f = F(f1);
     DWORD access = 0;
 
-    /* The mode and the owner are not kept yet; they are taken and ignored,
-       as WSL does without metadata. */
+    if (mask & (P9_SETATTR_MODE | P9_SETATTR_UID | P9_SETATTR_GID))
+        access |= FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES;
     if (mask & P9_SETATTR_SIZE)
         access |= GENERIC_WRITE;
     if (mask & (P9_SETATTR_ATIME | P9_SETATTR_MTIME))
         access |= FILE_WRITE_ATTRIBUTES;
+    /* a change time of its own is not kept */
     if (access == 0)
         return 0;
 
@@ -716,6 +864,32 @@ int FileSystemWin::SetAttr(FSFile *f1, uint32_t mask, uint32_t mode,
     NodeInfo info;
     bool ok = query_node(h, &info);
     int err = ok ? 0 : last_error();
+    if (!err && (mask & (P9_SETATTR_MODE | P9_SETATTR_UID |
+                         P9_SETATTR_GID))) {
+        LxMeta lx;
+        lx.has_uid = mask & P9_SETATTR_UID;
+        lx.uid = uid;
+        lx.has_gid = mask & P9_SETATTR_GID;
+        lx.gid = gid;
+        lx.has_mode = mask & P9_SETATTR_MODE;
+        lx.mode = node_type(info.attributes) | (mode & 07777);
+        err = set_lx(h, lx);
+        /* Once the guest lets the owner write, the host's read-only
+           attribute must not stop it. */
+        bool dir = info.attributes & FILE_ATTRIBUTE_DIRECTORY;
+        if (!err && lx.has_mode && (mode & 0200) && !dir &&
+            (info.attributes & FILE_ATTRIBUTE_READONLY)) {
+            FILE_BASIC_INFO basic {};
+            basic.FileAttributes = info.attributes &
+                (FILE_ATTRIBUTE_ARCHIVE | FILE_ATTRIBUTE_HIDDEN |
+                 FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED);
+            if (basic.FileAttributes == 0)
+                basic.FileAttributes = FILE_ATTRIBUTE_NORMAL;
+            if (!SetFileInformationByHandle(h, FileBasicInfo, &basic,
+                                            sizeof(basic)))
+                err = last_error();
+        }
+    }
     if (!err && (mask & P9_SETATTR_SIZE)) {
         if (info.attributes & FILE_ATTRIBUTE_DIRECTORY) {
             err = -P9_EISDIR;
