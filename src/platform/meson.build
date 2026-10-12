@@ -39,9 +39,9 @@ platform_sources = files(
 )
 if platform_os == 'windows'
   platform_sources += files(
-    'common/no_disk_fs.cpp',
     'win32/event_loop_wait.cpp',
     'win32/file_block.cpp',
+    'win32/fs_disk.cpp',
     'win32/stdio_console.cpp',
     'win32/wasapi_audio.cpp',
   )

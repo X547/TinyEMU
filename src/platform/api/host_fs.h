@@ -87,10 +87,15 @@
 #define P9_EPERM     1
 #define P9_ENOENT    2
 #define P9_EIO       5
+#define P9_EACCES    13
+#define P9_EBUSY     16
 #define	P9_EEXIST    17
 #define	P9_ENOTDIR   20
+#define P9_EISDIR    21
 #define P9_EINVAL    22
 #define	P9_ENOSPC    28
+#define P9_EROFS     30
+#define P9_ENAMETOOLONG 36
 #define P9_ENOTEMPTY 39
 #define P9_EPROTO    71
 #define P9_ENOTSUP   524
