@@ -28,6 +28,7 @@
 #include <assert.h>
 #include <stdarg.h>
 
+#include <algorithm>
 #include <map>
 
 #include "cutils.h"
@@ -868,7 +869,10 @@ int VIRTIO9PDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
             if (unmarshall(s, queue_idx, desc_idx, &offset, 
                            "ws", &msize, &version))
                 goto protocol_error;
-            s->msize = msize;
+            /* A message's pages and headers must fit the queue's
+               descriptors, as there are no indirect ones: half of them for
+               the pages leaves room for the rest. */
+            s->msize = std::min<uint32_t>(msize, MAX_QUEUE_NUM / 2 * 4096);
             //            printf("version: msize=%d version=%s\n", msize, version);
             free(version);
             buf_len = marshall(s, buf, sizeof(buf), "ws", s->msize, "9P2000.L");
