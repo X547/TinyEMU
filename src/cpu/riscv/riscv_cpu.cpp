@@ -118,12 +118,18 @@ static uint64_t riscv_cpu_rtc_time(RISCVCPUState *s)
     return host_monotonic_us();
 }
 
+/* exit from power down if an interrupt is pending, unless the hart is
+   stopped */
+static void wake_on_irq(RISCVCPUState *s)
+{
+    if (s->power_down_flag && (s->mip & s->mie) != 0 && !s->hsm_stopped)
+        s->power_down_flag = false;
+}
+
 static void set_mip(RISCVCPUState *s, uint32_t mask)
 {
     s->mip |= mask;
-    /* exit from power down if an interrupt is pending */
-    if (s->power_down_flag && (s->mip & s->mie) != 0)
-        s->power_down_flag = false;
+    wake_on_irq(s);
 }
 
 /* Sstc drives STIP from the stimecmp comparator instead of leaving it to the
@@ -1099,6 +1105,18 @@ static void imsic_claim(RISCVCPUState *s, int file)
     }
 }
 
+static void sbi_enter(RISCVCPUState *s, target_ulong pc, target_ulong opaque);
+
+static void take_posted_tlb_flush(RISCVCPUState *s)
+{
+    uint64_t req = s->tlb_flush_req.load();
+
+    if (req != s->tlb_flush_done.load(std::memory_order_relaxed)) {
+        tlb_flush_all(s);
+        s->tlb_flush_done.store(req);
+    }
+}
+
 /* Take in the interrupt lines and messages other threads posted. */
 static void process_inbox(RISCVCPUState *s)
 {
@@ -1106,6 +1124,14 @@ static void process_inbox(RISCVCPUState *s)
         return;
     /* cleared first, so that a post racing with this is seen next time */
     s->inbox_pending.store(false);
+
+    if (s->sbi != nullptr) {
+        take_posted_tlb_flush(s);
+        if (s->ssip_posted.exchange(false))
+            s->mip |= MIP_SSIP;
+        if (s->hsm_start_posted.exchange(false))
+            sbi_enter(s, s->hsm_addr, s->hsm_opaque);
+    }
 
     s->mip = (s->mip & ~s->irq_line_mask) |
         (s->irq_lines.load() & s->irq_line_mask);
@@ -1121,8 +1147,7 @@ static void process_inbox(RISCVCPUState *s)
                 imsic_update(s, file);
         }
     }
-    if (s->power_down_flag && (s->mip & s->mie) != 0)
-        s->power_down_flag = false;
+    wake_on_irq(s);
 }
 
 /* The eip or eie register an *iselect value in 0x80-0xff names: a 32 bit half
@@ -1832,12 +1857,73 @@ static void set_priv(RISCVCPUState *s, int priv)
     }
 }
 
+/* Where HsmStart() and a non-retentive resume leave a hart. */
+static void sbi_enter(RISCVCPUState *s, target_ulong pc, target_ulong opaque)
+{
+    s->mstatus &= ~(MSTATUS_SIE | MSTATUS_MPRV);
+    s->satp = 0;
+    tlb_flush_all(s);
+    set_priv(s, PRV_S);
+    s->reg[10] = s->mhartid;
+    s->reg[11] = opaque;
+    s->pc = pc;
+    s->hsm_stopped = false;
+    s->hsm_suspended = false;
+    s->hsm_resume = false;
+    s->power_down_flag = false;
+    s->hsm_state.store(RISCV_HSM_STARTED);
+}
+
+static void sbi_stop(RISCVCPUState *s)
+{
+    s->hsm_stopped = true;
+    s->hsm_suspended = false;
+    s->power_down_flag = true;
+    s->hsm_state.store(RISCV_HSM_STOPPED);
+}
+
+/* A register as the SBI sees it, and back. */
+static uint64_t sbi_arg(RISCVCPUState *s, int reg)
+{
+    if (s->cur_xlen == 32)
+        return (uint32_t)s->reg[reg];
+    return (uint64_t)s->reg[reg];
+}
+
+static target_ulong sbi_result(RISCVCPUState *s, uint64_t val)
+{
+    if (s->cur_xlen == 32)
+        return (target_long)(int32_t)val;
+    return (target_long)(int64_t)val;
+}
+
+/* s->pc is the ecall's address */
+static void sbi_ecall(RISCVCPUState *s)
+{
+    uint64_t a[8];
+
+    for (int i = 0; i < 8; i++)
+        a[i] = sbi_arg(s, 10 + i);
+    s->pc += 4;
+    s->sbi->Ecall(s, s->cur_xlen, a);
+    /* a non-retentive suspend sets a0 and a1 when it resumes */
+    if (!s->hsm_resume) {
+        s->reg[10] = sbi_result(s, a[0]);
+        s->reg[11] = sbi_result(s, a[1]);
+    }
+}
+
 static void raise_exception2(RISCVCPUState *s, uint32_t cause,
                              target_ulong tval)
 {
     bool deleg;
     target_ulong causel;
-    
+
+    if (cause == CAUSE_SUPERVISOR_ECALL && s->sbi != nullptr) {
+        sbi_ecall(s);
+        return;
+    }
+
 #if defined(DUMP_EXCEPTIONS) || defined(DUMP_MMU_EXCEPTIONS) || defined(DUMP_INTERRUPTS)
     {
         int flag;
@@ -1886,7 +1972,14 @@ static void raise_exception2(RISCVCPUState *s, uint32_t cause,
     causel = get_bits(cause, 0, 31);
     if (cause & CAUSE_INTERRUPT)
         causel |= bit_at<target_ulong>(s->cur_xlen - 1);
-    
+
+    if (!deleg && s->sbi != nullptr) {
+        s->sbi->MachineTrap(s, (uint64_t)causel, (uint64_t)s->pc,
+                            (uint64_t)tval);
+        sbi_stop(s);
+        return;
+    }
+
     if (deleg) {
         s->scause = causel;
         s->sepc = s->pc;
@@ -2040,6 +2133,15 @@ static void glue(riscv_cpu_interp, MAX_XLEN)(RISCVCPUState *s)
         process_inbox(s);
         if (s->power_down_flag)
             break;
+        if (unlikely(s->hsm_suspended)) {
+            /* woken up from an SBI suspend */
+            if (s->hsm_resume) {
+                sbi_enter(s, s->hsm_addr, s->hsm_opaque);
+            } else {
+                s->hsm_suspended = false;
+                s->hsm_state.store(RISCV_HSM_STARTED);
+            }
+        }
         if (unlikely(s->exit_request.load(std::memory_order_relaxed))) {
             s->exit_request.store(false);
             break;
@@ -2209,6 +2311,116 @@ void RISCVCPUState::ImsicSetPending(bool supervisor, uint32_t id)
         return;
     msi_pending[file][id / 64].fetch_or((uint64_t)1 << (id % 64));
     inbox_pending.store(true);
+}
+
+uint32_t RISCVCPUState::HartId()
+{
+    return mhartid;
+}
+
+void RISCVCPUState::SetSbiHandler(RISCVSbiHandler *handler)
+{
+    sbi = handler;
+    /* everything but the ecalls the handler answers */
+    medeleg = MEDELEG_MASK & ~bit_at(CAUSE_SUPERVISOR_ECALL);
+    mideleg = MIP_SSIP | MIP_STIP | MIP_SEIP;
+    mcounteren = COUNTEREN_MASK;
+    menvcfg = MENVCFG_STCE | MENVCFG_ADUE;
+    sbi_stop(this);
+}
+
+RISCVHsmState RISCVCPUState::HsmState()
+{
+    return (RISCVHsmState)hsm_state.load();
+}
+
+bool RISCVCPUState::HsmStart(uint64_t addr, uint64_t opaque)
+{
+    int expected = RISCV_HSM_STOPPED;
+
+    if (!hsm_state.compare_exchange_strong(expected,
+                                           RISCV_HSM_START_PENDING))
+        return false;
+    hsm_addr = addr;
+    hsm_opaque = opaque;
+    hsm_start_posted.store(true);
+    inbox_pending.store(true);
+    return true;
+}
+
+void RISCVCPUState::PostSoftIrq()
+{
+    ssip_posted.store(true);
+    inbox_pending.store(true);
+}
+
+uint64_t RISCVCPUState::PostTlbFlush()
+{
+    uint64_t ticket = tlb_flush_req.fetch_add(1) + 1;
+
+    inbox_pending.store(true);
+    return ticket;
+}
+
+bool RISCVCPUState::TlbFlushDone(uint64_t ticket)
+{
+    return tlb_flush_done.load() >= ticket;
+}
+
+void RISCVCPUState::HsmStop()
+{
+    sbi_stop(this);
+}
+
+void RISCVCPUState::HsmSuspend(bool retentive, uint64_t resume_addr,
+                               uint64_t opaque)
+{
+    hsm_suspended = true;
+    hsm_resume = !retentive;
+    hsm_addr = resume_addr;
+    hsm_opaque = opaque;
+    hsm_state.store(RISCV_HSM_SUSPENDED);
+    /* it wakes up as from WFI */
+    if ((mip & mie) == 0)
+        power_down_flag = true;
+}
+
+void RISCVCPUState::SetTimer(uint64_t stime)
+{
+    stimecmp = stime;
+    update_stimer(this);
+}
+
+void RISCVCPUState::ClearSoftIrq()
+{
+    mip &= ~MIP_SSIP;
+}
+
+void RISCVCPUState::FlushTlb()
+{
+    tlb_flush_all(this);
+    take_posted_tlb_flush(this);
+}
+
+void RISCVCPUState::TakePostedTlbFlush()
+{
+    take_posted_tlb_flush(this);
+}
+
+bool RISCVCPUState::ReadVirtual(uint64_t vaddr, uint64_t *pval)
+{
+    int saved_exception = pending_exception;
+    target_ulong saved_tval = pending_tval;
+    mem_uint_t val;
+    int ret;
+
+    ret = target_read_slow(this, &val, vaddr, cur_xlen == 32 ? 2 : 3);
+    pending_exception = saved_exception;
+    pending_tval = saved_tval;
+    if (ret)
+        return false;
+    *pval = cur_xlen == 32 ? (uint32_t)val : (uint64_t)val;
+    return true;
 }
 
 } // anonymous namespace

@@ -118,6 +118,9 @@ typedef struct {
     /* the IA32_PAT a hypervisor's processors start with: "default" or
        "write-back"; NULL when the configuration does not say */
     char *hypervisor_pat;
+    /* who implements the RISC-V SBI: "firmware" or "native"; NULL when the
+       configuration does not say */
+    char *sbi;
     bool rtc_real_time;
     bool rtc_local_time;
     Platform *platform;

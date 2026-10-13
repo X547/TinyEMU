@@ -270,6 +270,23 @@ struct RISCVCPUState: public RISCVCPU {
     std::atomic<uint64_t> msi_pending[2][IMSIC_WORDS];
     uint32_t irq_line_mask; /* the mip bits irq_lines drives */
 
+    /* SBI implemented by the machine; null when firmware runs in M-mode */
+    RISCVSbiHandler *sbi;
+    /* only HsmStart() leaves this state; interrupts do not */
+    bool hsm_stopped;
+    /* set by HsmSuspend() until the hart wakes up again */
+    bool hsm_suspended;
+    bool hsm_resume; /* non-retentive: resume at hsm_addr */
+    std::atomic<int> hsm_state; /* RISCVHsmState, for other threads */
+    /* where a start or a resume goes: written by whoever claimed the start,
+       before it posts hsm_start_posted */
+    target_ulong hsm_addr;
+    target_ulong hsm_opaque;
+    std::atomic<bool> hsm_start_posted;
+    std::atomic<bool> ssip_posted;
+    std::atomic<uint64_t> tlb_flush_req;
+    std::atomic<uint64_t> tlb_flush_done;
+
     target_ulong load_res; /* for atomic LR/SC */
     /* what LR read: with other harts, SC stores only if memory still holds
        it */
@@ -297,6 +314,21 @@ struct RISCVCPUState: public RISCVCPU {
     void SetSmp(bool smp) override;
     void SetInterruptArch(RISCVInterruptArch arch) override;
     void ImsicSetPending(bool supervisor, uint32_t id) override;
+    uint32_t HartId() override;
+    void SetSbiHandler(RISCVSbiHandler *sbi) override;
+    RISCVHsmState HsmState() override;
+    bool HsmStart(uint64_t addr, uint64_t opaque) override;
+    void PostSoftIrq() override;
+    uint64_t PostTlbFlush() override;
+    bool TlbFlushDone(uint64_t ticket) override;
+    void HsmStop() override;
+    void HsmSuspend(bool retentive, uint64_t resume_addr,
+                    uint64_t opaque) override;
+    void SetTimer(uint64_t stime) override;
+    void ClearSoftIrq() override;
+    void FlushTlb() override;
+    void TakePostedTlbFlush() override;
+    bool ReadVirtual(uint64_t vaddr, uint64_t *pval) override;
 };
 
 #define target_read_slow glue(glue(riscv, MAX_XLEN), _read_slow)

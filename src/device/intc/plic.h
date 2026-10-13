@@ -63,7 +63,8 @@ public:
     void SetIRQ(int irq_num, int level) override;
 
     /* Emit the controller's node; returns its phandle. 'intc_phandle' holds
-       the interrupt controller of each hart. */
+       the interrupt controller of each hart. 'supervisor_only' leaves the
+       M-mode contexts unconnected, as firmware does for its supervisor. */
     uint32_t BuildFDT(FDTBuilder &fdt, uint64_t base,
-                      const uint32_t *intc_phandle);
+                      const uint32_t *intc_phandle, bool supervisor_only);
 };

@@ -559,6 +559,14 @@ void APLIC::WriteS(uint32_t offset, uint32_t val, int size_log2)
 }
 
 
+void APLIC::DelegateAll()
+{
+    for (int irq = 1; irq <= fNumSources; irq++)
+        WriteSourcecfg(fDomains[0], irq, APLIC_SOURCECFG_D);
+    Update();
+}
+
+
 void APLIC::SetIRQ(int irq_num, int level)
 {
     uint32_t irq = irq_num;
@@ -593,10 +601,13 @@ void APLIC::SetIRQ(int irq_num, int level)
 
 void APLIC::BuildDomainFDT(FDTBuilder &fdt, const Domain &d, uint64_t base,
                            uint32_t phandle, uint32_t child_phandle,
-                           const uint32_t *intc_phandle, uint32_t msi_phandle)
+                           const uint32_t *intc_phandle, uint32_t msi_phandle,
+                           bool disabled)
 {
     fdt.BeginNodeNum("interrupt-controller", base);
     fdt.PropStr("compatible", "riscv,aplic");
+    if (disabled)
+        fdt.PropStr("status", "disabled");
     fdt.PropU64Range("reg", base, APLIC_SIZE);
     fdt.PropEmpty("interrupt-controller");
     fdt.PropU32("#interrupt-cells", 2);
@@ -631,14 +642,15 @@ void APLIC::BuildDomainFDT(FDTBuilder &fdt, const Domain &d, uint64_t base,
 
 uint32_t APLIC::BuildFDT(FDTBuilder &fdt, uint64_t m_base, uint64_t s_base,
                          const uint32_t *intc_phandle,
-                         uint32_t imsic_m_phandle, uint32_t imsic_s_phandle)
+                         uint32_t imsic_m_phandle, uint32_t imsic_s_phandle,
+                         bool supervisor_only)
 {
     uint32_t m_phandle = fdt.AllocPhandle();
     uint32_t s_phandle = fdt.AllocPhandle();
 
     BuildDomainFDT(fdt, fDomains[0], m_base, m_phandle, s_phandle,
-                   intc_phandle, imsic_m_phandle);
+                   intc_phandle, imsic_m_phandle, supervisor_only);
     BuildDomainFDT(fdt, fDomains[1], s_base, s_phandle, 0,
-                   intc_phandle, imsic_s_phandle);
+                   intc_phandle, imsic_s_phandle, false);
     return s_phandle;
 }

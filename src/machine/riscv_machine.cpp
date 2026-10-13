@@ -45,6 +45,7 @@
 #include "aplic.h"
 #include "clint.h"
 #include "htif.h"
+#include "riscv_sbi.h"
 
 /* RISCV machine */
 
@@ -63,7 +64,8 @@ class RISCVMachine final:
     public PCIMsiTarget,
     public TlbFlushTarget,
     public RtcTimeSource,
-    public ClintHost {
+    public ClintHost,
+    public RISCVSbiHarts {
 public:
     std::unique_ptr<PhysMemoryMap> mem_map;
     int max_xlen = 0;
@@ -76,6 +78,8 @@ public:
     uint64_t rtc_start_time = 0;
     std::unique_ptr<Clint> clint;
     std::unique_ptr<HTIF> htif;
+    /* the SBI when no firmware runs in M-mode */
+    std::unique_ptr<RISCVSbi> sbi;
     /* the one selected by intc_type */
     std::unique_ptr<PLIC> plic;
     std::unique_ptr<APLIC> aplic;
@@ -94,8 +98,13 @@ public:
     ~RISCVMachine() override;
 
     void HartThread(int hart);
+
+    /* RISCVSbiHarts */
+    int HartCount() override {return hart_count;}
+    RISCVCPU *Hart(int hart) override {return cpus[hart].get();}
     /* Makes 'hart' look at its interrupts again. Any thread. */
-    void KickHart(int hart);
+    void KickHart(int hart) override;
+    bool Stopping() override {return StopRequested();}
 
     /* memory-mapped register blocks */
     uint32_t ImsicRead(uint32_t offset, int size_log2);
@@ -284,6 +293,9 @@ static uint32_t riscv_build_imsic_fdt(RISCVMachine *m, FDTBuilder &fdt,
 
     fdt.BeginNodeNum("interrupt-controller", base);
     fdt.PropStr("compatible", "riscv,imsics");
+    /* only M-mode firmware has a use for the machine level files */
+    if (!supervisor && m->sbi)
+        fdt.PropStr("status", "disabled");
     fdt.PropU64Range("reg", base, imsic_region_size(m));
     for (int hart = 0; hart < m->hart_count; hart++) {
         fdt.AddCellU32(intc_phandle[hart]);
@@ -300,8 +312,10 @@ static uint32_t riscv_build_imsic_fdt(RISCVMachine *m, FDTBuilder &fdt,
     return phandle;
 }
 
+/* 'reserved_start' and 'reserved_size' are the RAM the guest must keep out
+   of: the firmware, or the tree itself without one. */
 static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
-                           uint64_t firmware_size,
+                           uint64_t reserved_start, uint64_t reserved_size,
                            uint64_t kernel_start, uint64_t kernel_size,
                            uint64_t initrd_start, uint64_t initrd_size,
                            const char *cmd_line)
@@ -316,10 +330,9 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
 
     ctx.fdt = &fdt;
 
-    /* Keep the guest out of the firmware image. There is no PMP here, so
-       nothing else stops a kernel from allocating over the M mode trap
-       handler it depends on. */
-    fdt.AddReservation(RAM_BASE_ADDR, firmware_size);
+    /* No PMP protects firmware here: only this keeps a kernel from
+       allocating over the M mode trap handler it depends on. */
+    fdt.AddReservation(reserved_start, reserved_size);
 
     fdt.BeginNode("");
     fdt.PropU32("#address-cells", 2);
@@ -466,7 +479,8 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
     fdt.EndNode(); /* clint */
 
     if (m->intc_type == RISCV_INTC_PLIC) {
-        ctx.irq_phandle = m->plic->BuildFDT(fdt, PLIC_BASE_ADDR, intc_phandle);
+        ctx.irq_phandle = m->plic->BuildFDT(fdt, PLIC_BASE_ADDR, intc_phandle,
+                                            m->sbi != nullptr);
     } else {
         uint32_t imsic_m_phandle = 0, imsic_s_phandle = 0;
 
@@ -479,7 +493,8 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
         }
         ctx.irq_phandle = m->aplic->BuildFDT(fdt, APLIC_M_BASE_ADDR,
                                              APLIC_S_BASE_ADDR, intc_phandle,
-                                             imsic_m_phandle, imsic_s_phandle);
+                                             imsic_m_phandle, imsic_s_phandle,
+                                             m->sbi != nullptr);
         ctx.irq_cells = 2;
     }
 
@@ -575,7 +590,7 @@ static void copy_bios(RISCVMachine *s, const uint8_t *buf, int buf_len,
 
     fdt_addr = 0x1000 + 8 * 8;
 
-    riscv_build_fdt(s, ram_ptr + fdt_addr, firmware_size,
+    riscv_build_fdt(s, ram_ptr + fdt_addr, RAM_BASE_ADDR, firmware_size,
                     RAM_BASE_ADDR + kernel_base, kernel_buf_len,
                     RAM_BASE_ADDR + initrd_base, initrd_buf_len,
                     cmd_line);
@@ -588,6 +603,61 @@ static void copy_bios(RISCVMachine *s, const uint8_t *buf, int buf_len,
     q[2] = 0x58593 + ((fdt_addr - 4) << 20); /* addi a1, a1, dtb */
     q[3] = 0xf1402573; /* csrr a0, mhartid */
     q[4] = 0x00028067; /* jalr zero, t0, jump_addr */
+}
+
+/* The tree's room at the top of RAM when no firmware places it. */
+#define NATIVE_FDT_SIZE 0x10000
+
+/* Without firmware the kernel takes the start of RAM and hart 0 enters it in
+   S-mode, with a1 pointing to the device tree as firmware would leave it. */
+static bool load_kernel_native(RISCVMachine *s, const uint8_t *kernel_buf,
+                               int kernel_buf_len, const uint8_t *initrd_buf,
+                               int initrd_buf_len, const char *cmd_line)
+{
+    uint64_t fdt_base, initrd_base = 0;
+    uint8_t *ram_ptr;
+    int fdt_size;
+
+    if (s->ram_size < 2 * NATIVE_FDT_SIZE) {
+        vm_error("not enough RAM\n");
+        return false;
+    }
+    fdt_base = s->ram_size - NATIVE_FDT_SIZE;
+    if ((uint64_t)kernel_buf_len > fdt_base) {
+        vm_error("kernel too big\n");
+        return false;
+    }
+    ram_ptr = get_ram_ptr(s, RAM_BASE_ADDR, true);
+    memcpy(ram_ptr, kernel_buf, kernel_buf_len);
+
+    if (initrd_buf_len > 0) {
+        /* same allocation as QEMU */
+        initrd_base = s->ram_size / 2;
+        if (initrd_base > (128 << 20))
+            initrd_base = 128 << 20;
+        if (initrd_base < (uint64_t)kernel_buf_len ||
+            (uint64_t)initrd_buf_len > fdt_base - initrd_base) {
+            vm_error("initrd too big\n");
+            return false;
+        }
+        memcpy(ram_ptr + initrd_base, initrd_buf, initrd_buf_len);
+    }
+
+    /* built aside, since nothing bounds its size beforehand */
+    std::vector<uint8_t> fdt(1 << 20);
+    fdt_size = riscv_build_fdt(s, fdt.data(),
+                               RAM_BASE_ADDR + fdt_base, NATIVE_FDT_SIZE,
+                               RAM_BASE_ADDR, kernel_buf_len,
+                               RAM_BASE_ADDR + initrd_base, initrd_buf_len,
+                               cmd_line);
+    if (fdt_size > NATIVE_FDT_SIZE) {
+        vm_error("device tree too big\n");
+        return false;
+    }
+    memcpy(ram_ptr + fdt_base, fdt.data(), fdt_size);
+
+    s->cpus[0]->HsmStart(RAM_BASE_ADDR, RAM_BASE_ADDR + fdt_base);
+    return true;
 }
 
 uint64_t RISCVMachine::RtcTime()
@@ -654,6 +724,7 @@ riscv_machine_init(const VirtMachineParams *p)
     std::unique_ptr<RISCVMachine> s;
     int max_xlen, ram_flags;
     RISCVIntcType intc_type;
+    bool native_sbi;
     DeviceContext ctx;
 
     if (!strcmp(p->machine_name, "riscv32")) {
@@ -683,6 +754,23 @@ riscv_machine_init(const VirtMachineParams *p)
         vm_error("%s: interrupt_controller must be \"plic\", \"aplic\" or "
                  "\"aplic-imsic\", not \"%s\"\n", p->machine_name,
                  p->interrupt_controller);
+        return nullptr;
+    }
+    if (p->sbi == nullptr || strcmp(p->sbi, "firmware") == 0) {
+        native_sbi = false;
+    } else if (strcmp(p->sbi, "native") == 0) {
+        native_sbi = true;
+    } else {
+        vm_error("%s: sbi must be \"firmware\" or \"native\", not \"%s\"\n",
+                 p->machine_name, p->sbi);
+        return nullptr;
+    }
+    if (native_sbi && p->files[VM_FILE_BIOS].buf) {
+        vm_error("%s: no bios runs with the native sbi\n", p->machine_name);
+        return nullptr;
+    }
+    if (native_sbi && !p->files[VM_FILE_KERNEL].buf) {
+        vm_error("%s: the native sbi needs a kernel\n", p->machine_name);
         return nullptr;
     }
 
@@ -799,6 +887,24 @@ riscv_machine_init(const VirtMachineParams *p)
     }
 
     device_context_connect(&ctx);
+
+    if (native_sbi) {
+        s->sbi = std::make_unique<RISCVSbi>(*s, *s, s->mem_map.get(),
+                                            p->device_lock,
+                                            p->platform->Console());
+        for (int hart = 0; hart < s->hart_count; hart++)
+            s->cpus[hart]->SetSbiHandler(s->sbi.get());
+        /* what firmware would hand the supervisor domain */
+        if (s->aplic)
+            s->aplic->DelegateAll();
+        if (!load_kernel_native(s.get(), p->files[VM_FILE_KERNEL].buf,
+                                p->files[VM_FILE_KERNEL].len,
+                                p->files[VM_FILE_INITRD].buf,
+                                p->files[VM_FILE_INITRD].len, p->cmdline)) {
+            return nullptr;
+        }
+        return s;
+    }
 
     if (!p->files[VM_FILE_BIOS].buf) {
         vm_error("No bios found");

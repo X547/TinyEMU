@@ -2,6 +2,7 @@ machine_sources = files(
   'devices.cpp',
   'machine.cpp',
   'riscv_machine.cpp',
+  'riscv_sbi.cpp',
 )
 if x86emu
   machine_sources += files('pc_acpi.cpp', 'x86_machine.cpp')

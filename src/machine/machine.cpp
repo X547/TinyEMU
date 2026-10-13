@@ -259,6 +259,10 @@ static int virt_machine_parse_config(VirtMachineParams *p,
         goto tag_fail;
     p->interrupt_controller = strdup_null(str);
 
+    if (vm_get_str_opt(cfg, "sbi", &str) < 0)
+        goto tag_fail;
+    p->sbi = strdup_null(str);
+
     tag_name = "bios";
     if (vm_get_str_opt(cfg, tag_name, &str) < 0)
         goto tag_fail;
@@ -603,6 +607,7 @@ void virt_machine_free_config(VirtMachineParams *p)
     free(p->interrupt_controller);
     free(p->hypervisor_cpuid);
     free(p->hypervisor_pat);
+    free(p->sbi);
     free(p->cmdline);
     for(i = 0; i < VM_FILE_COUNT; i++) {
         free(p->files[i].filename);

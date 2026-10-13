@@ -177,7 +177,7 @@ void PLIC::SetIRQ(int irq_num, int level)
 
 
 uint32_t PLIC::BuildFDT(FDTBuilder &fdt, uint64_t base,
-                        const uint32_t *intc_phandle)
+                        const uint32_t *intc_phandle, bool supervisor_only)
 {
     uint32_t phandle;
 
@@ -194,7 +194,7 @@ uint32_t PLIC::BuildFDT(FDTBuilder &fdt, uint64_t base,
     /* the context numbering DeviceRead() and DeviceWrite() decode */
     for (int hart = 0; hart < fHartCount; hart++) {
         fdt.AddCellU32(intc_phandle[hart]);
-        fdt.AddCellU32(11); /* M ext irq */
+        fdt.AddCellU32(supervisor_only ? 0xffffffff : 11); /* M ext irq */
         fdt.AddCellU32(intc_phandle[hart]);
         fdt.AddCellU32(9); /* S ext irq */
     }

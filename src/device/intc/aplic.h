@@ -106,7 +106,8 @@ private:
     void Update();
     void BuildDomainFDT(FDTBuilder &fdt, const Domain &d, uint64_t base,
                         uint32_t phandle, uint32_t child_phandle,
-                        const uint32_t *intc_phandle, uint32_t msi_phandle);
+                        const uint32_t *intc_phandle, uint32_t msi_phandle,
+                        bool disabled);
 
 public:
     /* 'msi' is null for direct delivery. */
@@ -117,13 +118,20 @@ public:
     DeviceIO *DomainIO(bool supervisor)
         {return supervisor ? static_cast<DeviceIO *>(&fIoS) : &fIoM;}
 
+    /* Delegates every source to the supervisor level domain, as firmware
+       does before it starts a supervisor. */
+    void DelegateAll();
+
     /* IRQTarget */
     void SetIRQ(int irq_num, int level) override;
 
     /* Emit both domains' nodes and return the supervisor level one's phandle,
        which is what devices name as their interrupt parent. The IMSIC
-       phandles are used in MSI delivery mode only. */
+       phandles are used in MSI delivery mode only. 'supervisor_only'
+       disables the machine level node, as firmware does for its
+       supervisor. */
     uint32_t BuildFDT(FDTBuilder &fdt, uint64_t m_base, uint64_t s_base,
                       const uint32_t *intc_phandle,
-                      uint32_t imsic_m_phandle, uint32_t imsic_s_phandle);
+                      uint32_t imsic_m_phandle, uint32_t imsic_s_phandle,
+                      bool supervisor_only);
 };

@@ -70,6 +70,31 @@ enum RISCVInterruptArch {
 /* Interrupt identities each IMSIC interrupt file implements. */
 #define RISCV_IMSIC_NUM_IDS 255
 
+/* A hart's state as the SBI HSM extension numbers it. */
+enum RISCVHsmState {
+    RISCV_HSM_STARTED = 0,
+    RISCV_HSM_STOPPED = 1,
+    RISCV_HSM_START_PENDING = 2,
+    RISCV_HSM_SUSPENDED = 4,
+};
+
+class RISCVCPU;
+
+/* The SBI implementation of a machine that runs no firmware in M-mode. The
+   harts call it on their own threads. */
+class RISCVSbiHandler {
+public:
+    virtual ~RISCVSbiHandler() = default;
+
+    /* An ecall from S-mode. a[] holds a0 to a7, zero extended from 'xlen'
+       bits; a[0] and a[1] are written back. */
+    virtual void Ecall(RISCVCPU *cpu, int xlen, uint64_t a[8]) = 0;
+    /* A trap S-mode does not take, which nothing is there to handle. The
+       hart stops afterwards. */
+    virtual void MachineTrap(RISCVCPU *cpu, uint64_t cause, uint64_t pc,
+                             uint64_t tval) = 0;
+};
+
 /* One implementation per supported XLEN; riscv_cpu.cpp is compiled once for
    each and each build keeps its implementation class internal.
 
@@ -109,6 +134,37 @@ public:
     /* A write of 'id' to the seteipnum register of the hart's machine or
        supervisor level IMSIC interrupt file. */
     virtual void ImsicSetPending(bool supervisor, uint32_t id) = 0;
+    virtual uint32_t HartId() = 0;
+
+    /* Runs the hart in S-mode with 'sbi' answering its ecalls, as firmware
+       would leave it: S-mode takes every trap, Sstc and Svadu are enabled,
+       and the hart waits stopped until HsmStart(). Before the hart runs. */
+    virtual void SetSbiHandler(RISCVSbiHandler *sbi) = 0;
+
+    /* The SBI services. These may be called from any thread; whoever posts
+       something to the hart then wakes it. */
+    virtual RISCVHsmState HsmState() = 0;
+    /* Starts a stopped hart in S-mode at 'addr', with a0 holding its hart
+       id and a1 'opaque'. False if it is not stopped. */
+    virtual bool HsmStart(uint64_t addr, uint64_t opaque) = 0;
+    virtual void PostSoftIrq() = 0;
+    /* Asks the hart to flush its TLB; returns the ticket TlbFlushDone()
+       takes. */
+    virtual uint64_t PostTlbFlush() = 0;
+    virtual bool TlbFlushDone(uint64_t ticket) = 0;
+
+    /* These are for the hart's own thread, from within Ecall(). */
+    virtual void HsmStop() = 0;
+    /* A non-retentive suspend resumes as HsmStart() would. */
+    virtual void HsmSuspend(bool retentive, uint64_t resume_addr,
+                            uint64_t opaque) = 0;
+    virtual void SetTimer(uint64_t stime) = 0;
+    virtual void ClearSoftIrq() = 0;
+    virtual void FlushTlb() = 0;
+    /* Flushes the TLB only if another hart asked for it. */
+    virtual void TakePostedTlbFlush() = 0;
+    /* One XLEN wide word of S-mode virtual memory; false if it faults. */
+    virtual bool ReadVirtual(uint64_t vaddr, uint64_t *pval) = 0;
 };
 
 int riscv_cpu_get_max_xlen(void);
