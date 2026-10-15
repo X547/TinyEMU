@@ -27,9 +27,15 @@
 #include <mutex>
 #include <vector>
 
+/* the pointer messages are from Windows 8 */
+#if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0602
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0602
+#endif
+
 #include <windows.h>
-#include <windowsx.h>
 #include <imm.h>
+#include <tpcshrd.h>
 
 #include "device_lock.h"
 #include "platform_backends.h"
@@ -125,9 +131,12 @@ private:
     /* the size is being set here rather than by the user */
     bool fSettingSize = false;
     uint8_t fKeyPressed[KEYCODE_MAX + 1] {};
+    /* the pointer the guest last heard from */
+    UINT32 fPointerId = 0;
     bool fHaveLastPos = false;
     int fLastX = 0;
     int fLastY = 0;
+    unsigned int fButtons = 0;
     int fWheel = 0;
 
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam,
@@ -151,8 +160,10 @@ private:
     void HandleKey(WPARAM vk, LPARAM lparam, bool down);
     void SendKey(int code, bool down);
     void ReleaseKeys();
-    void HandleMouse(int x, int y, WPARAM keys, int dz);
-    void HandleWheel(WPARAM wparam, LPARAM lparam);
+    void HandleMouse(int x, int y, unsigned int buttons, int dz);
+    void HandlePointer(WPARAM wparam);
+    void HandleWheel(WPARAM wparam);
+    void HandlePointerLost(WPARAM wparam);
 
 public:
     Win32Display(DeviceLock &lock, RunControl &run_control):
@@ -618,22 +629,93 @@ void Win32Display::ReleaseKeys()
 }
 
 
-/* (x, y) is in the window; 'keys' are the MK_ flags of the message. */
-void Win32Display::HandleMouse(int x, int y, WPARAM keys, int dz)
+/* The guest's buttons as the device has them, before Windows makes up any
+   clicks: a finger or either end of a pen on the surface is the left
+   button, and a pen's barrel button the right one, on the surface or not.
+   (Windows itself has the barrel button do nothing until the pen touches,
+   and then a right click in place of the left one.) */
+static unsigned int pointer_buttons(const POINTER_INFO &info, UINT32 pen_flags)
 {
-    unsigned int state = 0;
-    if (keys & MK_LBUTTON)
-        state |= 1 << 0;
-    if (keys & MK_RBUTTON)
-        state |= 1 << 1;
-    if (keys & MK_MBUTTON)
-        state |= 1 << 2;
+    POINTER_FLAGS flags = info.pointerFlags;
+    unsigned int buttons = 0;
 
+    if (flags & POINTER_FLAG_CANCELED)
+        return 0;
+    if (info.pointerType == PT_MOUSE) {
+        if (flags & POINTER_FLAG_FIRSTBUTTON)
+            buttons |= 1 << 0;
+        if (flags & POINTER_FLAG_SECONDBUTTON)
+            buttons |= 1 << 1;
+        if (flags & POINTER_FLAG_THIRDBUTTON)
+            buttons |= 1 << 2;
+    } else {
+        if (flags & POINTER_FLAG_INCONTACT)
+            buttons |= 1 << 0;
+        if (pen_flags & PEN_FLAG_BARREL)
+            buttons |= 1 << 1;
+    }
+    return buttons;
+}
+
+
+struct PointerSample {
+    /* on the screen, where the device put it, before Windows moves a touch
+       onto what it takes to be the target */
+    POINT pt;
+    unsigned int buttons;
+};
+
+
+/* Where a pointer has been since its last message, oldest first: Windows
+   folds the motion between two messages into the last one, and keeps the
+   rest as its history. */
+static std::vector<PointerSample> pointer_samples(UINT32 id,
+                                                  POINTER_INPUT_TYPE type)
+{
+    std::vector<PointerSample> samples;
+
+    if (type == PT_PEN) {
+        POINTER_PEN_INFO last;
+        if (!GetPointerPenInfo(id, &last))
+            return samples;
+        std::vector<POINTER_PEN_INFO> pen(
+            std::max<UINT32>(last.pointerInfo.historyCount, 1), last);
+        UINT32 count = pen.size();
+        if (count == 1 || !GetPointerPenInfoHistory(id, &count, pen.data()))
+            count = 1;
+        /* the newest is first */
+        for (UINT32 i = std::min<UINT32>(count, pen.size()); i-- > 0;) {
+            samples.push_back({pen[i].pointerInfo.ptPixelLocationRaw,
+                               pointer_buttons(pen[i].pointerInfo,
+                                               pen[i].penFlags)});
+        }
+    } else {
+        POINTER_INFO last;
+        if (!GetPointerInfo(id, &last))
+            return samples;
+        std::vector<POINTER_INFO> info(std::max<UINT32>(last.historyCount, 1),
+                                       last);
+        UINT32 count = info.size();
+        if (count == 1 || !GetPointerInfoHistory(id, &count, info.data()))
+            count = 1;
+        for (UINT32 i = std::min<UINT32>(count, info.size()); i-- > 0;) {
+            samples.push_back({info[i].ptPixelLocationRaw,
+                               pointer_buttons(info[i], 0)});
+        }
+    }
+    return samples;
+}
+
+
+/* (x, y) is in the window. */
+void Win32Display::HandleMouse(int x, int y, unsigned int buttons, int dz)
+{
     int dx = fHaveLastPos ? x - fLastX : 0;
     int dy = fHaveLastPos ? y - fLastY : 0;
     fHaveLastPos = true;
     fLastX = x;
     fLastY = y;
+    fButtons = buttons;
 
     DeviceLocker device_locker(fDeviceLock);
     if (fPointer == nullptr)
@@ -651,28 +733,80 @@ void Win32Display::HandleMouse(int x, int y, WPARAM keys, int dz)
             return;
         x = (std::clamp(x, 0, width - 1) * 32768) / width;
         y = (std::clamp(y, 0, height - 1) * 32768) / height;
-        fPointer->SendMouseEvent(x, y, dz, state);
+        fPointer->SendMouseEvent(x, y, dz, buttons);
     } else {
-        fPointer->SendMouseEvent(dx, dy, dz, state);
+        fPointer->SendMouseEvent(dx, dy, dz, buttons);
     }
 }
 
 
-void Win32Display::HandleWheel(WPARAM wparam, LPARAM lparam)
+/* A pointer moved, or a button or contact changed. Only the primary one
+   moves the guest's: the mouse, the pen, or the first finger down. */
+void Win32Display::HandlePointer(WPARAM wparam)
 {
-    POINT pt = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+    UINT32 id = GET_POINTERID_WPARAM(wparam);
+    POINTER_INPUT_TYPE type;
 
+    if (!IS_POINTER_PRIMARY_WPARAM(wparam) || !GetPointerType(id, &type))
+        return;
+    std::vector<PointerSample> samples = pointer_samples(id, type);
+    if (samples.empty())
+        return;
+    /* another pointer starts somewhere else, not with a jump from here */
+    if (id != fPointerId) {
+        fPointerId = id;
+        fHaveLastPos = false;
+    }
+    for (const PointerSample &sample : samples) {
+        POINT pt = sample.pt;
+        ScreenToClient(fWindow, &pt);
+        HandleMouse(pt.x, pt.y, sample.buttons, 0);
+    }
+
+    /* Keep the motion while a mouse button is held outside the window; the
+       other pointers are kept by Windows from their first contact. */
+    if (type == PT_MOUSE) {
+        if (fButtons != 0 && GetCapture() != fWindow)
+            SetCapture(fWindow);
+        else if (fButtons == 0 && GetCapture() == fWindow)
+            ReleaseCapture();
+    }
+}
+
+
+void Win32Display::HandleWheel(WPARAM wparam)
+{
+    UINT32 id = GET_POINTERID_WPARAM(wparam);
+    POINTER_INFO info;
+
+    if (!GetPointerInfo(id, &info))
+        return;
+    if (id != fPointerId) {
+        fPointerId = id;
+        fHaveLastPos = false;
+    }
+    POINT pt = info.ptPixelLocationRaw;
     ScreenToClient(fWindow, &pt);
+    unsigned int buttons = pointer_buttons(info, 0);
     /* one step per notch; a fine grained wheel sends parts of one */
     fWheel += GET_WHEEL_DELTA_WPARAM(wparam);
     while (fWheel >= WHEEL_DELTA) {
         fWheel -= WHEEL_DELTA;
-        HandleMouse(pt.x, pt.y, GET_KEYSTATE_WPARAM(wparam), 1);
+        HandleMouse(pt.x, pt.y, buttons, 1);
     }
     while (fWheel <= -WHEEL_DELTA) {
         fWheel += WHEEL_DELTA;
-        HandleMouse(pt.x, pt.y, GET_KEYSTATE_WPARAM(wparam), -1);
+        HandleMouse(pt.x, pt.y, buttons, -1);
     }
+}
+
+
+/* The window no longer hears from a pointer, which may still be down: a
+   finger the system took for a gesture of its own, say. */
+void Win32Display::HandlePointerLost(WPARAM wparam)
+{
+    if (GET_POINTERID_WPARAM(wparam) == fPointerId && fButtons != 0)
+        HandleMouse(fLastX, fLastY, 0, 0);
 }
 
 
@@ -772,25 +906,24 @@ LRESULT Win32Display::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam)
         ReleaseKeys();
         return 0;
 
-    case WM_LBUTTONDOWN:
-    case WM_RBUTTONDOWN:
-    case WM_MBUTTONDOWN:
-        /* keep the motion while a button is held outside the window */
-        SetCapture(fWindow);
-        HandleMouse(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam), wparam, 0);
+    /* The mouse, pens and fingers all come as pointers. None of their
+       messages goes on to DefWindowProc, which would make mouse messages
+       of them, and right clicks of a long press or a tap with the barrel
+       button held. */
+    case WM_POINTERDOWN:
+    case WM_POINTERUP:
+    case WM_POINTERUPDATE:
+        HandlePointer(wparam);
         return 0;
-    case WM_LBUTTONUP:
-    case WM_RBUTTONUP:
-    case WM_MBUTTONUP:
-        if ((wparam & (MK_LBUTTON | MK_RBUTTON | MK_MBUTTON)) == 0)
-            ReleaseCapture();
-        HandleMouse(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam), wparam, 0);
+    case WM_POINTERWHEEL:
+        HandleWheel(wparam);
         return 0;
-    case WM_MOUSEMOVE:
-        HandleMouse(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam), wparam, 0);
+    case WM_POINTERCAPTURECHANGED:
+        HandlePointerLost(wparam);
         return 0;
-    case WM_MOUSEWHEEL:
-        HandleWheel(wparam, lparam);
+    case WM_POINTERENTER:
+    case WM_POINTERLEAVE:
+    case WM_POINTERHWHEEL:
         return 0;
     }
     return DefWindowProcW(fWindow, msg, wparam, lparam);
@@ -812,6 +945,36 @@ static void set_dpi_awareness()
     if (set_context != nullptr && set_context(reinterpret_cast<HANDLE>(-4)))
         return;
     SetProcessDPIAware();
+}
+
+
+/* What the guest makes of a pen or a finger is its own business: Windows
+   recognizes no press and hold or flick on the window and draws nothing
+   where it is touched. */
+static void disable_pointer_gestures(HWND hwnd)
+{
+    static const wchar_t kTabletProperty[] =
+        L"MicrosoftTabletPenServiceProperty";
+    ATOM atom = GlobalAddAtomW(kTabletProperty);
+    SetPropW(hwnd, kTabletProperty, reinterpret_cast<HANDLE>(
+        static_cast<ULONG_PTR>(TABLET_DISABLE_PRESSANDHOLD |
+                               TABLET_DISABLE_PENTAPFEEDBACK |
+                               TABLET_DISABLE_PENBARRELFEEDBACK |
+                               TABLET_DISABLE_FLICKS |
+                               TABLET_DISABLE_FLICKFALLBACKKEYS |
+                               TABLET_DISABLE_SMOOTHSCROLLING)));
+    GlobalDeleteAtom(atom);
+
+    static const FEEDBACK_TYPE kFeedback[] = {
+        FEEDBACK_TOUCH_CONTACTVISUALIZATION, FEEDBACK_PEN_BARRELVISUALIZATION,
+        FEEDBACK_PEN_TAP, FEEDBACK_PEN_DOUBLETAP, FEEDBACK_PEN_PRESSANDHOLD,
+        FEEDBACK_PEN_RIGHTTAP, FEEDBACK_TOUCH_TAP, FEEDBACK_TOUCH_DOUBLETAP,
+        FEEDBACK_TOUCH_PRESSANDHOLD, FEEDBACK_TOUCH_RIGHTTAP,
+        FEEDBACK_GESTURE_PRESSANDTAP,
+    };
+    BOOL enabled = FALSE;
+    for (FEEDBACK_TYPE feedback : kFeedback)
+        SetWindowFeedbackSetting(hwnd, feedback, 0, sizeof(enabled), &enabled);
 }
 
 
@@ -846,6 +1009,7 @@ bool Win32Display::CreateScreenWindow(int width, int height, bool resizable)
     }
     /* The keys are the guest's: no input method composes text from them. */
     ImmAssociateContext(hwnd, nullptr);
+    disable_pointer_gestures(hwnd);
     /* the frame's size on the window's monitor may differ from the guess */
     SetClientSize(width, height);
     return true;
@@ -872,6 +1036,8 @@ void Win32Display::Run()
     }
 
     set_dpi_awareness();
+    /* the mouse comes as a pointer, like a pen or a finger */
+    EnableMouseInPointer(TRUE);
     if (!CreateScreenWindow(width, height, resizable)) {
         fRunControl.RequestShutdown(1);
         std::unique_lock<std::mutex> locker(fMutex);
