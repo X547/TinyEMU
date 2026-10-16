@@ -162,6 +162,16 @@ what the processor has besides the two 8259s:
                kernel booted without firmware finds both in its ACPI
                tables
 
+"sbi" chooses who implements the SBI on a RISC-V machine:
+
+  firmware  the "bios", run in M-mode (the default)
+  native    the emulator itself: no bios is loaded, and hart 0 starts in
+            S-mode with a0 holding its hart id and a1 the device tree, as
+            firmware would leave it. It enters the "kernel", loaded at the
+            start of RAM, or without one the first cfi-flash, where firmware
+            such as EDK2 runs in place. The other harts wait to be started
+            through the HSM extension
+
 "hypervisor_intc" (true unless given) lets a hardware hypervisor provide the
 interrupt controllers it can, of whatever kind the machine has. With false
 the machine emulates them all itself. On the PC machine that is the local
@@ -234,6 +244,17 @@ Device types:
                          "syscon" block and a "syscon-poweroff" node, which
                          OpenSBI and Linux use to power off; see 4.3 for the
                          exit status
+  cfi-flash              parallel NOR flash on the FDT bus, read in place and
+                         programmed with the Intel command set through a 32
+                         bit bank of two 16 bit chips, as on QEMU's virt
+                         machines; "file" (its contents, rounded up to a
+                         power of two with erased blocks; what the guest
+                         programs is written back as to a disk), "base" (its
+                         address; placed by the bus if absent), "block_size"
+                         (erase block in KB, default 256) and "read_only".
+                         EDK2's RISC-V virt build runs from one at
+                         0x20000000 and keeps its variables in one at
+                         0x22000000
   pci-host-ecam-generic  ECAM PCIe host bridge; "bus_count" (ECAM window
                          size in MB, default 16), "mmio_size" (aperture size
                          in MB, default 256), "mmio64_size" (size in MB of a

@@ -686,6 +686,19 @@ void VirtMachine::Stop()
 }
 
 
+void VirtMachine::HoldStart()
+{
+    fStartHolds.fetch_add(1);
+}
+
+
+void VirtMachine::ReleaseStart()
+{
+    if (fStartHolds.fetch_sub(1) == 1)
+        Kick();
+}
+
+
 void VirtMachine::Kick()
 {
     fWakeup.Kick();
@@ -719,10 +732,14 @@ int64_t VirtMachine::RefreshScreen()
 void VirtMachine::ThreadLoop()
 {
     host_set_thread_name("machine");
-    StartProcessors();
 
     while (!fStopRequested.load()) {
         int64_t delay, refresh_delay;
+
+        if (!fProcessorsStarted && fStartHolds.load() == 0) {
+            StartProcessors();
+            fProcessorsStarted = true;
+        }
 
         /* any timer set from now on may be one RunTimers() misses */
         fSleepUntil.store(UINT64_MAX);
@@ -737,7 +754,10 @@ void VirtMachine::ThreadLoop()
             fSleepUntil.store(host_monotonic_us() + delay);
         fWakeup.Wait(delay);
     }
-    JoinProcessors();
+    if (fProcessorsStarted) {
+        JoinProcessors();
+        fProcessorsStarted = false;
+    }
 }
 
 void virt_machine_set_defaults(VirtMachineParams *p)

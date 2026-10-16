@@ -150,6 +150,9 @@ private:
     /* when the machine thread wakes up next on its own, in
        host_monotonic_us(); UINT64_MAX while it runs the timers or has none */
     std::atomic<uint64_t> fSleepUntil {UINT64_MAX};
+    /* devices still loading what they need before the processors run */
+    std::atomic<int> fStartHolds {0};
+    bool fProcessorsStarted = false; /* machine thread */
 
     HostScreen *fScreen = nullptr;
     FBDevice *fScreenSource = nullptr;
@@ -191,6 +194,13 @@ public:
        ends, with the exit code a failure gives. Any thread. */
     void RequestReset();
     bool ShutdownRequested() const;
+
+    /* Keeps the processors from starting until ReleaseStart(), for a device
+       that reads its contents asynchronously before the guest may see them.
+       Before Start(). */
+    void HoldStart();
+    /* Any thread. */
+    void ReleaseStart();
 
     void Start();
     /* Returns once the machine thread and the processors' have ended. */

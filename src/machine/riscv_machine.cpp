@@ -608,15 +608,24 @@ static void copy_bios(RISCVMachine *s, const uint8_t *buf, int buf_len,
 /* The tree's room at the top of RAM when no firmware places it. */
 #define NATIVE_FDT_SIZE 0x10000
 
-/* Without firmware the kernel takes the start of RAM and hart 0 enters it in
-   S-mode, with a1 pointing to the device tree as firmware would leave it. */
-static bool load_kernel_native(RISCVMachine *s, const uint8_t *kernel_buf,
-                               int kernel_buf_len, const uint8_t *initrd_buf,
-                               int initrd_buf_len, const char *cmd_line)
+/* Without M-mode firmware the kernel takes the start of RAM and hart 0 enters
+   it in S-mode, with a1 pointing to the device tree as firmware would leave
+   it. Without a kernel hart 0 enters 'flash_base' instead, where S-mode
+   firmware runs in place. */
+static bool load_kernel_native(RISCVMachine *s, uint64_t flash_base,
+                               const uint8_t *kernel_buf, int kernel_buf_len,
+                               const uint8_t *initrd_buf, int initrd_buf_len,
+                               const char *cmd_line)
 {
     uint64_t fdt_base, initrd_base = 0;
+    uint64_t entry = kernel_buf_len > 0 ? RAM_BASE_ADDR : flash_base;
     uint8_t *ram_ptr;
     int fdt_size;
+
+    if (entry == 0) {
+        vm_error("the native sbi needs a kernel or a cfi-flash to run\n");
+        return false;
+    }
 
     if (s->ram_size < 2 * NATIVE_FDT_SIZE) {
         vm_error("not enough RAM\n");
@@ -656,7 +665,7 @@ static bool load_kernel_native(RISCVMachine *s, const uint8_t *kernel_buf,
     }
     memcpy(ram_ptr + fdt_base, fdt.data(), fdt_size);
 
-    s->cpus[0]->HsmStart(RAM_BASE_ADDR, RAM_BASE_ADDR + fdt_base);
+    s->cpus[0]->HsmStart(entry, RAM_BASE_ADDR + fdt_base);
     return true;
 }
 
@@ -767,10 +776,6 @@ riscv_machine_init(const VirtMachineParams *p)
     }
     if (native_sbi && p->files[VM_FILE_BIOS].buf) {
         vm_error("%s: no bios runs with the native sbi\n", p->machine_name);
-        return nullptr;
-    }
-    if (native_sbi && !p->files[VM_FILE_KERNEL].buf) {
-        vm_error("%s: the native sbi needs a kernel\n", p->machine_name);
         return nullptr;
     }
 
@@ -897,7 +902,8 @@ riscv_machine_init(const VirtMachineParams *p)
         /* what firmware would hand the supervisor domain */
         if (s->aplic)
             s->aplic->DelegateAll();
-        if (!load_kernel_native(s.get(), p->files[VM_FILE_KERNEL].buf,
+        if (!load_kernel_native(s.get(), ctx.boot_flash_base,
+                                p->files[VM_FILE_KERNEL].buf,
                                 p->files[VM_FILE_KERNEL].len,
                                 p->files[VM_FILE_INITRD].buf,
                                 p->files[VM_FILE_INITRD].len, p->cmdline)) {

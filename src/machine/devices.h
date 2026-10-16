@@ -66,6 +66,9 @@ struct DeviceContext {
     /* Where the framebuffer was placed, for a machine that has to tell its
        guest in something other than a device tree. */
     uint64_t fb_base = 0;
+    /* Where the first flash bank realized was placed, for firmware run in
+       place from it; 0 when there is none. */
+    uint64_t boot_flash_base = 0;
     std::vector<HostEthernet *> ethernet;
     /* The VMware backdoor, when a device answers it. The machine installs the
        port, because reading it means reading the processor's registers. */
