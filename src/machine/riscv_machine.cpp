@@ -30,10 +30,13 @@
 
 #include "bits.h"
 #include "cutils.h"
+#include "host_console.h"
 #include "host_thread.h"
 #include "host_time.h"
 #include "iomem.h"
 #include "riscv_cpu.h"
+#include "riscv_sbi_defs.h"
+#include "riscv_vcpu.h"
 #include "uart.h"
 #include "virtio.h"
 #include "machine.h"
@@ -45,7 +48,6 @@
 #include "aplic.h"
 #include "clint.h"
 #include "htif.h"
-#include "riscv_sbi.h"
 
 /* RISCV machine */
 
@@ -62,24 +64,22 @@ class RISCVMachine final:
     public VirtMachine,
     public HartIrqTarget,
     public PCIMsiTarget,
-    public TlbFlushTarget,
-    public RtcTimeSource,
     public ClintHost,
-    public RISCVSbiHarts {
+    public RISCVCpuTarget {
 public:
-    std::unique_ptr<PhysMemoryMap> mem_map;
+    /* the harts and the memory map everything else is in, so it goes
+       last */
+    std::unique_ptr<RISCVCpuBackend> fCpus;
+    PhysMemoryMap *mem_map = nullptr;
     int max_xlen = 0;
     int hart_count = 0;
-    std::unique_ptr<RISCVCPU> cpus[RISCV_MAX_HARTS];
     RISCVIntcType intc_type = RISCV_INTC_PLIC;
     uint64_t ram_size = 0;
-    /* RTC */
-    bool rtc_real_time = false;
-    uint64_t rtc_start_time = 0;
+    /* the harts answer the SBI, with no firmware in M-mode */
+    bool native_sbi = false;
+    HostConsole *fConsole = nullptr;
     std::unique_ptr<Clint> clint;
     std::unique_ptr<HTIF> htif;
-    /* the SBI when no firmware runs in M-mode */
-    std::unique_ptr<RISCVSbi> sbi;
     /* the one selected by intc_type */
     std::unique_ptr<PLIC> plic;
     std::unique_ptr<APLIC> aplic;
@@ -98,13 +98,15 @@ public:
     ~RISCVMachine() override;
 
     void HartThread(int hart);
+    /* Wakes the machine thread for a timer due at 'deadline' on the time
+       counter. Any thread. */
+    void KickTimersBefore(uint64_t deadline);
+    /* time counter ticks in host microseconds */
+    uint64_t TicksToUs(uint64_t ticks);
 
-    /* RISCVSbiHarts */
-    int HartCount() override {return hart_count;}
-    RISCVCPU *Hart(int hart) override {return cpus[hart].get();}
-    /* Makes 'hart' look at its interrupts again. Any thread. */
-    void KickHart(int hart) override;
-    bool Stopping() override {return StopRequested();}
+    /* the debug console's write and the legacy putchar */
+    int64_t ConsoleWrite(uint64_t len, uint64_t addr, uint64_t *value);
+    void ConsolePutchar(uint8_t c);
 
     /* memory-mapped register blocks */
     uint32_t ImsicRead(uint32_t offset, int size_log2);
@@ -122,12 +124,15 @@ public:
     /* PCIMsiTarget */
     void SendMsi(uint64_t addr, uint32_t data) override;
 
-    /* TlbFlushTarget */
-    void FlushTlbWriteRange(uint8_t *ram_addr, size_t ram_size) override;
-
-    /* RtcTimeSource */
-    uint64_t RtcTime() override;
-    void STimerChanged(uint64_t deadline) override;
+    /* RISCVCpuTarget */
+    bool SbiCall(int hart, int xlen, uint64_t a[8]) override;
+    void SystemReset(bool reboot, bool failure) override;
+    void HartFault(int hart, uint64_t cause, uint64_t pc,
+                   uint64_t tval) override;
+    /* Makes 'hart' look at its interrupts again. */
+    void WakeHart(int hart) override;
+    void TimerChanged(uint64_t deadline) override;
+    bool Stopping() override {return StopRequested();}
 
     /* ClintHost */
     uint64_t ClintTime() override;
@@ -186,44 +191,39 @@ public:
 #define PCI_IO_WINDOW_BASE 0
 #define PCI_IO_WINDOW_SIZE 0x1000000 /* 16 MB */
 
-#define RTC_FREQ 1000000
-#define RTC_FREQ_DIV 16 /* arbitrary, relative to CPU freq to have a
-                           10 MHz frequency */
-
-static uint64_t rtc_get_real_time(RISCVMachine *s)
+uint64_t RISCVMachine::TicksToUs(uint64_t ticks)
 {
-    return host_monotonic_us() / (1000000 / RTC_FREQ);
+    uint64_t freq = fCpus->TimebaseFrequency();
+
+    if (freq == 1000000)
+        return ticks;
+    if (ticks > UINT64_MAX / 1000000)
+        return ticks / freq * 1000000;
+    return ticks * 1000000 / freq;
 }
 
-static uint64_t rtc_get_time(RISCVMachine *m)
+/* A counter that does not follow host time can only be watched. */
+void RISCVMachine::KickTimersBefore(uint64_t deadline)
 {
-    uint64_t val;
-    if (m->rtc_real_time) {
-        val = rtc_get_real_time(m) - m->rtc_start_time;
-    } else {
-        /* the sum keeps advancing while some harts wait for interrupts */
-        val = 0;
-        for (int i = 0; i < m->hart_count; i++)
-            val += m->cpus[i]->Cycles();
-        val /= RTC_FREQ_DIV;
+    if (!fCpus->RealTimeClock()) {
+        Kick();
+        return;
     }
-    //    printf("rtc_time=%" PRId64 "\n", val);
-    return val;
+    uint64_t now = fCpus->Time();
+    uint64_t host_now = host_monotonic_us();
+    uint64_t us = deadline > now ? TicksToUs(deadline - now) : 0;
+    if (us <= UINT64_MAX - host_now)
+        KickBefore(host_now + us);
 }
 
-/* Wakes the machine thread for a timer due at 'deadline' on the counter,
-   which in real time counts host microseconds. */
-static void rtc_kick_before(RISCVMachine *m, uint64_t deadline)
-{
-    if (!m->rtc_real_time)
-        m->Kick();
-    else if (deadline <= UINT64_MAX - m->rtc_start_time)
-        m->KickBefore(deadline + m->rtc_start_time);
-}
-
-void RISCVMachine::KickHart(int hart)
+void RISCVMachine::WakeHart(int hart)
 {
     fHartWakeups[hart].Kick();
+}
+
+void RISCVMachine::TimerChanged(uint64_t deadline)
+{
+    KickTimersBefore(deadline);
 }
 
 /* The memory regions of the IMSIC interrupt files. The interrupt files
@@ -241,8 +241,8 @@ void RISCVMachine::ImsicWriteM(uint32_t offset, uint32_t val, int size_log2)
 
     if (offset % IMSIC_PAGE_SIZE == IMSIC_SETEIPNUM_LE &&
         hart < (uint32_t)hart_count) {
-        cpus[hart]->ImsicSetPending(false, val);
-        KickHart(hart);
+        fCpus->Vcpu(hart).ImsicSetPending(false, val);
+        WakeHart(hart);
     }
 }
 
@@ -252,8 +252,8 @@ void RISCVMachine::ImsicWriteS(uint32_t offset, uint32_t val, int size_log2)
 
     if (offset % IMSIC_PAGE_SIZE == IMSIC_SETEIPNUM_LE &&
         hart < (uint32_t)hart_count) {
-        cpus[hart]->ImsicSetPending(true, val);
-        KickHart(hart);
+        fCpus->Vcpu(hart).ImsicSetPending(true, val);
+        WakeHart(hart);
     }
 }
 
@@ -270,8 +270,8 @@ static uint64_t imsic_region_size(RISCVMachine *m)
 
 void RISCVMachine::SetExternalIrq(int hart, bool supervisor, int level)
 {
-    cpus[hart]->SetIrqLine(supervisor ? MIP_SEIP : MIP_MEIP, level);
-    KickHart(hart);
+    fCpus->Vcpu(hart).SetIrqLine(supervisor ? MIP_SEIP : MIP_MEIP, level);
+    WakeHart(hart);
 }
 
 static uint8_t *get_ram_ptr(RISCVMachine *s, uint64_t paddr, bool is_rw)
@@ -294,7 +294,7 @@ static uint32_t riscv_build_imsic_fdt(RISCVMachine *m, FDTBuilder &fdt,
     fdt.BeginNodeNum("interrupt-controller", base);
     fdt.PropStr("compatible", "riscv,imsics");
     /* only M-mode firmware has a use for the machine level files */
-    if (!supervisor && m->sbi)
+    if (!supervisor && m->native_sbi)
         fdt.PropStr("status", "disabled");
     fdt.PropU64Range("reg", base, imsic_region_size(m));
     for (int hart = 0; hart < m->hart_count; hart++) {
@@ -341,7 +341,7 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
     fdt.PropStr("model", "ucbbar,riscvemu-bare");
 
     max_xlen = m->max_xlen;
-    misa = m->cpus[0]->Misa();
+    misa = m->fCpus->Misa();
 
     /* Extensions implemented outside of misa, which only has room for the
        single letter ones. */
@@ -411,7 +411,7 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
     fdt.BeginNode("cpus");
     fdt.PropU32("#address-cells", 1);
     fdt.PropU32("#size-cells", 0);
-    fdt.PropU32("timebase-frequency", RTC_FREQ);
+    fdt.PropU32("timebase-frequency", m->fCpus->TimebaseFrequency());
 
     for (int hart = 0; hart < m->hart_count; hart++) {
         fdt.BeginNodeNum("cpu", hart);
@@ -480,7 +480,7 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
 
     if (m->intc_type == RISCV_INTC_PLIC) {
         ctx.irq_phandle = m->plic->BuildFDT(fdt, PLIC_BASE_ADDR, intc_phandle,
-                                            m->sbi != nullptr);
+                                            m->native_sbi);
     } else {
         uint32_t imsic_m_phandle = 0, imsic_s_phandle = 0;
 
@@ -494,7 +494,7 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
         ctx.irq_phandle = m->aplic->BuildFDT(fdt, APLIC_M_BASE_ADDR,
                                              APLIC_S_BASE_ADDR, intc_phandle,
                                              imsic_m_phandle, imsic_s_phandle,
-                                             m->sbi != nullptr);
+                                             m->native_sbi);
         ctx.irq_cells = 2;
     }
 
@@ -665,40 +665,124 @@ static bool load_kernel_native(RISCVMachine *s, uint64_t flash_base,
     }
     memcpy(ram_ptr + fdt_base, fdt.data(), fdt_size);
 
-    s->cpus[0]->HsmStart(entry, RAM_BASE_ADDR + fdt_base);
+    s->fCpus->Vcpu(0).Start(entry, RAM_BASE_ADDR + fdt_base);
     return true;
-}
-
-uint64_t RISCVMachine::RtcTime()
-{
-    return rtc_get_time(this);
-}
-
-void RISCVMachine::STimerChanged(uint64_t deadline)
-{
-    rtc_kick_before(this, deadline);
 }
 
 uint64_t RISCVMachine::ClintTime()
 {
-    return rtc_get_time(this);
+    return fCpus->Time();
 }
 
 void RISCVMachine::SetClintIrq(int hart, bool timer, bool level)
 {
-    cpus[hart]->SetIrqLine(timer ? MIP_MTIP : MIP_MSIP, level);
-    KickHart(hart);
+    fCpus->Vcpu(hart).SetIrqLine(timer ? MIP_MTIP : MIP_MSIP, level);
+    WakeHart(hart);
 }
 
 void RISCVMachine::ClintTimerChanged(uint64_t deadline)
 {
-    rtc_kick_before(this, deadline);
+    KickTimersBefore(deadline);
 }
 
-void RISCVMachine::FlushTlbWriteRange(uint8_t *ram_addr, size_t ram_size)
+/* Writes from guest physical memory, a page at a time since RAM may end at
+   any page. */
+int64_t RISCVMachine::ConsoleWrite(uint64_t len, uint64_t addr,
+                                   uint64_t *value)
 {
-    for (int hart = 0; hart < hart_count; hart++)
-        cpus[hart]->FlushTlbWriteRangeRam(ram_addr, ram_size);
+    uint64_t done = 0;
+
+    while (done < len) {
+        uint64_t n = DEVRAM_PAGE_SIZE - (addr + done) % DEVRAM_PAGE_SIZE;
+        if (n > len - done)
+            n = len - done;
+        uint8_t *ptr = mem_map->GetRamPtr(addr + done, false);
+        if (ptr == nullptr)
+            break;
+        if (fConsole != nullptr)
+            fConsole->WriteData(ptr, n);
+        done += n;
+    }
+    if (done == 0 && len != 0)
+        return SBI_ERR_INVALID_PARAM;
+    *value = done;
+    return SBI_SUCCESS;
+}
+
+void RISCVMachine::ConsolePutchar(uint8_t c)
+{
+    if (fConsole != nullptr)
+        fConsole->WriteData(&c, 1);
+}
+
+bool RISCVMachine::SbiCall(int hart, int xlen, uint64_t a[8])
+{
+    uint32_t fid = a[6];
+    uint64_t value = 0;
+    int64_t err;
+
+    (void)hart;
+    switch (a[7]) {
+    case SBI_LEGACY_PUTCHAR:
+        ConsolePutchar(a[0]);
+        a[0] = SBI_SUCCESS;
+        return true;
+    case SBI_LEGACY_GETCHAR:
+        /* console input goes to the guest's console devices */
+        a[0] = SBI_ERR_FAILED;
+        return true;
+    case SBI_EXT_DBCN:
+        break;
+    default:
+        return false;
+    }
+
+    switch (fid) {
+    case 0: /* write */
+        if (xlen != 32 && a[2] != 0)
+            err = SBI_ERR_INVALID_PARAM;
+        else
+            err = ConsoleWrite(a[0], xlen == 32 ? a[1] | a[2] << 32 : a[1],
+                               &value);
+        break;
+    case 1: /* read */
+        /* console input goes to the guest's console devices */
+        err = SBI_SUCCESS;
+        break;
+    case 2: /* write_byte */
+        ConsolePutchar(a[0]);
+        err = SBI_SUCCESS;
+        break;
+    default:
+        err = SBI_ERR_NOT_SUPPORTED;
+        break;
+    }
+    a[0] = err;
+    a[1] = value;
+    return true;
+}
+
+void RISCVMachine::SystemReset(bool reboot, bool failure)
+{
+    if (reboot) {
+        RequestReset();
+    } else if (!ShutdownRequested()) {
+        if (failure) {
+            printf("\nPower off, system failure.\n");
+            RequestShutdown(1);
+        } else {
+            printf("\nPower off.\n");
+            RequestShutdown(0);
+        }
+    }
+}
+
+void RISCVMachine::HartFault(int hart, uint64_t cause, uint64_t pc,
+                             uint64_t tval)
+{
+    vm_error("hart %d: trap with no M-mode to take it: cause=0x%" PRIx64
+             " pc=0x%" PRIx64 " tval=0x%" PRIx64 "\n", hart, cause, pc, tval);
+    RequestShutdown(255);
 }
 
 /* Reserve the parts of the map the architecture fixes, so that anything the
@@ -779,38 +863,35 @@ riscv_machine_init(const VirtMachineParams *p)
         return nullptr;
     }
 
+    RISCVCpuOptions options;
+    options.xlen = max_xlen;
+    options.hart_count = p->cpu_count;
+    options.interrupt_arch = intc_type == RISCV_INTC_PLIC ? RISCV_INTR_BASE :
+        intc_type == RISCV_INTC_APLIC ? RISCV_INTR_AIA : RISCV_INTR_AIA_IMSIC;
+    options.machine_mode = !native_sbi;
+    options.rtc_real_time = p->rtc_real_time;
+
     s = std::make_unique<RISCVMachine>();
     s->SetHost(p);
     s->intc_type = intc_type;
     s->vmc = p->vmc;
     s->ram_size = p->ram_size;
     s->max_xlen = max_xlen;
-    s->mem_map = std::make_unique<PhysMemoryMap>();
-    /* needed to handle the RAM dirty bits */
-    s->mem_map->SetTlbFlushTarget(s.get());
+    s->native_sbi = native_sbi;
+    s->fConsole = p->platform->Console();
 
-    for (int hart = 0; hart < p->cpu_count; hart++) {
-        s->cpus[hart].reset(riscv_cpu_create(s->mem_map.get(), max_xlen, hart));
-        if (!s->cpus[hart]) {
-            vm_error("unsupported max_xlen=%d\n", max_xlen);
-            return nullptr;
-        }
-        s->cpus[hart]->SetDeviceLock(p->device_lock);
-        s->cpus[hart]->SetSmp(p->cpu_count > 1);
-        s->hart_count++;
+    s->fCpus = riscv_interp_open(*s, *p->device_lock, options);
+    if (!s->fCpus) {
+        vm_error("unsupported max_xlen=%d\n", max_xlen);
+        return nullptr;
     }
+    s->mem_map = &s->fCpus->MemoryMap();
+    s->hart_count = p->cpu_count;
     s->fHartWakeups = std::make_unique<HostWakeup[]>(s->hart_count);
     /* RAM */
     ram_flags = 0;
     s->mem_map->RegisterRam(RAM_BASE_ADDR, p->ram_size, ram_flags);
     s->mem_map->RegisterRam(0x00000000, LOW_RAM_SIZE, 0);
-    s->rtc_real_time = p->rtc_real_time;
-    if (p->rtc_real_time) {
-        s->rtc_start_time = rtc_get_real_time(s.get());
-    }
-    /* the 'time' CSR must read the same counter as the CLINT */
-    for (int hart = 0; hart < s->hart_count; hart++)
-        s->cpus[hart]->SetRtcTimeSource(s.get());
 
     s->clint = std::make_unique<Clint>(*s, s->hart_count);
     s->mem_map->RegisterDevice(CLINT_BASE_ADDR, CLINT_SIZE, s->clint.get(),
@@ -827,7 +908,6 @@ riscv_machine_init(const VirtMachineParams *p)
         irq_target = s->plic.get();
     } else {
         AplicMsiLayout msi;
-        RISCVInterruptArch arch = RISCV_INTR_AIA;
 
         if (intc_type == RISCV_INTC_APLIC_IMSIC) {
             while ((1 << s->imsic_hart_bits) < s->hart_count)
@@ -841,9 +921,8 @@ riscv_machine_init(const VirtMachineParams *p)
             msi.m_base = IMSIC_M_BASE_ADDR;
             msi.s_base = IMSIC_S_BASE_ADDR;
             msi.hart_index_bits = s->imsic_hart_bits;
-            arch = RISCV_INTR_AIA_IMSIC;
         }
-        s->aplic = std::make_unique<APLIC>(s->mem_map.get(), s.get(),
+        s->aplic = std::make_unique<APLIC>(s->mem_map, s.get(),
                                            s->hart_count, RISCV_IRQ_LINES - 1,
                                            intc_type == RISCV_INTC_APLIC_IMSIC ?
                                            &msi : nullptr);
@@ -852,11 +931,9 @@ riscv_machine_init(const VirtMachineParams *p)
         s->mem_map->RegisterDevice(APLIC_S_BASE_ADDR, APLIC_SIZE,
                                    s->aplic->DomainIO(true), DEVIO_SIZE32);
         irq_target = s->aplic.get();
-        for (int hart = 0; hart < s->hart_count; hart++)
-            s->cpus[hart]->SetInterruptArch(arch);
     }
 
-    s->bus = std::make_unique<SystemBus>(s->mem_map.get(), irq_target,
+    s->bus = std::make_unique<SystemBus>(s->mem_map, irq_target,
                                          RISCV_IRQ_LINES);
     if (intc_type == RISCV_INTC_APLIC_IMSIC) {
         s->bus->SetMsiTarget(s.get());
@@ -894,11 +971,6 @@ riscv_machine_init(const VirtMachineParams *p)
     device_context_connect(&ctx);
 
     if (native_sbi) {
-        s->sbi = std::make_unique<RISCVSbi>(*s, *s, s->mem_map.get(),
-                                            p->device_lock,
-                                            p->platform->Console());
-        for (int hart = 0; hart < s->hart_count; hart++)
-            s->cpus[hart]->SetSbiHandler(s->sbi.get());
         /* what firmware would hand the supervisor domain */
         if (s->aplic)
             s->aplic->DelegateAll();
@@ -926,10 +998,10 @@ riscv_machine_init(const VirtMachineParams *p)
 
 RISCVMachine::~RISCVMachine() = default;
 
-/* The counter runs at RTC_FREQ, which is one tick per microsecond. */
+/* The delay is in host microseconds, the deadlines on the time counter. */
 int64_t RISCVMachine::RunTimers()
 {
-    uint64_t now = rtc_get_time(this);
+    uint64_t now = fCpus->Time();
     int64_t delay = -1;
 
     for (int hart = 0; hart < hart_count; hart++) {
@@ -938,17 +1010,18 @@ int64_t RISCVMachine::RunTimers()
         /* The supervisor timer runs off the same counter when Sstc is
            enabled. The hart raises it itself once woken, which takes the
            deadline away. */
-        uint64_t stimer = cpus[hart]->STimerDeadline();
+        RISCVVcpu &vcpu = fCpus->Vcpu(hart);
+        uint64_t stimer = vcpu.TimerDeadline();
         if (stimer > now) {
             if (stimer < next)
                 next = stimer;
         } else if (stimer != fSTimerKicked[hart]) {
             fSTimerKicked[hart] = stimer;
-            cpus[hart]->RequestExit();
-            KickHart(hart);
+            vcpu.InterruptRun();
+            WakeHart(hart);
         }
         if (next != UINT64_MAX) {
-            uint64_t d = next > now ? next - now : 0;
+            uint64_t d = next > now ? TicksToUs(next - now) : 0;
             if (d > INT64_MAX)
                 d = INT64_MAX;
             if (delay < 0 || (int64_t)d < delay)
@@ -974,22 +1047,22 @@ void RISCVMachine::JoinProcessors()
 void RISCVMachine::InterruptExecution()
 {
     for (int hart = 0; hart < hart_count; hart++) {
-        cpus[hart]->RequestExit();
+        fCpus->Vcpu(hart).InterruptRun();
         fHartWakeups[hart].Kick();
     }
 }
 
 void RISCVMachine::HartThread(int hart)
 {
-    RISCVCPU *cpu = cpus[hart].get();
+    RISCVVcpu &vcpu = fCpus->Vcpu(hart);
     char name[16];
 
     snprintf(name, sizeof(name), "cpu%d", hart);
     host_set_thread_name(name);
+    vcpu.ThreadStarted();
     while (!StopRequested()) {
-        cpu->UpdateSTimer();
-        if (!cpu->PowerDown()) {
-            cpu->Interp();
+        if (!vcpu.Idle()) {
+            vcpu.Run();
             continue;
         }
         /* whatever can wake the hart kicks it */

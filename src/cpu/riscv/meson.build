@@ -13,3 +13,8 @@ foreach xlen : xlens
     dependencies: common_deps,
   )
 endforeach
+
+# What runs the interpreter as the machine's harts, built once.
+emu_libs += static_library('cpu_riscv',
+  files('riscv_interp_backend.cpp', 'riscv_interp_sbi.cpp'),
+  kwargs: lib_kwargs)

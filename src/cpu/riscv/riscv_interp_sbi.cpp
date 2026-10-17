@@ -1,5 +1,5 @@
 /*
- * RISC-V SBI implemented by the machine
+ * RISC-V SBI for interpreted harts
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -19,67 +19,25 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-#include <stdio.h>
-#include <inttypes.h>
 #include <atomic>
 #include <thread>
 
 #include "device_lock.h"
-#include "host_console.h"
-#include "iomem.h"
-#include "machine.h"
-#include "riscv_sbi.h"
+#include "riscv_interp_sbi.h"
+#include "riscv_sbi_defs.h"
+#include "riscv_vcpu.h"
 
 #define SBI_SPEC_VERSION ((2 << 24) | 0) /* 2.0 */
 /* not a registered implementation ID: "TEMU" */
 #define SBI_IMPL_ID      0x54454d55
 #define SBI_IMPL_VERSION 1
 
-#define SBI_SUCCESS               0
-#define SBI_ERR_FAILED            -1
-#define SBI_ERR_NOT_SUPPORTED     -2
-#define SBI_ERR_INVALID_PARAM     -3
-#define SBI_ERR_ALREADY_AVAILABLE -6
 
-#define SBI_EXT_LEGACY_LAST 0x08
-#define SBI_EXT_BASE 0x10
-#define SBI_EXT_TIME 0x54494d45
-#define SBI_EXT_IPI  0x735049
-#define SBI_EXT_RFNC 0x52464e43
-#define SBI_EXT_HSM  0x48534d
-#define SBI_EXT_SRST 0x53525354
-#define SBI_EXT_DBCN 0x4442434e
-
-#define SBI_LEGACY_SET_TIMER   0
-#define SBI_LEGACY_PUTCHAR     1
-#define SBI_LEGACY_GETCHAR     2
-#define SBI_LEGACY_CLEAR_IPI   3
-#define SBI_LEGACY_SEND_IPI    4
-#define SBI_LEGACY_FENCE_I     5
-#define SBI_LEGACY_SFENCE_VMA  6
-#define SBI_LEGACY_SFENCE_ASID 7
-#define SBI_LEGACY_SHUTDOWN    8
-
-#define SBI_HSM_SUSPEND_RETENTIVE     0x00000000
-#define SBI_HSM_SUSPEND_NON_RETENTIVE 0x80000000
-
-#define SBI_SRST_SHUTDOWN    0
-#define SBI_SRST_COLD_REBOOT 1
-#define SBI_SRST_WARM_REBOOT 2
-#define SBI_SRST_REASON_NONE    0
-#define SBI_SRST_REASON_FAILURE 1
-
-#define PAGE_SIZE 4096
-
-
-RISCVSbi::RISCVSbi(VirtMachine &machine, RISCVSbiHarts &harts,
-                   PhysMemoryMap *mem_map, DeviceLock *device_lock,
-                   HostConsole *console):
-    fMachine(machine),
+RISCVSbi::RISCVSbi(RISCVSbiHarts &harts, RISCVCpuTarget &target,
+                   DeviceLock &device_lock):
     fHarts(harts),
-    fMemMap(mem_map),
-    fDeviceLock(device_lock),
-    fConsole(console)
+    fTarget(target),
+    fDeviceLock(device_lock)
 {
 }
 
@@ -130,7 +88,7 @@ void RISCVSbi::SendIpi(uint64_t set)
     for (int hart = 0; set != 0; hart++, set >>= 1) {
         if (set & 1) {
             fHarts.Hart(hart)->PostSoftIrq();
-            fHarts.KickHart(hart);
+            fTarget.WakeHart(hart);
         }
     }
 }
@@ -151,14 +109,14 @@ void RISCVSbi::RemoteSfence(RISCVCPU *cpu, uint64_t set)
             cpu->FlushTlb();
         } else {
             tickets[hart] = fHarts.Hart(hart)->PostTlbFlush();
-            fHarts.KickHart(hart);
+            fTarget.WakeHart(hart);
         }
     }
     for (int hart = 0; hart < 64; hart++) {
         if (!((set >> hart) & 1) || hart == self)
             continue;
         while (!fHarts.Hart(hart)->TlbFlushDone(tickets[hart])) {
-            if (fHarts.Stopping())
+            if (fTarget.Stopping())
                 return;
             cpu->TakePostedTlbFlush();
             std::this_thread::yield();
@@ -217,7 +175,7 @@ int64_t RISCVSbi::Hsm(RISCVCPU *cpu, uint32_t fid, uint64_t a[8],
             return SBI_ERR_INVALID_PARAM;
         if (!fHarts.Hart(a[0])->HsmStart(a[1], a[2]))
             return SBI_ERR_ALREADY_AVAILABLE;
-        fHarts.KickHart(a[0]);
+        fTarget.WakeHart(a[0]);
         return SBI_SUCCESS;
     case 1: /* hart_stop */
         cpu->HsmStop();
@@ -244,26 +202,24 @@ int64_t RISCVSbi::Hsm(RISCVCPU *cpu, uint32_t fid, uint64_t a[8],
 
 int64_t RISCVSbi::Reset(RISCVCPU *cpu, uint64_t type, uint64_t reason)
 {
+    bool reboot;
+
     if (reason != SBI_SRST_REASON_NONE && reason != SBI_SRST_REASON_FAILURE)
         return SBI_ERR_INVALID_PARAM;
     switch (type) {
     case SBI_SRST_SHUTDOWN:
-        if (fMachine.ShutdownRequested())
-            break;
-        if (reason == SBI_SRST_REASON_FAILURE) {
-            printf("\nPower off, system failure.\n");
-            fMachine.RequestShutdown(1);
-        } else {
-            printf("\nPower off.\n");
-            fMachine.RequestShutdown(0);
-        }
+        reboot = false;
         break;
     case SBI_SRST_COLD_REBOOT:
     case SBI_SRST_WARM_REBOOT:
-        fMachine.RequestReset();
+        reboot = true;
         break;
     default:
         return SBI_ERR_INVALID_PARAM;
+    }
+    {
+        DeviceLocker locker(fDeviceLock);
+        fTarget.SystemReset(reboot, reason == SBI_SRST_REASON_FAILURE);
     }
     /* the call does not return */
     cpu->HsmStop();
@@ -271,28 +227,11 @@ int64_t RISCVSbi::Reset(RISCVCPU *cpu, uint64_t type, uint64_t reason)
 }
 
 
-/* Writes from guest physical memory, a page at a time since RAM may end at
-   any page. */
-int64_t RISCVSbi::ConsoleWrite(uint64_t len, uint64_t addr, uint64_t *value)
+bool RISCVSbi::TargetCall(RISCVCPU *cpu, int xlen, uint64_t a[8])
 {
-    DeviceLocker locker(*fDeviceLock);
-    uint64_t done = 0;
+    DeviceLocker locker(fDeviceLock);
 
-    while (done < len) {
-        uint64_t n = PAGE_SIZE - (addr + done) % PAGE_SIZE;
-        if (n > len - done)
-            n = len - done;
-        uint8_t *ptr = fMemMap->GetRamPtr(addr + done, false);
-        if (ptr == nullptr)
-            break;
-        if (fConsole != nullptr)
-            fConsole->WriteData(ptr, n);
-        done += n;
-    }
-    if (done == 0 && len != 0)
-        return SBI_ERR_INVALID_PARAM;
-    *value = done;
-    return SBI_SUCCESS;
+    return fTarget.SbiCall(cpu->HartId(), xlen, a);
 }
 
 
@@ -307,15 +246,10 @@ void RISCVSbi::Legacy(RISCVCPU *cpu, int xlen, uint32_t eid, uint64_t a[8])
         cpu->SetTimer(xlen == 32 ? a[0] | a[1] << 32 : a[0]);
         break;
     case SBI_LEGACY_PUTCHAR:
-        if (fConsole != nullptr) {
-            DeviceLocker locker(*fDeviceLock);
-            uint8_t c = a[0];
-            fConsole->WriteData(&c, 1);
-        }
-        break;
     case SBI_LEGACY_GETCHAR:
-        /* console input goes to the guest's console devices */
-        ret = -1;
+        if (TargetCall(cpu, xlen, a))
+            return;
+        ret = SBI_ERR_NOT_SUPPORTED;
         break;
     case SBI_LEGACY_CLEAR_IPI:
         cpu->ClearSoftIrq();
@@ -354,6 +288,8 @@ void RISCVSbi::Ecall(RISCVCPU *cpu, int xlen, uint64_t a[8])
         Legacy(cpu, xlen, eid, a);
         return;
     }
+    if (a[7] == SBI_EXT_DBCN && TargetCall(cpu, xlen, a))
+        return;
     if (a[7] != eid) {
         err = SBI_ERR_NOT_SUPPORTED;
     } else switch (eid) {
@@ -400,33 +336,6 @@ void RISCVSbi::Ecall(RISCVCPU *cpu, int xlen, uint64_t a[8])
     case SBI_EXT_SRST:
         err = fid == 0 ? Reset(cpu, a[0], a[1]) : SBI_ERR_NOT_SUPPORTED;
         break;
-    case SBI_EXT_DBCN:
-        switch (fid) {
-        case 0: /* write */
-            if (xlen != 32 && a[2] != 0)
-                err = SBI_ERR_INVALID_PARAM;
-            else
-                err = ConsoleWrite(a[0], xlen == 32 ? a[1] | a[2] << 32 : a[1],
-                                   &value);
-            break;
-        case 1: /* read */
-            /* console input goes to the guest's console devices */
-            value = 0;
-            err = SBI_SUCCESS;
-            break;
-        case 2: /* write_byte */
-            if (fConsole != nullptr) {
-                DeviceLocker locker(*fDeviceLock);
-                uint8_t c = a[0];
-                fConsole->WriteData(&c, 1);
-            }
-            err = SBI_SUCCESS;
-            break;
-        default:
-            err = SBI_ERR_NOT_SUPPORTED;
-            break;
-        }
-        break;
     default:
         err = SBI_ERR_NOT_SUPPORTED;
         break;
@@ -439,8 +348,7 @@ void RISCVSbi::Ecall(RISCVCPU *cpu, int xlen, uint64_t a[8])
 void RISCVSbi::MachineTrap(RISCVCPU *cpu, uint64_t cause, uint64_t pc,
                            uint64_t tval)
 {
-    vm_error("hart %u: trap with no M-mode to take it: cause=0x%" PRIx64
-             " pc=0x%" PRIx64 " tval=0x%" PRIx64 "\n", cpu->HartId(), cause,
-             pc, tval);
-    fMachine.RequestShutdown(255);
+    DeviceLocker locker(fDeviceLock);
+
+    fTarget.HartFault(cpu->HartId(), cause, pc, tval);
 }
