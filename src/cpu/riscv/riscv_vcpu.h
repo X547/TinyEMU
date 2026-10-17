@@ -25,11 +25,34 @@
 #include <stdint.h>
 
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "riscv_cpu.h"
 
 class DeviceLock;
 class PhysMemoryMap;
+
+
+/* satp MODE values */
+#define RISCV_SATP_SV32 1
+#define RISCV_SATP_SV39 8
+#define RISCV_SATP_SV48 9
+#define RISCV_SATP_SV57 10
+
+
+/* What every hart implements, as the device tree describes it. */
+struct RISCVHartIsa {
+    /* the single letter extensions, as misa holds them */
+    uint32_t misa = 0;
+    /* the multi-letter ones, in the order the tree lists them */
+    std::vector<std::string> extensions;
+    /* the widest address translation, as satp's MODE names it */
+    int satp_mode = RISCV_SATP_SV39;
+    /* the bytes a Zicbom or Zicboz instruction covers, 0 if not given */
+    uint32_t cbom_block_size = 0;
+    uint32_t cboz_block_size = 0;
+};
 
 
 /* What the machine needs from the harts, fixed when their back end is
@@ -133,8 +156,7 @@ public:
     /* Hart 'index', below RISCVCpuOptions::hart_count. */
     virtual RISCVVcpu &Vcpu(int index) = 0;
 
-    /* The single letter extensions, as misa holds them. */
-    virtual uint32_t Misa() = 0;
+    virtual const RISCVHartIsa &Isa() = 0;
 
     /* The time counter the 'time' CSR reads and every timer runs on. Any
        thread. */

@@ -28,6 +28,8 @@
 #include <inttypes.h>
 #include <assert.h>
 
+#include <string>
+
 #include "bits.h"
 #include "cutils.h"
 #include "host_console.h"
@@ -323,8 +325,8 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
     FDTBuilder fdt;
     FDTContext ctx;
     int size, max_xlen, i;
-    char isa_string[128], *q;
-    char ext_list[256], *ext_end;
+    std::string isa_string;
+    std::string ext_list;
     uint32_t misa;
     uint32_t intc_phandle[RISCV_MAX_HARTS];
 
@@ -341,25 +343,10 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
     fdt.PropStr("model", "ucbbar,riscvemu-bare");
 
     max_xlen = m->max_xlen;
-    misa = m->fCpus->Misa();
+    const RISCVHartIsa &isa = m->fCpus->Isa();
+    misa = isa.misa;
 
-    /* Extensions implemented outside of misa, which only has room for the
-       single letter ones. */
-    const char *multi_letter_ext[16];
-    int ext_count = 0;
-    multi_letter_ext[ext_count++] = "zicsr";
-    multi_letter_ext[ext_count++] = "zifencei";
-    multi_letter_ext[ext_count++] = "zicntr";
-    if (m->intc_type != RISCV_INTC_PLIC) {
-        multi_letter_ext[ext_count++] = "smaia";
-        multi_letter_ext[ext_count++] = "ssaia";
-    }
-    multi_letter_ext[ext_count++] = "sstc";
-    multi_letter_ext[ext_count++] = "svadu";
-    multi_letter_ext[ext_count++] = "svinval";
-
-    q = isa_string;
-    q += snprintf(isa_string, sizeof(isa_string), "rv%d", max_xlen);
+    isa_string = "rv" + std::to_string(max_xlen);
     /* The single letter extensions must appear in the canonical order given
        by the ISA specification, not in misa bit order: Linux rejects a hart
        whose riscv,isa does not begin with "rv<xlen>ima" and refuses to boot.
@@ -371,40 +358,43 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
         for (const char *p = canonical; *p != '\0'; p++) {
             uint32_t bit = 1 << (*p - 'a');
             if (misa & bit) {
-                *q++ = *p;
+                isa_string += *p;
                 emitted |= bit;
             }
         }
         for(i = 0; i < 26; i++) {
             if (get_bit(misa, i) && !get_bit(emitted, i))
-                *q++ = 'a' + i;
+                isa_string += 'a' + i;
         }
     }
     /* Multi-letter extensions follow the single letter ones, each introduced
        by an underscore. */
-    for (i = 0; i < ext_count; i++) {
-        q += snprintf(q, sizeof(isa_string) - (q - isa_string), "_%s",
-                      multi_letter_ext[i]);
-    }
+    for (const std::string &ext : isa.extensions)
+        isa_string += "_" + ext;
 
     {
         /* A packed list of NUL terminated strings. The privilege modes 'S'
            and 'U' are not extensions and have no place here, unlike in the
            "riscv,isa" string above. */
         static const char canonical[] = "imafdqch";
-        char *p = ext_list;
         for (const char *c = canonical; *c != '\0'; c++) {
             if (misa & (1 << (*c - 'a'))) {
-                *p++ = *c;
-                *p++ = '\0';
+                ext_list += *c;
+                ext_list += '\0';
             }
         }
-        for (i = 0; i < ext_count; i++) {
-            size_t len = strlen(multi_letter_ext[i]) + 1;
-            memcpy(p, multi_letter_ext[i], len);
-            p += len;
+        for (const std::string &ext : isa.extensions) {
+            ext_list += ext;
+            ext_list += '\0';
         }
-        ext_end = p;
+    }
+
+    const char *mmu_type;
+    switch (isa.satp_mode) {
+    case RISCV_SATP_SV32: mmu_type = "riscv,sv32"; break;
+    case RISCV_SATP_SV39: mmu_type = "riscv,sv39"; break;
+    case RISCV_SATP_SV48: mmu_type = "riscv,sv48"; break;
+    default: mmu_type = "riscv,sv57"; break;
     }
 
     /* CPU list */
@@ -420,7 +410,7 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
         fdt.PropStr("status", "okay");
         fdt.PropStr("compatible", "riscv");
 
-        fdt.PropStr("riscv,isa", isa_string);
+        fdt.PropStr("riscv,isa", isa_string.c_str());
         /* Linux 6.6 and later parse "riscv,isa-base" plus
            "riscv,isa-extensions" instead, and a kernel built without
            CONFIG_RISCV_ISA_FALLBACK (Ubuntu's generic riscv64 kernel, for
@@ -429,9 +419,14 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
            and of_parse_and_init_cpus() hits a BUG() before the console is
            even up, so both forms are emitted. */
         fdt.PropStr("riscv,isa-base", max_xlen <= 32 ? "rv32i" : "rv64i");
-        fdt.Prop("riscv,isa-extensions", ext_list, ext_end - ext_list);
+        fdt.Prop("riscv,isa-extensions", ext_list.data(), ext_list.size());
+        /* without the block sizes a guest leaves the extensions unused */
+        if (isa.cbom_block_size != 0)
+            fdt.PropU32("riscv,cbom-block-size", isa.cbom_block_size);
+        if (isa.cboz_block_size != 0)
+            fdt.PropU32("riscv,cboz-block-size", isa.cboz_block_size);
 
-        fdt.PropStr("mmu-type", max_xlen <= 32 ? "riscv,sv32" : "riscv,sv48");
+        fdt.PropStr("mmu-type", mmu_type);
         fdt.PropU32("clock-frequency", 2000000000);
 
         fdt.BeginNode("interrupt-controller");

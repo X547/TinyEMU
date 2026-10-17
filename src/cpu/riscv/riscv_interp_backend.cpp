@@ -68,7 +68,7 @@ class RISCVInterpBackend final:
     public TlbFlushTarget {
 private:
     RISCVCpuTarget &fTarget;
-    uint32_t fMisa = 0;
+    RISCVHartIsa fIsa;
     bool fRealTime;
     uint64_t fStartTime = 0;
     /* before the harts, which use it until they go */
@@ -86,7 +86,7 @@ public:
     /* RISCVCpuBackend */
     PhysMemoryMap &MemoryMap() override {return fMemoryMap;}
     RISCVVcpu &Vcpu(int index) override {return *fVcpus[index];}
-    uint32_t Misa() override {return fMisa;}
+    const RISCVHartIsa &Isa() override {return fIsa;}
     uint64_t Time() override;
     uint64_t TimebaseFrequency() override {return RTC_FREQ;}
     bool RealTimeClock() override {return fRealTime;}
@@ -140,7 +140,13 @@ bool RISCVInterpBackend::Init(DeviceLock &lock,
         if (options.interrupt_arch != RISCV_INTR_BASE)
             cpu->SetInterruptArch(options.interrupt_arch);
     }
-    fMisa = fVcpus[0]->Cpu()->Misa();
+    fIsa.misa = fVcpus[0]->Cpu()->Misa();
+    fIsa.extensions = {"zicsr", "zifencei", "zicntr"};
+    if (options.interrupt_arch != RISCV_INTR_BASE)
+        fIsa.extensions.insert(fIsa.extensions.end(), {"smaia", "ssaia"});
+    fIsa.extensions.insert(fIsa.extensions.end(),
+                           {"sstc", "svadu", "svinval"});
+    fIsa.satp_mode = options.xlen == 32 ? RISCV_SATP_SV32 : RISCV_SATP_SV48;
     if (fRealTime)
         fStartTime = rtc_get_real_time();
     /* the 'time' CSR must read the same counter as the machine's timers */
