@@ -62,7 +62,8 @@ void help(void)
            "-ctrlc            the C-c key stops the emulator instead of being sent to the\n"
            "                  emulated software\n"
            "-append cmdline   append cmdline to the kernel command line\n"
-           "-no-accel         disable VM acceleration (KVM, x86 machine only)\n"
+           "-no-accel         run the processors in the interpreter, not in a\n"
+           "                  host hypervisor\n"
            "\n"
            "Console keys:\n"
            "Press C-a x to exit the emulator, C-a h to get some help.\n");

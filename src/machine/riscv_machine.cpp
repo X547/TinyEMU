@@ -33,6 +33,7 @@
 #include "bits.h"
 #include "cutils.h"
 #include "host_console.h"
+#include "host_riscv_hypervisor.h"
 #include "host_thread.h"
 #include "host_time.h"
 #include "iomem.h"
@@ -875,7 +876,11 @@ riscv_machine_init(const VirtMachineParams *p)
     s->native_sbi = native_sbi;
     s->fConsole = p->platform->Console();
 
-    s->fCpus = riscv_interp_open(*s, *p->device_lock, options);
+    if (p->accel_enable &&
+        !host_riscv_hypervisor_open(*s, *p->device_lock, options, &s->fCpus))
+        return nullptr;
+    if (!s->fCpus)
+        s->fCpus = riscv_interp_open(*s, *p->device_lock, options);
     if (!s->fCpus) {
         vm_error("unsupported max_xlen=%d\n", max_xlen);
         return nullptr;
@@ -1078,7 +1083,7 @@ public:
 
     void SetDefaults(VirtMachineParams *p) const override
     {
-        (void)p;
+        p->accel_enable = true;
     }
 
     std::unique_ptr<VirtMachine> Init(const VirtMachineParams *p) const override

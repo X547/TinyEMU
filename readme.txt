@@ -120,7 +120,8 @@ options are:
 -ctrlc            the C-c key stops the emulator instead of being sent to the
                   emulated software
 -append cmdline   append cmdline to the kernel command line
--no-accel         disable VM acceleration (KVM, x86 machine only)
+-no-accel         run the processors in the interpreter, not in a
+                  host hypervisor
 
 Console keys:
 Press C-a x to exit the emulator, C-a h to get some help.
@@ -171,6 +172,17 @@ what the processor has besides the two 8259s:
             start of RAM, or without one the first cfi-flash, where firmware
             such as EDK2 runs in place. The other harts wait to be started
             through the HSM extension
+
+"accel" chooses what runs the processors, on either machine: "auto" (the
+default) a hardware hypervisor when the host has one, and the interpreter
+when it has none; "none" always the interpreter, as -no-accel does. A RISC-V
+machine runs on Linux KVM on a riscv64 host with the H extension. KVM takes
+only riscv64 guests with "sbi" "native", whose SBI the host kernel then
+answers, and "plic" or "aplic" (the guest gets no AIA CSRs). Any other
+configuration stops with an error rather than falling back, so one that runs
+M-mode firmware needs "accel": "none" on such a host. The harts show the
+guest the extensions KVM offers, the host's address translation modes and
+its timebase frequency, in place of the interpreter's.
 
 "hypervisor_intc" (true unless given) lets a hardware hypervisor provide the
 interrupt controllers it can, of whatever kind the machine has. With false

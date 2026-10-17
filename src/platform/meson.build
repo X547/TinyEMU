@@ -75,6 +75,12 @@ elif nvmm_enabled
 else
   platform_sources += files('common/no_x86_hypervisor.cpp')
 endif
+if platform_os == 'linux' and host_machine.cpu_family() == 'riscv64'
+  platform_sources += files('linux/kvm_riscv.cpp',
+                            'common/hypervisor_memory_map.cpp')
+else
+  platform_sources += files('common/no_riscv_hypervisor.cpp')
+endif
 if slirp_enabled
   platform_sources += files('slirp/slirp_ethernet.cpp')
 else
