@@ -23,7 +23,7 @@
  */
 #pragma once
 
-#include "host_x86_hypervisor.h"
+#include "host_hypervisor_ram.h"
 #include "iomem.h"
 
 

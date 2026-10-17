@@ -44,6 +44,7 @@
 #include "bits.h"
 #include "device_lock.h"
 #include "host_memory.h"
+#include "host_x86_hypervisor.h"
 #include "hypervisor_memory_map.h"
 
 

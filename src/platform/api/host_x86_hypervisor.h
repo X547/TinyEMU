@@ -26,32 +26,10 @@
 
 #include <memory>
 
+#include "host_hypervisor_ram.h"
 #include "x86_vcpu.h"
 
 class DeviceLock;
-
-
-/* Guest RAM as a hypervisor holds it, which HypervisorPhysMemoryMap
-   (platform/common) keeps up to date. Called with the device lock held. */
-class HostHypervisorRam {
-public:
-    virtual ~HostHypervisorRam() = default;
-
-    /* Memory for guest RAM, zeroed, as host_ram_alloc() gives it. It comes
-       from here because a hypervisor may have to set it up before anything
-       is written to it; nullptr on failure. */
-    virtual uint8_t *AllocRam(size_t size) = 0;
-    virtual void FreeRam(uint8_t *ptr, size_t size) = 0;
-
-    /* Guest RAM at 'addr' backed by 'host_mem'. 'slot' names the range from
-       then on; mapping it again moves it, and a size of 0 removes it. */
-    virtual void MapRam(int slot, uint64_t addr, uint64_t size,
-                        uint8_t *host_mem, bool read_only,
-                        bool log_dirty) = 0;
-    /* The pages of 'slot' written since the last call, one bit per page in
-       64 bit words; the log starts over. */
-    virtual void GetDirtyLog(int slot, uint32_t *bitmap) = 0;
-};
 
 
 /* Implemented once per host; the build picks the file. The processors run
