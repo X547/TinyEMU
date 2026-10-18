@@ -6,11 +6,19 @@ wayland_scanner = find_program(
 wayland_protocols_dir = dependency('wayland-protocols') \
   .get_variable('pkgdatadir')
 
-wayland_protocol_sources = []
-foreach xml : [
+wayland_protocols = [
   'stable/xdg-shell/xdg-shell.xml',
   'unstable/xdg-decoration/xdg-decoration-unstable-v1.xml',
 ]
+wayland_sources = files('be_decorator.cpp', 'title_font.cpp',
+                        'wayland_display.cpp', 'window_buffer.cpp')
+if wayland_dmabuf
+  wayland_protocols += 'stable/linux-dmabuf/linux-dmabuf-v1.xml'
+  wayland_sources += files('dmabuf_allocator.cpp')
+endif
+
+wayland_protocol_sources = []
+foreach xml : wayland_protocols
   name = xml.split('/')[-1].replace('.xml', '')
   wayland_protocol_sources += custom_target(name + '-client-header',
     input: wayland_protocols_dir / xml,
@@ -25,8 +33,7 @@ foreach xml : [
 endforeach
 
 emu_libs += static_library('platform_wayland_gui',
-  files('be_decorator.cpp', 'shm_buffer.cpp', 'title_font.cpp',
-        'wayland_display.cpp'),
+  wayland_sources,
   wayland_protocol_sources,
   kwargs: platform_kwargs,
 )

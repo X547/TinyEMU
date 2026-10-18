@@ -1,5 +1,5 @@
 /*
- * Wayland shared memory buffers
+ * Wayland window buffers
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -31,7 +31,22 @@
 
 #include <wayland-client.h>
 
-#include "shm_buffer.h"
+#include "window_buffer.h"
+
+
+namespace {
+
+struct ShmBuffer final: WindowBuffer {
+    size_t size = 0;
+
+    ~ShmBuffer() override
+    {
+        if (pixels != nullptr)
+            munmap(pixels, size);
+    }
+};
+
+} // namespace
 
 
 /* An unnamed file of 'size' bytes to share with the compositor. */
@@ -70,51 +85,15 @@ static int create_shm_file(size_t size)
 }
 
 
-ShmBufferRing::~ShmBufferRing()
+WindowBuffer::~WindowBuffer()
 {
-    for (ShmBuffer *buffer : fBuffers)
-        Destroy(buffer);
-    for (ShmBuffer *buffer : fDropped)
-        Destroy(buffer);
+    if (buffer != nullptr)
+        wl_buffer_destroy(buffer);
 }
 
 
-void ShmBufferRing::HandleRelease(void *data, wl_buffer *wl_buffer)
+WindowBuffer *ShmAllocator::Create(int width, int height)
 {
-    (void)wl_buffer;
-    auto *buffer = static_cast<ShmBuffer *>(data);
-    buffer->ring->Released(buffer);
-}
-
-
-void ShmBufferRing::Released(ShmBuffer *buffer)
-{
-    buffer->busy = false;
-    auto it = std::find(fDropped.begin(), fDropped.end(), buffer);
-    if (it != fDropped.end()) {
-        fDropped.erase(it);
-        Destroy(buffer);
-    }
-    if (fReleased)
-        fReleased();
-}
-
-
-void ShmBufferRing::Destroy(ShmBuffer *buffer)
-{
-    if (buffer->buffer != nullptr)
-        wl_buffer_destroy(buffer->buffer);
-    if (buffer->pixels != nullptr)
-        munmap(buffer->pixels, buffer->size);
-    delete buffer;
-}
-
-
-ShmBuffer *ShmBufferRing::Create(int width, int height)
-{
-    static const wl_buffer_listener listener = {
-        .release = HandleRelease,
-    };
     size_t stride = (size_t)width * 4;
     size_t size = stride * height;
 
@@ -139,53 +118,92 @@ ShmBuffer *ShmBufferRing::Create(int width, int height)
     close(fd);
 
     auto *buffer = new ShmBuffer;
-    buffer->ring = this;
     buffer->buffer = wl_buffer;
     buffer->pixels = static_cast<uint32_t *>(pixels);
     buffer->size = size;
+    buffer->pitch = width;
     buffer->width = width;
     buffer->height = height;
-    buffer->stale = ScreenRect(0, 0, width, height);
-    wl_buffer_add_listener(wl_buffer, &listener, buffer);
     return buffer;
 }
 
 
-ShmBuffer *ShmBufferRing::Acquire(int width, int height)
+BufferRing::~BufferRing()
 {
+    for (WindowBuffer *buffer : fBuffers)
+        delete buffer;
+    for (WindowBuffer *buffer : fDropped)
+        delete buffer;
+}
+
+
+void BufferRing::HandleRelease(void *data, wl_buffer *wl_buffer)
+{
+    (void)wl_buffer;
+    auto *buffer = static_cast<WindowBuffer *>(data);
+    buffer->ring->Released(buffer);
+}
+
+
+void BufferRing::Released(WindowBuffer *buffer)
+{
+    buffer->busy = false;
+    auto it = std::find(fDropped.begin(), fDropped.end(), buffer);
+    if (it != fDropped.end()) {
+        fDropped.erase(it);
+        delete buffer;
+    }
+    if (fReleased)
+        fReleased();
+}
+
+
+WindowBuffer *BufferRing::Acquire(int width, int height)
+{
+    static const wl_buffer_listener listener = {
+        .release = HandleRelease,
+    };
+
+    fCreateFailed = false;
     if (!fBuffers.empty() && (fBuffers[0]->width != width ||
                               fBuffers[0]->height != height)) {
-        for (ShmBuffer *buffer : fBuffers) {
+        for (WindowBuffer *buffer : fBuffers) {
             if (buffer->busy)
                 fDropped.push_back(buffer);
             else
-                Destroy(buffer);
+                delete buffer;
         }
         fBuffers.clear();
     }
 
-    for (ShmBuffer *buffer : fBuffers) {
+    for (WindowBuffer *buffer : fBuffers) {
         if (!buffer->busy)
             return buffer;
     }
     if (fBuffers.size() >= fMaxBuffers || width <= 0 || height <= 0)
         return nullptr;
-    ShmBuffer *buffer = Create(width, height);
-    if (buffer != nullptr)
-        fBuffers.push_back(buffer);
+    WindowBuffer *buffer = fAllocator.Create(width, height);
+    if (buffer == nullptr) {
+        fCreateFailed = true;
+        return nullptr;
+    }
+    buffer->ring = this;
+    buffer->stale = ScreenRect(0, 0, width, height);
+    wl_buffer_add_listener(buffer->buffer, &listener, buffer);
+    fBuffers.push_back(buffer);
     return buffer;
 }
 
 
-void ShmBufferRing::Attached(ShmBuffer *buffer)
+void BufferRing::Attached(WindowBuffer *buffer)
 {
     buffer->busy = true;
     buffer->stale = ScreenRect();
 }
 
 
-void ShmBufferRing::Invalidate(const ScreenRect &r)
+void BufferRing::Invalidate(const ScreenRect &r)
 {
-    for (ShmBuffer *buffer : fBuffers)
+    for (WindowBuffer *buffer : fBuffers)
         buffer->stale |= r & ScreenRect(0, 0, buffer->width, buffer->height);
 }

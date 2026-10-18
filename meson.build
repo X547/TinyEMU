@@ -117,6 +117,17 @@ wayland_gui_opt = get_option('wayland_gui') \
 wayland_dep = dependency('wayland-client', required: wayland_gui_opt)
 wayland_gui = wayland_dep.found()
 
+# The window's buffers as dma-bufs that Vulkan allocates, with shared memory
+# kept for compositors that don't take them.
+wayland_dmabuf_opt = get_option('wayland_dmabuf') \
+  .require(wayland_gui, error_message: 'dma-bufs are for the Wayland window')
+vulkan_dep = dependency('vulkan', required: wayland_dmabuf_opt)
+wayland_dmabuf = vulkan_dep.found()
+if wayland_dmabuf
+  emu_deps += vulkan_dep
+  common_defines += '-DCONFIG_WAYLAND_DMABUF'
+endif
+
 if haiku_gui
   emu_deps += be_dep
   sdl_dep = dependency('', required: false)
@@ -371,6 +382,7 @@ summary({
   'Haiku display': haiku_gui,
   'Windows display': win32_gui,
   'Wayland display': wayland_gui,
+  'Wayland dma-bufs': wayland_dmabuf,
   'x86 emulator': x86emu,
   'Windows Hypervisor Platform': whp_enabled,
   'NVMM': nvmm_enabled,

@@ -39,11 +39,14 @@
 
 #include "be_decorator.h"
 #include "device_lock.h"
+#ifdef CONFIG_WAYLAND_DMABUF
+#include "dmabuf_allocator.h"
+#endif
 #include "platform_backends.h"
 #include "run_control.h"
 #include "screen_rect.h"
-#include "shm_buffer.h"
 #include "title_font.h"
+#include "window_buffer.h"
 #include "WaylandKeycodes.h"
 
 #define KEYCODE_MAX 127
@@ -105,8 +108,8 @@ private:
     /* the window's own cursor image */
     struct FrameCursorSurface {
         wl_surface *surface = nullptr;
-        std::unique_ptr<ShmBufferRing> buffers;
-        ShmBuffer *buffer = nullptr;
+        std::unique_ptr<BufferRing> buffers;
+        WindowBuffer *buffer = nullptr;
         int hot_x = 0;
         int hot_y = 0;
     };
@@ -161,6 +164,9 @@ private:
     wl_compositor *fCompositor = nullptr;
     uint32_t fCompositorVersion = 0;
     wl_shm *fShm = nullptr;
+    /* the zwp_linux_dmabuf_v1 global, bound by the dma-buf allocator */
+    uint32_t fDmabufName = 0;
+    uint32_t fDmabufVersion = 0;
     xdg_wm_base *fWmBase = nullptr;
     zxdg_decoration_manager_v1 *fDecorationManager = nullptr;
     wl_seat *fSeat = nullptr;
@@ -172,7 +178,10 @@ private:
     xdg_surface *fXdgSurface = nullptr;
     xdg_toplevel *fToplevel = nullptr;
     zxdg_toplevel_decoration_v1 *fDecoration = nullptr;
-    std::unique_ptr<ShmBufferRing> fBuffers;
+    std::unique_ptr<ShmAllocator> fShmAllocator;
+    /* the window's buffers when the compositor's GPU reads them in place */
+    std::unique_ptr<BufferAllocator> fDmabufAllocator;
+    std::unique_ptr<BufferRing> fBuffers;
     wl_callback *fFrameCallback = nullptr;
     bool fConfigured = false;
     /* what the last configure asked for; a size of 0 is the window's to
@@ -215,9 +224,9 @@ private:
 
     /* the host cursor over the window: the guest's image, or none */
     wl_surface *fCursorSurface = nullptr;
-    std::unique_ptr<ShmBufferRing> fCursorBuffers;
+    std::unique_ptr<BufferRing> fCursorBuffers;
     /* drawn, attached once the cursor is shown */
-    ShmBuffer *fCursorBuffer = nullptr;
+    WindowBuffer *fCursorBuffer = nullptr;
     std::vector<uint32_t> fHostCursor;
     int fHostCursorWidth = 0;
     int fHostCursorHeight = 0;
@@ -277,13 +286,14 @@ private:
     void CopyFromSource(int x, int y, int w, int h);
     ScreenRect CursorRect() const;
     ScreenRect ContentRect() const;
-    void Paint(ShmBuffer *buffer, const ScreenRect &area);
+    void Paint(WindowBuffer *buffer, const ScreenRect &area);
 
     /* the window's thread */
     void HandleGlobal(wl_registry *registry, uint32_t name,
                       const char *interface, uint32_t version);
     void HandleSeatCapabilities(uint32_t caps);
     void CreateWindow(int width, int height, bool resizable);
+    void CreateBuffers();
     void CreateFrameCursor(FrameCursorSurface &cursor,
                            const FrameCursor &image);
     void Layout();
@@ -350,6 +360,8 @@ WaylandDisplay::~WaylandDisplay()
     fBuffers.reset();
     fCursorBuffers.reset();
     fFrameCursor.buffers.reset();
+    fDmabufAllocator.reset();
+    fShmAllocator.reset();
     if (fFrameCursor.surface != nullptr)
         wl_surface_destroy(fFrameCursor.surface);
     if (fFrameCallback != nullptr)
@@ -551,9 +563,9 @@ ScreenRect WaylandDisplay::ContentRect() const
 /* With fMutex held: draws the frame, and in the content the frame buffer,
    black past its edges, and the cursor over both, into one rectangle of
    'buffer'. */
-void WaylandDisplay::Paint(ShmBuffer *buffer, const ScreenRect &area)
+void WaylandDisplay::Paint(WindowBuffer *buffer, const ScreenRect &area)
 {
-    int pitch = buffer->width;
+    int pitch = buffer->pitch;
     ScreenRect content = ContentRect();
 
     bool in_content = area.x0 >= content.x0 && area.y0 >= content.y0 &&
@@ -604,7 +616,15 @@ void WaylandDisplay::Redraw()
 {
     if (!fConfigured || fFrameCallback != nullptr || fWindowDirty.Empty())
         return;
-    ShmBuffer *buffer = fBuffers->Acquire(fWindowWidth, fWindowHeight);
+    WindowBuffer *buffer = fBuffers->Acquire(fWindowWidth, fWindowHeight);
+    if (buffer == nullptr && fBuffers->CreateFailed() &&
+        fDmabufAllocator != nullptr) {
+        /* the old buffers go, and the next ones are drawn in full */
+        fBuffers.reset();
+        fDmabufAllocator.reset();
+        CreateBuffers();
+        buffer = fBuffers->Acquire(fWindowWidth, fWindowHeight);
+    }
     if (buffer == nullptr)
         return;
 
@@ -714,10 +734,9 @@ void WaylandDisplay::CreateWindow(int width, int height, bool resizable)
     fServerSide = fDecorationManager != nullptr && !fOptions.client_decorations;
     Layout();
 
-    fBuffers = std::make_unique<ShmBufferRing>(fShm, WL_SHM_FORMAT_ARGB8888,
-                                               3, [this]() {Redraw();});
-    fCursorBuffers = std::make_unique<ShmBufferRing>(
-        fShm, WL_SHM_FORMAT_ARGB8888, 2, [this]() {
+    CreateBuffers();
+    fCursorBuffers = std::make_unique<BufferRing>(
+        *fShmAllocator, 2, [this]() {
             if (fHostCursorPending)
                 SetHostCursor();
         });
@@ -748,12 +767,22 @@ void WaylandDisplay::CreateWindow(int width, int height, bool resizable)
 }
 
 
+/* The window's buffers: dma-bufs when the compositor takes them, shared
+   memory otherwise. */
+void WaylandDisplay::CreateBuffers()
+{
+    BufferAllocator *allocator = fDmabufAllocator != nullptr ?
+                                 fDmabufAllocator.get() : fShmAllocator.get();
+    fBuffers = std::make_unique<BufferRing>(*allocator, 3,
+                                            [this]() {Redraw();});
+}
+
+
 void WaylandDisplay::CreateFrameCursor(FrameCursorSurface &cursor,
                                        const FrameCursor &image)
 {
     cursor.surface = wl_compositor_create_surface(fCompositor);
-    cursor.buffers = std::make_unique<ShmBufferRing>(
-        fShm, WL_SHM_FORMAT_ARGB8888, 1, nullptr);
+    cursor.buffers = std::make_unique<BufferRing>(*fShmAllocator, 1, nullptr);
     cursor.hot_x = image.hot_x;
     cursor.hot_y = image.hot_y;
     cursor.buffer = cursor.buffers->Acquire(image.width, image.height);
@@ -921,8 +950,8 @@ void WaylandDisplay::SetHostCursor()
     /* the old buffer may go when the size changes */
     fCursorBuffer = nullptr;
     if (!fHostCursor.empty()) {
-        ShmBuffer *buffer = fCursorBuffers->Acquire(fHostCursorWidth,
-                                                    fHostCursorHeight);
+        WindowBuffer *buffer = fCursorBuffers->Acquire(fHostCursorWidth,
+                                                       fHostCursorHeight);
         if (buffer == nullptr) {
             fHostCursorPending = true;
             return;
@@ -943,8 +972,8 @@ void WaylandDisplay::ShowHostCursor()
         return;
 
     wl_surface *surface;
-    ShmBufferRing *ring;
-    ShmBuffer *buffer;
+    BufferRing *ring;
+    WindowBuffer *buffer;
     int hot_x, hot_y;
     if (fCursorKind == kCursorGuest) {
         surface = fCursorSurface;
@@ -1457,6 +1486,9 @@ void WaylandDisplay::HandleGlobal(wl_registry *registry, uint32_t name,
     } else if (strcmp(interface, wl_shm_interface.name) == 0) {
         fShm = static_cast<wl_shm *>(wl_registry_bind(
             registry, name, &wl_shm_interface, 1));
+    } else if (strcmp(interface, "zwp_linux_dmabuf_v1") == 0) {
+        fDmabufName = name;
+        fDmabufVersion = version;
     } else if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
         fWmBase = static_cast<xdg_wm_base *>(wl_registry_bind(
             registry, name, &xdg_wm_base_interface, std::min(version, 5u)));
@@ -1534,6 +1566,15 @@ bool WaylandDisplay::Connect()
                 fShm == nullptr ? "wl_shm" : "xdg_wm_base");
         return false;
     }
+    fShmAllocator = std::make_unique<ShmAllocator>(fShm,
+                                                   WL_SHM_FORMAT_ARGB8888);
+#ifdef CONFIG_WAYLAND_DMABUF
+    if (fDmabufName != 0) {
+        fDmabufAllocator = dmabuf_allocator_create(fDisplay, fRegistry,
+                                                   fDmabufName,
+                                                   fDmabufVersion);
+    }
+#endif
     return true;
 }
 

@@ -1,5 +1,5 @@
 /*
- * Wayland shared memory buffers
+ * Wayland window buffers
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -31,58 +31,85 @@
 
 struct wl_buffer;
 struct wl_shm;
-class ShmBufferRing;
+class BufferRing;
 
 
-/* 32 bit pixels a wl_buffer shows, 'width' pixels per row. */
-struct ShmBuffer {
-    ShmBufferRing *ring = nullptr;
+/* 32 bit pixels a wl_buffer shows, 'pitch' pixels per row. */
+struct WindowBuffer {
+    BufferRing *ring = nullptr;
     wl_buffer *buffer = nullptr;
     uint32_t *pixels = nullptr;
-    size_t size = 0;
+    int pitch = 0;
     int width = 0;
     int height = 0;
     /* attached, and not yet released by the compositor */
     bool busy = false;
     /* what changed since the pixels were last drawn */
     ScreenRect stale;
+
+    virtual ~WindowBuffer();
+};
+
+
+/* Makes the buffers of a ring. */
+class BufferAllocator {
+public:
+    virtual ~BufferAllocator() = default;
+
+    /* A buffer of that size, with its wl_buffer and pixels; nullptr when
+       none could be made. */
+    virtual WindowBuffer *Create(int width, int height) = 0;
+};
+
+
+/* Buffers in memory shared with the compositor. */
+class ShmAllocator final: public BufferAllocator {
+private:
+    wl_shm *fShm;
+    uint32_t fFormat;
+
+public:
+    /* 'format' is a WL_SHM_FORMAT_ value. */
+    ShmAllocator(wl_shm *shm, uint32_t format): fShm(shm), fFormat(format) {}
+
+    WindowBuffer *Create(int width, int height) override;
 };
 
 
 /* The buffers one surface takes turns on, all of one size. One the
    compositor still reads is not drawn into; a buffer that is reused is
    drawn again only where it is out of date. */
-class ShmBufferRing {
+class BufferRing {
 private:
-    wl_shm *fShm;
-    uint32_t fFormat;
+    BufferAllocator &fAllocator;
     size_t fMaxBuffers;
     /* a buffer came back from the compositor */
     std::function<void()> fReleased;
-    std::vector<ShmBuffer *> fBuffers;
+    std::vector<WindowBuffer *> fBuffers;
     /* of an older size, destroyed once released */
-    std::vector<ShmBuffer *> fDropped;
+    std::vector<WindowBuffer *> fDropped;
+    bool fCreateFailed = false;
 
-    ShmBuffer *Create(int width, int height);
-    void Released(ShmBuffer *buffer);
-    static void Destroy(ShmBuffer *buffer);
+    void Released(WindowBuffer *buffer);
     static void HandleRelease(void *data, wl_buffer *wl_buffer);
 
 public:
-    /* 'format' is a WL_SHM_FORMAT_ value. 'released' is called from the
-       compositor's events whenever a buffer stops being busy. */
-    ShmBufferRing(wl_shm *shm, uint32_t format, size_t max_buffers,
-                  std::function<void()> released):
-        fShm(shm), fFormat(format), fMaxBuffers(max_buffers),
+    /* 'released' is called from the compositor's events whenever a buffer
+       stops being busy. The allocator outlives the ring. */
+    BufferRing(BufferAllocator &allocator, size_t max_buffers,
+               std::function<void()> released):
+        fAllocator(allocator), fMaxBuffers(max_buffers),
         fReleased(std::move(released)) {}
-    ~ShmBufferRing();
+    ~BufferRing();
 
     /* A buffer of that size that is not busy, its 'stale' area to be
        drawn; nullptr when all are busy or none could be made. A size
        other than the last one drops the old buffers. */
-    ShmBuffer *Acquire(int width, int height);
+    WindowBuffer *Acquire(int width, int height);
+    /* the last Acquire() returned nullptr because no buffer could be made */
+    bool CreateFailed() const {return fCreateFailed;}
     /* 'buffer', drawn, is attached and committed. */
-    void Attached(ShmBuffer *buffer);
+    void Attached(WindowBuffer *buffer);
     /* 'r' changed, in every buffer. */
     void Invalidate(const ScreenRect &r);
 };

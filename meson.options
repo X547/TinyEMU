@@ -18,6 +18,11 @@ option('wayland_gui',
   value: 'disabled',
   description: 'Wayland window instead of SDL')
 
+option('wayland_dmabuf',
+  type: 'feature',
+  value: 'auto',
+  description: 'Wayland window buffers the compositor GPU reads in place (needs Vulkan)')
+
 option('fs_net',
   type: 'feature',
   value: 'disabled',
