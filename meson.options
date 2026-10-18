@@ -23,6 +23,11 @@ option('wayland_dmabuf',
   value: 'auto',
   description: 'Wayland window buffers the compositor GPU reads in place (needs Vulkan)')
 
+option('pipewire',
+  type: 'feature',
+  value: 'auto',
+  description: 'sound through PipeWire (Linux and BSD hosts)')
+
 option('fs_net',
   type: 'feature',
   value: 'disabled',

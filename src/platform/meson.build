@@ -55,6 +55,8 @@ else
 endif
 if platform_os == 'haiku'
   platform_sources += files('haiku/media_audio.cpp')
+elif pipewire_enabled
+  platform_sources += files('linux/pipewire_audio.cpp')
 elif platform_os != 'windows'
   platform_sources += files('common/no_host_audio.cpp')
 endif

@@ -238,6 +238,18 @@ if platform_os == 'haiku'
   endforeach
 endif
 
+# Other hosts play sound through PipeWire. A buffer's requested size, which
+# the stream's clock is counted in, came with 0.3.49.
+pipewire_opt = get_option('pipewire') \
+  .require(platform_os not in ['windows', 'haiku'],
+           error_message: 'Windows and Haiku have their own sound systems')
+pipewire_dep = dependency('libpipewire-0.3', version: '>= 0.3.49',
+                          required: pipewire_opt)
+pipewire_enabled = pipewire_dep.found()
+if pipewire_enabled
+  emu_deps += pipewire_dep
+endif
+
 slirp_enabled = get_option('slirp')
 
 # ----------------------------------------------------------------------------
@@ -386,6 +398,7 @@ summary({
   'x86 emulator': x86emu,
   'Windows Hypervisor Platform': whp_enabled,
   'NVMM': nvmm_enabled,
+  'PipeWire audio': pipewire_enabled,
   'slirp': slirp_enabled,
   'network filesystem': fs_net_enabled,
   'builtin crypto': fs_net_enabled and builtin_crypto,
