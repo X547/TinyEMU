@@ -86,7 +86,7 @@ if slirp_enabled
 else
   platform_sources += files('common/no_slirp_ethernet.cpp')
 endif
-if not sdl_dep.found() and not haiku_gui and not win32_gui
+if not sdl_dep.found() and not haiku_gui and not win32_gui and not wayland_gui
   platform_sources += files('common/no_display.cpp')
 endif
 if not fs_net_enabled
@@ -110,6 +110,9 @@ if win32_gui
     files('win32/win32_display.cpp', 'win32/win32_keymap.cpp'),
     kwargs: platform_kwargs,
   )
+endif
+if wayland_gui
+  subdir('wayland')
 endif
 if fs_net_enabled
   subdir('curl')

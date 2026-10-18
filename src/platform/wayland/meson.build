@@ -1,0 +1,31 @@
+# The Wayland window. The protocols other than the core one are generated
+# from their descriptions.
+
+wayland_scanner = find_program(
+  dependency('wayland-scanner', native: true).get_variable('wayland_scanner'))
+wayland_protocols_dir = dependency('wayland-protocols') \
+  .get_variable('pkgdatadir')
+
+wayland_protocol_sources = []
+foreach xml : [
+  'stable/xdg-shell/xdg-shell.xml',
+  'unstable/xdg-decoration/xdg-decoration-unstable-v1.xml',
+]
+  name = xml.split('/')[-1].replace('.xml', '')
+  wayland_protocol_sources += custom_target(name + '-client-header',
+    input: wayland_protocols_dir / xml,
+    output: name + '-client-protocol.h',
+    command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'],
+  )
+  wayland_protocol_sources += custom_target(name + '-code',
+    input: wayland_protocols_dir / xml,
+    output: name + '-protocol.c',
+    command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+  )
+endforeach
+
+emu_libs += static_library('platform_wayland_gui',
+  files('shm_buffer.cpp', 'wayland_display.cpp'),
+  wayland_protocol_sources,
+  kwargs: platform_kwargs,
+)

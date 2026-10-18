@@ -18,7 +18,8 @@ TinyEMU System Emulator by Fabrice Bellard
 
 - VirtIO console, network, block device, input, 2D GPU and 9P filesystem
 
-- Graphical display with SDL, or a native window on Haiku and Windows
+- Graphical display with SDL, or a native window on Haiku, Windows and
+  Wayland
 
 - JSON configuration file
 
@@ -48,7 +49,10 @@ TinyEMU System Emulator by Fabrice Bellard
                   (feature, default auto; -Dsdl=enabled keeps SDL)
   win32_gui       native Win32 window instead of SDL, Windows hosts only
                   (feature, default auto; -Dsdl=enabled keeps SDL)
-  fs_net          network filesystem, needs libcurl and libcrypto
+  wayland_gui     Wayland window instead of SDL, needs libwayland-client,
+                  wayland-scanner and wayland-protocols (feature, default
+                  disabled; cannot be combined with -Dsdl=enabled)
+  fs_net         network filesystem, needs libcurl and libcrypto
                   (feature, default disabled)
   builtin_crypto  use the bundled AES/SHA256 code instead of libcrypto
                   (boolean, default false)

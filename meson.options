@@ -13,6 +13,11 @@ option('win32_gui',
   value: 'auto',
   description: 'native Win32 window instead of SDL (Windows hosts only)')
 
+option('wayland_gui',
+  type: 'feature',
+  value: 'disabled',
+  description: 'Wayland window instead of SDL')
+
 option('fs_net',
   type: 'feature',
   value: 'disabled',
