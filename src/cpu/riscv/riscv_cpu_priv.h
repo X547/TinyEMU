@@ -24,22 +24,33 @@
 #ifndef RISCV_CPU_PRIV_H
 #define RISCV_CPU_PRIV_H
 
-/* included inside a namespace, so <atomic> comes from the includer */
+/* included inside a namespace, so <atomic>, <bit> and <type_traits> come from
+   the includer */
 #include "riscv_cpu.h"
 #include "bits.h"
 #include "cutils.h"
 
 #define __exception __attribute__((warn_unused_result))
 
-#ifndef FLEN
+/* FLEN is the floating point register width */
 #if MAX_XLEN == 128
 #define FLEN 128
 #else
 #define FLEN 64
 #endif
-#endif /* !FLEN */
 
 #define CONFIG_EXT_C /* compressed instructions */
+
+/* the integer types of a width in bits */
+template <int Bits> struct IntOfWidth;
+template <> struct IntOfWidth<32> { typedef uint32_t U; typedef int32_t S; };
+template <> struct IntOfWidth<64> { typedef uint64_t U; typedef int64_t S; };
+#ifdef HAVE_INT128
+template <> struct IntOfWidth<128> { typedef uint128_t U; typedef int128_t S; };
+#endif
+
+template <int Bits> using uintn_t = typename IntOfWidth<Bits>::U;
+template <int Bits> using intn_t = typename IntOfWidth<Bits>::S;
 
 #if MAX_XLEN == 32
 typedef uint32_t target_ulong;
@@ -57,46 +68,28 @@ typedef int128_t target_long;
 #error unsupported MAX_XLEN
 #endif
 
-/* FLEN is the floating point register width */
-#if FLEN > 0
-#if FLEN == 32
-typedef uint32_t fp_uint;
-#define F32_HIGH 0
-#elif FLEN == 64
+#if FLEN == 64
 typedef uint64_t fp_uint;
 #define F32_HIGH ((fp_uint)-1 << 32)
 #define F64_HIGH 0
-#elif FLEN == 128
+#else
 typedef uint128_t fp_uint;
 #define F32_HIGH ((fp_uint)-1 << 32)
 #define F64_HIGH ((fp_uint)-1 << 64)
-#else
-#error unsupported FLEN
 #endif
 
 /* The decoder keeps the rounding mode in a plain int because get_insn_rm()
    reports an invalid encoding as -1. Every use site rejects the negative case
    before reaching softfp, so the narrowing to RoundingModeEnum is safe there. */
 #define RM(rm) static_cast<RoundingModeEnum>(rm)
-#endif
 
 /* MLEN is the maximum memory access width */
-#if MAX_XLEN <= 32 && FLEN <= 32
-#define MLEN 32
-#elif MAX_XLEN <= 64 && FLEN <= 64
-#define MLEN 64
-#else
-#define MLEN 128
-#endif
+#define MLEN FLEN
 
-#if MLEN == 32
-typedef uint32_t mem_uint_t;
-#elif MLEN == 64
+#if MLEN == 64
 typedef uint64_t mem_uint_t;
-#elif MLEN == 128
-typedef uint128_t mem_uint_t;
 #else
-#unsupported MLEN
+typedef uint128_t mem_uint_t;
 #endif
 
 #define TLB_BITS 8
@@ -198,12 +191,10 @@ struct RISCVCPUState: public RISCVCPU {
     target_ulong pc;
     target_ulong reg[32];
 
-#if FLEN > 0
     fp_uint fp_reg[32];
     uint32_t fflags;
     uint8_t frm;
-#endif
-    
+
     uint8_t cur_xlen;  /* current XLEN value, <= MAX_XLEN */
     uint8_t priv; /* see PRV_x */
     uint8_t fs; /* MSTATUS_FS value */
@@ -339,46 +330,54 @@ DLL_PUBLIC int target_read_slow(RISCVCPUState *s, mem_uint_t *pval,
 DLL_PUBLIC int target_write_slow(RISCVCPUState *s, target_ulong addr,
                                  mem_uint_t val, int size_log2);
 
-/* return 0 if OK, != 0 if exception */
-#define TARGET_READ_WRITE(size, uint_type, size_log2)                   \
-static inline __exception int target_read_u ## size(RISCVCPUState *s, uint_type *pval, target_ulong addr)                              \
-{\
-    uint32_t tlb_idx;\
-    tlb_idx = get_bits(addr, PG_SHIFT, TLB_BITS);\
-    if (likely(s->tlb_read[tlb_idx].vaddr == (addr & ~(PG_MASK & ~((size / 8) - 1))))) { \
-        *pval = *(uint_type *)(s->tlb_read[tlb_idx].mem_addend + (uintptr_t)addr);\
-    } else {\
-        mem_uint_t val;\
-        int ret;\
-        ret = target_read_slow(s, &val, addr, size_log2);\
-        if (ret)\
-            return ret;\
-        *pval = val;\
-    }\
-    return 0;\
-}\
-\
-static inline __exception int target_write_u ## size(RISCVCPUState *s, target_ulong addr,\
-                                          uint_type val)                \
-{\
-    uint32_t tlb_idx;\
-    tlb_idx = get_bits(addr, PG_SHIFT, TLB_BITS);\
-    if (likely(s->tlb_write[tlb_idx].vaddr == (addr & ~(PG_MASK & ~((size / 8) - 1))))) { \
-        *(uint_type *)(s->tlb_write[tlb_idx].mem_addend + (uintptr_t)addr) = val;\
-        return 0;\
-    } else {\
-        return target_write_slow(s, addr, val, size_log2);\
-    }\
+/* log2 of the size of an access of type T */
+template <typename T>
+static constexpr int access_size_log2 = std::countr_zero(sizeof(T));
+
+/* The page tag an access of type T hits: an access that crosses its page
+   matches no TLB entry. */
+template <typename T>
+static inline target_ulong tlb_access_tag(target_ulong addr)
+{
+    return addr & ~(PG_MASK & ~(target_ulong)(sizeof(T) - 1));
 }
 
-TARGET_READ_WRITE(8, uint8_t, 0)
-TARGET_READ_WRITE(16, uint16_t, 1)
-TARGET_READ_WRITE(32, uint32_t, 2)
-#if MLEN >= 64
-TARGET_READ_WRITE(64, uint64_t, 3)
-#endif
-#if MLEN >= 128
-TARGET_READ_WRITE(128, uint128_t, 4)
-#endif
+/* return 0 if OK, != 0 if exception */
+template <typename T>
+static inline __exception int target_read(RISCVCPUState *s, T *pval,
+                                          target_ulong addr)
+{
+    static_assert(sizeof(T) * 8 <= MLEN);
+    uint32_t tlb_idx;
+    tlb_idx = get_bits(addr, PG_SHIFT, TLB_BITS);
+    if (likely(s->tlb_read[tlb_idx].vaddr == tlb_access_tag<T>(addr))) {
+        *pval = *(T *)(s->tlb_read[tlb_idx].mem_addend + (uintptr_t)addr);
+    } else {
+        mem_uint_t val;
+        int ret;
+        ret = target_read_slow(s, &val, addr, access_size_log2<T>);
+        if (ret)
+            return ret;
+        *pval = val;
+    }
+    return 0;
+}
+
+/* T is given explicitly: the value is usually wider than the access */
+template <typename T>
+static inline __exception int target_write(RISCVCPUState *s,
+                                           target_ulong addr,
+                                           std::type_identity_t<T> val)
+{
+    static_assert(sizeof(T) * 8 <= MLEN);
+    uint32_t tlb_idx;
+    tlb_idx = get_bits(addr, PG_SHIFT, TLB_BITS);
+    if (likely(s->tlb_write[tlb_idx].vaddr == tlb_access_tag<T>(addr))) {
+        *(T *)(s->tlb_write[tlb_idx].mem_addend + (uintptr_t)addr) = val;
+        return 0;
+    } else {
+        return target_write_slow(s, addr, val, access_size_log2<T>);
+    }
+}
 
 #endif /* RISCV_CPU_PRIV_H */

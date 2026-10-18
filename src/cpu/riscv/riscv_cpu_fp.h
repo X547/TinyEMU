@@ -131,23 +131,29 @@
                     val = (int32_t)glue(glue(cvt_sf, F_SIZE), _u32)(s->fp_reg[rs1], RM(rm),
                                                           &s->fflags);
                     break;
-#if XLEN >= 64
                 case 2: /* fcvt.l.[sdq] */
+                    if constexpr (Xlen < 64)
+                        goto illegal_insn;
                     val = (int64_t)glue(glue(cvt_sf, F_SIZE), _i64)(s->fp_reg[rs1], RM(rm),
                                                           &s->fflags);
                     break;
                 case 3: /* fcvt.lu.[sdq] */
+                    if constexpr (Xlen < 64)
+                        goto illegal_insn;
                     val = (int64_t)glue(glue(cvt_sf, F_SIZE), _u64)(s->fp_reg[rs1], RM(rm),
                                                           &s->fflags);
                     break;
-#endif
-#if XLEN >= 128
+#if MAX_XLEN >= 128
                 /* XXX: the index is not defined in the spec */
                 case 4: /* fcvt.t.[sdq] */
+                    if constexpr (Xlen < 128)
+                        goto illegal_insn;
                     val = glue(glue(cvt_sf, F_SIZE), _i128)(s->fp_reg[rs1], RM(rm),
                                                           &s->fflags);
                     break;
                 case 5: /* fcvt.tu.[sdq] */
+                    if constexpr (Xlen < 128)
+                        goto illegal_insn;
                     val = glue(glue(cvt_sf, F_SIZE), _u128)(s->fp_reg[rs1], RM(rm),
                                                           &s->fflags);
                     break;
@@ -191,23 +197,29 @@
                     s->fp_reg[rd] = glue(cvt_u32_sf, F_SIZE)(s->reg[rs1], RM(rm),
                                                        &s->fflags) | F_HIGH;
                     break;
-#if XLEN >= 64
                 case 2: /* fcvt.[sdq].l */
+                    if constexpr (Xlen < 64)
+                        goto illegal_insn;
                     s->fp_reg[rd] = glue(cvt_i64_sf, F_SIZE)(s->reg[rs1], RM(rm),
                                                        &s->fflags) | F_HIGH;
                     break;
                 case 3: /* fcvt.[sdq].lu */
+                    if constexpr (Xlen < 64)
+                        goto illegal_insn;
                     s->fp_reg[rd] = glue(cvt_u64_sf, F_SIZE)(s->reg[rs1], RM(rm),
                                                             &s->fflags) | F_HIGH;
                     break;
-#endif
-#if XLEN >= 128
+#if MAX_XLEN >= 128
                 /* XXX: the index is not defined in the spec */
                 case 4: /* fcvt.[sdq].t */
+                    if constexpr (Xlen < 128)
+                        goto illegal_insn;
                     s->fp_reg[rd] = glue(cvt_i128_sf, F_SIZE)(s->reg[rs1], RM(rm),
                                                        &s->fflags) | F_HIGH;
                     break;
                 case 5: /* fcvt.[sdq].tu */
+                    if constexpr (Xlen < 128)
+                        goto illegal_insn;
                     s->fp_reg[rd] = glue(cvt_u128_sf, F_SIZE)(s->reg[rs1], RM(rm),
                                                             &s->fflags) | F_HIGH;
                     break;
@@ -262,8 +274,9 @@
                 if (rs2 != 0)
                     goto illegal_insn;            
                 switch(rm) {
-#if F_SIZE <= XLEN
                 case 0: /* fmv.x.s */
+                    if constexpr (F_SIZE > Xlen)
+                        goto illegal_insn;
 #if F_SIZE == 32
                     val = (int32_t)s->fp_reg[rs1];
 #elif F_SIZE == 64
@@ -272,7 +285,6 @@
                     val = (int128_t)s->fp_reg[rs1];
 #endif
                     break;
-#endif /* F_SIZE <= XLEN */
                 case 1: /* fclass */
                     val = glue(fclass_sf, F_SIZE)(s->fp_reg[rs1]);
                     break;
@@ -283,8 +295,9 @@
                     s->reg[rd] = val;
                 break;
 
-#if F_SIZE <= XLEN
             case (0x1e << 2) | OPID: /* fmv.s.x */
+                if constexpr (F_SIZE > Xlen)
+                    goto illegal_insn;
                 if (rs2 != 0 || rm != 0)
                     goto illegal_insn;
 #if F_SIZE == 32
@@ -296,7 +309,6 @@
 #endif
                 s->fs = 3;
                 break;
-#endif /* F_SIZE <= XLEN */
 
 #undef F_SIZE
 #undef F_HIGH

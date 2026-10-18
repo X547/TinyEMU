@@ -28,6 +28,8 @@
 #include <inttypes.h>
 #include <assert.h>
 #include <atomic>
+#include <bit>
+#include <type_traits>
 
 #include "bits.h"
 #include "cutils.h"
@@ -471,10 +473,10 @@ int target_read_slow(RISCVCPUState *s, mem_uint_t *pval,
         case 1:
             {
                 uint8_t v0, v1;
-                err = target_read_u8(s, &v0, addr);
+                err = target_read(s, &v0, addr);
                 if (err)
                     return err;
-                err = target_read_u8(s, &v1, addr + 1);
+                err = target_read(s, &v1, addr + 1);
                 if (err)
                     return err;
                 ret = v0 | (v1 << 8);
@@ -484,10 +486,10 @@ int target_read_slow(RISCVCPUState *s, mem_uint_t *pval,
             {
                 uint32_t v0, v1;
                 addr -= al;
-                err = target_read_u32(s, &v0, addr);
+                err = target_read(s, &v0, addr);
                 if (err)
                     return err;
-                err = target_read_u32(s, &v1, addr + 4);
+                err = target_read(s, &v1, addr + 4);
                 if (err)
                     return err;
                 ret = (v0 >> (al * 8)) | (v1 << (32 - al * 8));
@@ -498,10 +500,10 @@ int target_read_slow(RISCVCPUState *s, mem_uint_t *pval,
             {
                 uint64_t v0, v1;
                 addr -= al;
-                err = target_read_u64(s, &v0, addr);
+                err = target_read(s, &v0, addr);
                 if (err)
                     return err;
-                err = target_read_u64(s, &v1, addr + 8);
+                err = target_read(s, &v1, addr + 8);
                 if (err)
                     return err;
                 ret = (v0 >> (al * 8)) | (v1 << (64 - al * 8));
@@ -513,10 +515,10 @@ int target_read_slow(RISCVCPUState *s, mem_uint_t *pval,
             {
                 uint128_t v0, v1;
                 addr -= al;
-                err = target_read_u128(s, &v0, addr);
+                err = target_read(s, &v0, addr);
                 if (err)
                     return err;
-                err = target_read_u128(s, &v1, addr + 16);
+                err = target_read(s, &v1, addr + 16);
                 if (err)
                     return err;
                 ret = (v0 >> (al * 8)) | (v1 << (128 - al * 8));
@@ -645,7 +647,7 @@ int target_write_slow(RISCVCPUState *s, target_ulong addr,
     if ((addr & (size - 1)) != 0) {
         /* XXX: should avoid modifying the memory in case of exception */
         for(i = 0; i < size; i++) {
-            err = target_write_u8(s, addr + i, get_bits(val, 8 * i, 8));
+            err = target_write<uint8_t>(s, addr + i, get_bits(val, 8 * i, 8));
             if (err)
                 return err;
         }
@@ -1271,7 +1273,6 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
     process_inbox(s);
 
     switch(csr) {
-#if FLEN > 0
     case 0x001: /* fflags */
         if (s->fs == 0)
             return -1;
@@ -1287,7 +1288,6 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
             return -1;
         val = set_bits(s->fflags, 5, 3, s->frm);
         break;
-#endif
     case 0xc00: /* cycle */
         if (!counter_accessible(s, 0))
             goto invalid_csr;
@@ -1559,7 +1559,6 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
     return 0;
 }
 
-#if FLEN > 0
 static void set_frm(RISCVCPUState *s, unsigned int val)
 {
     if (val >= 5)
@@ -1577,7 +1576,6 @@ static int get_insn_rm(RISCVCPUState *s, unsigned int rm)
     else
         return rm;
 }
-#endif
 
 /* return -1 if invalid CSR, 0 if OK, 1 if the interpreter loop must be
    exited (e.g. XLEN was modified), 2 if TLBs have been flushed. */
@@ -1592,7 +1590,6 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
 #endif
     process_inbox(s);
     switch(csr) {
-#if FLEN > 0
     case 0x001: /* fflags */
         s->fflags = get_bits(val, 0, 5);
         s->fs = 3;
@@ -1606,7 +1603,6 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
         s->fflags = get_bits(val, 0, 5);
         s->fs = 3;
         break;
-#endif
     case 0x100: /* sstatus */
         set_mstatus(s, (s->mstatus & ~SSTATUS_MASK) | (val & SSTATUS_MASK));
         break;
@@ -2125,18 +2121,7 @@ static inline uint32_t get_field1(uint32_t val, int src_pos,
     return get_bits(val, src_pos, dst_pos_max - dst_pos + 1) << dst_pos;
 }
 
-#define XLEN 32
-#include "riscv_cpu_template.h"
-
-#if MAX_XLEN >= 64
-#define XLEN 64
-#include "riscv_cpu_template.h"
-#endif
-
-#if MAX_XLEN >= 128
-#define XLEN 128
-#include "riscv_cpu_template.h"
-#endif
+#include "riscv_cpu_interp.h"
 
 /* Instructions one call of the interpreter counts at most; it starts over
    from here for as long as it runs. */
@@ -2166,16 +2151,16 @@ static void glue(riscv_cpu_interp, MAX_XLEN)(RISCVCPUState *s)
         }
         switch(s->cur_xlen) {
         case 32:
-            riscv_cpu_interp_x32(s, n_cycles);
+            riscv_cpu_interp_x<32>(s, n_cycles);
             break;
 #if MAX_XLEN >= 64
         case 64:
-            riscv_cpu_interp_x64(s, n_cycles);
+            riscv_cpu_interp_x<64>(s, n_cycles);
             break;
 #endif
 #if MAX_XLEN >= 128
         case 128:
-            riscv_cpu_interp_x128(s, n_cycles);
+            riscv_cpu_interp_x<128>(s, n_cycles);
             break;
 #endif
         default:
@@ -2221,12 +2206,7 @@ static RISCVCPUState *glue(riscv_cpu_init, MAX_XLEN)(PhysMemoryMap *mem_map,
     s->stimer_deadline.store(UINT64_MAX);
     s->irq_line_mask = MIP_MSIP | MIP_MTIP | MIP_MEIP | MIP_SEIP;
     s->misa |= MCPUID_SUPER | MCPUID_USER | MCPUID_I | MCPUID_M | MCPUID_A;
-#if FLEN >= 32
-    s->misa |= MCPUID_F;
-#endif
-#if FLEN >= 64
-    s->misa |= MCPUID_D;
-#endif
+    s->misa |= MCPUID_F | MCPUID_D;
 #if FLEN >= 128
     s->misa |= MCPUID_Q;
 #endif
