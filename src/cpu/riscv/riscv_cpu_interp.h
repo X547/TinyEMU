@@ -265,6 +265,8 @@ static force_inline int exec_amo(RISCVCPUState *s, uint32_t insn,
     return 0;
 }
 
+#include "riscv_cpu_fp.h"
+
 #define DUP2(F, n) F(n) F(n+1)
 #define DUP4(F, n) DUP2(F, n) DUP2(F, n + 2)
 #define DUP8(F, n) DUP4(F, n) DUP4(F, n + 4)
@@ -1712,20 +1714,24 @@ static void no_inline riscv_cpu_interp_x(RISCVCPUState *s, int n_cycles1)
                 goto illegal_insn;
             imm = get_bits(insn, 25, 7);
             rm = get_bits(insn, 12, 3);
-            switch(imm) {
-
-#define F_SIZE 32
-#include "riscv_cpu_fp.h"
-#define F_SIZE 64
-#include "riscv_cpu_fp.h"
+            /* the low bits of funct7 are the format */
+            switch(imm & 3) {
+            case 0:
+                err = exec_fp_op<32, Xlen>(s, imm >> 2, rd, rs1, rs2, rm);
+                break;
+            case 1:
+                err = exec_fp_op<64, Xlen>(s, imm >> 2, rd, rs1, rs2, rm);
+                break;
 #if FLEN >= 128
-#define F_SIZE 128
-#include "riscv_cpu_fp.h"
+            case 3:
+                err = exec_fp_op<128, Xlen>(s, imm >> 2, rd, rs1, rs2, rm);
+                break;
 #endif
-
             default:
                 goto illegal_insn;
             }
+            if (err != 0)
+                goto illegal_insn;
             NEXT_INSN;
         default:
             goto illegal_insn;

@@ -1,6 +1,6 @@
 /*
  * RISCV emulator
- * 
+ *
  * Copyright (c) 2016 Fabrice Bellard
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -21,296 +21,371 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-#if F_SIZE == 32
-#define OPID 0
-#define F_HIGH F32_HIGH
-#elif F_SIZE == 64
-#define OPID 1
-#define F_HIGH F64_HIGH
-#elif F_SIZE == 128
-#define OPID 3
-#define F_HIGH 0
-#else
-#error unsupported F_SIZE
+
+/* softfp's functions for the format of F bits */
+template <int F> struct SoftFloat;
+
+template <> struct SoftFloat<32> {
+    static constexpr auto sign_mask = FSIGN_MASK32;
+    static constexpr auto add = add_sf32;
+    static constexpr auto sub = sub_sf32;
+    static constexpr auto mul = mul_sf32;
+    static constexpr auto div = div_sf32;
+    static constexpr auto sqrt = sqrt_sf32;
+    static constexpr auto fma = fma_sf32;
+    static constexpr auto min = min_sf32;
+    static constexpr auto max = max_sf32;
+    static constexpr auto eq_quiet = eq_quiet_sf32;
+    static constexpr auto le = le_sf32;
+    static constexpr auto lt = lt_sf32;
+    static constexpr auto fclass = fclass_sf32;
+    static constexpr auto to_i32 = cvt_sf32_i32;
+    static constexpr auto to_u32 = cvt_sf32_u32;
+    static constexpr auto to_i64 = cvt_sf32_i64;
+    static constexpr auto to_u64 = cvt_sf32_u64;
+    static constexpr auto from_i32 = cvt_i32_sf32;
+    static constexpr auto from_u32 = cvt_u32_sf32;
+    static constexpr auto from_i64 = cvt_i64_sf32;
+    static constexpr auto from_u64 = cvt_u64_sf32;
+#ifdef HAVE_INT128
+    static constexpr auto to_i128 = cvt_sf32_i128;
+    static constexpr auto to_u128 = cvt_sf32_u128;
+    static constexpr auto from_i128 = cvt_i128_sf32;
+    static constexpr auto from_u128 = cvt_u128_sf32;
+#endif
+};
+
+template <> struct SoftFloat<64> {
+    static constexpr auto sign_mask = FSIGN_MASK64;
+    static constexpr auto add = add_sf64;
+    static constexpr auto sub = sub_sf64;
+    static constexpr auto mul = mul_sf64;
+    static constexpr auto div = div_sf64;
+    static constexpr auto sqrt = sqrt_sf64;
+    static constexpr auto fma = fma_sf64;
+    static constexpr auto min = min_sf64;
+    static constexpr auto max = max_sf64;
+    static constexpr auto eq_quiet = eq_quiet_sf64;
+    static constexpr auto le = le_sf64;
+    static constexpr auto lt = lt_sf64;
+    static constexpr auto fclass = fclass_sf64;
+    static constexpr auto to_i32 = cvt_sf64_i32;
+    static constexpr auto to_u32 = cvt_sf64_u32;
+    static constexpr auto to_i64 = cvt_sf64_i64;
+    static constexpr auto to_u64 = cvt_sf64_u64;
+    static constexpr auto from_i32 = cvt_i32_sf64;
+    static constexpr auto from_u32 = cvt_u32_sf64;
+    static constexpr auto from_i64 = cvt_i64_sf64;
+    static constexpr auto from_u64 = cvt_u64_sf64;
+#ifdef HAVE_INT128
+    static constexpr auto to_i128 = cvt_sf64_i128;
+    static constexpr auto to_u128 = cvt_sf64_u128;
+    static constexpr auto from_i128 = cvt_i128_sf64;
+    static constexpr auto from_u128 = cvt_u128_sf64;
+#endif
+};
+
+#ifdef HAVE_INT128
+template <> struct SoftFloat<128> {
+    static constexpr auto sign_mask = FSIGN_MASK128;
+    static constexpr auto add = add_sf128;
+    static constexpr auto sub = sub_sf128;
+    static constexpr auto mul = mul_sf128;
+    static constexpr auto div = div_sf128;
+    static constexpr auto sqrt = sqrt_sf128;
+    static constexpr auto fma = fma_sf128;
+    static constexpr auto min = min_sf128;
+    static constexpr auto max = max_sf128;
+    static constexpr auto eq_quiet = eq_quiet_sf128;
+    static constexpr auto le = le_sf128;
+    static constexpr auto lt = lt_sf128;
+    static constexpr auto fclass = fclass_sf128;
+    static constexpr auto to_i32 = cvt_sf128_i32;
+    static constexpr auto to_u32 = cvt_sf128_u32;
+    static constexpr auto to_i64 = cvt_sf128_i64;
+    static constexpr auto to_u64 = cvt_sf128_u64;
+    static constexpr auto from_i32 = cvt_i32_sf128;
+    static constexpr auto from_u32 = cvt_u32_sf128;
+    static constexpr auto from_i64 = cvt_i64_sf128;
+    static constexpr auto from_u64 = cvt_u64_sf128;
+    static constexpr auto to_i128 = cvt_sf128_i128;
+    static constexpr auto to_u128 = cvt_sf128_u128;
+    static constexpr auto from_i128 = cvt_i128_sf128;
+    static constexpr auto from_u128 = cvt_u128_sf128;
+};
 #endif
 
-#define FSIGN_MASK glue(FSIGN_MASK, F_SIZE)
+/* the bits of an FP register above a value of F bits, which NaN-box it */
+template <int F>
+static constexpr fp_uint fp_high()
+{
+    if constexpr (F < FLEN)
+        return (fp_uint)-1 << F;
+    else
+        return 0;
+}
 
-            case (0x00 << 2) | OPID:
-                rm = get_insn_rm(s, rm);
-                if (rm < 0)
-                    goto illegal_insn;
-                s->fp_reg[rd] = glue(add_sf, F_SIZE)(s->fp_reg[rs1],
-                                         s->fp_reg[rs2],
-                                         RM(rm), &s->fflags) | F_HIGH;
-                s->fs = 3;                                             
-                break;
-            case (0x01 << 2) | OPID:
-                rm = get_insn_rm(s, rm);
-                if (rm < 0)
-                    goto illegal_insn;
-                s->fp_reg[rd] = glue(sub_sf, F_SIZE)(s->fp_reg[rs1],
-                                               s->fp_reg[rs2],
-                                               RM(rm), &s->fflags) | F_HIGH;
-                s->fs = 3;                                             
-                break;
-            case (0x02 << 2) | OPID:
-                rm = get_insn_rm(s, rm);
-                if (rm < 0)
-                    goto illegal_insn;
-                s->fp_reg[rd] = glue(mul_sf, F_SIZE)(s->fp_reg[rs1],
-                                               s->fp_reg[rs2],
-                                               RM(rm), &s->fflags) | F_HIGH;
-                s->fs = 3;                                             
-                break;
-            case (0x03 << 2) | OPID:
-                rm = get_insn_rm(s, rm);
-                if (rm < 0)
-                    goto illegal_insn;
-                s->fp_reg[rd] = glue(div_sf, F_SIZE)(s->fp_reg[rs1],
-                                               s->fp_reg[rs2],
-                                               RM(rm), &s->fflags) | F_HIGH;
-                s->fs = 3;                                             
-                break;
-            case (0x0b << 2) | OPID:
-                rm = get_insn_rm(s, rm);
-                if (rm < 0 || rs2 != 0)
-                    goto illegal_insn;
-                s->fp_reg[rd] = glue(sqrt_sf, F_SIZE)(s->fp_reg[rs1],
-                                                RM(rm), &s->fflags) | F_HIGH;
-                s->fs = 3;                                             
-                break;
-            case (0x04 << 2) | OPID:
-                switch(rm) {
-                case 0: /* fsgnj */
-                    s->fp_reg[rd] = (s->fp_reg[rs1] & ~FSIGN_MASK) |
-                        (s->fp_reg[rs2] & FSIGN_MASK);
-                    break;
-                case 1: /* fsgnjn */
-                    s->fp_reg[rd] = (s->fp_reg[rs1] & ~FSIGN_MASK) |
-                        ((s->fp_reg[rs2] & FSIGN_MASK) ^ FSIGN_MASK);
-                    break;
-                case 2: /* fsgnjx */
-                    s->fp_reg[rd] = s->fp_reg[rs1] ^
-                        (s->fp_reg[rs2] & FSIGN_MASK);
-                    break;
-                default:
-                    goto illegal_insn;
-                }
-                s->fs = 3;                                             
-                break;
-            case (0x05 << 2) | OPID:
-                switch(rm) {
-                case 0: /* fmin */
-                    s->fp_reg[rd] = glue(min_sf, F_SIZE)(s->fp_reg[rs1],
-                                                   s->fp_reg[rs2],
-                                                   &s->fflags,
-                                                   FMINMAX_IEEE754_201X) | F_HIGH;
-                    break;
-                case 1: /* fmax */
-                    s->fp_reg[rd] = glue(max_sf, F_SIZE)(s->fp_reg[rs1],
-                                                   s->fp_reg[rs2],
-                                                   &s->fflags,
-                                                   FMINMAX_IEEE754_201X) | F_HIGH;
-                    break;
-                default:
-                    goto illegal_insn;
-                }
-                s->fs = 3;                                             
-                break;
-            case (0x18 << 2) | OPID:
-                rm = get_insn_rm(s, rm);
-                if (rm < 0)
-                    goto illegal_insn;
-                switch(rs2) {
-                case 0: /* fcvt.w.[sdq] */
-                    val = (int32_t)glue(glue(cvt_sf, F_SIZE), _i32)(s->fp_reg[rs1], RM(rm),
-                                                          &s->fflags);
-                    break;
-                case 1: /* fcvt.wu.[sdq] */
-                    val = (int32_t)glue(glue(cvt_sf, F_SIZE), _u32)(s->fp_reg[rs1], RM(rm),
-                                                          &s->fflags);
-                    break;
-                case 2: /* fcvt.l.[sdq] */
-                    if constexpr (Xlen < 64)
-                        goto illegal_insn;
-                    val = (int64_t)glue(glue(cvt_sf, F_SIZE), _i64)(s->fp_reg[rs1], RM(rm),
-                                                          &s->fflags);
-                    break;
-                case 3: /* fcvt.lu.[sdq] */
-                    if constexpr (Xlen < 64)
-                        goto illegal_insn;
-                    val = (int64_t)glue(glue(cvt_sf, F_SIZE), _u64)(s->fp_reg[rs1], RM(rm),
-                                                          &s->fflags);
-                    break;
-#if MAX_XLEN >= 128
-                /* XXX: the index is not defined in the spec */
-                case 4: /* fcvt.t.[sdq] */
-                    if constexpr (Xlen < 128)
-                        goto illegal_insn;
-                    val = glue(glue(cvt_sf, F_SIZE), _i128)(s->fp_reg[rs1], RM(rm),
-                                                          &s->fflags);
-                    break;
-                case 5: /* fcvt.tu.[sdq] */
-                    if constexpr (Xlen < 128)
-                        goto illegal_insn;
-                    val = glue(glue(cvt_sf, F_SIZE), _u128)(s->fp_reg[rs1], RM(rm),
-                                                          &s->fflags);
-                    break;
-#endif
-                default:
-                    goto illegal_insn;
-                }
-                if (rd != 0)
-                    s->reg[rd] = val;
-                break;
-            case (0x14 << 2) | OPID:
-                switch(rm) {
-                case 0: /* fle */
-                    val = glue(le_sf, F_SIZE)(s->fp_reg[rs1], s->fp_reg[rs2],
-                                     &s->fflags);
-                    break;
-                case 1: /* flt */
-                    val = glue(lt_sf, F_SIZE)(s->fp_reg[rs1], s->fp_reg[rs2],
-                                     &s->fflags);
-                    break;
-                case 2: /* feq */
-                    val = glue(eq_quiet_sf, F_SIZE)(s->fp_reg[rs1], s->fp_reg[rs2],
-                                           &s->fflags);
-                    break;
-                default:
-                    goto illegal_insn;
-                }
-                if (rd != 0)
-                    s->reg[rd] = val;
-                break;
-            case (0x1a << 2) | OPID:
-                rm = get_insn_rm(s, rm);
-                if (rm < 0)
-                    goto illegal_insn;
-                switch(rs2) {
-                case 0: /* fcvt.[sdq].w */
-                    s->fp_reg[rd] = glue(cvt_i32_sf, F_SIZE)(s->reg[rs1], RM(rm),
-                                                       &s->fflags) | F_HIGH;
-                    break;
-                case 1: /* fcvt.[sdq].wu */
-                    s->fp_reg[rd] = glue(cvt_u32_sf, F_SIZE)(s->reg[rs1], RM(rm),
-                                                       &s->fflags) | F_HIGH;
-                    break;
-                case 2: /* fcvt.[sdq].l */
-                    if constexpr (Xlen < 64)
-                        goto illegal_insn;
-                    s->fp_reg[rd] = glue(cvt_i64_sf, F_SIZE)(s->reg[rs1], RM(rm),
-                                                       &s->fflags) | F_HIGH;
-                    break;
-                case 3: /* fcvt.[sdq].lu */
-                    if constexpr (Xlen < 64)
-                        goto illegal_insn;
-                    s->fp_reg[rd] = glue(cvt_u64_sf, F_SIZE)(s->reg[rs1], RM(rm),
-                                                            &s->fflags) | F_HIGH;
-                    break;
-#if MAX_XLEN >= 128
-                /* XXX: the index is not defined in the spec */
-                case 4: /* fcvt.[sdq].t */
-                    if constexpr (Xlen < 128)
-                        goto illegal_insn;
-                    s->fp_reg[rd] = glue(cvt_i128_sf, F_SIZE)(s->reg[rs1], RM(rm),
-                                                       &s->fflags) | F_HIGH;
-                    break;
-                case 5: /* fcvt.[sdq].tu */
-                    if constexpr (Xlen < 128)
-                        goto illegal_insn;
-                    s->fp_reg[rd] = glue(cvt_u128_sf, F_SIZE)(s->reg[rs1], RM(rm),
-                                                            &s->fflags) | F_HIGH;
-                    break;
-#endif
-                default:
-                    goto illegal_insn;
-                }
-                s->fs = 3;
-                break;
+/* OP-FP of the format of F bits: 'funct5' is the operation, 'rm' the rounding
+   mode field. Returns 0, or INSN_ILLEGAL. */
+template <int F, int Xlen>
+static force_inline int exec_fp_op(RISCVCPUState *s, uint32_t funct5,
+                                   uint32_t rd, uint32_t rs1, uint32_t rs2,
+                                   int32_t rm)
+{
+    typedef SoftFloat<F> SF;
+    constexpr fp_uint high = fp_high<F>();
+    target_ulong val;
 
-            case (0x08 << 2) | OPID:
-                rm = get_insn_rm(s, rm);
-                if (rm < 0)
-                    goto illegal_insn;
-                switch(rs2) {
-#if F_SIZE == 32 && FLEN >= 64
-                case 1: /* cvt.s.d */
-                    s->fp_reg[rd] = cvt_sf64_sf32(s->fp_reg[rs1], RM(rm), &s->fflags) | F32_HIGH;
-                    break;
+    switch(funct5) {
+    case 0x00:
+        rm = get_insn_rm(s, rm);
+        if (rm < 0)
+            return INSN_ILLEGAL;
+        s->fp_reg[rd] = SF::add(s->fp_reg[rs1], s->fp_reg[rs2],
+                                RM(rm), &s->fflags) | high;
+        s->fs = 3;
+        break;
+    case 0x01:
+        rm = get_insn_rm(s, rm);
+        if (rm < 0)
+            return INSN_ILLEGAL;
+        s->fp_reg[rd] = SF::sub(s->fp_reg[rs1], s->fp_reg[rs2],
+                                RM(rm), &s->fflags) | high;
+        s->fs = 3;
+        break;
+    case 0x02:
+        rm = get_insn_rm(s, rm);
+        if (rm < 0)
+            return INSN_ILLEGAL;
+        s->fp_reg[rd] = SF::mul(s->fp_reg[rs1], s->fp_reg[rs2],
+                                RM(rm), &s->fflags) | high;
+        s->fs = 3;
+        break;
+    case 0x03:
+        rm = get_insn_rm(s, rm);
+        if (rm < 0)
+            return INSN_ILLEGAL;
+        s->fp_reg[rd] = SF::div(s->fp_reg[rs1], s->fp_reg[rs2],
+                                RM(rm), &s->fflags) | high;
+        s->fs = 3;
+        break;
+    case 0x0b:
+        rm = get_insn_rm(s, rm);
+        if (rm < 0 || rs2 != 0)
+            return INSN_ILLEGAL;
+        s->fp_reg[rd] = SF::sqrt(s->fp_reg[rs1], RM(rm), &s->fflags) | high;
+        s->fs = 3;
+        break;
+    case 0x04:
+        switch(rm) {
+        case 0: /* fsgnj */
+            s->fp_reg[rd] = (s->fp_reg[rs1] & ~SF::sign_mask) |
+                (s->fp_reg[rs2] & SF::sign_mask);
+            break;
+        case 1: /* fsgnjn */
+            s->fp_reg[rd] = (s->fp_reg[rs1] & ~SF::sign_mask) |
+                ((s->fp_reg[rs2] & SF::sign_mask) ^ SF::sign_mask);
+            break;
+        case 2: /* fsgnjx */
+            s->fp_reg[rd] = s->fp_reg[rs1] ^
+                (s->fp_reg[rs2] & SF::sign_mask);
+            break;
+        default:
+            return INSN_ILLEGAL;
+        }
+        s->fs = 3;
+        break;
+    case 0x05:
+        switch(rm) {
+        case 0: /* fmin */
+            s->fp_reg[rd] = SF::min(s->fp_reg[rs1], s->fp_reg[rs2],
+                                    &s->fflags, FMINMAX_IEEE754_201X) | high;
+            break;
+        case 1: /* fmax */
+            s->fp_reg[rd] = SF::max(s->fp_reg[rs1], s->fp_reg[rs2],
+                                    &s->fflags, FMINMAX_IEEE754_201X) | high;
+            break;
+        default:
+            return INSN_ILLEGAL;
+        }
+        s->fs = 3;
+        break;
+    case 0x18:
+        rm = get_insn_rm(s, rm);
+        if (rm < 0)
+            return INSN_ILLEGAL;
+        switch(rs2) {
+        case 0: /* fcvt.w.[sdq] */
+            val = (int32_t)SF::to_i32(s->fp_reg[rs1], RM(rm), &s->fflags);
+            break;
+        case 1: /* fcvt.wu.[sdq] */
+            val = (int32_t)SF::to_u32(s->fp_reg[rs1], RM(rm), &s->fflags);
+            break;
+        case 2: /* fcvt.l.[sdq] */
+            if constexpr (Xlen < 64)
+                return INSN_ILLEGAL;
+            val = (int64_t)SF::to_i64(s->fp_reg[rs1], RM(rm), &s->fflags);
+            break;
+        case 3: /* fcvt.lu.[sdq] */
+            if constexpr (Xlen < 64)
+                return INSN_ILLEGAL;
+            val = (int64_t)SF::to_u64(s->fp_reg[rs1], RM(rm), &s->fflags);
+            break;
+        /* XXX: the index is not defined in the spec */
+        case 4: /* fcvt.t.[sdq] */
+            if constexpr (Xlen < 128)
+                return INSN_ILLEGAL;
+            else
+                val = SF::to_i128(s->fp_reg[rs1], RM(rm), &s->fflags);
+            break;
+        case 5: /* fcvt.tu.[sdq] */
+            if constexpr (Xlen < 128)
+                return INSN_ILLEGAL;
+            else
+                val = SF::to_u128(s->fp_reg[rs1], RM(rm), &s->fflags);
+            break;
+        default:
+            return INSN_ILLEGAL;
+        }
+        if (rd != 0)
+            s->reg[rd] = val;
+        break;
+    case 0x14:
+        switch(rm) {
+        case 0: /* fle */
+            val = SF::le(s->fp_reg[rs1], s->fp_reg[rs2], &s->fflags);
+            break;
+        case 1: /* flt */
+            val = SF::lt(s->fp_reg[rs1], s->fp_reg[rs2], &s->fflags);
+            break;
+        case 2: /* feq */
+            val = SF::eq_quiet(s->fp_reg[rs1], s->fp_reg[rs2], &s->fflags);
+            break;
+        default:
+            return INSN_ILLEGAL;
+        }
+        if (rd != 0)
+            s->reg[rd] = val;
+        break;
+    case 0x1a:
+        rm = get_insn_rm(s, rm);
+        if (rm < 0)
+            return INSN_ILLEGAL;
+        switch(rs2) {
+        case 0: /* fcvt.[sdq].w */
+            s->fp_reg[rd] = SF::from_i32(s->reg[rs1], RM(rm),
+                                         &s->fflags) | high;
+            break;
+        case 1: /* fcvt.[sdq].wu */
+            s->fp_reg[rd] = SF::from_u32(s->reg[rs1], RM(rm),
+                                         &s->fflags) | high;
+            break;
+        case 2: /* fcvt.[sdq].l */
+            if constexpr (Xlen < 64)
+                return INSN_ILLEGAL;
+            s->fp_reg[rd] = SF::from_i64(s->reg[rs1], RM(rm),
+                                         &s->fflags) | high;
+            break;
+        case 3: /* fcvt.[sdq].lu */
+            if constexpr (Xlen < 64)
+                return INSN_ILLEGAL;
+            s->fp_reg[rd] = SF::from_u64(s->reg[rs1], RM(rm),
+                                         &s->fflags) | high;
+            break;
+        /* XXX: the index is not defined in the spec */
+        case 4: /* fcvt.[sdq].t */
+            if constexpr (Xlen < 128)
+                return INSN_ILLEGAL;
+            else
+                s->fp_reg[rd] = SF::from_i128(s->reg[rs1], RM(rm),
+                                              &s->fflags) | high;
+            break;
+        case 5: /* fcvt.[sdq].tu */
+            if constexpr (Xlen < 128)
+                return INSN_ILLEGAL;
+            else
+                s->fp_reg[rd] = SF::from_u128(s->reg[rs1], RM(rm),
+                                              &s->fflags) | high;
+            break;
+        default:
+            return INSN_ILLEGAL;
+        }
+        s->fs = 3;
+        break;
+    case 0x08:
+        rm = get_insn_rm(s, rm);
+        if (rm < 0)
+            return INSN_ILLEGAL;
+        if constexpr (F == 32) {
+            switch(rs2) {
+            case 1: /* cvt.s.d */
+                s->fp_reg[rd] = cvt_sf64_sf32(s->fp_reg[rs1], RM(rm), &s->fflags) | F32_HIGH;
+                break;
 #if FLEN >= 128
-                case 3: /* cvt.s.q */
-                    s->fp_reg[rd] = cvt_sf128_sf32(s->fp_reg[rs1], RM(rm), &s->fflags) | F32_HIGH;
-                    break;
+            case 3: /* cvt.s.q */
+                s->fp_reg[rd] = cvt_sf128_sf32(s->fp_reg[rs1], RM(rm), &s->fflags) | F32_HIGH;
+                break;
 #endif
-#endif /* F_SIZE == 32 */
-#if F_SIZE == 64
-                case 0: /* cvt.d.s */
-                    s->fp_reg[rd] = cvt_sf32_sf64(s->fp_reg[rs1], &s->fflags) | F64_HIGH;
-                    break;
+            default:
+                return INSN_ILLEGAL;
+            }
+        } else if constexpr (F == 64) {
+            switch(rs2) {
+            case 0: /* cvt.d.s */
+                s->fp_reg[rd] = cvt_sf32_sf64(s->fp_reg[rs1], &s->fflags) | F64_HIGH;
+                break;
 #if FLEN >= 128
-                case 1: /* cvt.d.q */
-                    s->fp_reg[rd] = cvt_sf128_sf64(s->fp_reg[rs1], RM(rm), &s->fflags) | F64_HIGH;
-                    break;
-#endif
-#endif /* F_SIZE == 64 */
-#if F_SIZE == 128
-                case 0: /* cvt.q.s */
-                    s->fp_reg[rd] = cvt_sf32_sf128(s->fp_reg[rs1], &s->fflags);
-                    break;
-                case 1: /* cvt.q.d */
-                    s->fp_reg[rd] = cvt_sf64_sf128(s->fp_reg[rs1], &s->fflags);
-                    break;
-#endif /* F_SIZE == 128 */
-                    
-                default:
-                    goto illegal_insn;
-                }
-                s->fs = 3;
+            case 1: /* cvt.d.q */
+                s->fp_reg[rd] = cvt_sf128_sf64(s->fp_reg[rs1], RM(rm), &s->fflags) | F64_HIGH;
                 break;
-
-            case (0x1c << 2) | OPID:
-                if (rs2 != 0)
-                    goto illegal_insn;            
-                switch(rm) {
-                case 0: /* fmv.x.s */
-                    if constexpr (F_SIZE > Xlen)
-                        goto illegal_insn;
-#if F_SIZE == 32
-                    val = (int32_t)s->fp_reg[rs1];
-#elif F_SIZE == 64
-                    val = (int64_t)s->fp_reg[rs1];
-#else
-                    val = (int128_t)s->fp_reg[rs1];
 #endif
-                    break;
-                case 1: /* fclass */
-                    val = glue(fclass_sf, F_SIZE)(s->fp_reg[rs1]);
-                    break;
-                default:
-                    goto illegal_insn;
-                }
-                if (rd != 0)
-                    s->reg[rd] = val;
+            default:
+                return INSN_ILLEGAL;
+            }
+        } else {
+#if FLEN >= 128
+            switch(rs2) {
+            case 0: /* cvt.q.s */
+                s->fp_reg[rd] = cvt_sf32_sf128(s->fp_reg[rs1], &s->fflags);
                 break;
-
-            case (0x1e << 2) | OPID: /* fmv.s.x */
-                if constexpr (F_SIZE > Xlen)
-                    goto illegal_insn;
-                if (rs2 != 0 || rm != 0)
-                    goto illegal_insn;
-#if F_SIZE == 32
-                s->fp_reg[rd] = (int32_t)s->reg[rs1];
-#elif F_SIZE == 64
-                s->fp_reg[rd] = (int64_t)s->reg[rs1];
-#else
-                s->fp_reg[rd] = (int128_t)s->reg[rs1];
+            case 1: /* cvt.q.d */
+                s->fp_reg[rd] = cvt_sf64_sf128(s->fp_reg[rs1], &s->fflags);
+                break;
+            default:
+                return INSN_ILLEGAL;
+            }
 #endif
-                s->fs = 3;
-                break;
-
-#undef F_SIZE
-#undef F_HIGH
-#undef OPID
-#undef FSIGN_MASK
+        }
+        s->fs = 3;
+        break;
+    case 0x1c:
+        if (rs2 != 0)
+            return INSN_ILLEGAL;
+        switch(rm) {
+        case 0: /* fmv.x.s */
+            if constexpr (F > Xlen)
+                return INSN_ILLEGAL;
+            val = (intn_t<F>)s->fp_reg[rs1];
+            break;
+        case 1: /* fclass */
+            val = SF::fclass(s->fp_reg[rs1]);
+            break;
+        default:
+            return INSN_ILLEGAL;
+        }
+        if (rd != 0)
+            s->reg[rd] = val;
+        break;
+    case 0x1e: /* fmv.s.x */
+        if constexpr (F > Xlen)
+            return INSN_ILLEGAL;
+        if (rs2 != 0 || rm != 0)
+            return INSN_ILLEGAL;
+        s->fp_reg[rd] = (intn_t<F>)s->reg[rs1];
+        s->fs = 3;
+        break;
+    default:
+        return INSN_ILLEGAL;
+    }
+    return 0;
+}
