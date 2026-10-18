@@ -23,9 +23,11 @@
 
 
 std::unique_ptr<HostDisplay> host_display_create(DeviceLock &lock,
-                                                 RunControl &run_control)
+                                                 RunControl &run_control,
+                                                 const DisplayOptions &options)
 {
     (void)lock;
     (void)run_control;
+    (void)options;
     return nullptr;
 }

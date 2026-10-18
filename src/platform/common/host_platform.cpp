@@ -32,7 +32,8 @@ HostPlatform::HostPlatform(DeviceLock &lock, RunControl &run_control,
 {
     url_backend_init(fLoop);
     fConsole = host_console_create(fLoop, run_control, fOptions.allow_ctrlc);
-    fDisplay = host_display_create(fDeviceLock, run_control);
+    fDisplay = host_display_create(fDeviceLock, run_control,
+                                   fOptions.display);
 }
 
 

@@ -49,6 +49,7 @@ static struct option options[] = {
     { "append", required_argument },
     { "no-accel", no_argument },
     { "build-preload", required_argument },
+    { "client-decorations", no_argument },
     { NULL },
 };
 
@@ -64,6 +65,9 @@ void help(void)
            "-append cmdline   append cmdline to the kernel command line\n"
            "-no-accel         run the processors in the interpreter, not in a\n"
            "                  host hypervisor\n"
+           "-client-decorations\n"
+           "                  draw TinyEMU's own window frame even when the\n"
+           "                  compositor offers one (Wayland)\n"
            "\n"
            "Console keys:\n"
            "Press C-a x to exit the emulator, C-a h to get some help.\n");
@@ -104,6 +108,9 @@ int main(int argc, char **argv)
                 break;
             case 6: /* build-preload */
                 platform_options.build_preload_file = optarg;
+                break;
+            case 7: /* client-decorations */
+                platform_options.display.client_decorations = true;
                 break;
             default:
                 fprintf(stderr, "unknown option index: %d\n", option_index);

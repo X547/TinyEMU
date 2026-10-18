@@ -784,8 +784,10 @@ void HaikuDisplay::Quit()
 
 
 std::unique_ptr<HostDisplay> host_display_create(DeviceLock &lock,
-                                                 RunControl &run_control)
+                                                 RunControl &run_control,
+                                                 const DisplayOptions &options)
 {
+    (void)options;
     status_t status;
     auto app = std::make_unique<BApplication>(APP_SIGNATURE, &status);
 

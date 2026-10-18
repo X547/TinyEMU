@@ -23,6 +23,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -36,11 +37,13 @@
 #include "xdg-shell-client-protocol.h"
 #include "xdg-decoration-unstable-v1-client-protocol.h"
 
+#include "be_decorator.h"
 #include "device_lock.h"
 #include "platform_backends.h"
 #include "run_control.h"
 #include "screen_rect.h"
 #include "shm_buffer.h"
+#include "title_font.h"
 #include "WaylandKeycodes.h"
 
 #define KEYCODE_MAX 127
@@ -50,6 +53,13 @@ static const uint32_t kOpaque = 0xff000000;
 /* wheel motion per notch, in axis_value120 units and in axis units */
 static const int kWheelStep120 = 120;
 static const double kWheelStepAxis = 10.0;
+/* a second press this soon and this near is a double click */
+static const uint32_t kDoubleClickMs = 400;
+static const int kDoubleClickDistance = 4;
+/* how far the pointer goes with the button held before the window moves */
+static const int kDragDistance = 3;
+/* the smallest content a resizable window is given */
+static const int kMinContentSize = 64;
 
 
 /* An xRGB pixel, which need not be aligned. */
@@ -73,10 +83,37 @@ static uint32_t premultiply(uint32_t p)
 }
 
 
+static void damage_buffer(wl_surface *surface, uint32_t version,
+                          const ScreenRect &r)
+{
+    if (version >= 4)
+        wl_surface_damage_buffer(surface, r.x0, r.y0, r.Width(), r.Height());
+    else
+        wl_surface_damage(surface, r.x0, r.y0, r.Width(), r.Height());
+}
+
+
 class WaylandDisplay final: public HostDisplay {
 private:
+    /* the host cursor shown over the window: the guest's over the content,
+       the window's own over the frame */
+    enum CursorKind {
+        kCursorGuest,
+        kCursorFrame,
+    };
+
+    /* the window's own cursor image */
+    struct FrameCursorSurface {
+        wl_surface *surface = nullptr;
+        std::unique_ptr<ShmBufferRing> buffers;
+        ShmBuffer *buffer = nullptr;
+        int hot_x = 0;
+        int hot_y = 0;
+    };
+
     DeviceLock &fDeviceLock;
     RunControl &fRunControl;
+    const DisplayOptions fOptions;
 
     /* Everything below the mutex is shared with the other threads. */
     std::mutex fMutex;
@@ -138,23 +175,49 @@ private:
     std::unique_ptr<ShmBufferRing> fBuffers;
     wl_callback *fFrameCallback = nullptr;
     bool fConfigured = false;
-    /* the size the last configure asked for; 0 leaves it to the window */
+    /* what the last configure asked for; a size of 0 is the window's to
+       choose */
     int fConfigureWidth = 0;
     int fConfigureHeight = 0;
+    bool fConfigureActivated = false;
+    bool fConfigureFullscreen = false;
+    bool fConfigureMaximized = false;
+    /* the compositor draws the frame */
+    bool fServerSide = false;
+    bool fCanMinimize = true;
+    bool fWindowResizable = false;
+    bool fFullscreen = false;
+    bool fMaximized = false;
+
+    /* the content, fWidth x fHeight, sits at (fContentX, fContentY) in a
+       window of fWindowWidth x fWindowHeight */
     int fWidth = 0;
     int fHeight = 0;
-    bool fWindowResizable = false;
-    /* the size the opaque region was set for */
-    int fOpaqueWidth = 0;
-    int fOpaqueHeight = 0;
-    /* what to draw at the next frame */
+    int fContentX = 0;
+    int fContentY = 0;
+    int fWindowWidth = 0;
+    int fWindowHeight = 0;
+    /* the frame is drawn here rather than by the compositor */
+    bool fFrame = false;
+    BeDecorator fDecorator;
+    /* loaded when the frame is first drawn here */
+    TitleFont fTitleFont;
+    bool fTitleFontLoaded = false;
+    /* the size and frame the window's regions were last set for */
+    int fRegionWidth = 0;
+    int fRegionHeight = 0;
+    bool fRegionFrame = false;
+    /* what to draw at the next frame, in the window */
     ScreenRect fWindowDirty;
     uint32_t fShownGeneration = 0;
+    /* where the guest's cursor was drawn, in the frame buffer */
     ScreenRect fCursorDrawn;
 
     /* the host cursor over the window: the guest's image, or none */
     wl_surface *fCursorSurface = nullptr;
     std::unique_ptr<ShmBufferRing> fCursorBuffers;
+    /* drawn, attached once the cursor is shown */
+    ShmBuffer *fCursorBuffer = nullptr;
     std::vector<uint32_t> fHostCursor;
     int fHostCursorWidth = 0;
     int fHostCursorHeight = 0;
@@ -162,11 +225,19 @@ private:
     int fHostCursorHotY = 0;
     /* waits for a free cursor buffer */
     bool fHostCursorPending = false;
+    FrameCursorSurface fFrameCursor;
+    CursorKind fCursorKind = kCursorGuest;
+    /* the cursor surface last shown with an image */
+    wl_surface *fShownCursorSurface = nullptr;
 
     bool fPointerInside = false;
     uint32_t fEnterSerial = 0;
+    /* in the window */
     int fPointerX = 0;
     int fPointerY = 0;
+    BeDecorator::Part fPointerPart = BeDecorator::kContent;
+    /* held down on the content; the guest has the pointer until they are
+       all released */
     unsigned int fButtons = 0;
     /* collected until the pointer's frame event */
     bool fPointerChanged = false;
@@ -177,6 +248,19 @@ private:
     bool fHaveLastPos = false;
     int fLastX = 0;
     int fLastY = 0;
+    /* the left button went down on the close button */
+    bool fCloseTracking = false;
+    /* the left button went down on the frame; the window moves once the
+       pointer goes far enough */
+    bool fDragPending = false;
+    uint32_t fDragSerial = 0;
+    int fDragX = 0;
+    int fDragY = 0;
+    /* the last press on the frame, for double clicks */
+    bool fHaveLastClick = false;
+    uint32_t fLastClickTime = 0;
+    int fLastClickX = 0;
+    int fLastClickY = 0;
     uint8_t fKeyPressed[KEYCODE_MAX + 1] {};
 
     static const wl_registry_listener kRegistryListener;
@@ -192,6 +276,7 @@ private:
     void PostUpdate();
     void CopyFromSource(int x, int y, int w, int h);
     ScreenRect CursorRect() const;
+    ScreenRect ContentRect() const;
     void Paint(ShmBuffer *buffer, const ScreenRect &area);
 
     /* the window's thread */
@@ -199,7 +284,12 @@ private:
                       const char *interface, uint32_t version);
     void HandleSeatCapabilities(uint32_t caps);
     void CreateWindow(int width, int height, bool resizable);
+    void CreateFrameCursor(FrameCursorSurface &cursor,
+                           const FrameCursor &image);
+    void Layout();
     void SetSizeLimits();
+    void SetRegions();
+    void HandleToplevelConfigure(int width, int height, wl_array *states);
     void HandleConfigure(uint32_t serial);
     void TellSourceSize();
     bool HandleUpdate();
@@ -207,17 +297,30 @@ private:
     void HandleFrameDone();
     void SetHostCursor();
     void ShowHostCursor();
+    void SetCursorKind(CursorKind kind);
+    void ReplaceCursorSurface(wl_surface *old);
     void SendKey(int code, bool down);
     void ReleaseKeys();
     void HandleKey(uint32_t key, uint32_t state);
+    bool PointerOnGuest() const;
+    void UpdatePointerPart();
+    void HandlePointerEnter(uint32_t serial, wl_fixed_t x, wl_fixed_t y);
+    void HandlePointerLeave();
+    void HandlePointerMotion(wl_fixed_t x, wl_fixed_t y);
+    void HandlePointerButton(uint32_t serial, uint32_t time, uint32_t button,
+                             uint32_t state);
+    void PressFrame(uint32_t serial, uint32_t time);
+    void ReleaseFrame();
+    void SetClosePressed(bool pressed);
     void HandlePointerFrame();
     void SendMouse(int dz);
     bool Fail();
     bool EventLoop();
 
 public:
-    WaylandDisplay(DeviceLock &lock, RunControl &run_control):
-        fDeviceLock(lock), fRunControl(run_control) {}
+    WaylandDisplay(DeviceLock &lock, RunControl &run_control,
+                   const DisplayOptions &options):
+        fDeviceLock(lock), fRunControl(run_control), fOptions(options) {}
     ~WaylandDisplay() override;
 
     /* Connects to the compositor; false when there is none to use. */
@@ -246,6 +349,9 @@ WaylandDisplay::~WaylandDisplay()
 {
     fBuffers.reset();
     fCursorBuffers.reset();
+    fFrameCursor.buffers.reset();
+    if (fFrameCursor.surface != nullptr)
+        wl_surface_destroy(fFrameCursor.surface);
     if (fFrameCallback != nullptr)
         wl_callback_destroy(fFrameCallback);
     if (fDecoration != nullptr)
@@ -435,40 +541,58 @@ ScreenRect WaylandDisplay::CursorRect() const
 }
 
 
-/* With fMutex held: draws the frame buffer, black past its edges, and the
-   cursor over both, into one rectangle of 'buffer'. */
+/* Where the frame buffer is shown in the window. */
+ScreenRect WaylandDisplay::ContentRect() const
+{
+    return ScreenRect(fContentX, fContentY, fWidth, fHeight);
+}
+
+
+/* With fMutex held: draws the frame, and in the content the frame buffer,
+   black past its edges, and the cursor over both, into one rectangle of
+   'buffer'. */
 void WaylandDisplay::Paint(ShmBuffer *buffer, const ScreenRect &area)
 {
     int pitch = buffer->width;
+    ScreenRect content = ContentRect();
 
-    ScreenRect fb = area & ScreenRect(0, 0, fFbWidth, fFbHeight);
+    bool in_content = area.x0 >= content.x0 && area.y0 >= content.y0 &&
+                      area.x1 <= content.x1 && area.y1 <= content.y1;
+    if (fFrame && !in_content)
+        fDecorator.Paint(buffer->pixels, pitch, area);
+
+    /* in the frame buffer's coordinates from here on */
+    ScreenRect r = area & content;
+    if (r.Empty())
+        return;
+    r = ScreenRect(r.x0 - fContentX, r.y0 - fContentY, r.Width(), r.Height());
+    uint32_t *base = buffer->pixels + fContentY * pitch + fContentX;
+
+    ScreenRect fb = r & ScreenRect(0, 0, fFbWidth, fFbHeight);
     if (!fb.Empty()) {
         for (int y = fb.y0; y < fb.y1; y++) {
-            memcpy(&buffer->pixels[y * pitch + fb.x0],
-                   &fFb[y * fFbWidth + fb.x0], fb.Width() * 4);
+            memcpy(&base[y * pitch + fb.x0], &fFb[y * fFbWidth + fb.x0],
+                   fb.Width() * 4);
         }
     }
 
     ScreenRect outside[2];
-    int count = screen_rect_outside(area, fFbWidth, fFbHeight, outside);
+    int count = screen_rect_outside(r, fFbWidth, fFbHeight, outside);
     for (int i = 0; i < count; i++) {
-        const ScreenRect &r = outside[i];
-        for (int y = r.y0; y < r.y1; y++) {
-            std::fill_n(&buffer->pixels[y * pitch + r.x0], r.Width(),
-                        kOpaque);
-        }
+        const ScreenRect &o = outside[i];
+        for (int y = o.y0; y < o.y1; y++)
+            std::fill_n(&base[y * pitch + o.x0], o.Width(), kOpaque);
     }
 
-    ScreenRect c = area & CursorRect();
+    ScreenRect c = r & CursorRect();
     for (int sy = c.y0; sy < c.y1; sy++) {
         for (int sx = c.x0; sx < c.x1; sx++) {
-            uint32_t base = kOpaque;
+            uint32_t under = kOpaque;
             if (sx < fFbWidth && sy < fFbHeight)
-                base = fFb[sy * fFbWidth + sx];
+                under = fFb[sy * fFbWidth + sx];
             uint32_t src = fCursor[(sy - fCursorY) * fCursorWidth +
                                    (sx - fCursorX)];
-            buffer->pixels[sy * pitch + sx] = cursor_blend(base, src) |
-                                              kOpaque;
+            base[sy * pitch + sx] = cursor_blend(under, src) | kOpaque;
         }
     }
 }
@@ -480,7 +604,7 @@ void WaylandDisplay::Redraw()
 {
     if (!fConfigured || fFrameCallback != nullptr || fWindowDirty.Empty())
         return;
-    ShmBuffer *buffer = fBuffers->Acquire(fWidth, fHeight);
+    ShmBuffer *buffer = fBuffers->Acquire(fWindowWidth, fWindowHeight);
     if (buffer == nullptr)
         return;
 
@@ -492,22 +616,9 @@ void WaylandDisplay::Redraw()
         Paint(buffer, area);
     }
 
-    if (fOpaqueWidth != fWidth || fOpaqueHeight != fHeight) {
-        fOpaqueWidth = fWidth;
-        fOpaqueHeight = fHeight;
-        wl_region *region = wl_compositor_create_region(fCompositor);
-        wl_region_add(region, 0, 0, fWidth, fHeight);
-        wl_surface_set_opaque_region(fSurface, region);
-        wl_region_destroy(region);
-    }
+    SetRegions();
     wl_surface_attach(fSurface, buffer->buffer, 0, 0);
-    if (fCompositorVersion >= 4) {
-        wl_surface_damage_buffer(fSurface, area.x0, area.y0, area.Width(),
-                                 area.Height());
-    } else {
-        wl_surface_damage(fSurface, area.x0, area.y0, area.Width(),
-                          area.Height());
-    }
+    damage_buffer(fSurface, fCompositorVersion, area);
     fFrameCallback = wl_surface_frame(fSurface);
     wl_callback_add_listener(fFrameCallback, &kFrameListener, this);
     wl_surface_commit(fSurface);
@@ -532,6 +643,7 @@ bool WaylandDisplay::HandleUpdate()
 
     bool resized = false;
     bool cursor_image = false;
+    ScreenRect dirty;
     {
         std::lock_guard<std::mutex> locker(fMutex);
 
@@ -547,10 +659,10 @@ bool WaylandDisplay::HandleUpdate()
                 fHeight = fFbHeight;
                 resized = true;
             }
-            fWindowDirty |= ScreenRect(0, 0, fWidth, fHeight);
+            dirty |= ScreenRect(0, 0, fWidth, fHeight);
             fCursorChanged = true;
         }
-        fWindowDirty |= fDirty;
+        dirty |= fDirty;
         fDirty = ScreenRect();
 
         if (fCursorImageChanged) {
@@ -569,15 +681,20 @@ bool WaylandDisplay::HandleUpdate()
         if (fCursorChanged) {
             fCursorChanged = false;
             ScreenRect c = CursorRect();
-            fWindowDirty |= fCursorDrawn;
-            fWindowDirty |= c;
+            dirty |= fCursorDrawn;
+            dirty |= c;
             fCursorDrawn = c;
         }
     }
-    fWindowDirty = fWindowDirty & ScreenRect(0, 0, fWidth, fHeight);
 
-    if (resized)
+    if (resized) {
+        Layout();
         SetSizeLimits();
+        fWindowDirty = ScreenRect(0, 0, fWindowWidth, fWindowHeight);
+    }
+    dirty = dirty & ScreenRect(0, 0, fWidth, fHeight);
+    fWindowDirty |= ScreenRect(dirty.x0 + fContentX, dirty.y0 + fContentY,
+                               dirty.Width(), dirty.Height());
     if (cursor_image)
         SetHostCursor();
     Redraw();
@@ -592,6 +709,10 @@ void WaylandDisplay::CreateWindow(int width, int height, bool resizable)
     fWidth = width;
     fHeight = height;
     fWindowResizable = resizable;
+    fDecorator.SetTitle("TinyEMU");
+    /* what the compositor will most likely answer */
+    fServerSide = fDecorationManager != nullptr && !fOptions.client_decorations;
+    Layout();
 
     fBuffers = std::make_unique<ShmBufferRing>(fShm, WL_SHM_FORMAT_ARGB8888,
                                                3, [this]() {Redraw();});
@@ -603,6 +724,7 @@ void WaylandDisplay::CreateWindow(int width, int height, bool resizable)
 
     fSurface = wl_compositor_create_surface(fCompositor);
     fCursorSurface = wl_compositor_create_surface(fCompositor);
+    CreateFrameCursor(fFrameCursor, frame_cursor());
     fXdgSurface = xdg_wm_base_get_xdg_surface(fWmBase, fSurface);
     xdg_surface_add_listener(fXdgSurface, &kXdgSurfaceListener, this);
     fToplevel = xdg_surface_get_toplevel(fXdgSurface);
@@ -616,21 +738,130 @@ void WaylandDisplay::CreateWindow(int width, int height, bool resizable)
             fDecorationManager, fToplevel);
         zxdg_toplevel_decoration_v1_add_listener(fDecoration,
                                                  &kDecorationListener, this);
-        zxdg_toplevel_decoration_v1_set_mode(
-            fDecoration, ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+        zxdg_toplevel_decoration_v1_set_mode(fDecoration,
+            fOptions.client_decorations ?
+            ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE :
+            ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
     }
     /* no buffer until the first configure */
     wl_surface_commit(fSurface);
 }
 
 
+void WaylandDisplay::CreateFrameCursor(FrameCursorSurface &cursor,
+                                       const FrameCursor &image)
+{
+    cursor.surface = wl_compositor_create_surface(fCompositor);
+    cursor.buffers = std::make_unique<ShmBufferRing>(
+        fShm, WL_SHM_FORMAT_ARGB8888, 1, nullptr);
+    cursor.hot_x = image.hot_x;
+    cursor.hot_y = image.hot_y;
+    cursor.buffer = cursor.buffers->Acquire(image.width, image.height);
+    if (cursor.buffer != nullptr) {
+        std::copy(image.pixels.begin(), image.pixels.end(),
+                  cursor.buffer->pixels);
+    }
+}
+
+
+/* Places the content in the window, with the frame around it when it is
+   drawn here. */
+void WaylandDisplay::Layout()
+{
+    fFrame = !fServerSide && !fFullscreen;
+    if (fFrame && !fTitleFontLoaded) {
+        /* the system's bold font, as Haiku titles windows */
+        fTitleFontLoaded = true;
+        if (fTitleFont.Open("sans-serif:bold", 12))
+            fDecorator.SetFont(&fTitleFont);
+        else
+            fprintf(stderr, "No font for the window's title\n");
+    }
+    fContentX = fFrame ? BeDecorator::kLeft : 0;
+    fContentY = fFrame ? fDecorator.Top() : 0;
+    fWindowWidth = fWidth + (fFrame ? BeDecorator::kLeft +
+                                      BeDecorator::kRight : 0);
+    fWindowHeight = fHeight + (fFrame ? fDecorator.Top() +
+                                        BeDecorator::kBottom : 0);
+    fDecorator.SetSize(fWindowWidth, fWindowHeight);
+    fDecorator.SetResizable(fWindowResizable && !fMaximized);
+}
+
+
 /* A fixed size window keeps the size of the frame buffer. */
 void WaylandDisplay::SetSizeLimits()
 {
-    if (fWindowResizable)
+    int frame_width = fWindowWidth - fWidth;
+    int frame_height = fWindowHeight - fHeight;
+
+    if (fWindowResizable) {
+        xdg_toplevel_set_min_size(fToplevel, kMinContentSize + frame_width,
+                                  kMinContentSize + frame_height);
+        xdg_toplevel_set_max_size(fToplevel, 0, 0);
+    } else {
+        xdg_toplevel_set_min_size(fToplevel, fWindowWidth, fWindowHeight);
+        xdg_toplevel_set_max_size(fToplevel, fWindowWidth, fWindowHeight);
+    }
+}
+
+
+/* The window's shape, which the frame's see-through part is not part of,
+   set with the next commit. */
+void WaylandDisplay::SetRegions()
+{
+    if (fRegionWidth == fWindowWidth && fRegionHeight == fWindowHeight &&
+        fRegionFrame == fFrame)
         return;
-    xdg_toplevel_set_min_size(fToplevel, fWidth, fHeight);
-    xdg_toplevel_set_max_size(fToplevel, fWidth, fHeight);
+    fRegionWidth = fWindowWidth;
+    fRegionHeight = fWindowHeight;
+    fRegionFrame = fFrame;
+
+    wl_region *region = wl_compositor_create_region(fCompositor);
+    if (fFrame) {
+        ScreenRect rects[2];
+        int count = fDecorator.SolidRects(rects);
+        for (int i = 0; i < count; i++) {
+            wl_region_add(region, rects[i].x0, rects[i].y0, rects[i].Width(),
+                          rects[i].Height());
+        }
+    } else {
+        wl_region_add(region, 0, 0, fWindowWidth, fWindowHeight);
+    }
+    wl_surface_set_opaque_region(fSurface, region);
+    wl_surface_set_input_region(fSurface, region);
+    wl_region_destroy(region);
+    xdg_surface_set_window_geometry(fXdgSurface, 0, 0, fWindowWidth,
+                                    fWindowHeight);
+}
+
+
+void WaylandDisplay::HandleToplevelConfigure(int width, int height,
+                                             wl_array *states)
+{
+    fConfigureWidth = width;
+    fConfigureHeight = height;
+    fConfigureActivated = false;
+    fConfigureFullscreen = false;
+    fConfigureMaximized = false;
+
+    const uint32_t *state = static_cast<const uint32_t *>(states->data);
+    for (size_t i = 0; i < states->size / sizeof(uint32_t); i++) {
+        switch (state[i]) {
+        case XDG_TOPLEVEL_STATE_ACTIVATED:
+            fConfigureActivated = true;
+            break;
+        case XDG_TOPLEVEL_STATE_FULLSCREEN:
+            fConfigureFullscreen = true;
+            break;
+        case XDG_TOPLEVEL_STATE_MAXIMIZED:
+        case XDG_TOPLEVEL_STATE_TILED_LEFT:
+        case XDG_TOPLEVEL_STATE_TILED_RIGHT:
+        case XDG_TOPLEVEL_STATE_TILED_TOP:
+        case XDG_TOPLEVEL_STATE_TILED_BOTTOM:
+            fConfigureMaximized = true;
+            break;
+        }
+    }
 }
 
 
@@ -639,15 +870,29 @@ void WaylandDisplay::HandleConfigure(uint32_t serial)
     xdg_surface_ack_configure(fXdgSurface, serial);
     fConfigured = true;
 
+    fFullscreen = fConfigureFullscreen;
+    fMaximized = fConfigureMaximized;
+    fDecorator.SetActive(fConfigureActivated);
+    Layout();
+
     bool resized = false;
-    if (fWindowResizable && fConfigureWidth > 0 && fConfigureHeight > 0 &&
-        (fConfigureWidth != fWidth || fConfigureHeight != fHeight)) {
-        fWidth = fConfigureWidth;
-        fHeight = fConfigureHeight;
-        resized = true;
+    if (fWindowResizable && fConfigureWidth > 0 && fConfigureHeight > 0) {
+        /* not every compositor keeps to the minimum size */
+        int width = std::max(fConfigureWidth - (fWindowWidth - fWidth),
+                             kMinContentSize);
+        int height = std::max(fConfigureHeight - (fWindowHeight - fHeight),
+                              kMinContentSize);
+        if (width != fWidth || height != fHeight) {
+            fWidth = width;
+            fHeight = height;
+            resized = true;
+            Layout();
+        }
     }
+    SetSizeLimits();
+    UpdatePointerPart();
     /* the acknowledgement takes effect with the next commit */
-    fWindowDirty = ScreenRect(0, 0, fWidth, fHeight);
+    fWindowDirty = ScreenRect(0, 0, fWindowWidth, fWindowHeight);
     if (resized)
         TellSourceSize();
     Redraw();
@@ -667,34 +912,27 @@ void WaylandDisplay::TellSourceSize()
 }
 
 
-/* The host cursor over the window: the guest's image when it is shown
-   natively, and none otherwise. None is the cursor surface without a buffer
-   rather than no cursor surface, which WSLg answers by keeping the last
-   image. */
+/* The guest's cursor image: shown natively, or none. None is the cursor
+   surface without a buffer rather than no cursor surface, which WSLg
+   answers by keeping the last image. */
 void WaylandDisplay::SetHostCursor()
 {
     fHostCursorPending = false;
-    if (fHostCursor.empty()) {
-        wl_surface_attach(fCursorSurface, nullptr, 0, 0);
-    } else {
-        int width = fHostCursorWidth;
-        int height = fHostCursorHeight;
-        ShmBuffer *buffer = fCursorBuffers->Acquire(width, height);
+    /* the old buffer may go when the size changes */
+    fCursorBuffer = nullptr;
+    if (!fHostCursor.empty()) {
+        ShmBuffer *buffer = fCursorBuffers->Acquire(fHostCursorWidth,
+                                                    fHostCursorHeight);
         if (buffer == nullptr) {
             fHostCursorPending = true;
             return;
         }
-        for (int i = 0; i < width * height; i++)
+        for (size_t i = 0; i < fHostCursor.size(); i++)
             buffer->pixels[i] = premultiply(fHostCursor[i]);
-        wl_surface_attach(fCursorSurface, buffer->buffer, 0, 0);
-        if (fCompositorVersion >= 4)
-            wl_surface_damage_buffer(fCursorSurface, 0, 0, width, height);
-        else
-            wl_surface_damage(fCursorSurface, 0, 0, width, height);
-        fCursorBuffers->Attached(buffer);
+        fCursorBuffer = buffer;
     }
-    wl_surface_commit(fCursorSurface);
-    ShowHostCursor();
+    if (fCursorKind == kCursorGuest)
+        ShowHostCursor();
 }
 
 
@@ -703,12 +941,71 @@ void WaylandDisplay::ShowHostCursor()
 {
     if (fPointerDevice == nullptr || !fPointerInside)
         return;
-    wl_pointer_set_cursor(fPointerDevice, fEnterSerial, fCursorSurface,
-                          fHostCursorHotX, fHostCursorHotY);
+
+    wl_surface *surface;
+    ShmBufferRing *ring;
+    ShmBuffer *buffer;
+    int hot_x, hot_y;
+    if (fCursorKind == kCursorGuest) {
+        surface = fCursorSurface;
+        ring = fCursorBuffers.get();
+        buffer = fCursorBuffer;
+        hot_x = fHostCursorHotX;
+        hot_y = fHostCursorHotY;
+    } else {
+        surface = fFrameCursor.surface;
+        ring = fFrameCursor.buffers.get();
+        buffer = fFrameCursor.buffer;
+        hot_x = fFrameCursor.hot_x;
+        hot_y = fFrameCursor.hot_y;
+    }
+    if (buffer == nullptr) {
+        /* A cursor surface without a buffer hides the cursor; WSLg hides it
+           only once the surface that showed it is destroyed. */
+        if (fShownCursorSurface != nullptr) {
+            ReplaceCursorSurface(fShownCursorSurface);
+            fShownCursorSurface = nullptr;
+        }
+        wl_pointer_set_cursor(fPointerDevice, fEnterSerial, fCursorSurface,
+                              0, 0);
+        return;
+    }
+    wl_pointer_set_cursor(fPointerDevice, fEnterSerial, surface, hot_x,
+                          hot_y);
+    /* WSLg takes the image from a commit made after the surface became the
+       cursor, not from one made before */
+    wl_surface_attach(surface, buffer->buffer, 0, 0);
+    damage_buffer(surface, fCompositorVersion,
+                  ScreenRect(0, 0, buffer->width, buffer->height));
+    wl_surface_commit(surface);
+    ring->Attached(buffer);
+    fShownCursorSurface = surface;
 }
 
 
-//#pragma mark - input
+/* A new surface in place of 'old', one of the cursor surfaces. */
+void WaylandDisplay::ReplaceCursorSurface(wl_surface *old)
+{
+    for (wl_surface **surface : {&fCursorSurface, &fFrameCursor.surface}) {
+        if (*surface == old) {
+            wl_surface_destroy(old);
+            *surface = wl_compositor_create_surface(fCompositor);
+            return;
+        }
+    }
+}
+
+
+void WaylandDisplay::SetCursorKind(CursorKind kind)
+{
+    if (kind == fCursorKind)
+        return;
+    fCursorKind = kind;
+    ShowHostCursor();
+}
+
+
+//#pragma mark - keyboard
 
 /* With the device lock held. */
 void WaylandDisplay::SendKey(int code, bool down)
@@ -746,10 +1043,190 @@ void WaylandDisplay::HandleKey(uint32_t key, uint32_t state)
 }
 
 
+//#pragma mark - pointer
+
+/* The guest has the pointer while it is over the content, and while a
+   button pressed there is held. */
+bool WaylandDisplay::PointerOnGuest() const
+{
+    return fButtons != 0 || fPointerPart == BeDecorator::kContent;
+}
+
+
+/* Which part of the window the pointer is over, and the cursor for it. */
+void WaylandDisplay::UpdatePointerPart()
+{
+    if (!fPointerInside)
+        return;
+    fPointerPart = fFrame ? fDecorator.HitTest(fPointerX, fPointerY) :
+                            BeDecorator::kContent;
+    SetCursorKind(PointerOnGuest() ? kCursorGuest : kCursorFrame);
+}
+
+
+void WaylandDisplay::HandlePointerEnter(uint32_t serial, wl_fixed_t x,
+                                        wl_fixed_t y)
+{
+    fPointerInside = true;
+    fEnterSerial = serial;
+    fPointerX = wl_fixed_to_int(x);
+    fPointerY = wl_fixed_to_int(y);
+    fHaveLastPos = false;
+    UpdatePointerPart();
+    ShowHostCursor();
+    if (PointerOnGuest())
+        fPointerChanged = true;
+}
+
+
+/* No more pointer events until it comes back: what was held is let go. */
+void WaylandDisplay::HandlePointerLeave()
+{
+    fPointerInside = false;
+    fDragPending = false;
+    if (fCloseTracking) {
+        fCloseTracking = false;
+        SetClosePressed(false);
+    }
+    if (fButtons != 0) {
+        fButtons = 0;
+        fPointerChanged = true;
+    }
+}
+
+
+void WaylandDisplay::HandlePointerMotion(wl_fixed_t x, wl_fixed_t y)
+{
+    fPointerX = wl_fixed_to_int(x);
+    fPointerY = wl_fixed_to_int(y);
+
+    if (fCloseTracking) {
+        SetClosePressed(fDecorator.HitTest(fPointerX, fPointerY) ==
+                        BeDecorator::kClose);
+        return;
+    }
+    if (fDragPending) {
+        if (abs(fPointerX - fDragX) >= kDragDistance ||
+            abs(fPointerY - fDragY) >= kDragDistance) {
+            fDragPending = false;
+            xdg_toplevel_move(fToplevel, fSeat, fDragSerial);
+        }
+        return;
+    }
+    if (fButtons == 0)
+        UpdatePointerPart();
+    if (PointerOnGuest())
+        fPointerChanged = true;
+}
+
+
+void WaylandDisplay::HandlePointerButton(uint32_t serial, uint32_t time,
+                                         uint32_t button, uint32_t state)
+{
+    unsigned int bit;
+    switch (button) {
+    case BTN_LEFT:
+        bit = 1 << 0;
+        break;
+    case BTN_RIGHT:
+        bit = 1 << 1;
+        break;
+    case BTN_MIDDLE:
+        bit = 1 << 2;
+        break;
+    default:
+        return;
+    }
+
+    if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
+        if (!PointerOnGuest()) {
+            if (button == BTN_LEFT)
+                PressFrame(serial, time);
+            return;
+        }
+        fButtons |= bit;
+        fPointerChanged = true;
+    } else if (fButtons & bit) {
+        fButtons &= ~bit;
+        fPointerChanged = true;
+        if (fButtons == 0)
+            UpdatePointerPart();
+    } else if (button == BTN_LEFT) {
+        ReleaseFrame();
+    }
+}
+
+
+/* The left button went down on the frame. */
+void WaylandDisplay::PressFrame(uint32_t serial, uint32_t time)
+{
+    switch (fPointerPart) {
+    case BeDecorator::kClose:
+        fCloseTracking = true;
+        SetClosePressed(true);
+        break;
+
+    case BeDecorator::kResize:
+        xdg_toplevel_resize(fToplevel, fSeat, serial,
+                            XDG_TOPLEVEL_RESIZE_EDGE_BOTTOM_RIGHT);
+        break;
+
+    case BeDecorator::kMove:
+        if (fHaveLastClick && time - fLastClickTime < kDoubleClickMs &&
+            abs(fPointerX - fLastClickX) <= kDoubleClickDistance &&
+            abs(fPointerY - fLastClickY) <= kDoubleClickDistance) {
+            fHaveLastClick = false;
+            if (fCanMinimize)
+                xdg_toplevel_set_minimized(fToplevel);
+            break;
+        }
+        fHaveLastClick = true;
+        fLastClickTime = time;
+        fLastClickX = fPointerX;
+        fLastClickY = fPointerY;
+        /* moving only once dragged keeps a double click from being taken
+           by the compositor's move */
+        fDragPending = true;
+        fDragSerial = serial;
+        fDragX = fPointerX;
+        fDragY = fPointerY;
+        break;
+
+    default:
+        break;
+    }
+}
+
+
+void WaylandDisplay::ReleaseFrame()
+{
+    fDragPending = false;
+    if (!fCloseTracking)
+        return;
+    fCloseTracking = false;
+    if (fDecorator.ClosePressed()) {
+        SetClosePressed(false);
+        /* the machine's shutdown closes the window */
+        fRunControl.RequestShutdown(0);
+    }
+}
+
+
+void WaylandDisplay::SetClosePressed(bool pressed)
+{
+    if (pressed == fDecorator.ClosePressed())
+        return;
+    fDecorator.SetClosePressed(pressed);
+    fWindowDirty |= fDecorator.TabRect();
+    Redraw();
+}
+
+
+/* (fPointerX, fPointerY) relative to the content, as the guest sees it. */
 void WaylandDisplay::SendMouse(int dz)
 {
-    int x = fPointerX;
-    int y = fPointerY;
+    int x = fPointerX - fContentX;
+    int y = fPointerY - fContentY;
     int dx = fHaveLastPos ? x - fLastX : 0;
     int dy = fHaveLastPos ? y - fLastY : 0;
     fHaveLastPos = true;
@@ -837,23 +1314,36 @@ const xdg_surface_listener WaylandDisplay::kXdgSurfaceListener = {
 
 const xdg_toplevel_listener WaylandDisplay::kToplevelListener = {
     .configure = [](void *data, xdg_toplevel *, int32_t width, int32_t height,
-                    wl_array *) {
-        auto *display = static_cast<WaylandDisplay *>(data);
-        display->fConfigureWidth = width;
-        display->fConfigureHeight = height;
+                    wl_array *states) {
+        static_cast<WaylandDisplay *>(data)->HandleToplevelConfigure(
+            width, height, states);
     },
     .close = [](void *data, xdg_toplevel *) {
         /* the machine's shutdown closes the window */
         static_cast<WaylandDisplay *>(data)->fRunControl.RequestShutdown(0);
     },
     .configure_bounds = [](void *, xdg_toplevel *, int32_t, int32_t) {},
-    .wm_capabilities = [](void *, xdg_toplevel *, wl_array *) {},
+    .wm_capabilities = [](void *data, xdg_toplevel *,
+                          wl_array *capabilities) {
+        auto *display = static_cast<WaylandDisplay *>(data);
+        const uint32_t *cap = static_cast<const uint32_t *>(
+            capabilities->data);
+        display->fCanMinimize = false;
+        for (size_t i = 0; i < capabilities->size / sizeof(uint32_t); i++) {
+            if (cap[i] == XDG_TOPLEVEL_WM_CAPABILITIES_MINIMIZE)
+                display->fCanMinimize = true;
+        }
+    },
 };
 
 
+/* A configure of the window follows, which applies the mode. */
 const zxdg_toplevel_decoration_v1_listener
 WaylandDisplay::kDecorationListener = {
-    .configure = [](void *, zxdg_toplevel_decoration_v1 *, uint32_t) {},
+    .configure = [](void *data, zxdg_toplevel_decoration_v1 *, uint32_t mode) {
+        static_cast<WaylandDisplay *>(data)->fServerSide =
+            mode == ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE;
+    },
 };
 
 
@@ -891,61 +1381,41 @@ const wl_keyboard_listener WaylandDisplay::kKeyboardListener = {
 };
 
 
+/* Before version 5 nothing groups the events, so each is a frame of its
+   own. */
 const wl_pointer_listener WaylandDisplay::kPointerListener = {
     .enter = [](void *data, wl_pointer *, uint32_t serial, wl_surface *,
                 wl_fixed_t x, wl_fixed_t y) {
         auto *display = static_cast<WaylandDisplay *>(data);
-        display->fPointerInside = true;
-        display->fEnterSerial = serial;
-        display->fPointerX = wl_fixed_to_int(x);
-        display->fPointerY = wl_fixed_to_int(y);
-        display->fHaveLastPos = false;
-        display->ShowHostCursor();
-        display->fPointerChanged = true;
+        display->HandlePointerEnter(serial, x, y);
         if (display->fSeatVersion < 5)
             display->HandlePointerFrame();
     },
     .leave = [](void *data, wl_pointer *, uint32_t, wl_surface *) {
-        static_cast<WaylandDisplay *>(data)->fPointerInside = false;
+        auto *display = static_cast<WaylandDisplay *>(data);
+        display->HandlePointerLeave();
+        if (display->fSeatVersion < 5)
+            display->HandlePointerFrame();
     },
     .motion = [](void *data, wl_pointer *, uint32_t, wl_fixed_t x,
                  wl_fixed_t y) {
         auto *display = static_cast<WaylandDisplay *>(data);
-        display->fPointerX = wl_fixed_to_int(x);
-        display->fPointerY = wl_fixed_to_int(y);
-        display->fPointerChanged = true;
+        display->HandlePointerMotion(x, y);
         if (display->fSeatVersion < 5)
             display->HandlePointerFrame();
     },
-    .button = [](void *data, wl_pointer *, uint32_t, uint32_t,
+    .button = [](void *data, wl_pointer *, uint32_t serial, uint32_t time,
                  uint32_t button, uint32_t state) {
         auto *display = static_cast<WaylandDisplay *>(data);
-        unsigned int bit;
-        switch (button) {
-        case BTN_LEFT:
-            bit = 1 << 0;
-            break;
-        case BTN_RIGHT:
-            bit = 1 << 1;
-            break;
-        case BTN_MIDDLE:
-            bit = 1 << 2;
-            break;
-        default:
-            return;
-        }
-        if (state == WL_POINTER_BUTTON_STATE_PRESSED)
-            display->fButtons |= bit;
-        else
-            display->fButtons &= ~bit;
-        display->fPointerChanged = true;
+        display->HandlePointerButton(serial, time, button, state);
         if (display->fSeatVersion < 5)
             display->HandlePointerFrame();
     },
     .axis = [](void *data, wl_pointer *, uint32_t, uint32_t axis,
                wl_fixed_t value) {
         auto *display = static_cast<WaylandDisplay *>(data);
-        if (axis != WL_POINTER_AXIS_VERTICAL_SCROLL)
+        if (axis != WL_POINTER_AXIS_VERTICAL_SCROLL ||
+            !display->PointerOnGuest())
             return;
         display->fWheelAxis += wl_fixed_to_double(value);
         if (display->fSeatVersion < 5)
@@ -959,7 +1429,8 @@ const wl_pointer_listener WaylandDisplay::kPointerListener = {
     .axis_discrete = [](void *data, wl_pointer *, uint32_t axis,
                         int32_t discrete) {
         auto *display = static_cast<WaylandDisplay *>(data);
-        if (axis != WL_POINTER_AXIS_VERTICAL_SCROLL)
+        if (axis != WL_POINTER_AXIS_VERTICAL_SCROLL ||
+            !display->PointerOnGuest())
             return;
         display->fWheelDiscrete += discrete;
         display->fWheelHasSteps = true;
@@ -967,7 +1438,8 @@ const wl_pointer_listener WaylandDisplay::kPointerListener = {
     .axis_value120 = [](void *data, wl_pointer *, uint32_t axis,
                         int32_t value120) {
         auto *display = static_cast<WaylandDisplay *>(data);
-        if (axis != WL_POINTER_AXIS_VERTICAL_SCROLL)
+        if (axis != WL_POINTER_AXIS_VERTICAL_SCROLL ||
+            !display->PointerOnGuest())
             return;
         display->fWheel120 += value120;
         display->fWheelHasSteps = true;
@@ -1021,9 +1493,10 @@ void WaylandDisplay::HandleSeatCapabilities(uint32_t caps)
         fPointerDevice = wl_seat_get_pointer(fSeat);
         wl_pointer_add_listener(fPointerDevice, &kPointerListener, this);
     } else if (!pointer && fPointerDevice != nullptr) {
+        HandlePointerLeave();
+        HandlePointerFrame();
         wl_pointer_destroy(fPointerDevice);
         fPointerDevice = nullptr;
-        fPointerInside = false;
     }
 }
 
@@ -1148,9 +1621,11 @@ void WaylandDisplay::Run()
 
 
 std::unique_ptr<HostDisplay> host_display_create(DeviceLock &lock,
-                                                 RunControl &run_control)
+                                                 RunControl &run_control,
+                                                 const DisplayOptions &options)
 {
-    auto display = std::make_unique<WaylandDisplay>(lock, run_control);
+    auto display = std::make_unique<WaylandDisplay>(lock, run_control,
+                                                    options);
     if (!display->Connect()) {
         fprintf(stderr, "Running without a display\n");
         return nullptr;

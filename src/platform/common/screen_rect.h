@@ -39,6 +39,8 @@ struct ScreenRect {
     bool Empty() const {return x0 >= x1 || y0 >= y1;}
     int Width() const {return x1 - x0;}
     int Height() const {return y1 - y0;}
+    bool Contains(int x, int y) const
+        {return x >= x0 && x < x1 && y >= y0 && y < y1;}
 
     ScreenRect operator&(const ScreenRect &r) const
     {

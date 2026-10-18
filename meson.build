@@ -126,7 +126,8 @@ elif win32_gui
   endforeach
   sdl_dep = dependency('', required: false)
 elif wayland_gui
-  emu_deps += wayland_dep
+  # the window's own frame titles itself in the system's font
+  emu_deps += [wayland_dep, dependency('freetype2'), dependency('fontconfig')]
   sdl_dep = dependency('', required: false)
 else
   sdl_dep = dependency('sdl', required: get_option('sdl'))

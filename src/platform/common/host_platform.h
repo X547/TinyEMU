@@ -35,6 +35,7 @@ struct PlatformOptions {
     BlockModeEnum block_mode = BLOCK_MODE_SNAPSHOT;
     /* network file systems record the files they fetch here */
     const char *build_preload_file = nullptr;
+    DisplayOptions display;
 };
 
 

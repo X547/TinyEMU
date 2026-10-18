@@ -50,8 +50,9 @@ TinyEMU System Emulator by Fabrice Bellard
   win32_gui       native Win32 window instead of SDL, Windows hosts only
                   (feature, default auto; -Dsdl=enabled keeps SDL)
   wayland_gui     Wayland window instead of SDL, needs libwayland-client,
-                  wayland-scanner and wayland-protocols (feature, default
-                  disabled; cannot be combined with -Dsdl=enabled)
+                  wayland-scanner, wayland-protocols, FreeType and
+                  fontconfig (feature, default disabled; cannot be combined
+                  with -Dsdl=enabled)
   fs_net         network filesystem, needs libcurl and libcrypto
                   (feature, default disabled)
   builtin_crypto  use the bundled AES/SHA256 code instead of libcrypto
@@ -126,6 +127,14 @@ options are:
 -append cmdline   append cmdline to the kernel command line
 -no-accel         run the processors in the interpreter, not in a
                   host hypervisor
+-client-decorations
+                  draw TinyEMU's own window frame even when the
+                  compositor offers one (Wayland)
+
+The Wayland window uses the compositor's frame when it offers one, and
+otherwise draws its own: the close button on the left of the title tab,
+dragging the tab or the frame moves the window, double clicking them
+minimizes it, and the bottom right corner resizes it.
 
 Console keys:
 Press C-a x to exit the emulator, C-a h to get some help.

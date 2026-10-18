@@ -765,7 +765,9 @@ void SDLDisplay::Run()
 
 
 std::unique_ptr<HostDisplay> host_display_create(DeviceLock &lock,
-                                                 RunControl &run_control)
+                                                 RunControl &run_control,
+                                                 const DisplayOptions &options)
 {
+    (void)options;
     return std::make_unique<SDLDisplay>(lock, run_control);
 }

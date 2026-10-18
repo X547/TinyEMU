@@ -25,7 +25,8 @@ foreach xml : [
 endforeach
 
 emu_libs += static_library('platform_wayland_gui',
-  files('shm_buffer.cpp', 'wayland_display.cpp'),
+  files('be_decorator.cpp', 'shm_buffer.cpp', 'title_font.cpp',
+        'wayland_display.cpp'),
   wayland_protocol_sources,
   kwargs: platform_kwargs,
 )

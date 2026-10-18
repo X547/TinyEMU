@@ -55,10 +55,17 @@ std::unique_ptr<HostConsole> host_console_create(EventLoop &loop,
                                                  RunControl &run_control,
                                                  bool allow_ctrlc);
 
+struct DisplayOptions {
+    /* the window draws its own frame even where the window system offers
+       one; only some displays have a choice */
+    bool client_decorations = false;
+};
+
 /* nullptr when the build has no display. Input reaches the devices with
    'lock' held; closing the window requests a shutdown. */
 std::unique_ptr<HostDisplay> host_display_create(DeviceLock &lock,
-                                                 RunControl &run_control);
+                                                 RunControl &run_control,
+                                                 const DisplayOptions &options);
 
 typedef enum {
     BLOCK_MODE_RO,
