@@ -99,24 +99,6 @@ template <int Bits> using intn_t = typename IntOfWidth<Bits>::S;
 #define MSTATUS_FS_SHIFT 13
 #define MSTATUS_UXL_SHIFT 32
 #define MSTATUS_SXL_SHIFT 34
-
-/* masks of the register's own width, the target_ulong of the RISCVCPUState
-   member using them, so that complementing one keeps the fields above bit 31
-   of a 64 bit mstatus */
-#define MSTATUS_SIE bit_at<target_ulong>(MSTATUS_SIE_SHIFT)
-#define MSTATUS_MIE bit_at<target_ulong>(MSTATUS_MIE_SHIFT)
-#define MSTATUS_SPIE bit_at<target_ulong>(MSTATUS_SPIE_SHIFT)
-#define MSTATUS_MPIE bit_at<target_ulong>(MSTATUS_MPIE_SHIFT)
-#define MSTATUS_SPP bit_at<target_ulong>(MSTATUS_SPP_SHIFT)
-#define MSTATUS_MPP field_mask<target_ulong>(MSTATUS_MPP_SHIFT, 2)
-#define MSTATUS_FS field_mask<target_ulong>(MSTATUS_FS_SHIFT, 2)
-#define MSTATUS_XS field_mask<target_ulong>(15, 2)
-#define MSTATUS_MPRV bit_at<target_ulong>(17)
-#define MSTATUS_SUM bit_at<target_ulong>(18)
-#define MSTATUS_MXR bit_at<target_ulong>(19)
-#define MSTATUS_TVM bit_at<target_ulong>(20)
-#define MSTATUS_TW bit_at<target_ulong>(21)
-#define MSTATUS_TSR bit_at<target_ulong>(22)
 #define MSTATUS_UXL_MASK field_mask<uint64_t>(MSTATUS_UXL_SHIFT, 2)
 #define MSTATUS_SXL_MASK field_mask<uint64_t>(MSTATUS_SXL_SHIFT, 2)
 
@@ -126,7 +108,6 @@ template <int Bits> using intn_t = typename IntOfWidth<Bits>::S;
 #define MENVCFG_STCE bit_at<uint64_t>(63)
 
 #define PG_SHIFT 12
-#define PG_MASK bit_mask<target_ulong>(PG_SHIFT)
 
 #define IMSIC_WORDS ((RISCV_IMSIC_NUM_IDS + 64) / 64)
 
@@ -169,6 +150,41 @@ struct RISCVCPUState: public RISCVCPU {
        a PTE that sets any of them is malformed and must fault. */
     static constexpr target_ulong PTE_RESERVED_MASK =
         MAX_XLEN >= 64 ? field_mask<target_ulong>(54, 10) : 0;
+
+    /* mstatus masks of the register's own width, so that complementing one
+       keeps the fields above bit 31 of a 64 bit mstatus */
+    static constexpr target_ulong MSTATUS_SIE =
+        bit_at<target_ulong>(MSTATUS_SIE_SHIFT);
+    static constexpr target_ulong MSTATUS_MIE =
+        bit_at<target_ulong>(MSTATUS_MIE_SHIFT);
+    static constexpr target_ulong MSTATUS_SPIE =
+        bit_at<target_ulong>(MSTATUS_SPIE_SHIFT);
+    static constexpr target_ulong MSTATUS_MPIE =
+        bit_at<target_ulong>(MSTATUS_MPIE_SHIFT);
+    static constexpr target_ulong MSTATUS_SPP =
+        bit_at<target_ulong>(MSTATUS_SPP_SHIFT);
+    static constexpr target_ulong MSTATUS_MPP =
+        field_mask<target_ulong>(MSTATUS_MPP_SHIFT, 2);
+    static constexpr target_ulong MSTATUS_FS =
+        field_mask<target_ulong>(MSTATUS_FS_SHIFT, 2);
+    static constexpr target_ulong MSTATUS_XS = field_mask<target_ulong>(15, 2);
+    static constexpr target_ulong MSTATUS_MPRV = bit_at<target_ulong>(17);
+    static constexpr target_ulong MSTATUS_SUM = bit_at<target_ulong>(18);
+    static constexpr target_ulong MSTATUS_MXR = bit_at<target_ulong>(19);
+    static constexpr target_ulong MSTATUS_TVM = bit_at<target_ulong>(20);
+    static constexpr target_ulong MSTATUS_TW = bit_at<target_ulong>(21);
+    static constexpr target_ulong MSTATUS_TSR = bit_at<target_ulong>(22);
+
+    static constexpr target_ulong SSTATUS_MASK =
+        MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_FS | MSTATUS_XS |
+        MSTATUS_SUM | MSTATUS_MXR |
+        (target_ulong)(MAX_XLEN >= 64 ? MSTATUS_UXL_MASK : 0);
+    static constexpr target_ulong MSTATUS_MASK =
+        MSTATUS_SIE | MSTATUS_MIE | MSTATUS_SPIE | MSTATUS_MPIE |
+        MSTATUS_SPP | MSTATUS_MPP | MSTATUS_FS | MSTATUS_MPRV |
+        MSTATUS_SUM | MSTATUS_MXR | MSTATUS_TVM | MSTATUS_TW | MSTATUS_TSR;
+
+    static constexpr target_ulong PG_MASK = bit_mask<target_ulong>(PG_SHIFT);
 
     target_ulong pc;
     target_ulong reg[32];

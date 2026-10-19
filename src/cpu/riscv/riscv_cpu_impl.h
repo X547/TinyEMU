@@ -908,22 +908,6 @@ void RISCVCPUState<MaxXlen>::flush_tlb_write_range_ram(RISCVCPUState *s,
     tlb_flush_ram_range(s->tlb_code, ram_ptr, ram_end);
 }
 
-
-#define SSTATUS_MASK0 (MSTATUS_SIE | MSTATUS_SPIE |     \
-                      MSTATUS_SPP | \
-                      MSTATUS_FS | MSTATUS_XS | \
-                      MSTATUS_SUM | MSTATUS_MXR)
-#define SSTATUS_MASK (SSTATUS_MASK0 | \
-                      (target_ulong)(MAX_XLEN >= 64 ? MSTATUS_UXL_MASK : 0))
-
-
-#define MSTATUS_MASK (MSTATUS_SIE | MSTATUS_MIE |      \
-                      MSTATUS_SPIE | MSTATUS_MPIE |    \
-                      MSTATUS_SPP | MSTATUS_MPP | \
-                      MSTATUS_FS | \
-                      MSTATUS_MPRV | MSTATUS_SUM | MSTATUS_MXR | \
-                      MSTATUS_TVM | MSTATUS_TW | MSTATUS_TSR)
-
 /* cycle, time and insn counters */
 #define COUNTEREN_MASK bit_mask(3)
 
