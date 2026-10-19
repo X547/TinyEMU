@@ -157,10 +157,11 @@ static inline U rv_mulhsu(std::make_signed_t<U> a, U b)
    about, an operand in RAM is updated through 'ptr': an SC stores only if
    memory still holds what the LR read, and an AMO computes its result again
    until its compare and exchange finds the value it read. */
+template <int MaxXlen>
 template <typename U>
-static force_inline int exec_amo(RISCVCPUState *s, uint32_t insn,
-                                 uint32_t rs1, uint32_t rs2,
-                                 target_ulong *pval)
+int RISCVCPUState<MaxXlen>::exec_amo(RISCVCPUState *s, uint32_t insn,
+                                     uint32_t rs1, uint32_t rs2,
+                                     target_ulong *pval)
 {
     typedef std::make_signed_t<U> S;
     U rval;
@@ -296,8 +297,10 @@ static force_inline int exec_amo(RISCVCPUState *s, uint32_t insn,
     } while (0)
 
 /* the interpreter for code running at XLEN Xlen */
+template <int MaxXlen>
 template <int Xlen>
-static void no_inline riscv_cpu_interp_x(RISCVCPUState *s, int n_cycles1)
+void RISCVCPUState<MaxXlen>::riscv_cpu_interp_x(RISCVCPUState *s,
+                                                int n_cycles1)
 {
     typedef uintn_t<Xlen> uintx_t;
     typedef intn_t<Xlen> intx_t;
@@ -439,7 +442,7 @@ static void no_inline riscv_cpu_interp_x(RISCVCPUState *s, int n_cycles1)
                     addr = (intx_t)(s->reg[rs1] + imm);
                     if (target_read(s, &rval, addr))
                         goto mmu_exception;
-                    s->fp_reg[rd] = rval | F64_HIGH;
+                    s->fp_reg[rd] = rval | fp_high<64>();
                     s->fs = 3;
                 }
                 break;
@@ -479,7 +482,7 @@ static void no_inline riscv_cpu_interp_x(RISCVCPUState *s, int n_cycles1)
                     addr = (intx_t)(s->reg[rs1] + imm);
                     if (target_read(s, &rval, addr))
                         goto mmu_exception;
-                    s->fp_reg[rd] = rval | F32_HIGH;
+                    s->fp_reg[rd] = rval | fp_high<32>();
                     s->fs = 3;
                 }
                 break;
@@ -738,7 +741,7 @@ static void no_inline riscv_cpu_interp_x(RISCVCPUState *s, int n_cycles1)
                     addr = (intx_t)(s->reg[2] + imm);
                     if (target_read(s, &rval, addr))
                         goto mmu_exception;
-                    s->fp_reg[rd] = rval | F64_HIGH;
+                    s->fp_reg[rd] = rval | fp_high<64>();
                     s->fs = 3;
                 }
                 break;
@@ -778,7 +781,7 @@ static void no_inline riscv_cpu_interp_x(RISCVCPUState *s, int n_cycles1)
                     addr = (intx_t)(s->reg[2] + imm);
                     if (target_read(s, &rval, addr))
                         goto mmu_exception;
-                    s->fp_reg[rd] = rval | F32_HIGH;
+                    s->fp_reg[rd] = rval | fp_high<32>();
                     s->fs = 3;
                 }
                 break;
@@ -1528,7 +1531,7 @@ static void no_inline riscv_cpu_interp_x(RISCVCPUState *s, int n_cycles1)
                     uint32_t rval;
                     if (target_read(s, &rval, addr))
                         goto mmu_exception;
-                    s->fp_reg[rd] = rval | F32_HIGH;
+                    s->fp_reg[rd] = rval | fp_high<32>();
                 }
                 break;
             case 3: /* fld */
@@ -1536,19 +1539,19 @@ static void no_inline riscv_cpu_interp_x(RISCVCPUState *s, int n_cycles1)
                     uint64_t rval;
                     if (target_read(s, &rval, addr))
                         goto mmu_exception;
-                    s->fp_reg[rd] = rval | F64_HIGH;
+                    s->fp_reg[rd] = rval | fp_high<64>();
                 }
                 break;
-#if FLEN >= 128
             case 4: /* flq */
-                {
-                    uint128_t rval;
+                if constexpr (FLEN < 128) {
+                    goto illegal_insn;
+                } else {
+                    fp_uint rval;
                     if (target_read(s, &rval, addr))
                         goto mmu_exception;
                     s->fp_reg[rd] = rval;
                 }
                 break;
-#endif
             default:
                 goto illegal_insn;
             }
@@ -1569,12 +1572,12 @@ static void no_inline riscv_cpu_interp_x(RISCVCPUState *s, int n_cycles1)
                 if (target_write<uint64_t>(s, addr, s->fp_reg[rs2]))
                     goto mmu_exception;
                 break;
-#if FLEN >= 128
             case 4: /* fsq */
-                if (target_write<uint128_t>(s, addr, s->fp_reg[rs2]))
+                if constexpr (FLEN < 128)
+                    goto illegal_insn;
+                if (target_write<fp_uint>(s, addr, s->fp_reg[rs2]))
                     goto mmu_exception;
                 break;
-#endif
             default:
                 goto illegal_insn;
             }
@@ -1590,18 +1593,22 @@ static void no_inline riscv_cpu_interp_x(RISCVCPUState *s, int n_cycles1)
             switch(funct3) {
             case 0:
                 s->fp_reg[rd] = fma_sf32(s->fp_reg[rs1], s->fp_reg[rs2],
-                                         s->fp_reg[rs3], RM(rm), &s->fflags) | F32_HIGH;
+                                         s->fp_reg[rs3], RM(rm), &s->fflags) | fp_high<32>();
                 break;
             case 1:
                 s->fp_reg[rd] = fma_sf64(s->fp_reg[rs1], s->fp_reg[rs2],
-                                         s->fp_reg[rs3], RM(rm), &s->fflags) | F64_HIGH;
+                                         s->fp_reg[rs3], RM(rm), &s->fflags) | fp_high<64>();
                 break;
-#if FLEN >= 128
             case 3:
-                s->fp_reg[rd] = fma_sf128(s->fp_reg[rs1], s->fp_reg[rs2],
-                                          s->fp_reg[rs3], RM(rm), &s->fflags);
+                if constexpr (FLEN < 128) {
+                    goto illegal_insn;
+                } else {
+                    typedef SoftFloat<FLEN> SF;
+                    s->fp_reg[rd] = SF::fma(s->fp_reg[rs1], s->fp_reg[rs2],
+                                            s->fp_reg[rs3], RM(rm),
+                                            &s->fflags);
+                }
                 break;
-#endif
             default:
                 goto illegal_insn;
             }
@@ -1620,22 +1627,25 @@ static void no_inline riscv_cpu_interp_x(RISCVCPUState *s, int n_cycles1)
                 s->fp_reg[rd] = fma_sf32(s->fp_reg[rs1],
                                          s->fp_reg[rs2],
                                          s->fp_reg[rs3] ^ FSIGN_MASK32,
-                                         RM(rm), &s->fflags) | F32_HIGH;
+                                         RM(rm), &s->fflags) | fp_high<32>();
                 break;
             case 1:
                 s->fp_reg[rd] = fma_sf64(s->fp_reg[rs1],
                                          s->fp_reg[rs2],
                                          s->fp_reg[rs3] ^ FSIGN_MASK64,
-                                         RM(rm), &s->fflags) | F64_HIGH;
+                                         RM(rm), &s->fflags) | fp_high<64>();
                 break;
-#if FLEN >= 128
             case 3:
-                s->fp_reg[rd] = fma_sf128(s->fp_reg[rs1],
-                                          s->fp_reg[rs2],
-                                          s->fp_reg[rs3] ^ FSIGN_MASK128,
-                                          RM(rm), &s->fflags);
+                if constexpr (FLEN < 128) {
+                    goto illegal_insn;
+                } else {
+                    typedef SoftFloat<FLEN> SF;
+                    s->fp_reg[rd] = SF::fma(s->fp_reg[rs1],
+                                            s->fp_reg[rs2],
+                                            s->fp_reg[rs3] ^ SF::sign_mask,
+                                            RM(rm), &s->fflags);
+                }
                 break;
-#endif
             default:
                 goto illegal_insn;
             }
@@ -1654,22 +1664,25 @@ static void no_inline riscv_cpu_interp_x(RISCVCPUState *s, int n_cycles1)
                 s->fp_reg[rd] = fma_sf32(s->fp_reg[rs1] ^ FSIGN_MASK32,
                                          s->fp_reg[rs2],
                                          s->fp_reg[rs3],
-                                         RM(rm), &s->fflags) | F32_HIGH;
+                                         RM(rm), &s->fflags) | fp_high<32>();
                 break;
             case 1:
                 s->fp_reg[rd] = fma_sf64(s->fp_reg[rs1] ^ FSIGN_MASK64,
                                          s->fp_reg[rs2],
                                          s->fp_reg[rs3],
-                                         RM(rm), &s->fflags) | F64_HIGH;
+                                         RM(rm), &s->fflags) | fp_high<64>();
                 break;
-#if FLEN >= 128
             case 3:
-                s->fp_reg[rd] = fma_sf128(s->fp_reg[rs1] ^ FSIGN_MASK128,
-                                          s->fp_reg[rs2],
-                                          s->fp_reg[rs3],
-                                          RM(rm), &s->fflags);
+                if constexpr (FLEN < 128) {
+                    goto illegal_insn;
+                } else {
+                    typedef SoftFloat<FLEN> SF;
+                    s->fp_reg[rd] = SF::fma(s->fp_reg[rs1] ^ SF::sign_mask,
+                                            s->fp_reg[rs2],
+                                            s->fp_reg[rs3],
+                                            RM(rm), &s->fflags);
+                }
                 break;
-#endif
             default:
                 goto illegal_insn;
             }
@@ -1688,22 +1701,25 @@ static void no_inline riscv_cpu_interp_x(RISCVCPUState *s, int n_cycles1)
                 s->fp_reg[rd] = fma_sf32(s->fp_reg[rs1] ^ FSIGN_MASK32,
                                          s->fp_reg[rs2],
                                          s->fp_reg[rs3] ^ FSIGN_MASK32,
-                                         RM(rm), &s->fflags) | F32_HIGH;
+                                         RM(rm), &s->fflags) | fp_high<32>();
                 break;
             case 1:
                 s->fp_reg[rd] = fma_sf64(s->fp_reg[rs1] ^ FSIGN_MASK64,
                                          s->fp_reg[rs2],
                                          s->fp_reg[rs3] ^ FSIGN_MASK64,
-                                         RM(rm), &s->fflags) | F64_HIGH;
+                                         RM(rm), &s->fflags) | fp_high<64>();
                 break;
-#if FLEN >= 128
             case 3:
-                s->fp_reg[rd] = fma_sf128(s->fp_reg[rs1] ^ FSIGN_MASK128,
-                                          s->fp_reg[rs2],
-                                          s->fp_reg[rs3] ^ FSIGN_MASK128,
-                                          RM(rm), &s->fflags);
+                if constexpr (FLEN < 128) {
+                    goto illegal_insn;
+                } else {
+                    typedef SoftFloat<FLEN> SF;
+                    s->fp_reg[rd] = SF::fma(s->fp_reg[rs1] ^ SF::sign_mask,
+                                            s->fp_reg[rs2],
+                                            s->fp_reg[rs3] ^ SF::sign_mask,
+                                            RM(rm), &s->fflags);
+                }
                 break;
-#endif
             default:
                 goto illegal_insn;
             }
@@ -1722,11 +1738,12 @@ static void no_inline riscv_cpu_interp_x(RISCVCPUState *s, int n_cycles1)
             case 1:
                 err = exec_fp_op<64, Xlen>(s, imm >> 2, rd, rs1, rs2, rm);
                 break;
-#if FLEN >= 128
             case 3:
-                err = exec_fp_op<128, Xlen>(s, imm >> 2, rd, rs1, rs2, rm);
+                if constexpr (FLEN < 128)
+                    goto illegal_insn;
+                else
+                    err = exec_fp_op<FLEN, Xlen>(s, imm >> 2, rd, rs1, rs2, rm);
                 break;
-#endif
             default:
                 goto illegal_insn;
             }

@@ -382,7 +382,6 @@ subdir('tools')
 
 executable('temu',
   link_whole: emu_libs,
-  link_with: riscv_cpu_libs,
   cpp_args: common_args,
   dependencies: common_deps + emu_deps,
   link_args: emu_link_args,

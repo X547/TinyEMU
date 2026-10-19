@@ -29,6 +29,24 @@
 #include "riscv_vcpu.h"
 
 
+RISCVCPU *riscv_cpu_create(PhysMemoryMap *mem_map, int max_xlen,
+                           uint32_t hart_id)
+{
+    switch (max_xlen) {
+        case 32:
+            return riscv_cpu_create32(mem_map, hart_id);
+        case 64:
+            return riscv_cpu_create64(mem_map, hart_id);
+#if CONFIG_RISCV_MAX_XLEN == 128
+        case 128:
+            return riscv_cpu_create128(mem_map, hart_id);
+#endif
+        default:
+            return nullptr;
+    }
+}
+
+
 #define RTC_FREQ 1000000
 #define RTC_FREQ_DIV 16 /* arbitrary, relative to CPU freq to have a
                            10 MHz frequency */

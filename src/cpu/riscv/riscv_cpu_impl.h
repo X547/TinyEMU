@@ -37,12 +37,8 @@
 #include "iomem.h"
 #include "riscv_cpu.h"
 
-#ifndef MAX_XLEN
-#error MAX_XLEN must be defined
-#endif
-#ifndef CONFIG_RISCV_MAX_XLEN
-#error CONFIG_RISCV_MAX_XLEN must be defined
-#endif
+/* The definitions of RISCVCPUState<MaxXlen>. Each riscv_cpuNN.cpp includes
+   this and instantiates the template for one maximum XLEN. */
 
 #define DUMP_INVALID_MEM_ACCESS
 //#define DUMP_MMU_EXCEPTIONS
@@ -55,9 +51,8 @@
 /* softfp is shared with the other XLEN builds, so it stays at global scope. */
 #include "softfp.h"
 
-/* Each XLEN build defines its own RISCVCPUState. Giving them internal linkage
-   keeps three differently-shaped, polymorphic types with the same name from
-   emitting three conflicting vtables under one symbol. */
+/* Internal linkage, as each unit has all it calls, lets the compiler inline
+   and drop the helpers as it would for static functions. */
 namespace {
 
 #include "riscv_cpu_priv.h"
@@ -86,19 +81,20 @@ static void __attribute__((format(printf, 1, 2), unused)) log_printf(const char 
     va_end(ap);
 }
 
-#if MAX_XLEN == 128
-static void fprint_target_ulong(FILE *f, target_ulong a)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::fprint_target_ulong(FILE *f, target_ulong a)
 {
-    fprintf(f, "%016" PRIx64 "%016" PRIx64, (uint64_t)(a >> 64), (uint64_t)a);
+    if constexpr (MAX_XLEN == 128)
+        fprintf(f, "%016" PRIx64 "%016" PRIx64, (uint64_t)(a >> 64),
+                (uint64_t)a);
+    else if constexpr (MAX_XLEN == 64)
+        fprintf(f, "%016" PRIx64, (uint64_t)a);
+    else
+        fprintf(f, "%08x", (uint32_t)a);
 }
-#else
-static void fprint_target_ulong(FILE *f, target_ulong a)
-{
-    fprintf(f, "%" PR_target_ulong, a);
-}
-#endif
 
-static void print_target_ulong(target_ulong a)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::print_target_ulong(target_ulong a)
 {
     fprint_target_ulong(stdout, a);
 }
@@ -112,7 +108,8 @@ static const char *reg_name[32] = {
 
 /* The machine supplies the counter so that the 'time' CSR agrees with the
    timer device; without one, fall back to the host clock. */
-static uint64_t riscv_cpu_rtc_time(RISCVCPUState *s)
+template <int MaxXlen>
+uint64_t RISCVCPUState<MaxXlen>::riscv_cpu_rtc_time(RISCVCPUState *s)
 {
     if (s->rtc_time_source != nullptr) {
         return s->rtc_time_source->RtcTime();
@@ -122,13 +119,15 @@ static uint64_t riscv_cpu_rtc_time(RISCVCPUState *s)
 
 /* exit from power down if an interrupt is pending, unless the hart is
    stopped */
-static void wake_on_irq(RISCVCPUState *s)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::wake_on_irq(RISCVCPUState *s)
 {
     if (s->power_down_flag && (s->mip & s->mie) != 0 && !s->hsm_stopped)
         s->power_down_flag = false;
 }
 
-static void set_mip(RISCVCPUState *s, uint32_t mask)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::set_mip(RISCVCPUState *s, uint32_t mask)
 {
     s->mip |= mask;
     wake_on_irq(s);
@@ -138,7 +137,8 @@ static void set_mip(RISCVCPUState *s, uint32_t mask)
    execution environment. Returns when the next interrupt falls due, or
    UINT64_MAX when the comparator is not in charge or has already fired.
    The machine wakes the hart at that time. */
-static uint64_t update_stimer(RISCVCPUState *s)
+template <int MaxXlen>
+uint64_t RISCVCPUState<MaxXlen>::update_stimer(RISCVCPUState *s)
 {
     uint64_t deadline = UINT64_MAX;
 
@@ -159,7 +159,8 @@ static uint64_t update_stimer(RISCVCPUState *s)
     return deadline;
 }
 
-static void dump_regs(RISCVCPUState *s)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::dump_regs(RISCVCPUState *s)
 {
     int i, cols;
     const char priv_str[] = "USHM";
@@ -191,36 +192,34 @@ static void dump_regs(RISCVCPUState *s)
 #endif
 }
 
-static __attribute__((unused)) void cpu_abort(RISCVCPUState *s)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::cpu_abort(RISCVCPUState *s)
 {
     dump_regs(s);
     abort();
 }
 
 /* addr must be aligned. Only RAM accesses are supported */
-#define PHYS_MEM_READ_WRITE(size, uint_type) \
-static __maybe_unused inline void phys_write_u ## size(RISCVCPUState *s, target_ulong addr,\
-                                        uint_type val)                   \
-{\
-    PhysMemoryRange *pr = s->mem_map->FindRange(addr);\
-    if (!pr || !pr->is_ram)\
-        return;\
-    *(uint_type *)(pr->phys_mem + \
-                 (uintptr_t)(addr - pr->addr)) = val;\
-}\
-\
-static __maybe_unused inline uint_type phys_read_u ## size(RISCVCPUState *s, target_ulong addr) \
-{\
-    PhysMemoryRange *pr = s->mem_map->FindRange(addr);\
-    if (!pr || !pr->is_ram)\
-        return 0;\
-    return *(uint_type *)(pr->phys_mem + \
-                          (uintptr_t)(addr - pr->addr));     \
+template <int MaxXlen>
+template <typename T>
+void RISCVCPUState<MaxXlen>::phys_write(RISCVCPUState *s, target_ulong addr,
+                                        std::type_identity_t<T> val)
+{
+    PhysMemoryRange *pr = s->mem_map->FindRange(addr);
+    if (!pr || !pr->is_ram)
+        return;
+    *(T *)(pr->phys_mem + (uintptr_t)(addr - pr->addr)) = val;
 }
 
-PHYS_MEM_READ_WRITE(8, uint8_t)
-PHYS_MEM_READ_WRITE(32, uint32_t)
-PHYS_MEM_READ_WRITE(64, uint64_t)
+template <int MaxXlen>
+template <typename T>
+T RISCVCPUState<MaxXlen>::phys_read(RISCVCPUState *s, target_ulong addr)
+{
+    PhysMemoryRange *pr = s->mem_map->FindRange(addr);
+    if (!pr || !pr->is_ram)
+        return 0;
+    return *(T *)(pr->phys_mem + (uintptr_t)(addr - pr->addr));
+}
 
 /* Replace what RAM at 'ptr' holds, if it is still *old, as one atomic step;
    otherwise *old gets what it holds. */
@@ -237,7 +236,7 @@ static inline T host_atomic_load(uint8_t *ptr)
     return __atomic_load_n((T *)ptr, __ATOMIC_RELAXED);
 }
 
-#if MLEN >= 128
+#ifdef HAVE_INT128
 /* never reached: target_rmw_ptr() leaves 128 bit operands to the plain
    path, which keeps libatomic out */
 template <>
@@ -254,10 +253,9 @@ inline uint128_t host_atomic_load<uint128_t>(uint8_t *ptr)
 }
 #endif
 
-#define amo_size_log2(size) ((size) == 32 ? 2 : (size) == 64 ? 3 : 4)
-
 /* LR with aq on a host that could let later accesses pass the load. */
-static inline void lr_acquire(RISCVCPUState *s, uint32_t insn)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::lr_acquire(RISCVCPUState *s, uint32_t insn)
 {
 #if !defined(__x86_64__) && !defined(__i386__)
     if (s->smp && get_bit(insn, 26))
@@ -267,14 +265,17 @@ static inline void lr_acquire(RISCVCPUState *s, uint32_t insn)
 
 /* Set the A and D bits of a PTE. Another hart may change it meanwhile:
    then nothing is written, and the walk starts over. */
-static bool update_pte(RISCVCPUState *s, target_ulong pte_addr,
-                       target_ulong old, target_ulong pte, int pte_size_log2)
+template <int MaxXlen>
+bool RISCVCPUState<MaxXlen>::update_pte(RISCVCPUState *s,
+                                        target_ulong pte_addr,
+                                        target_ulong old, target_ulong pte,
+                                        int pte_size_log2)
 {
     if (!s->smp) {
         if (pte_size_log2 == 2)
-            phys_write_u32(s, pte_addr, pte);
+            phys_write<uint32_t>(s, pte_addr, pte);
         else
-            phys_write_u64(s, pte_addr, pte);
+            phys_write<uint64_t>(s, pte_addr, pte);
         return true;
     }
     PhysMemoryRange *pr = s->mem_map->FindRange(pte_addr);
@@ -294,24 +295,16 @@ static bool update_pte(RISCVCPUState *s, target_ulong pte_addr,
 #define PTE_A_MASK bit_at(6)
 #define PTE_D_MASK bit_at(7)
 
-/* Bits 63:54 of a 64 bit PTE are claimed by Svnapot (63), Svpbmt (62:61) and
-   future standard use (60:54). None of them are implemented here, so a PTE
-   that sets any of them is malformed and must fault. */
-#if MAX_XLEN >= 64
-#define PTE_RESERVED_MASK field_mask<target_ulong>(54, 10)
-#else
-#define PTE_RESERVED_MASK 0
-#endif
-
 #define ACCESS_READ  0
 #define ACCESS_WRITE 1
 #define ACCESS_CODE  2
 
 /* access = 0: read, 1 = write, 2 = code. Set the exception_pending
    field if necessary. return 0 if OK, -1 if translation error */
-static int get_phys_addr(RISCVCPUState *s,
-                         target_ulong *ppaddr, target_ulong vaddr,
-                         int access)
+template <int MaxXlen>
+int RISCVCPUState<MaxXlen>::get_phys_addr(RISCVCPUState *s,
+                                          target_ulong *ppaddr,
+                                          target_ulong vaddr, int access)
 {
     int mode, levels, pte_bits, pte_idx, pte_size_log2, xwr, priv;
     int vaddr_shift, i, pte_addr_bits;
@@ -333,35 +326,35 @@ static int get_phys_addr(RISCVCPUState *s,
         }
         return 0;
     }
-#if MAX_XLEN == 32
-    /* 32 bits */
-    mode = get_bit(s->satp, 31);
-    if (mode == 0) {
-        /* bare: no translation */
-        *ppaddr = vaddr;
-        return 0;
+    if constexpr (MAX_XLEN == 32) {
+        /* 32 bits */
+        mode = get_bit(s->satp, 31);
+        if (mode == 0) {
+            /* bare: no translation */
+            *ppaddr = vaddr;
+            return 0;
+        } else {
+            /* sv32 */
+            levels = 2;
+            pte_size_log2 = 2;
+            pte_addr_bits = 22;
+        }
     } else {
-        /* sv32 */
-        levels = 2;
-        pte_size_log2 = 2;
-        pte_addr_bits = 22;
+        mode = get_bits(s->satp, 60, 4);
+        if (mode == 0) {
+            /* bare: no translation */
+            *ppaddr = vaddr;
+            return 0;
+        } else {
+            /* sv39/sv48 */
+            levels = mode - 8 + 3;
+            pte_size_log2 = 3;
+            vaddr_shift = MAX_XLEN - (PG_SHIFT + levels * 9);
+            if ((target_ulong)sign_extend(vaddr, MAX_XLEN - vaddr_shift) != vaddr)
+                return -1;
+            pte_addr_bits = 44;
+        }
     }
-#else
-    mode = get_bits(s->satp, 60, 4);
-    if (mode == 0) {
-        /* bare: no translation */
-        *ppaddr = vaddr;
-        return 0;
-    } else {
-        /* sv39/sv48 */
-        levels = mode - 8 + 3;
-        pte_size_log2 = 3;
-        vaddr_shift = MAX_XLEN - (PG_SHIFT + levels * 9);
-        if ((target_ulong)sign_extend(vaddr, MAX_XLEN - vaddr_shift) != vaddr)
-            return -1;
-        pte_addr_bits = 44;
-    }
-#endif
 restart:
     pte_addr = (target_ulong)get_bits(s->satp, 0, pte_addr_bits) << PG_SHIFT;
     pte_bits = 12 - pte_size_log2;
@@ -370,9 +363,9 @@ restart:
         pte_idx = get_bits(vaddr, vaddr_shift, pte_bits);
         pte_addr += pte_idx << pte_size_log2;
         if (pte_size_log2 == 2)
-            pte = phys_read_u32(s, pte_addr);
+            pte = phys_read<uint32_t>(s, pte_addr);
         else
-            pte = phys_read_u64(s, pte_addr);
+            pte = phys_read<uint64_t>(s, pte_addr);
         //printf("pte=0x%08" PRIx64 "\n", pte);
         if ((pte & PTE_RESERVED_MASK) != 0)
             return -1;
@@ -429,15 +422,20 @@ restart:
 
 /* A device range is found without the device lock: another hart may have
    moved or disabled it since, and then nothing answers. */
-static bool device_maps(PhysMemoryRange *pr, target_ulong paddr)
+template <int MaxXlen>
+bool RISCVCPUState<MaxXlen>::device_maps(PhysMemoryRange *pr,
+                                         target_ulong paddr)
 {
     return paddr >= pr->addr && paddr - pr->addr < pr->size;
 }
 
 /* Map the page of 'addr' for writing onto RAM range 'pr', recording the
    write in its dirty bits, and return the host pointer for 'addr'. */
-static uint8_t *tlb_fill_write(RISCVCPUState *s, target_ulong addr,
-                               PhysMemoryRange *pr, target_ulong paddr)
+template <int MaxXlen>
+uint8_t *RISCVCPUState<MaxXlen>::tlb_fill_write(RISCVCPUState *s,
+                                                target_ulong addr,
+                                                PhysMemoryRange *pr,
+                                                target_ulong paddr)
 {
     int tlb_idx = get_bits(addr, PG_SHIFT, TLB_BITS);
     uint8_t *ptr = pr->phys_mem + (uintptr_t)(paddr - pr->addr);
@@ -456,8 +454,10 @@ static uint8_t *tlb_fill_write(RISCVCPUState *s, target_ulong addr,
 }
 
 /* return 0 if OK, != 0 if exception */
-int target_read_slow(RISCVCPUState *s, mem_uint_t *pval,
-                     target_ulong addr, int size_log2)
+template <int MaxXlen>
+int RISCVCPUState<MaxXlen>::target_read_slow(RISCVCPUState *s,
+                                             mem_uint_t *pval,
+                                             target_ulong addr, int size_log2)
 {
     int size, tlb_idx, err, al;
     target_ulong paddr, offset;
@@ -495,7 +495,6 @@ int target_read_slow(RISCVCPUState *s, mem_uint_t *pval,
                 ret = (v0 >> (al * 8)) | (v1 << (32 - al * 8));
             }
             break;
-#if MLEN >= 64
         case 3:
             {
                 uint64_t v0, v1;
@@ -509,11 +508,9 @@ int target_read_slow(RISCVCPUState *s, mem_uint_t *pval,
                 ret = (v0 >> (al * 8)) | (v1 << (64 - al * 8));
             }
             break;
-#endif
-#if MLEN >= 128
         case 4:
-            {
-                uint128_t v0, v1;
+            if constexpr (MLEN >= 128) {
+                mem_uint_t v0, v1;
                 addr -= al;
                 err = target_read(s, &v0, addr);
                 if (err)
@@ -522,9 +519,10 @@ int target_read_slow(RISCVCPUState *s, mem_uint_t *pval,
                 if (err)
                     return err;
                 ret = (v0 >> (al * 8)) | (v1 << (128 - al * 8));
+            } else {
+                abort();
             }
             break;
-#endif
         default:
             abort();
         }
@@ -561,16 +559,14 @@ int target_read_slow(RISCVCPUState *s, mem_uint_t *pval,
             case 2:
                 ret = *(uint32_t *)ptr;
                 break;
-#if MLEN >= 64
             case 3:
                 ret = *(uint64_t *)ptr;
                 break;
-#endif
-#if MLEN >= 128
             case 4:
-                ret = *(uint128_t *)ptr;
+                if constexpr (MLEN < 128)
+                    abort();
+                ret = *(mem_uint_t *)ptr;
                 break;
-#endif
             default:
                 abort();
             }
@@ -582,14 +578,12 @@ int target_read_slow(RISCVCPUState *s, mem_uint_t *pval,
             } else if (get_bit(pr->devio_flags, size_log2)) {
                 ret = pr->io->DeviceRead(offset, size_log2);
             }
-#if MLEN >= 64
             else if ((pr->devio_flags & DEVIO_SIZE32) && size_log2 == 3) {
                 /* emulate 64 bit access */
                 ret = pr->io->DeviceRead(offset, 2);
                 ret |= (uint64_t)pr->io->DeviceRead(offset + 4, 2) << 32;
                 
             }
-#endif
             else {
 #ifdef DUMP_INVALID_MEM_ACCESS
                 printf("unsupported device read access: addr=0x");
@@ -604,8 +598,11 @@ int target_read_slow(RISCVCPUState *s, mem_uint_t *pval,
     return 0;
 }
 
-static void device_write(RISCVCPUState *s, PhysMemoryRange *pr,
-                         target_ulong paddr, mem_uint_t val, int size_log2)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::device_write(RISCVCPUState *s,
+                                          PhysMemoryRange *pr,
+                                          target_ulong paddr, mem_uint_t val,
+                                          int size_log2)
 {
     DeviceLocker locker(*s->device_lock);
     target_ulong offset = paddr - pr->addr;
@@ -615,7 +612,6 @@ static void device_write(RISCVCPUState *s, PhysMemoryRange *pr,
     } else if (get_bit(pr->devio_flags, size_log2)) {
         pr->io->DeviceWrite(offset, val, size_log2);
     }
-#if MLEN >= 64
     else if ((pr->devio_flags & DEVIO_SIZE32) && size_log2 == 3) {
         /* emulate 64 bit access */
         pr->io->DeviceWrite(offset,
@@ -623,7 +619,6 @@ static void device_write(RISCVCPUState *s, PhysMemoryRange *pr,
         pr->io->DeviceWrite(offset + 4,
                        get_bits(val, 32, 32), 2);
     }
-#endif
     else {
 #ifdef DUMP_INVALID_MEM_ACCESS
         printf("unsupported device write access: addr=0x");
@@ -634,8 +629,10 @@ static void device_write(RISCVCPUState *s, PhysMemoryRange *pr,
 }
 
 /* return 0 if OK, != 0 if exception */
-int target_write_slow(RISCVCPUState *s, target_ulong addr,
-                      mem_uint_t val, int size_log2)
+template <int MaxXlen>
+int RISCVCPUState<MaxXlen>::target_write_slow(RISCVCPUState *s,
+                                              target_ulong addr,
+                                              mem_uint_t val, int size_log2)
 {
     int size, i, err;
     target_ulong paddr;
@@ -685,16 +682,14 @@ int target_write_slow(RISCVCPUState *s, target_ulong addr,
             case 2:
                 *(uint32_t *)ptr = val;
                 break;
-#if MLEN >= 64
             case 3:
                 *(uint64_t *)ptr = val;
                 break;
-#endif
-#if MLEN >= 128
             case 4:
-                *(uint128_t *)ptr = val;
+                if constexpr (MLEN < 128)
+                    abort();
+                *(mem_uint_t *)ptr = val;
                 break;
-#endif
             default:
                 abort();
             }
@@ -709,9 +704,9 @@ int target_write_slow(RISCVCPUState *s, target_ulong addr,
    operand of up to 64 bits in RAM, translated and checked for writing, or
    null for any other operand, which takes the plain read and write. Returns
    != 0 on an exception. */
-static no_inline __exception int target_rmw_ptr(RISCVCPUState *s,
-                                                target_ulong addr,
-                                                int size_log2, uint8_t **pptr)
+template <int MaxXlen>
+int RISCVCPUState<MaxXlen>::target_rmw_ptr(RISCVCPUState *s, target_ulong addr,
+                                           int size_log2, uint8_t **pptr)
 {
     int tlb_idx = get_bits(addr, PG_SHIFT, TLB_BITS);
     target_ulong paddr;
@@ -735,8 +730,9 @@ static no_inline __exception int target_rmw_ptr(RISCVCPUState *s,
     return 0;
 }
 
-static inline __exception int rmw_ptr(RISCVCPUState *s, target_ulong addr,
-                                      int size_log2, uint8_t **pptr)
+template <int MaxXlen>
+int RISCVCPUState<MaxXlen>::rmw_ptr(RISCVCPUState *s, target_ulong addr,
+                                    int size_log2, uint8_t **pptr)
 {
     *pptr = nullptr;
     if (likely(!s->smp))
@@ -749,7 +745,8 @@ static inline __exception int rmw_ptr(RISCVCPUState *s, target_ulong addr,
    stores before later loads. Only a fence ordering writes before reads
    needs a full host fence; the others are acquire and release, which an
    x86 host keeps anyway. */
-static inline void fence(RISCVCPUState *s, uint32_t insn)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::fence(RISCVCPUState *s, uint32_t insn)
 {
     if (likely(!s->smp))
         return;
@@ -777,9 +774,10 @@ static uint32_t get_insn32(uint8_t *ptr)
 }
 
 /* return 0 if OK, != 0 if exception */
-static no_inline __exception int target_read_insn_slow(RISCVCPUState *s,
-                                                       uint8_t **pptr,
-                                                       target_ulong addr)
+template <int MaxXlen>
+int RISCVCPUState<MaxXlen>::target_read_insn_slow(RISCVCPUState *s,
+                                                  uint8_t **pptr,
+                                                  target_ulong addr)
 {
     int tlb_idx;
     target_ulong paddr;
@@ -807,8 +805,10 @@ static no_inline __exception int target_read_insn_slow(RISCVCPUState *s,
 }
 
 /* addr must be aligned */
-static inline __exception int target_read_insn_u16(RISCVCPUState *s, uint16_t *pinsn,
-                                                   target_ulong addr)
+template <int MaxXlen>
+int RISCVCPUState<MaxXlen>::target_read_insn_u16(RISCVCPUState *s,
+                                                 uint16_t *pinsn,
+                                                 target_ulong addr)
 {
     uint32_t tlb_idx;
     uint8_t *ptr;
@@ -825,7 +825,8 @@ static inline __exception int target_read_insn_u16(RISCVCPUState *s, uint16_t *p
     return 0;
 }
 
-static void tlb_init(RISCVCPUState *s)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::tlb_init(RISCVCPUState *s)
 {
     int i;
     
@@ -836,7 +837,8 @@ static void tlb_init(RISCVCPUState *s)
     }
 }
 
-static void tlb_flush_all(RISCVCPUState *s)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::tlb_flush_all(RISCVCPUState *s)
 {
     tlb_init(s);
 }
@@ -844,7 +846,9 @@ static void tlb_flush_all(RISCVCPUState *s)
 /* Entries are cached per 4 KiB page with no record of the page size they came
    from, so a superpage is spread over many slots and there is no way to find
    the rest of them from one address. Everything goes. */
-static void tlb_flush_vaddr(RISCVCPUState *s, target_ulong vaddr)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::tlb_flush_vaddr(RISCVCPUState *s,
+                                             target_ulong vaddr)
 {
     tlb_flush_all(s);
 }
@@ -869,8 +873,10 @@ static inline void tlb_field_store(T *p, T val)
         *(volatile T *)p = val;
 }
 
-static void tlb_flush_ram_range(TLBEntry *tlb, uint8_t *ram_ptr,
-                                uint8_t *ram_end)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::tlb_flush_ram_range(TLBEntry *tlb,
+                                                 uint8_t *ram_ptr,
+                                                 uint8_t *ram_end)
 {
     for (int i = 0; i < TLB_SIZE; i++) {
         target_ulong vaddr = tlb_field_load(&tlb[i].vaddr);
@@ -889,9 +895,10 @@ static void tlb_flush_ram_range(TLBEntry *tlb, uint8_t *ram_ptr,
    it is seldom used. From another thread than the hart's, a write already
    past its TLB lookup still completes, into the RAM it found; an entry being
    filled meanwhile is the filler's to check (see tlb_fill_write()). */
-static void glue(riscv_cpu_flush_tlb_write_range_ram,
-                 MAX_XLEN)(RISCVCPUState *s,
-                           uint8_t *ram_ptr, size_t ram_size)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::flush_tlb_write_range_ram(RISCVCPUState *s,
+                                                       uint8_t *ram_ptr,
+                                                       size_t ram_size)
 {
     uint8_t *ram_end = ram_ptr + ram_size;
 
@@ -906,11 +913,8 @@ static void glue(riscv_cpu_flush_tlb_write_range_ram,
                       MSTATUS_SPP | \
                       MSTATUS_FS | MSTATUS_XS | \
                       MSTATUS_SUM | MSTATUS_MXR)
-#if MAX_XLEN >= 64
-#define SSTATUS_MASK (SSTATUS_MASK0 | MSTATUS_UXL_MASK)
-#else
-#define SSTATUS_MASK SSTATUS_MASK0
-#endif
+#define SSTATUS_MASK (SSTATUS_MASK0 | \
+                      (target_ulong)(MAX_XLEN >= 64 ? MSTATUS_UXL_MASK : 0))
 
 
 #define MSTATUS_MASK (MSTATUS_SIE | MSTATUS_MIE |      \
@@ -940,7 +944,9 @@ static void glue(riscv_cpu_flush_tlb_write_range_ram,
 #define SENVCFG_MASK (ENVCFG_FIOM)
 
 /* return the complete mstatus with the SD bit */
-static target_ulong get_mstatus(RISCVCPUState *s, target_ulong mask)
+template <int MaxXlen>
+auto RISCVCPUState<MaxXlen>::get_mstatus(RISCVCPUState *s,
+                                         target_ulong mask) -> target_ulong
 {
     target_ulong val;
     bool sd;
@@ -963,7 +969,8 @@ static int get_base_from_xlen(int xlen)
         return 3;
 }
 
-static void set_mstatus(RISCVCPUState *s, target_ulong val)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::set_mstatus(RISCVCPUState *s, target_ulong val)
 {
     target_ulong mod, mask;
 
@@ -982,8 +989,7 @@ static void set_mstatus(RISCVCPUState *s, target_ulong val)
     s->fs = get_bits(val, MSTATUS_FS_SHIFT, 2);
 
     mask = MSTATUS_MASK & ~MSTATUS_FS;
-#if MAX_XLEN >= 64
-    {
+    if constexpr (MAX_XLEN >= 64) {
         int uxl, sxl;
         uxl = get_bits(val, MSTATUS_UXL_SHIFT, 2);
         if (uxl >= 1 && uxl <= get_base_from_xlen(MAX_XLEN))
@@ -992,13 +998,13 @@ static void set_mstatus(RISCVCPUState *s, target_ulong val)
         if (sxl >= 1 && sxl <= get_base_from_xlen(MAX_XLEN))
             mask |= MSTATUS_SXL_MASK;
     }
-#endif
     s->mstatus = (s->mstatus & ~mask) | (val & mask);
 }
 
 /* mcounteren gates S-mode and, together with scounteren, U-mode access to the
    counter CSRs. 'counter' is the index of the counter within either register */
-static bool counter_accessible(RISCVCPUState *s, int counter)
+template <int MaxXlen>
+bool RISCVCPUState<MaxXlen>::counter_accessible(RISCVCPUState *s, int counter)
 {
     uint32_t counteren;
 
@@ -1010,21 +1016,24 @@ static bool counter_accessible(RISCVCPUState *s, int counter)
     return get_bit(counteren, counter);
 }
 
-static uint64_t get_mcycle(RISCVCPUState *s)
+template <int MaxXlen>
+uint64_t RISCVCPUState<MaxXlen>::get_mcycle(RISCVCPUState *s)
 {
     if (s->mcountinhibit & MCOUNTINHIBIT_CY)
         return s->mcycle_base;
     return s->insn_counter + s->mcycle_base;
 }
 
-static uint64_t get_minstret(RISCVCPUState *s)
+template <int MaxXlen>
+uint64_t RISCVCPUState<MaxXlen>::get_minstret(RISCVCPUState *s)
 {
     if (s->mcountinhibit & MCOUNTINHIBIT_IR)
         return s->minstret_base;
     return s->insn_counter + s->minstret_base;
 }
 
-static void set_mcycle(RISCVCPUState *s, uint64_t val)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::set_mcycle(RISCVCPUState *s, uint64_t val)
 {
     if (s->mcountinhibit & MCOUNTINHIBIT_CY)
         s->mcycle_base = val;
@@ -1032,7 +1041,8 @@ static void set_mcycle(RISCVCPUState *s, uint64_t val)
         s->mcycle_base = val - s->insn_counter;
 }
 
-static void set_minstret(RISCVCPUState *s, uint64_t val)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::set_minstret(RISCVCPUState *s, uint64_t val)
 {
     if (s->mcountinhibit & MCOUNTINHIBIT_IR)
         s->minstret_base = val;
@@ -1041,15 +1051,18 @@ static void set_minstret(RISCVCPUState *s, uint64_t val)
 }
 
 /* menvcfg.STCE hands stimecmp to S-mode; without it only M-mode may touch it */
-static bool stimecmp_accessible(RISCVCPUState *s)
+template <int MaxXlen>
+bool RISCVCPUState<MaxXlen>::stimecmp_accessible(RISCVCPUState *s)
 {
     return s->priv >= PRV_M || (s->menvcfg & MENVCFG_STCE) != 0;
 }
 
 /* some CSRs are 64 bit whatever XLEN is, so RV32 writes one half at a time
    through a companion CSR and leaves the other one alone */
-static uint64_t csr64_written(RISCVCPUState *s, uint64_t old_val,
-                              target_ulong val, bool high)
+template <int MaxXlen>
+uint64_t RISCVCPUState<MaxXlen>::csr64_written(RISCVCPUState *s,
+                                               uint64_t old_val,
+                                               target_ulong val, bool high)
 {
     if (s->cur_xlen != 32)
         return val;
@@ -1062,7 +1075,9 @@ static const uint8_t irq_priority[] = { 11, 3, 7, 9, 1, 5 };
 
 /* mtopi or stopi: the top pending and enabled interrupt that traps to the
    given level. The iprio arrays are read-only zero, so IPRIO is always 1. */
-static target_ulong top_interrupt(RISCVCPUState *s, bool supervisor)
+template <int MaxXlen>
+auto RISCVCPUState<MaxXlen>::top_interrupt(RISCVCPUState *s,
+                                           bool supervisor) -> target_ulong
 {
     uint32_t pending = s->mip & s->mie;
     int irq;
@@ -1097,7 +1112,8 @@ static uint32_t imsic_top(const ImsicFile *f)
 }
 
 /* An interrupt file drives MEIP or SEIP by itself. */
-static void imsic_update(RISCVCPUState *s, int file)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::imsic_update(RISCVCPUState *s, int file)
 {
     uint32_t bit = file == IMSIC_FILE_M ? MIP_MEIP : MIP_SEIP;
 
@@ -1108,14 +1124,17 @@ static void imsic_update(RISCVCPUState *s, int file)
 }
 
 /* mtopei or stopei */
-static target_ulong imsic_topei(RISCVCPUState *s, int file)
+template <int MaxXlen>
+auto RISCVCPUState<MaxXlen>::imsic_topei(RISCVCPUState *s,
+                                         int file) -> target_ulong
 {
     uint32_t id = imsic_top(&s->imsic[file]);
     return ((target_ulong)id << 16) | id;
 }
 
 /* A write to mtopei or stopei claims what it reads. */
-static void imsic_claim(RISCVCPUState *s, int file)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::imsic_claim(RISCVCPUState *s, int file)
 {
     uint32_t id = imsic_top(&s->imsic[file]);
 
@@ -1125,9 +1144,8 @@ static void imsic_claim(RISCVCPUState *s, int file)
     }
 }
 
-static void sbi_enter(RISCVCPUState *s, target_ulong pc, target_ulong opaque);
-
-static void take_posted_tlb_flush(RISCVCPUState *s)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::take_posted_tlb_flush(RISCVCPUState *s)
 {
     uint64_t req = s->tlb_flush_req.load();
 
@@ -1138,7 +1156,8 @@ static void take_posted_tlb_flush(RISCVCPUState *s)
 }
 
 /* Take in the interrupt lines and messages other threads posted. */
-static void process_inbox(RISCVCPUState *s)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::process_inbox(RISCVCPUState *s)
 {
     if (likely(!s->inbox_pending.load(std::memory_order_relaxed)))
         return;
@@ -1174,8 +1193,11 @@ static void process_inbox(RISCVCPUState *s)
    of a 64 bit word for RV32, a whole word otherwise. Returns false for the
    odd numbers, which do not exist for RV64. Registers past the implemented
    identities give a null word. */
-static bool imsic_array_reg(RISCVCPUState *s, ImsicFile *f, target_ulong sel,
-                            uint64_t **pword, int *pshift, int *plen)
+template <int MaxXlen>
+bool RISCVCPUState<MaxXlen>::imsic_array_reg(RISCVCPUState *s, ImsicFile *f,
+                                             target_ulong sel,
+                                             uint64_t **pword, int *pshift,
+                                             int *plen)
 {
     uint64_t *array = sel >= 0xc0 ? f->eie : f->eip;
     unsigned int k = get_bits(sel, 0, 6);
@@ -1194,8 +1216,9 @@ static bool imsic_array_reg(RISCVCPUState *s, ImsicFile *f, target_ulong sel,
 }
 
 /* mireg or sireg. Returns -1 if the selected register does not exist. */
-static int ireg_read(RISCVCPUState *s, int file, target_ulong sel,
-                     target_ulong *pval)
+template <int MaxXlen>
+int RISCVCPUState<MaxXlen>::ireg_read(RISCVCPUState *s, int file,
+                                      target_ulong sel, target_ulong *pval)
 {
     if (sel >= 0x30 && sel <= 0x3f) {
         /* the iprio array, all read-only zero */
@@ -1225,8 +1248,9 @@ static int ireg_read(RISCVCPUState *s, int file, target_ulong sel,
     return -1;
 }
 
-static int ireg_write(RISCVCPUState *s, int file, target_ulong sel,
-                      target_ulong val)
+template <int MaxXlen>
+int RISCVCPUState<MaxXlen>::ireg_write(RISCVCPUState *s, int file,
+                                       target_ulong sel, target_ulong val)
 {
     if (sel >= 0x30 && sel <= 0x3f) {
         if (s->cur_xlen != 32 && (sel & 1))
@@ -1261,8 +1285,9 @@ static int ireg_write(RISCVCPUState *s, int file, target_ulong sel,
 
 /* return -1 if invalid CSR. 0 if OK. 'will_write' indicate that the
    csr will be written after (used for CSR access check) */
-static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
-                     bool will_write)
+template <int MaxXlen>
+int RISCVCPUState<MaxXlen>::csr_read(RISCVCPUState *s, target_ulong *pval,
+                                     uint32_t csr, bool will_write)
 {
     target_ulong val;
 
@@ -1559,7 +1584,8 @@ static int csr_read(RISCVCPUState *s, target_ulong *pval, uint32_t csr,
     return 0;
 }
 
-static void set_frm(RISCVCPUState *s, unsigned int val)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::set_frm(RISCVCPUState *s, unsigned int val)
 {
     if (val >= 5)
         val = 0;
@@ -1567,7 +1593,8 @@ static void set_frm(RISCVCPUState *s, unsigned int val)
 }
 
 /* return -1 if invalid roundind mode */
-static int get_insn_rm(RISCVCPUState *s, unsigned int rm)
+template <int MaxXlen>
+int RISCVCPUState<MaxXlen>::get_insn_rm(RISCVCPUState *s, unsigned int rm)
 {
     if (rm == 7)
         return s->frm;
@@ -1579,7 +1606,9 @@ static int get_insn_rm(RISCVCPUState *s, unsigned int rm)
 
 /* return -1 if invalid CSR, 0 if OK, 1 if the interpreter loop must be
    exited (e.g. XLEN was modified), 2 if TLBs have been flushed. */
-static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
+template <int MaxXlen>
+int RISCVCPUState<MaxXlen>::csr_write(RISCVCPUState *s, uint32_t csr,
+                                      target_ulong val)
 {
     target_ulong mask;
 
@@ -1653,10 +1682,9 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
         if (s->priv < PRV_M && (s->mstatus & MSTATUS_TVM))
             return -1;
         /* no ASID implemented */
-#if MAX_XLEN == 32
-        s->satp = set_bit(get_bits(val, 0, 22), 31, get_bit(val, 31));
-#else
-        {
+        if constexpr (MAX_XLEN == 32) {
+            s->satp = set_bit(get_bits(val, 0, 22), 31, get_bit(val, 31));
+        } else {
             int mode, new_mode;
             mode = get_bits(s->satp, 60, 4);
             new_mode = get_bits(val, 60, 4);
@@ -1665,7 +1693,6 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
                 mode = new_mode;
             s->satp = set_bits(get_bits(val, 0, 44), 60, 4, mode);
         }
-#endif
         tlb_flush_all(s);
         return 2;
 
@@ -1730,8 +1757,7 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
         set_mstatus(s, val);
         break;
     case 0x301: /* misa */
-#if MAX_XLEN >= 64
-        {
+        if constexpr (MAX_XLEN >= 64) {
             int new_mxl;
             new_mxl = get_bits(val, s->cur_xlen - 2, 2);
             if (new_mxl >= 1 && new_mxl <= get_base_from_xlen(MAX_XLEN)) {
@@ -1744,7 +1770,6 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
                 }
             }
         }
-#endif
         break;
     case 0x302:
         mask = MEDELEG_MASK;
@@ -1850,13 +1875,13 @@ static int csr_write(RISCVCPUState *s, uint32_t csr, target_ulong val)
     return 0;
 }
 
-static void set_priv(RISCVCPUState *s, int priv)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::set_priv(RISCVCPUState *s, int priv)
 {
     if (s->priv != priv) {
         tlb_flush_all(s);
-#if MAX_XLEN >= 64
         /* change the current xlen */
-        {
+        if constexpr (MAX_XLEN >= 64) {
             int mxl;
             if (priv == PRV_S)
                 mxl = get_bits(s->mstatus, MSTATUS_SXL_SHIFT, 2);
@@ -1866,13 +1891,14 @@ static void set_priv(RISCVCPUState *s, int priv)
                 mxl = s->mxl;
             s->cur_xlen = 1 << (4 + mxl);
         }
-#endif
         s->priv = priv;
     }
 }
 
 /* Where HsmStart() and a non-retentive resume leave a hart. */
-static void sbi_enter(RISCVCPUState *s, target_ulong pc, target_ulong opaque)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::sbi_enter(RISCVCPUState *s, target_ulong pc,
+                                       target_ulong opaque)
 {
     s->mstatus &= ~(MSTATUS_SIE | MSTATUS_MPRV);
     s->satp = 0;
@@ -1888,7 +1914,8 @@ static void sbi_enter(RISCVCPUState *s, target_ulong pc, target_ulong opaque)
     s->hsm_state.store(RISCV_HSM_STARTED);
 }
 
-static void sbi_stop(RISCVCPUState *s)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::sbi_stop(RISCVCPUState *s)
 {
     s->hsm_stopped = true;
     s->hsm_suspended = false;
@@ -1897,14 +1924,17 @@ static void sbi_stop(RISCVCPUState *s)
 }
 
 /* A register as the SBI sees it, and back. */
-static uint64_t sbi_arg(RISCVCPUState *s, int reg)
+template <int MaxXlen>
+uint64_t RISCVCPUState<MaxXlen>::sbi_arg(RISCVCPUState *s, int reg)
 {
     if (s->cur_xlen == 32)
         return (uint32_t)s->reg[reg];
     return (uint64_t)s->reg[reg];
 }
 
-static target_ulong sbi_result(RISCVCPUState *s, uint64_t val)
+template <int MaxXlen>
+auto RISCVCPUState<MaxXlen>::sbi_result(RISCVCPUState *s,
+                                        uint64_t val) -> target_ulong
 {
     if (s->cur_xlen == 32)
         return (target_long)(int32_t)val;
@@ -1912,7 +1942,8 @@ static target_ulong sbi_result(RISCVCPUState *s, uint64_t val)
 }
 
 /* s->pc is the ecall's address */
-static void sbi_ecall(RISCVCPUState *s)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::sbi_ecall(RISCVCPUState *s)
 {
     uint64_t a[8];
 
@@ -1927,8 +1958,9 @@ static void sbi_ecall(RISCVCPUState *s)
     }
 }
 
-static void raise_exception2(RISCVCPUState *s, uint32_t cause,
-                             target_ulong tval)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::raise_exception2(RISCVCPUState *s, uint32_t cause,
+                                              target_ulong tval)
 {
     bool deleg;
     target_ulong causel;
@@ -2017,13 +2049,16 @@ static void raise_exception2(RISCVCPUState *s, uint32_t cause,
     }
 }
 
-static void raise_exception(RISCVCPUState *s, uint32_t cause)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::raise_exception(RISCVCPUState *s, uint32_t cause)
 {
     raise_exception2(s, cause, 0);
 }
 
 /* returning to anything below M drops the privilege MPRV borrows */
-static void clear_mprv_on_return(RISCVCPUState *s, int new_priv)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::clear_mprv_on_return(RISCVCPUState *s,
+                                                  int new_priv)
 {
     if (new_priv != PRV_M && (s->mstatus & MSTATUS_MPRV)) {
         s->mstatus &= ~MSTATUS_MPRV;
@@ -2031,7 +2066,8 @@ static void clear_mprv_on_return(RISCVCPUState *s, int new_priv)
     }
 }
 
-static void handle_sret(RISCVCPUState *s)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::handle_sret(RISCVCPUState *s)
 {
     int spp;
     bool spie;
@@ -2048,7 +2084,8 @@ static void handle_sret(RISCVCPUState *s)
     s->pc = s->sepc;
 }
 
-static void handle_mret(RISCVCPUState *s)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::handle_mret(RISCVCPUState *s)
 {
     int mpp;
     bool mpie;
@@ -2065,7 +2102,8 @@ static void handle_mret(RISCVCPUState *s)
     s->pc = s->mepc;
 }
 
-static inline uint32_t get_pending_irq_mask(RISCVCPUState *s)
+template <int MaxXlen>
+uint32_t RISCVCPUState<MaxXlen>::get_pending_irq_mask(RISCVCPUState *s)
 {
     uint32_t pending_ints, enabled_ints;
 
@@ -2092,7 +2130,8 @@ static inline uint32_t get_pending_irq_mask(RISCVCPUState *s)
     return pending_ints & enabled_ints;
 }
 
-static __exception int raise_interrupt(RISCVCPUState *s)
+template <int MaxXlen>
+int RISCVCPUState<MaxXlen>::raise_interrupt(RISCVCPUState *s)
 {
     uint32_t mask;
     size_t i;
@@ -2127,7 +2166,8 @@ static inline uint32_t get_field1(uint32_t val, int src_pos,
    from here for as long as it runs. */
 #define INTERP_COUNT_LIMIT INT32_MAX
 
-static void glue(riscv_cpu_interp, MAX_XLEN)(RISCVCPUState *s)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::riscv_cpu_interp(RISCVCPUState *s)
 {
     int n_cycles = INTERP_COUNT_LIMIT;
 
@@ -2153,16 +2193,18 @@ static void glue(riscv_cpu_interp, MAX_XLEN)(RISCVCPUState *s)
         case 32:
             riscv_cpu_interp_x<32>(s, n_cycles);
             break;
-#if MAX_XLEN >= 64
         case 64:
-            riscv_cpu_interp_x<64>(s, n_cycles);
+            if constexpr (MAX_XLEN >= 64)
+                riscv_cpu_interp_x<64>(s, n_cycles);
+            else
+                abort();
             break;
-#endif
-#if MAX_XLEN >= 128
         case 128:
-            riscv_cpu_interp_x<128>(s, n_cycles);
+            if constexpr (MAX_XLEN >= 128)
+                riscv_cpu_interp_x<128>(s, n_cycles);
+            else
+                abort();
             break;
-#endif
         default:
             abort();
         }
@@ -2173,20 +2215,9 @@ static void glue(riscv_cpu_interp, MAX_XLEN)(RISCVCPUState *s)
     s->load_res = (target_ulong)-1;
 }
 
-/* Note: the value is not accurate when called in riscv_cpu_interp() */
-static uint64_t glue(riscv_cpu_get_cycles, MAX_XLEN)(RISCVCPUState *s)
-{
-    return s->insn_counter;
-}
-
-static bool glue(riscv_cpu_get_power_down, MAX_XLEN)(RISCVCPUState *s)
-{
-    process_inbox(s);
-    return s->power_down_flag;
-}
-
-static RISCVCPUState *glue(riscv_cpu_init, MAX_XLEN)(PhysMemoryMap *mem_map,
-                                                     uint32_t hart_id)
+template <int MaxXlen>
+auto RISCVCPUState<MaxXlen>::riscv_cpu_init(PhysMemoryMap *mem_map,
+                                            uint32_t hart_id) -> RISCVCPUState *
 {
     RISCVCPUState *s;
 
@@ -2207,9 +2238,8 @@ static RISCVCPUState *glue(riscv_cpu_init, MAX_XLEN)(PhysMemoryMap *mem_map,
     s->irq_line_mask = MIP_MSIP | MIP_MTIP | MIP_MEIP | MIP_SEIP;
     s->misa |= MCPUID_SUPER | MCPUID_USER | MCPUID_I | MCPUID_M | MCPUID_A;
     s->misa |= MCPUID_F | MCPUID_D;
-#if FLEN >= 128
-    s->misa |= MCPUID_Q;
-#endif
+    if constexpr (FLEN >= 128)
+        s->misa |= MCPUID_Q;
 #ifdef CONFIG_EXT_C
     s->misa |= MCPUID_C;
 #endif
@@ -2217,32 +2247,32 @@ static RISCVCPUState *glue(riscv_cpu_init, MAX_XLEN)(PhysMemoryMap *mem_map,
     return s;
 }
 
-static uint32_t glue(riscv_cpu_get_misa, MAX_XLEN)(RISCVCPUState *s)
-{
-    return s->misa;
-}
-
-/* The interpreter and its helpers stay plain functions over RISCVCPUState;
+/* The interpreter and its helpers stay static functions over RISCVCPUState;
    these overrides are the only bridge to the abstract interface. */
-void RISCVCPUState::Interp()
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::Interp()
 {
-    glue(riscv_cpu_interp, MAX_XLEN)(this);
+    riscv_cpu_interp(this);
 }
 
 /* The interpreter looks at inbox_pending between blocks, then at
    exit_request once it has taken the inbox in. */
-void RISCVCPUState::RequestExit()
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::RequestExit()
 {
     exit_request.store(true);
     inbox_pending.store(true);
 }
 
-uint64_t RISCVCPUState::Cycles()
+/* Note: the value is not accurate when called in riscv_cpu_interp() */
+template <int MaxXlen>
+uint64_t RISCVCPUState<MaxXlen>::Cycles()
 {
-    return glue(riscv_cpu_get_cycles, MAX_XLEN)(this);
+    return insn_counter;
 }
 
-void RISCVCPUState::SetIrqLine(uint32_t mask, bool level)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::SetIrqLine(uint32_t mask, bool level)
 {
     if (level)
         irq_lines.fetch_or(mask);
@@ -2251,47 +2281,57 @@ void RISCVCPUState::SetIrqLine(uint32_t mask, bool level)
     inbox_pending.store(true);
 }
 
-uint64_t RISCVCPUState::UpdateSTimer()
+template <int MaxXlen>
+uint64_t RISCVCPUState<MaxXlen>::UpdateSTimer()
 {
     return update_stimer(this);
 }
 
-uint64_t RISCVCPUState::STimerDeadline()
+template <int MaxXlen>
+uint64_t RISCVCPUState<MaxXlen>::STimerDeadline()
 {
     return stimer_deadline.load();
 }
 
-bool RISCVCPUState::PowerDown()
+template <int MaxXlen>
+bool RISCVCPUState<MaxXlen>::PowerDown()
 {
-    return glue(riscv_cpu_get_power_down, MAX_XLEN)(this);
+    process_inbox(this);
+    return power_down_flag;
 }
 
-uint32_t RISCVCPUState::Misa()
+template <int MaxXlen>
+uint32_t RISCVCPUState<MaxXlen>::Misa()
 {
-    return glue(riscv_cpu_get_misa, MAX_XLEN)(this);
+    return misa;
 }
 
-void RISCVCPUState::SetRtcTimeSource(RtcTimeSource *source)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::SetRtcTimeSource(RtcTimeSource *source)
 {
     rtc_time_source = source;
 }
 
-void RISCVCPUState::FlushTlbWriteRangeRam(uint8_t *ram_ptr, size_t ram_size)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::FlushTlbWriteRangeRam(uint8_t *ram_ptr, size_t ram_size)
 {
-    glue(riscv_cpu_flush_tlb_write_range_ram, MAX_XLEN)(this, ram_ptr, ram_size);
+    flush_tlb_write_range_ram(this, ram_ptr, ram_size);
 }
 
-void RISCVCPUState::SetDeviceLock(DeviceLock *lock)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::SetDeviceLock(DeviceLock *lock)
 {
     device_lock = lock;
 }
 
-void RISCVCPUState::SetSmp(bool enable)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::SetSmp(bool enable)
 {
     smp = enable;
 }
 
-void RISCVCPUState::SetInterruptArch(RISCVInterruptArch arch)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::SetInterruptArch(RISCVInterruptArch arch)
 {
     intr_arch = arch;
     /* interrupt files drive the external interrupts by themselves */
@@ -2300,7 +2340,8 @@ void RISCVCPUState::SetInterruptArch(RISCVInterruptArch arch)
         irq_line_mask |= MIP_MEIP | MIP_SEIP;
 }
 
-void RISCVCPUState::ImsicSetPending(bool supervisor, uint32_t id)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::ImsicSetPending(bool supervisor, uint32_t id)
 {
     int file = supervisor ? IMSIC_FILE_S : IMSIC_FILE_M;
 
@@ -2311,12 +2352,14 @@ void RISCVCPUState::ImsicSetPending(bool supervisor, uint32_t id)
     inbox_pending.store(true);
 }
 
-uint32_t RISCVCPUState::HartId()
+template <int MaxXlen>
+uint32_t RISCVCPUState<MaxXlen>::HartId()
 {
     return mhartid;
 }
 
-void RISCVCPUState::SetSbiHandler(RISCVSbiHandler *handler)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::SetSbiHandler(RISCVSbiHandler *handler)
 {
     sbi = handler;
     /* everything but the ecalls the handler answers */
@@ -2327,12 +2370,14 @@ void RISCVCPUState::SetSbiHandler(RISCVSbiHandler *handler)
     sbi_stop(this);
 }
 
-RISCVHsmState RISCVCPUState::HsmState()
+template <int MaxXlen>
+RISCVHsmState RISCVCPUState<MaxXlen>::HsmState()
 {
     return (RISCVHsmState)hsm_state.load();
 }
 
-bool RISCVCPUState::HsmStart(uint64_t addr, uint64_t opaque)
+template <int MaxXlen>
+bool RISCVCPUState<MaxXlen>::HsmStart(uint64_t addr, uint64_t opaque)
 {
     int expected = RISCV_HSM_STOPPED;
 
@@ -2346,13 +2391,15 @@ bool RISCVCPUState::HsmStart(uint64_t addr, uint64_t opaque)
     return true;
 }
 
-void RISCVCPUState::PostSoftIrq()
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::PostSoftIrq()
 {
     ssip_posted.store(true);
     inbox_pending.store(true);
 }
 
-uint64_t RISCVCPUState::PostTlbFlush()
+template <int MaxXlen>
+uint64_t RISCVCPUState<MaxXlen>::PostTlbFlush()
 {
     uint64_t ticket = tlb_flush_req.fetch_add(1) + 1;
 
@@ -2360,17 +2407,20 @@ uint64_t RISCVCPUState::PostTlbFlush()
     return ticket;
 }
 
-bool RISCVCPUState::TlbFlushDone(uint64_t ticket)
+template <int MaxXlen>
+bool RISCVCPUState<MaxXlen>::TlbFlushDone(uint64_t ticket)
 {
     return tlb_flush_done.load() >= ticket;
 }
 
-void RISCVCPUState::HsmStop()
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::HsmStop()
 {
     sbi_stop(this);
 }
 
-void RISCVCPUState::HsmSuspend(bool retentive, uint64_t resume_addr,
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::HsmSuspend(bool retentive, uint64_t resume_addr,
                                uint64_t opaque)
 {
     hsm_suspended = true;
@@ -2383,29 +2433,34 @@ void RISCVCPUState::HsmSuspend(bool retentive, uint64_t resume_addr,
         power_down_flag = true;
 }
 
-void RISCVCPUState::SetTimer(uint64_t stime)
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::SetTimer(uint64_t stime)
 {
     stimecmp = stime;
     update_stimer(this);
 }
 
-void RISCVCPUState::ClearSoftIrq()
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::ClearSoftIrq()
 {
     mip &= ~MIP_SSIP;
 }
 
-void RISCVCPUState::FlushTlb()
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::FlushTlb()
 {
     tlb_flush_all(this);
     take_posted_tlb_flush(this);
 }
 
-void RISCVCPUState::TakePostedTlbFlush()
+template <int MaxXlen>
+void RISCVCPUState<MaxXlen>::TakePostedTlbFlush()
 {
     take_posted_tlb_flush(this);
 }
 
-bool RISCVCPUState::ReadVirtual(uint64_t vaddr, uint64_t *pval)
+template <int MaxXlen>
+bool RISCVCPUState<MaxXlen>::ReadVirtual(uint64_t vaddr, uint64_t *pval)
 {
     int saved_exception = pending_exception;
     target_ulong saved_tval = pending_tval;
@@ -2422,30 +2477,3 @@ bool RISCVCPUState::ReadVirtual(uint64_t vaddr, uint64_t *pval)
 }
 
 } // anonymous namespace
-
-
-RISCVCPU *glue(riscv_cpu_create, MAX_XLEN)(PhysMemoryMap *mem_map,
-                                           uint32_t hart_id)
-{
-    return glue(riscv_cpu_init, MAX_XLEN)(mem_map, hart_id);
-}
-
-#if CONFIG_RISCV_MAX_XLEN == MAX_XLEN
-RISCVCPU *riscv_cpu_create(PhysMemoryMap *mem_map, int max_xlen,
-                           uint32_t hart_id)
-{
-    switch (max_xlen) {
-        case 32:
-            return riscv_cpu_create32(mem_map, hart_id);
-        case 64:
-            return riscv_cpu_create64(mem_map, hart_id);
-#if CONFIG_RISCV_MAX_XLEN == 128
-        case 128:
-            return riscv_cpu_create128(mem_map, hart_id);
-#endif
-        default:
-            return nullptr;
-    }
-}
-#endif /* CONFIG_RISCV_MAX_XLEN == MAX_XLEN */
-

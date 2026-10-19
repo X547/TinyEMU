@@ -1,20 +1,10 @@
-# riscv_cpu.cpp is compiled once per supported XLEN.
-riscv_cpu_libs = []
-xlens = [32, 64]
+# riscv_cpuNN.cpp each instantiate the interpreter for one maximum XLEN.
+riscv_cpu_files = files('riscv_cpu32.cpp', 'riscv_cpu64.cpp')
 if max_xlen == 128
-  xlens += 128
+  riscv_cpu_files += files('riscv_cpu128.cpp')
 endif
-
-foreach xlen : xlens
-  riscv_cpu_libs += static_library('riscv_cpu@0@'.format(xlen),
-    files('riscv_cpu.cpp'),
-    cpp_args: common_args + ['-DMAX_XLEN=@0@'.format(xlen)],
-    include_directories: inc,
-    dependencies: common_deps,
-  )
-endforeach
 
 # What runs the interpreter as the machine's harts, built once.
 emu_libs += static_library('cpu_riscv',
-  files('riscv_interp_backend.cpp', 'riscv_interp_sbi.cpp'),
+  riscv_cpu_files + files('riscv_interp_backend.cpp', 'riscv_interp_sbi.cpp'),
   kwargs: lib_kwargs)

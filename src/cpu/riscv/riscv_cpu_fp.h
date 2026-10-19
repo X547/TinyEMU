@@ -47,11 +47,13 @@ template <> struct SoftFloat<32> {
     static constexpr auto from_u32 = cvt_u32_sf32;
     static constexpr auto from_i64 = cvt_i64_sf32;
     static constexpr auto from_u64 = cvt_u64_sf32;
+    static constexpr auto from_sf64 = cvt_sf64_sf32;
 #ifdef HAVE_INT128
     static constexpr auto to_i128 = cvt_sf32_i128;
     static constexpr auto to_u128 = cvt_sf32_u128;
     static constexpr auto from_i128 = cvt_i128_sf32;
     static constexpr auto from_u128 = cvt_u128_sf32;
+    static constexpr auto from_sf128 = cvt_sf128_sf32;
 #endif
 };
 
@@ -77,11 +79,13 @@ template <> struct SoftFloat<64> {
     static constexpr auto from_u32 = cvt_u32_sf64;
     static constexpr auto from_i64 = cvt_i64_sf64;
     static constexpr auto from_u64 = cvt_u64_sf64;
+    static constexpr auto from_sf32 = cvt_sf32_sf64;
 #ifdef HAVE_INT128
     static constexpr auto to_i128 = cvt_sf64_i128;
     static constexpr auto to_u128 = cvt_sf64_u128;
     static constexpr auto from_i128 = cvt_i128_sf64;
     static constexpr auto from_u128 = cvt_u128_sf64;
+    static constexpr auto from_sf128 = cvt_sf128_sf64;
 #endif
 };
 
@@ -112,25 +116,18 @@ template <> struct SoftFloat<128> {
     static constexpr auto to_u128 = cvt_sf128_u128;
     static constexpr auto from_i128 = cvt_i128_sf128;
     static constexpr auto from_u128 = cvt_u128_sf128;
+    static constexpr auto from_sf32 = cvt_sf32_sf128;
+    static constexpr auto from_sf64 = cvt_sf64_sf128;
 };
 #endif
 
-/* the bits of an FP register above a value of F bits, which NaN-box it */
-template <int F>
-static constexpr fp_uint fp_high()
-{
-    if constexpr (F < FLEN)
-        return (fp_uint)-1 << F;
-    else
-        return 0;
-}
-
 /* OP-FP of the format of F bits: 'funct5' is the operation, 'rm' the rounding
    mode field. Returns 0, or INSN_ILLEGAL. */
+template <int MaxXlen>
 template <int F, int Xlen>
-static force_inline int exec_fp_op(RISCVCPUState *s, uint32_t funct5,
-                                   uint32_t rd, uint32_t rs1, uint32_t rs2,
-                                   int32_t rm)
+int RISCVCPUState<MaxXlen>::exec_fp_op(RISCVCPUState *s, uint32_t funct5,
+                                       uint32_t rd, uint32_t rs1,
+                                       uint32_t rs2, int32_t rm)
 {
     typedef SoftFloat<F> SF;
     constexpr fp_uint high = fp_high<F>();
@@ -319,42 +316,46 @@ static force_inline int exec_fp_op(RISCVCPUState *s, uint32_t funct5,
         if constexpr (F == 32) {
             switch(rs2) {
             case 1: /* cvt.s.d */
-                s->fp_reg[rd] = cvt_sf64_sf32(s->fp_reg[rs1], RM(rm), &s->fflags) | F32_HIGH;
+                s->fp_reg[rd] = SF::from_sf64(s->fp_reg[rs1], RM(rm),
+                                              &s->fflags) | high;
                 break;
-#if FLEN >= 128
             case 3: /* cvt.s.q */
-                s->fp_reg[rd] = cvt_sf128_sf32(s->fp_reg[rs1], RM(rm), &s->fflags) | F32_HIGH;
+                if constexpr (FLEN < 128)
+                    return INSN_ILLEGAL;
+                else
+                    s->fp_reg[rd] = SF::from_sf128(s->fp_reg[rs1], RM(rm),
+                                                   &s->fflags) | high;
                 break;
-#endif
             default:
                 return INSN_ILLEGAL;
             }
         } else if constexpr (F == 64) {
             switch(rs2) {
             case 0: /* cvt.d.s */
-                s->fp_reg[rd] = cvt_sf32_sf64(s->fp_reg[rs1], &s->fflags) | F64_HIGH;
+                s->fp_reg[rd] = SF::from_sf32(s->fp_reg[rs1],
+                                              &s->fflags) | high;
                 break;
-#if FLEN >= 128
             case 1: /* cvt.d.q */
-                s->fp_reg[rd] = cvt_sf128_sf64(s->fp_reg[rs1], RM(rm), &s->fflags) | F64_HIGH;
+                if constexpr (FLEN < 128)
+                    return INSN_ILLEGAL;
+                else
+                    s->fp_reg[rd] = SF::from_sf128(s->fp_reg[rs1], RM(rm),
+                                                   &s->fflags) | high;
                 break;
-#endif
             default:
                 return INSN_ILLEGAL;
             }
         } else {
-#if FLEN >= 128
             switch(rs2) {
             case 0: /* cvt.q.s */
-                s->fp_reg[rd] = cvt_sf32_sf128(s->fp_reg[rs1], &s->fflags);
+                s->fp_reg[rd] = SF::from_sf32(s->fp_reg[rs1], &s->fflags);
                 break;
             case 1: /* cvt.q.d */
-                s->fp_reg[rd] = cvt_sf64_sf128(s->fp_reg[rs1], &s->fflags);
+                s->fp_reg[rd] = SF::from_sf64(s->fp_reg[rs1], &s->fflags);
                 break;
             default:
                 return INSN_ILLEGAL;
             }
-#endif
         }
         s->fs = 3;
         break;
