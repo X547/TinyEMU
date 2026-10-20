@@ -236,219 +236,11 @@ BeOS R5 maps the 3dfx frame buffer uncached, counting on an MTRR to make it
 write-combining, and WHP and KVM ignore guest MTRRs. A guest that programs
 PAT itself replaces the value.
 
-The root bus of an FDT machine is declared as:
-
-bus: { type: "fdt", devices: [ ... ] }
-
-and that of the PC machine as:
-
-bus: { type: "pc", devices: [ ... ] }
-
-Each entry of "devices" is an object with a "type" and whatever properties
-that type needs. A device that provides a bus of its own carries a nested
-"bus" object, so buses can be nested arbitrarily, for example
-FDT bus -> pci-host-ecam-generic -> PCI bus -> virtio device.
-
-The difference between the two root buses is where a device's registers are
-decoded. An FDT machine maps them into physical address space and allocates
-the addresses and interrupt lines, then describes what it assigned in the
-device tree. A PC decodes them by port number, and its devices sit at the
-addresses a PC has had since the AT, so nothing places them; the machine only
-checks that two devices have not been declared on top of each other. The PC
-has no device tree, so nothing it carries is described to the guest: its
-firmware and its guests know where to look.
-
-Device types:
-
-  ns16550a               serial port; on an FDT machine it also supplies
-                         /chosen/stdout-path, and on a PC it is COM1 at 0x3f8
-                         on line 4 unless "reg" (the port) and "irq" say
-                         otherwise
-  simplefb               "width", "height"
-  syscon-poweroff        power off register on the FDT bus, described as a
-                         "syscon" block and a "syscon-poweroff" node, which
-                         OpenSBI and Linux use to power off; see 4.3 for the
-                         exit status
-  cfi-flash              parallel NOR flash on the FDT bus, read in place and
-                         programmed with the Intel command set through a 32
-                         bit bank of two 16 bit chips, as on QEMU's virt
-                         machines; "file" (its contents, rounded up to a
-                         power of two with erased blocks; what the guest
-                         programs is written back as to a disk), "base" (its
-                         address; placed by the bus if absent), "block_size"
-                         (erase block in KB, default 256) and "read_only".
-                         EDK2's RISC-V virt build runs from one at
-                         0x20000000 and keeps its variables in one at
-                         0x22000000
-  pci-host-ecam-generic  ECAM PCIe host bridge; "bus_count" (ECAM window
-                         size in MB, default 16), "mmio_size" (aperture size
-                         in MB, default 256), "mmio64_size" (size in MB of a
-                         second aperture above 4 GB, default 4096; 0 for
-                         none), "io_size" (I/O aperture size in KB, default
-                         64; 0 for none), and a nested PCI bus
-  pci-host-designware    Synopsys DesignWare PCIe root complex; "mmio_size",
-                         "mmio64_size", "io_size" and "bus_count" as above
-                         (bus_count defaults to 16 and bounds only what the
-                         device tree advertises), "compatible" (which
-                         controller it claims to be, default
-                         "sifive,fu740-pcie"), and a nested PCI bus
-  pci-host-plda          PLDA XpressRich PCIe root complex, as the StarFive
-                         JH7110 has ("starfive,jh7110-pcie"); "mmio_size",
-                         "mmio64_size" and "bus_count" as above, no I/O
-                         aperture, and a nested PCI bus. Brings its own
-                         syscon and reset controller nodes, which the driver
-                         requires. A guest may accept only PCI domains 0
-                         and 1, so it should be among the first two host
-                         bridges declared
-  pci-bridge             PCI Express switch; the devices nested in it sit
-                         behind it rather than on the bus above. Nest one
-                         inside another for a deeper hierarchy
-  pci-host-i440fx        the host bridge of the PC machine: the CF8/CFC
-                         configuration ports, the i440FX function and the
-                         PIIX3 ISA bridge that routes the four INTx lines
-                         onto the PIC, and a nested PCI bus. Its apertures
-                         are the space from the end of the RAM below 4 GB
-                         to 0xf8000000, and above the RAM up to the
-                         physical address width
-  pci-host-cloudhv       the same bridge as Cloud Hypervisor presents it,
-                         which EDK2's Cloud Hypervisor build, booted as a
-                         PVH kernel, needs: the host bridge function is
-                         8086:0d57 and the aperture below 4 GB is fixed at
-                         0xc0000000-0xf7ffffff
-  vga                    the standard VGA on a PCI bus, which is also what
-                         decodes the legacy VGA and VBE ports; "width" and
-                         "height" are the largest mode it offers and the
-                         size the window opens at, and the machine's
-                         vga_bios is its ROM. It follows the guest from one
-                         mode to another: text, and the VBE linear modes at
-                         8, 15, 16, 24 and 32 bits per pixel. The planar and
-                         chained graphics modes addressed through the
-                         0xa0000 window are not drawn
-  banshee                3dfx Voodoo Banshee on a PCI bus, with a 2D drawing
-                         engine and a hardware cursor; "vram" (video memory
-                         in MB, a power of two from 4 to 32, default 16),
-                         "model" ("banshee" or "voodoo3", which changes only
-                         what a driver matches on), and "width" and "height"
-                         (default 1024 and 768) for the size the window
-                         opens at. It has no VGA core, so it shows nothing
-                         until a driver turns its video processor on
-  i8042                  the PC's keyboard controller; "vmmouse" (default 1)
-                         adds the VMware backdoor port the absolute pointer
-                         protocol is read through, and a nested PS/2 bus
-                         carrying up to two devices
-  hpet                   the PC's HPET at 0xfed00000: a 100 MHz counter and
-                         three timers, which in legacy replacement mode take
-                         over the lines of the PIT and the RTC and otherwise
-                         go to IOAPIC inputs 16 to 23. A firmware or a kernel
-                         booted without one finds it in the ACPI tables
-  ps2-keyboard           PS/2 keyboard; "port" (0 or 1, default the first
-                         free one)
-  ps2-mouse              PS/2 pointer; "port" as above. Any order works: a
-                         mouse on port 0 and a keyboard on port 1 is what
-                         the controller sees if the mouse is listed first
-  pci-ide                PCI IDE controller with bus master DMA, and a nested
-                         ATA bus. On the PC it runs in compatibility mode --
-                         0x1f0 and 0x170 on lines 14 and 15, with only the bus
-                         master block placed by a base address register --
-                         and elsewhere in native mode, where every window is a
-                         base address register and the interrupt is INTx
-  ata-disk               ATA disk; "file", and "read_only"
-  atapi                  ATAPI packet device: a nested SCSI bus carrying one
-                         device, whose commands it passes over the ATA bus
-  buslogic               BusLogic BT-958 PCI SCSI host adapter, and a nested
-                         SCSI bus with targets 0 to 15 (7 is the adapter's
-                         own) and units 0 to 7. It has no BIOS, so the guest
-                         cannot boot from it
-  virtio-block           "file", and "read_only"
-  virtio-9p             "file", "tag"
-  virtio-net             "driver" ("user" or "tap"), "ifname" for tap, and
-                         "forward" (see below) for user
-  virtio-console         uses the emulator console
-  virtio-input           "kind" ("keyboard", "mouse" or "tablet")
-  virtio-gpu             2D display with a cursor; "width" and "height"
-                         (default 1024 and 768) are the size first offered
-                         to the guest, which is asked to follow when the
-                         window is resized. The guest reports what changed,
-                         so the screen is not polled
-  xhci                  USB 3.0 host controller on PCI; "usb2_ports"
-                         (default 4) and "usb3_ports" (default 2), and a
-                         nested USB bus
-  usb-hub                USB 2.0 hub; "ports" (default 4), "port" (which port
-                         of the parent to occupy, default the first free one),
-                         and a nested USB bus
-  usb-storage            USB mass storage, bulk-only transport; "port" as
-                         above, and a nested SCSI bus
-  usb-hid                USB HID class device, the HID bus over USB; "port" as
-                         above, and a nested HID bus
-  usb-audio              USB Audio Class 1.0 device; "port" as above, and a
-                         nested bus carrying its outputs
-  usb-audio-output       playback path of a "usb-audio" (see below)
-  hid-keyboard           HID keyboard; "index" (which function of the
-                         transport to be, default the first free one)
-  hid-tablet             HID absolute pointing device; "index" as above
-  scsi-disk              SCSI direct access block device; "file", "lun"
-                         (default the first free logical unit), and
-                         "read_only"
-  scsi-cd                SCSI CD/DVD-ROM drive; "file" (a plain ISO image of
-                         2048 byte blocks, opened read only; without one the
-                         drive is empty) and "lun" as above. An image larger
-                         than 80 minutes of blocks is a DVD. The guest can
-                         eject the disc and load it again
-  nvme                   NVM Express controller on PCI; "quirks" (see below)
-                         and a nested NVMe bus
-  nvme-ns                NVMe namespace; "file", "nsid" (default the first
-                         free namespace id), and "read_only"
-  sdhci                  SD host controller, on PCI or on the FDT bus;
-                         "clock" (the base clock in MHz, default 50),
-                         "compatible" (which controller the device tree node
-                         claims to be, default "arasan,sdhci-8.9a", and
-                         unused on PCI), and a nested SD bus
-  dw-mmc                 Synopsys DesignWare MMC host on the FDT bus, as the
-                         StarFive JH7110 has; "clock" (the card interface
-                         clock in MHz, default 50), "compatible" (default
-                         "snps,dw-mshc"), "dma" (the DMA descriptor address
-                         width, 32 as on the JH7110 or 64; 0 for a
-                         controller built without its DMA engine), and a
-                         nested SD bus
-  intel-hda              Intel High Definition Audio controller (ICH6) on PCI;
-                         "input_streams" and "output_streams" (default 4
-                         each), and a nested HDA link
-  hda-codec              codec on an HDA link; "address" (default the first
-                         free one), "vendor_id", "subsystem_id" and
-                         "revision_id" (what a driver matches on), and a
-                         nested bus carrying its function groups
-  hda-audio-group        audio function group, and a nested bus carrying its
-                         ports
-  hda-output             output converter and the pin it drives (see below)
-  sd-card               SD memory card; "file", and "read_only"
-  mmc-card               eMMC storage device; "file", and "read_only"
-  ne2000                 NE2000 Ethernet adapter, on PCI as an RTL8029AS or
-                         on the ports a PC's ISA bus carried one on; "driver"
-                         and "ifname" as for virtio-net, and "reg" (default
-                         0x300) and "irq" (default 9) for the ports, which
-                         only a card on the pc bus takes
-  eepro100               Intel EtherExpress PRO/100 (82558) Ethernet adapter
-                         on PCI, with its PHY and EEPROM; "driver" and
-                         "ifname" as for virtio-net. It moves frames by bus
-                         master DMA, so it is much faster than the ne2000
-                         under a hypervisor, for a guest with a driver for it
-  dwmac                 Synopsys DesignWare Ethernet QoS MAC on the FDT bus;
-                         "driver" and "ifname" as for virtio-net,
-                         "compatible" (which core the node claims to be,
-                         default "snps,dwmac-5.10a"; it must name a 4.x or
-                         5.x core, because that is the register layout this
-                         models), "phy_mode" (default "rgmii-id"), "quirks"
-                         (see below), and a nested MDIO bus
-  ethernet-phy           generic 10/100/1000 PHY on an MDIO bus; "reg" (its
-                         address, default the first free one) and "phy_id"
-                         (the identifier the guest reads, default one no
-                         vendor owns so that a generic driver binds)
-  dw-i2c                 Synopsys DesignWare I2C controller on the FDT bus,
-                         as the StarFive JH7110 has; "compatible" (default
-                         "snps,designware-i2c"), and a nested I2C bus
-  i2c-hid                HID over I2C target; "reg" (its 7 bit address,
-                         0x08 to 0x77, default the first free one), and a
-                         nested HID bus carrying one function
+The root bus is { type: "fdt", devices: [ ... ] } on a RISC-V machine and
+{ type: "pc", devices: [ ... ] } on the PC. docs/devices.md describes how
+devices and buses nest, every device type and its properties, and gives an
+example definition for each; the sections below explain how the device models
+behave.
 
 The virtio devices work on either transport: attached to the FDT bus they
 appear as virtio-mmio, and attached to a PCI bus they appear as PCI devices.
@@ -517,28 +309,12 @@ protocol's level triggered line is meant to be. The controller runs commands
 as they are queued, so a transfer takes the bus no time; it holds the bus when
 its command FIFO runs dry without a STOP, as the drivers expect.
 
-Whichever devices are realized last holding the keyboard and the pointer roles
-are the ones the emulator window sends its events to, so a configuration
-should declare either "virtio-input" or HID functions, not both.
-
 The NVMe controller nests the same way, down to the image file:
 
     PCI bus -> nvme -> NVMe bus -> nvme-ns
 
 It behaves as the specification describes unless the configuration asks
-otherwise. "quirks" is an array of names, and a name that is not one of these
-is reported rather than ignored:
-
-  no-enable-check      serve the admin queue as soon as AQA, ASQ and ACQ have
-                       been programmed, instead of waiting for CC.EN
-  nsid-zero            take namespace id 0 to mean namespace 1
-  loose-queue-create   accept a queue creation that asks for a discontiguous
-                       queue or names completion queue 0, and clamp a read
-                       that runs off the end of the namespace instead of
-                       failing it
-  poll-only            never drive the INTx pin, leaving the guest to poll
-  haiku                all four, which is what Haiku's RISC-V boot loader and
-                       disk driver between them need
+otherwise with "quirks", which docs/devices.md lists.
 
 A completion queue interrupt is a level: it is asserted while the queue holds
 entries the host has not taken, and it clears when the host rings that queue's
@@ -602,35 +378,8 @@ the codecs on the link, their function groups, and the ports of a group.
 
 Each "hda-output" is a converter and the pin it drives, and plays to a host
 back end of its own, so one controller may carry, say, a line out to the
-speakers and a headphone jack recorded to a file:
-
-  kind         "line-out" (default), "speaker" or "headphone"
-  location     "rear", "front", "left", "right", "top", "bottom" or
-               "internal"; the default follows "kind". An internal pin is
-               a fixed one, anything else a jack
-  association  1 to 15 (default 1), and "sequence", 0 to 15 (default 0):
-               how the pins group, as the pin configuration tells the
-               driver. Pins in one association are one device, in the
-               order their sequences give
-  channels     1 to 16 (default 2)
-  plugged      whether something is in the jack (default 1). A driver that
-               follows the jacks silences the speakers while headphones
-               are plugged in
-  rates        the sample rates the converter offers, e.g. [44100, 48000];
-               by default only the rate the host end runs at, so that
-               nothing is converted
-  host         where the sound goes: an object with "driver" and what that
-               driver takes:
-                 "host"  the host's own audio system: WASAPI on Windows,
-                         where "device" picks an output by part of its
-                         name and without it the default output is
-                         followed as the user changes it; the Media Kit's
-                         system mixer on Haiku. On a host without an audio
-                         back end it is "none". The default
-                 "wav"   "file", a WAV file the guest's sound is written to
-                 "none"  nothing, but the guest's streams keep time
-               "latency" (default 20) is how far ahead of the listener,
-               in milliseconds, the guest may run
+speakers and a headphone jack recorded to a file. A driver that follows the
+jacks silences the speakers while headphones are plugged in.
 
 A stream moves at the pace of the host end's own clock rather than the
 emulator's: the host device asks for frames and the controller fetches them
@@ -645,13 +394,7 @@ own:
 
 A "usb-audio" is a full speed USB Audio Class 1.0 device carrying up to four
 outputs, each a streaming interface the guest sees as a playback device of
-its own. An output takes "host" as "hda-output" does, and:
-
-  kind         "speaker" (default), "headphone" or "line-out", the output
-               terminal the guest is told about
-  channels     1 to 8 (default 2), 16 bit samples
-  rates        the sample rates offered, e.g. [44100, 48000], from 8000 to
-               96000; by default only the rate the host end runs at
+its own.
 
 The output has a master mute and volume, and works as real asynchronous
 hardware does. The controller delivers the guest's packets in the USB frames
@@ -722,16 +465,8 @@ reassembles one. Checksum offload, segmentation, timestamping, the hash
 filter and the statistics counters are all absent, and the feature registers
 say so, so a driver never asks for them.
 
-The MAC is a bare DesignWare core unless the configuration asks otherwise.
-"quirks" is an array of names, and a name that is not one of these is
-reported rather than ignored:
-
-  clocks           emit the clocks a StarFive style platform binding names,
-                   as one fixed clock standing in for all of them
-  link-on-reset    report the link again after a software reset
-  haiku            both, which is what Haiku's driver needs together
-
-Both exist for a driver written against a part that wraps this core in a
+The MAC is a bare DesignWare core unless the configuration asks otherwise
+with "quirks" ("clocks" and "link-on-reset"; see docs/devices.md). Both exist for a driver written against a part that wraps this core in a
 platform binding rather than for the core itself. Such a driver refuses to
 probe when a clock that binding names is missing, and there is no clock
 controller in this machine to take one from. And where Linux learns the link
@@ -743,13 +478,8 @@ two do not collide, because negotiation finishes a second or so after the
 driver has started.
 
 Haiku's driver wants both, and its device manager binds on the part rather
-than on the core, so it also wants the name:
-
-    { type: "dwmac", driver: "user",
-      compatible: "starfive,jh7110-eqos-5.20", quirks: ["haiku"],
-      bus: { type: "mdio", devices: [ { type: "ethernet-phy", reg: 0 } ] } }
-
-The node keeps "snps,dwmac" as its last compatible entry whatever the first
+than on the core, so it also wants the name; docs/devices.md has the
+definition. The node keeps "snps,dwmac" as its last compatible entry whatever the first
 one says, so a generic driver still binds to it.
 
 The PCI host bridges differ in more than their register layout. The ECAM one
@@ -873,12 +603,10 @@ offers is published on a host port instead, with a "forward" entry beside the
   forward: [ { host_port: 2323, guest_port: 23 } ] }
 
 A connection to port 2323 of the host then arrives at port 23 of the guest.
-"proto" is "tcp" or "udp", default "tcp". "host_addr" is the address the port
-is accepted on, and defaults to 127.0.0.1: a forward is a hole through to the
-guest, so opening it on "0.0.0.0" -- which offers the guest to the whole
-network -- is something the configuration has to ask for. "guest_addr" names
-which guest the connection goes to, and defaults to the one address the
-built-in DHCP server hands out.
+The port is accepted on 127.0.0.1 unless "host_addr" says otherwise: a forward
+is a hole through to the guest, so opening it on "0.0.0.0" -- which offers the
+guest to the whole network -- is something the configuration has to ask for.
+docs/devices.md lists the other properties of an entry.
 
 Only the "user" driver takes forwards. A "tap" guest is on the host's own
 network with an address of its own, and is reached at it.
