@@ -160,6 +160,9 @@ bool RISCVInterpBackend::Init(DeviceLock &lock,
     }
     fIsa.misa = fVcpus[0]->Cpu()->Misa();
     fIsa.extensions = {"zicsr", "zifencei", "zicntr"};
+    /* the interpreter has the bit manipulation instructions up to XLEN 64 */
+    if (options.xlen <= 64)
+        fIsa.extensions.insert(fIsa.extensions.end(), {"zba", "zbb", "zbs"});
     if (options.interrupt_arch != RISCV_INTR_BASE)
         fIsa.extensions.insert(fIsa.extensions.end(), {"smaia", "ssaia"});
     fIsa.extensions.insert(fIsa.extensions.end(),

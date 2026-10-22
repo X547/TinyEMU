@@ -149,6 +149,272 @@ static inline U rv_mulhsu(std::make_signed_t<U> a, U b)
     }
 }
 
+/* The bit manipulation primitives of Zbb on U, which is 32 or 64 bits wide. */
+template <typename U>
+static inline U rv_clz(U a)
+{
+    if (a == 0)
+        return 8 * sizeof(U);
+    if constexpr (sizeof(U) == 4)
+        return __builtin_clz(a);
+    else
+        return __builtin_clzll(a);
+}
+
+template <typename U>
+static inline U rv_ctz(U a)
+{
+    if (a == 0)
+        return 8 * sizeof(U);
+    if constexpr (sizeof(U) == 4)
+        return __builtin_ctz(a);
+    else
+        return __builtin_ctzll(a);
+}
+
+template <typename U>
+static inline U rv_cpop(U a)
+{
+    if constexpr (sizeof(U) == 4)
+        return __builtin_popcount(a);
+    else
+        return __builtin_popcountll(a);
+}
+
+template <typename U>
+static inline U rv_rol(U a, unsigned int shamt)
+{
+    shamt &= 8 * sizeof(U) - 1;
+    if (shamt == 0)
+        return a;
+    return (a << shamt) | (a >> (8 * sizeof(U) - shamt));
+}
+
+template <typename U>
+static inline U rv_ror(U a, unsigned int shamt)
+{
+    return rv_rol<U>(a, -shamt);
+}
+
+template <typename U>
+static inline U rv_rev8(U a)
+{
+    if constexpr (sizeof(U) == 4)
+        return __builtin_bswap32(a);
+    else
+        return __builtin_bswap64(a);
+}
+
+template <typename U>
+static inline U rv_orc_b(U a)
+{
+    U r = 0;
+    for (unsigned int i = 0; i < 8 * sizeof(U); i += 8) {
+        if ((a >> i) & 0xff)
+            r |= (U)0xff << i;
+    }
+    return r;
+}
+
+/* The Zba, Zbb and Zbs instructions in OP, at XLEN 32 or 64 with U that
+   wide. False for an encoding that is none of theirs. */
+template <typename U>
+static bool rv_bitmanip_op(uint32_t insn, U a, U b, U *pres)
+{
+    typedef std::make_signed_t<U> S;
+    constexpr unsigned int len = 8 * sizeof(U);
+    U bit = (U)1 << (b & (len - 1));
+
+    switch (get_bits(insn, 25, 7) << 3 | get_bits(insn, 12, 3)) {
+    case 0x10 << 3 | 2: /* sh1add */
+        *pres = b + (a << 1);
+        break;
+    case 0x10 << 3 | 4: /* sh2add */
+        *pres = b + (a << 2);
+        break;
+    case 0x10 << 3 | 6: /* sh3add */
+        *pres = b + (a << 3);
+        break;
+    case 0x20 << 3 | 4: /* xnor */
+        *pres = ~(a ^ b);
+        break;
+    case 0x20 << 3 | 6: /* orn */
+        *pres = a | ~b;
+        break;
+    case 0x20 << 3 | 7: /* andn */
+        *pres = a & ~b;
+        break;
+    case 0x05 << 3 | 4: /* min */
+        *pres = (S)a < (S)b ? a : b;
+        break;
+    case 0x05 << 3 | 5: /* minu */
+        *pres = a < b ? a : b;
+        break;
+    case 0x05 << 3 | 6: /* max */
+        *pres = (S)a < (S)b ? b : a;
+        break;
+    case 0x05 << 3 | 7: /* maxu */
+        *pres = a < b ? b : a;
+        break;
+    case 0x30 << 3 | 1: /* rol */
+        *pres = rv_rol<U>(a, b);
+        break;
+    case 0x30 << 3 | 5: /* ror */
+        *pres = rv_ror<U>(a, b);
+        break;
+    case 0x14 << 3 | 1: /* bset */
+        *pres = a | bit;
+        break;
+    case 0x24 << 3 | 1: /* bclr */
+        *pres = a & ~bit;
+        break;
+    case 0x24 << 3 | 5: /* bext */
+        *pres = (a & bit) != 0;
+        break;
+    case 0x34 << 3 | 1: /* binv */
+        *pres = a ^ bit;
+        break;
+    case 0x04 << 3 | 4: /* zext.h, which RV64 has in OP-32 instead */
+        if (len != 32 || get_bits(insn, 20, 5) != 0)
+            return false;
+        *pres = (uint16_t)a;
+        break;
+    default:
+        return false;
+    }
+    return true;
+}
+
+/* The Zbb and Zbs instructions in OP-IMM, at XLEN 32 or 64 with U that
+   wide. False for an encoding that is none of theirs. */
+template <typename U>
+static bool rv_bitmanip_op_imm(uint32_t insn, U a, U *pres)
+{
+    typedef std::make_signed_t<U> S;
+    constexpr unsigned int len = 8 * sizeof(U);
+    uint32_t imm = get_bits(insn, 20, 12);
+    uint32_t shamt = imm & 0x3f;
+    U bit = (U)1 << (shamt & (len - 1));
+
+    if (get_bits(insn, 12, 3) == 1) {
+        switch (imm) {
+        case 0x600: /* clz */
+            *pres = rv_clz<U>(a);
+            return true;
+        case 0x601: /* ctz */
+            *pres = rv_ctz<U>(a);
+            return true;
+        case 0x602: /* cpop */
+            *pres = rv_cpop<U>(a);
+            return true;
+        case 0x604: /* sext.b */
+            *pres = (S)(int8_t)a;
+            return true;
+        case 0x605: /* sext.h */
+            *pres = (S)(int16_t)a;
+            return true;
+        }
+        if (shamt >= len)
+            return false;
+        switch (imm >> 6) {
+        case 0x0a: /* bseti */
+            *pres = a | bit;
+            return true;
+        case 0x12: /* bclri */
+            *pres = a & ~bit;
+            return true;
+        case 0x1a: /* binvi */
+            *pres = a ^ bit;
+            return true;
+        }
+    } else {
+        if (imm == 0x287) { /* orc.b */
+            *pres = rv_orc_b<U>(a);
+            return true;
+        }
+        if (imm == (len == 32 ? 0x698 : 0x6b8)) { /* rev8 */
+            *pres = rv_rev8<U>(a);
+            return true;
+        }
+        if (shamt >= len)
+            return false;
+        switch (imm >> 6) {
+        case 0x12: /* bexti */
+            *pres = (a & bit) != 0;
+            return true;
+        case 0x18: /* rori */
+            *pres = rv_ror<U>(a, shamt);
+            return true;
+        }
+    }
+    return false;
+}
+
+/* The Zba and Zbb instructions in OP-32, at XLEN 64. The result is the full
+   register value. False for an encoding that is none of theirs. */
+static inline bool rv_bitmanip_op_32(uint32_t insn, uint64_t a, uint64_t b,
+                                     uint64_t *pres)
+{
+    switch (get_bits(insn, 25, 7) << 3 | get_bits(insn, 12, 3)) {
+    case 0x04 << 3 | 0: /* add.uw */
+        *pres = b + (uint32_t)a;
+        break;
+    case 0x04 << 3 | 4: /* zext.h */
+        if (get_bits(insn, 20, 5) != 0)
+            return false;
+        *pres = (uint16_t)a;
+        break;
+    case 0x10 << 3 | 2: /* sh1add.uw */
+        *pres = b + ((uint64_t)(uint32_t)a << 1);
+        break;
+    case 0x10 << 3 | 4: /* sh2add.uw */
+        *pres = b + ((uint64_t)(uint32_t)a << 2);
+        break;
+    case 0x10 << 3 | 6: /* sh3add.uw */
+        *pres = b + ((uint64_t)(uint32_t)a << 3);
+        break;
+    case 0x30 << 3 | 1: /* rolw */
+        *pres = (int32_t)rv_rol<uint32_t>(a, b);
+        break;
+    case 0x30 << 3 | 5: /* rorw */
+        *pres = (int32_t)rv_ror<uint32_t>(a, b);
+        break;
+    default:
+        return false;
+    }
+    return true;
+}
+
+/* The Zba and Zbb instructions in OP-IMM-32, at XLEN 64. The result is the
+   full register value. False for an encoding that is none of theirs. */
+static inline bool rv_bitmanip_op_imm_32(uint32_t insn, uint64_t a,
+                                         uint64_t *pres)
+{
+    uint32_t imm = get_bits(insn, 20, 12);
+
+    if (get_bits(insn, 12, 3) == 1) {
+        switch (imm) {
+        case 0x600: /* clzw */
+            *pres = rv_clz<uint32_t>(a);
+            return true;
+        case 0x601: /* ctzw */
+            *pres = rv_ctz<uint32_t>(a);
+            return true;
+        case 0x602: /* cpopw */
+            *pres = rv_cpop<uint32_t>(a);
+            return true;
+        }
+        if ((imm >> 6) == 0x02) { /* slli.uw */
+            *pres = (uint64_t)(uint32_t)a << (imm & 0x3f);
+            return true;
+        }
+    } else if ((imm >> 5) == 0x30) { /* roriw */
+        *pres = (int32_t)rv_ror<uint32_t>(a, imm & 0x1f);
+        return true;
+    }
+    return false;
+}
+
 /* how an instruction that a helper executed ended, if not normally */
 #define INSN_ILLEGAL   (-1)
 #define INSN_EXCEPTION 1
@@ -1043,6 +1309,15 @@ void RISCVCPUState<MaxXlen>::riscv_cpu_interp_x(RISCVCPUState *s,
                 val = (intx_t)(s->reg[rs1] + imm);
                 break;
             case 1: /* slli */
+                if constexpr (Xlen <= 64) {
+                    if (get_bits(insn, 26, 6) != 0) {
+                        uintx_t r;
+                        if (!rv_bitmanip_op_imm<uintx_t>(insn, s->reg[rs1], &r))
+                            goto illegal_insn;
+                        val = (intx_t)r;
+                        break;
+                    }
+                }
                 if ((imm & ~(Xlen - 1)) != 0)
                     goto illegal_insn;
                 val = (intx_t)(s->reg[rs1] << (imm & (Xlen - 1)));
@@ -1057,6 +1332,15 @@ void RISCVCPUState<MaxXlen>::riscv_cpu_interp_x(RISCVCPUState *s,
                 val = s->reg[rs1] ^ imm;
                 break;
             case 5: /* srli/srai */
+                if constexpr (Xlen <= 64) {
+                    if ((get_bits(insn, 26, 6) & ~0x10) != 0) {
+                        uintx_t r;
+                        if (!rv_bitmanip_op_imm<uintx_t>(insn, s->reg[rs1], &r))
+                            goto illegal_insn;
+                        val = (intx_t)r;
+                        break;
+                    }
+                }
                 if ((imm & ~((Xlen - 1) | 0x400)) != 0)
                     goto illegal_insn;
                 if (get_bit(imm, 10))
@@ -1081,6 +1365,17 @@ void RISCVCPUState<MaxXlen>::riscv_cpu_interp_x(RISCVCPUState *s,
             funct3 = get_bits(insn, 12, 3);
             imm = sign_extend(insn >> 20, 12);
             val = s->reg[rs1];
+            if constexpr (Xlen == 64) {
+                if ((funct3 == 1 && get_bits(insn, 25, 7) != 0) ||
+                    (funct3 == 5 && (get_bits(insn, 25, 7) & ~0x20) != 0)) {
+                    uint64_t r;
+                    if (!rv_bitmanip_op_imm_32(insn, val, &r))
+                        goto illegal_insn;
+                    if (rd != 0)
+                        s->reg[rd] = (int64_t)r;
+                    NEXT_INSN;
+                }
+            }
             switch(funct3) {
             case 0: /* addiw */
                 val = (int32_t)(val + imm);
@@ -1168,6 +1463,15 @@ void RISCVCPUState<MaxXlen>::riscv_cpu_interp_x(RISCVCPUState *s,
                     goto illegal_insn;
                 }
             } else {
+                if constexpr (Xlen <= 64) {
+                    uintx_t r;
+                    if (imm != 0 &&
+                        rv_bitmanip_op<uintx_t>(insn, val, val2, &r)) {
+                        if (rd != 0)
+                            s->reg[rd] = (intx_t)r;
+                        NEXT_INSN;
+                    }
+                }
                 if (imm & ~0x20)
                     goto illegal_insn;
                 funct3 = get_bits(insn, 12, 3) | (get_bit(insn, 30) << 3);
@@ -1237,6 +1541,15 @@ void RISCVCPUState<MaxXlen>::riscv_cpu_interp_x(RISCVCPUState *s,
                     goto illegal_insn;
                 }
             } else {
+                if constexpr (Xlen == 64) {
+                    uint64_t r;
+                    if (imm != 0 && imm != 0x20 &&
+                        rv_bitmanip_op_32(insn, val, val2, &r)) {
+                        if (rd != 0)
+                            s->reg[rd] = (int64_t)r;
+                        NEXT_INSN;
+                    }
+                }
                 if (imm & ~0x20)
                     goto illegal_insn;
                 funct3 = get_bits(insn, 12, 3) | (get_bit(insn, 30) << 3);
