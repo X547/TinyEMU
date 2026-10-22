@@ -48,6 +48,8 @@ struct PCIDevice: public IRQTarget {
     PCIBus *bus;
     uint8_t devfn;
     IRQSignal irq[4];
+    /* The pins the function asserts, before its INTx Disable bit gates them */
+    uint8_t irq_request;
     uint8_t config[PCI_EXT_CONFIG_SIZE];
     uint16_t next_cap_offset; /* offset of the next capability */
     uint16_t next_ext_cap_offset; /* offset of the next extended capability */
@@ -109,15 +111,13 @@ static int bus_map_irq(PCIDevice *d, int irq_num)
     return pci_bus_map_irq(d->devfn, irq_num);
 }
 
-void PCIDevice::SetIRQ(int irq_num, int level)
+static void pci_bus_set_pin(PCIDevice *d, int irq_num, int level)
 {
-    PCIDevice *d = this;
     PCIBus *b = d->bus;
     uint32_t mask;
     int i, irq_level;
     uint32_t *state;
 
-    //    printf("%s: pci_device_seq_irq: %d %d\n", d->name, irq_num, level);
     irq_num = bus_map_irq(d, irq_num);
     state = &b->irq_state[irq_num][d->devfn >> 5];
     *state = set_bit(*state, get_bits(d->devfn, 0, 5), level);
@@ -128,6 +128,32 @@ void PCIDevice::SetIRQ(int irq_num, int level)
         mask |= b->irq_state[irq_num][i];
     irq_level = (mask != 0);
     b->irq[irq_num].Set(irq_level);
+}
+
+/* What the function drives onto its pins. INTx Disable gates only the
+   function's own interrupts: a bridge forwards those of its secondary bus
+   through the same pins whatever its own bit says. The Interrupt Status bit
+   reports the function's interrupt with the gate left out, so a driver that
+   masked the pin can still see why it would fire. */
+static void pci_update_intx(PCIDevice *d)
+{
+    bool disabled = !pci_is_bridge(d) &&
+        (get_le16(&d->config[PCI_COMMAND]) & PCI_COMMAND_INTX_DISABLE) != 0;
+
+    if (!pci_is_bridge(d)) {
+        if (d->irq_request != 0)
+            d->config[PCI_STATUS] |= PCI_STATUS_INTERRUPT;
+        else
+            d->config[PCI_STATUS] &= ~PCI_STATUS_INTERRUPT;
+    }
+    for (int i = 0; i < 4; i++)
+        pci_bus_set_pin(d, i, get_bit(d->irq_request, i) && !disabled);
+}
+
+void PCIDevice::SetIRQ(int irq_num, int level)
+{
+    irq_request = set_bit(irq_request, irq_num, level);
+    pci_update_intx(this);
 }
 
 static int devfn_alloc(PCIBus *b)
@@ -595,6 +621,9 @@ static void pci_device_config_write(PCIDevice *d, uint32_t addr,
     }
     if (PCI_COMMAND >= addr && PCI_COMMAND < addr + size) {
         pci_update_mappings(d);
+    }
+    if (PCI_COMMAND + 1 >= addr && PCI_COMMAND + 1 < addr + size) {
+        pci_update_intx(d);
     }
     /* Moving a forwarding window changes what everything behind this bridge
        can decode, so the whole subtree is looked at again. The registers of
