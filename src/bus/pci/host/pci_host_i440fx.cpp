@@ -28,6 +28,7 @@
 #include <string.h>
 #include <assert.h>
 
+#include "acpi.h"
 #include "bits.h"
 #include "cutils.h"
 #include "devices.h"
@@ -37,6 +38,11 @@
 /* PIRQA..PIRQD routing registers of the PIIX3, one byte each. Bit 7 disables
    the line; the low bits name the PIC input it lands on. */
 #define PIIX3_PIRQ_ROUTE 0x60
+
+/* Where a kernel boot routes PIRQA-D: two lines no ISA device of a PC owns,
+   leaving 9 for the SCI and 12 for the PS/2 mouse. Firmware picks the same
+   two. */
+static const uint8_t kPirqLines[4] = { 10, 11, 10, 11 };
 
 #define CLOUDHV_DEVICE_ID 0x0d57
 /* Cloud Hypervisor's 32 bit aperture, which its EDK2 build does not look
@@ -153,6 +159,7 @@ private:
     Resource *fDataRes = nullptr;
     Resource *fMmioRes = nullptr;
     Resource *fMmio64Res = nullptr;
+    Resource *fPirqRes[2] {};
     I440FXVariant fVariant;
     PcPciApertures fSpace;
 
@@ -162,19 +169,6 @@ public:
         Device(name), fVariant(variant), fSpace(space) {}
 
     I440FXState *State() const {return fState.get();}
-
-    PcPciApertures Apertures() const
-    {
-        PcPciApertures a;
-
-        a.mmio_base = fMmioRes->base;
-        a.mmio_end = fMmioRes->End();
-        if (fMmio64Res != nullptr) {
-            a.mmio64_base = fMmio64Res->base;
-            a.mmio64_end = fMmio64Res->End();
-        }
-        return a;
-    }
 
     bool Prepare() override
     {
@@ -190,6 +184,13 @@ public:
         fDataRes = AddFixedResource(RES_IO, 0xcfc, 4);
         if (fAddrRes == nullptr || fDataRes == nullptr) {
             return false;
+        }
+        /* the lines PIRQA-D are routed to, which nothing else may take */
+        for (int i = 0; i < 2; i++) {
+            fPirqRes[i] = AddFixedResource(RES_IRQ, kPirqLines[i], 1);
+            if (fPirqRes[i] == nullptr) {
+                return false;
+            }
         }
 
         /* The apertures the BARs go in. The devices map their BARs
@@ -268,6 +269,41 @@ public:
         return true;
     }
 
+    /* Every bus, the port space but for the configuration ports, the VGA
+       hole and the apertures. Every slot's INTx pins are swizzled onto
+       PIRQA-D the way the root bus does it. */
+    void BuildAML(AcpiContext &ctx) override
+    {
+        AmlBytes r;
+
+        aml_res_word_space(r, 2, 0, 0x00, 0xff);
+        /* the configuration ports, which it consumes */
+        aml_res_io(r, fAddrRes->base, 8);
+        aml_res_word_space(r, 1, 3, 0x0000, 0x0cf7);
+        aml_res_word_space(r, 1, 3, 0x0d00, 0xffff);
+        aml_res_dword_memory(r, 0xa0000, 0xbffff);
+        aml_res_dword_memory(r, fMmioRes->base, fMmioRes->End() - 1);
+        if (fMmio64Res != nullptr) {
+            aml_res_qword_memory(r, fMmio64Res->base, fMmio64Res->End() - 1);
+        }
+
+        std::vector<AmlBytes> prt;
+        for (int slot = 0; slot < 32; slot++) {
+            for (int pin = 0; pin < 4; pin++) {
+                prt.push_back(aml_package({
+                    aml_int((slot << 16) | 0xffff), aml_int(pin), aml_int(0),
+                    aml_int(kPirqLines[(pin + slot - 1) & 3]),
+                }));
+            }
+        }
+
+        AmlBytes dev = aml_name("_HID", aml_eisaid("PNP0A03"));
+        aml_append(dev, aml_name("_ADR", aml_int(0)));
+        aml_append(dev, aml_name("_CRS", aml_resource_template(r)));
+        aml_append(dev, aml_name("_PRT", aml_package(prt)));
+        aml_append(*ctx.aml, aml_device(ctx.NewName("PCI").c_str(), dev));
+    }
+
     Bus *ChildBus() override {return fChildBus.get();}
 };
 
@@ -309,17 +345,8 @@ I440FXState *i440fx_node_state(Device *dev)
     return node != nullptr ? node->State() : nullptr;
 }
 
-
-PcPciApertures i440fx_node_apertures(Device *dev)
-{
-    I440FXDevice *node = dynamic_cast<I440FXDevice *>(dev);
-
-    return node != nullptr ? node->Apertures() : PcPciApertures();
-}
-
 /* in case no BIOS is used, map the interrupts. */
-void i440fx_map_interrupts(I440FXState *s, uint8_t *elcr,
-                           const uint8_t *pci_irqs)
+void i440fx_map_interrupts(I440FXState *s, uint8_t *elcr)
 {
     PCIBus *b = s->pci_bus;
     PCIDevice *d, *hd;
@@ -331,7 +358,7 @@ void i440fx_map_interrupts(I440FXState *s, uint8_t *elcr,
     elcr[0] = 0;
     elcr[1] = 0;
     for(i = 0; i < 4; i++) {
-        irq_num = pci_irqs[i];
+        irq_num = kPirqLines[i];
         pci_device_set_config8(hd, PIIX3_PIRQ_ROUTE + i, irq_num);
         elcr[irq_num >> 3] |= (1 << (irq_num & 7));
     }

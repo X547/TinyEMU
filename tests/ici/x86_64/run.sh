@@ -45,7 +45,7 @@ for cpus in ${*:-2 4}; do
     interrupt_controller: "apic",
     kernel: "ici.elf",
     cmdline: "iterations=$ITERATIONS",
-    bus: { type: "pc", devices: [ { type: "ns16550a" } ] },
+    bus: { type: "acpi", devices: [ { type: "ns16550a" } ] },
 }
 EOF
     echo "== $cpus cpus"

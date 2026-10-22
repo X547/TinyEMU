@@ -25,9 +25,36 @@
 #include <stdint.h>
 
 #include <initializer_list>
+#include <memory>
+#include <set>
+#include <string>
 #include <vector>
 
 typedef std::vector<uint8_t> AmlBytes;
+
+
+/* Carried down the tree while the DSDT is built, as FDTContext is while a
+   device tree is. A device appends its Device() to 'aml'; one whose children
+   are described too builds them in a context of its own, from Nested(). */
+class AcpiContext {
+private:
+    /* the full paths handed out so far */
+    std::shared_ptr<std::set<std::string>> fNames;
+
+public:
+    AmlBytes *aml;
+    /* this scope's path, as a resource source names it: "\\_SB" */
+    std::string scope;
+
+    AcpiContext(AmlBytes *aml, const char *scope);
+
+    /* A name of its own in this scope: 'prefix' with a digit after it when
+       it is three characters, or else 'prefix' itself. */
+    std::string NewName(const char *prefix);
+
+    /* The context of the devices inside device 'name' of this scope. */
+    AcpiContext Nested(const std::string &name, AmlBytes *aml) const;
+};
 
 
 /* Little endian values, appended. */

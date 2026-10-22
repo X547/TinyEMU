@@ -134,8 +134,6 @@ public:
     PCIrqFanout fIrqFanout {*this};
     /* the configuration's HPET, if it has one */
     HPET *fHpet = nullptr;
-    /* what the host bridge decodes, if there is one */
-    PcPciApertures fPciApertures;
     /* the physical address width the processors report */
     int fPhysAddressBits = 0;
     /* Otherwise the machine's: INTR as the 8259s drive it, read without the
@@ -230,10 +228,6 @@ public:
     int64_t RunTimers() override;
     void InterruptExecution() override;
 };
-
-/* Where a kernel boot routes PIRQA-D: two lines no ISA device of a PC
-   owns, leaving 9 for the SCI and 12 for the PS/2 mouse. */
-static const uint8_t kKernelPciIrqs[4] = { 10, 11, 10, 11 };
 
 /* The processor the calling thread runs, or -1 on any other thread. */
 static thread_local int sCurrentVcpu = -1;
@@ -641,6 +635,7 @@ static bool pc_claim_fixed_ranges(PCMachine *s, bool acpi, uint32_t bios_size)
         mmio.Claim(PC_HIGH_RAM_BASE - bios_size, bios_size, "bios") &&
         mmio.Claim(PC_HIGH_RAM_BASE, s->fHighRamSize, "high ram") &&
         (!acpi || io.Claim(ACPI_PM_BASE, ACPI_PM_SIZE, "acpi")) &&
+        (!acpi || irq.Claim(ACPI_SCI_IRQ, 1, "acpi sci")) &&
         io.Claim(0x20, 2, "pic") && io.Claim(0xa0, 2, "pic") &&
         io.Claim(0x4d0, 2, "elcr") &&
         io.Claim(0x40, 4, "pit") && io.Claim(0x61, 1, "pit") &&
@@ -839,11 +834,6 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     s->bus->IoAlloc().SetWindow(0, PC_IO_SPACE_SIZE);
     s->bus->MmioAlloc().SetWindow(PC_DEVICE_WINDOW_BASE,
                                   PC_DEVICE_WINDOW_SIZE);
-    /* A kernel booted without firmware gets its ACPI tables from here. */
-    bool acpi = p->files[VM_FILE_KERNEL].buf != nullptr;
-    if (!pc_claim_fixed_ranges(s, acpi, p->files[VM_FILE_BIOS].len)) {
-        return nullptr;
-    }
 
     PcPciApertures pci_space = pc_pci_space(s);
     ctx.params = p;
@@ -852,13 +842,33 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     ctx.pc_pci_space = &pci_space;
 
     /* The nesting in the file is the nesting of the buses, so the root one
-       has to be the kind this machine provides. */
+       has to be the kind this machine provides: "pc" for devices only
+       firmware knows of, "acpi" for devices the machine describes in the
+       ACPI tables it builds for a kernel. */
     SystemBus *root = s->bus;
+    bool acpi = false;
     if (!bus_config_attach(p->root_bus, "the pc machine",
-                           [root](const char *type) -> Bus * {
-                               return strcmp(type, "pc") == 0 ? root
-                                                              : nullptr;
-                           }, &ctx) ||
+                           [root, &acpi](const char *type) -> Bus * {
+                               acpi = strcmp(type, "acpi") == 0;
+                               return acpi || strcmp(type, "pc") == 0 ?
+                                   root : nullptr;
+                           }, &ctx)) {
+        return nullptr;
+    }
+    if (acpi && p->files[VM_FILE_BIOS].len > 0) {
+        vm_error("pc: the \"acpi\" root bus is for a kernel the machine "
+                 "loads itself; firmware builds tables of its own, so use "
+                 "\"pc\"\n");
+        return nullptr;
+    }
+    if (!acpi && p->files[VM_FILE_KERNEL].buf != nullptr &&
+        (s->fLocalApic || s->fCpuCount > 1)) {
+        vm_error("pc: a kernel finds APICs and other processors only in the "
+                 "ACPI tables, which the machine builds on the \"acpi\" root "
+                 "bus\n");
+        return nullptr;
+    }
+    if (!pc_claim_fixed_ranges(s, acpi, p->files[VM_FILE_BIOS].len) ||
         !s->bus->AllocateAll() || !s->bus->RealizeAll()) {
         return nullptr;
     }
@@ -876,13 +886,11 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     }
 
     /* With no firmware to program the PIRQ registers, copy_kernel() routes
-       the INTx lines itself, which needs the bridge the tree built. Its
-       apertures go in the ACPI tables. */
+       the INTx lines itself, which needs the bridge the tree built. */
     for (int i = 0; i < s->bus->DeviceCount(); i++) {
         I440FXState *fx = i440fx_node_state(s->bus->DeviceAt(i));
         if (fx != NULL) {
             s->i440fx_state = fx;
-            s->fPciApertures = i440fx_node_apertures(s->bus->DeviceAt(i));
             break;
         }
     }
@@ -1221,7 +1229,7 @@ static void map_pci_interrupts(PCMachine *s)
 
     if (s->i440fx_state == nullptr)
         return;
-    i440fx_map_interrupts(s->i440fx_state, elcr, kKernelPciIrqs);
+    i440fx_map_interrupts(s->i440fx_state, elcr);
     /* XXX: hypervisor support */
     if (s->pic_state) {
         s->pic_state->SetElcr(elcr);
@@ -1237,8 +1245,9 @@ static void pc_acpi_setup(PCMachine *s)
     config.apic = s->fLocalApic;
     config.cpu_count = s->fCpuCount;
     config.hpet_block_id = s->fHpet ? s->fHpet->BlockId() : 0;
-    config.pci_gsis = kKernelPciIrqs;
-    config.pci_apertures = s->fPciApertures;
+    AcpiContext ctx(&config.sb, "\\_SB");
+    pc_acpi_chipset(ctx);
+    s->bus->BuildAMLAll(ctx);
     assert(mem != NULL);
     memset(mem, 0, PC_ACPI_SIZE);
     pc_acpi_build(mem, config);

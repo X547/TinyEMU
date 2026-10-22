@@ -25,6 +25,49 @@
 #include <string.h>
 
 
+//#pragma mark - AcpiContext
+
+AcpiContext::AcpiContext(AmlBytes *aml, const char *scope):
+    fNames(std::make_shared<std::set<std::string>>()),
+    aml(aml),
+    scope(scope)
+{
+}
+
+
+std::string AcpiContext::NewName(const char *prefix)
+{
+    static const char kDigits[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    std::string name(prefix);
+
+    if (name.size() == 4) {
+        bool added = fNames->insert(scope + "." + name).second;
+        assert(added);
+        (void)added;
+        return name;
+    }
+    assert(name.size() == 3);
+    for (const char *d = kDigits; *d != '\0'; d++) {
+        std::string candidate = name + *d;
+        if (fNames->insert(scope + "." + candidate).second) {
+            return candidate;
+        }
+    }
+    assert(0);
+    return name + "_";
+}
+
+
+AcpiContext AcpiContext::Nested(const std::string &name, AmlBytes *aml) const
+{
+    AcpiContext nested = *this;
+
+    nested.aml = aml;
+    nested.scope = scope + "." + name;
+    return nested;
+}
+
+
 //#pragma mark - values
 
 void aml_put8(AmlBytes &b, uint8_t v)

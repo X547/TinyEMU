@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+#include "acpi.h"
 #include "bits.h"
 #include "devices.h"
 #include "machine.h"
@@ -548,6 +549,25 @@ public:
             fCtx->vmport_base = fVmportRes->base;
         }
         return true;
+    }
+
+    /* An OS that has ACPI may look for the controller nowhere else. */
+    void BuildAML(AcpiContext &ctx) override
+    {
+        AmlBytes r;
+
+        aml_res_io(r, fDataRes->base, 1);
+        aml_res_io(r, fCmdRes->base, 1);
+        aml_res_irq(r, fKbdIrqRes->base);
+        AmlBytes kbd = aml_name("_HID", aml_eisaid("PNP0303"));
+        aml_append(kbd, aml_name("_CRS", aml_resource_template(r)));
+        aml_append(*ctx.aml, aml_device(ctx.NewName("KBD_").c_str(), kbd));
+
+        r.clear();
+        aml_res_irq(r, fAuxIrqRes->base);
+        AmlBytes mou = aml_name("_HID", aml_eisaid("PNP0F13"));
+        aml_append(mou, aml_name("_CRS", aml_resource_template(r)));
+        aml_append(*ctx.aml, aml_device(ctx.NewName("MOU_").c_str(), mou));
     }
 
     Bus *ChildBus() override {return fChildBus.get();}

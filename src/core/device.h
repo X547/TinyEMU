@@ -34,6 +34,7 @@
 #define BUS_MAX_DEVICES 32
 #define SYSTEM_BUS_MAX_IRQ 32
 
+class AcpiContext;
 class Bus;
 class Device;
 class FDTBuilder;
@@ -113,6 +114,11 @@ public:
        enumerated by the guest and so are deliberately not described. */
     virtual void BuildFDT(FDTContext &ctx) {(void)ctx;}
 
+    /* The same for a machine that describes its devices in ACPI: emit this
+       device's Device() into the DSDT, and its children's if they are not
+       enumerated. */
+    virtual void BuildAML(AcpiContext &ctx) {(void)ctx;}
+
     virtual Bus *ChildBus() {return nullptr;}
 
     /* The bus this device provides under the name a configuration file gives
@@ -173,6 +179,7 @@ public:
     bool AllocateAll();
     bool RealizeAll();
     void BuildFDTAll(FDTContext &ctx);
+    void BuildAMLAll(AcpiContext &ctx);
 };
 
 

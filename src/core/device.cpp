@@ -268,6 +268,14 @@ void Bus::BuildFDTAll(FDTContext &ctx)
 }
 
 
+void Bus::BuildAMLAll(AcpiContext &ctx)
+{
+    for (int i = 0; i < fDeviceCount; i++) {
+        fDevices[i]->BuildAML(ctx);
+    }
+}
+
+
 //#pragma mark - SystemBus
 
 SystemBus::SystemBus(PhysMemoryMap *mem_map, IRQTarget *irq_target,

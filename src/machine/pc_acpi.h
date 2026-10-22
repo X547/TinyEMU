@@ -24,8 +24,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "acpi.h"
 #include "iomem.h"
-#include "pci_host_i440fx.h"
 
 class VirtMachine;
 
@@ -63,15 +63,13 @@ struct PcAcpiConfig {
     /* a MADT: the local APIC of each processor and the IOAPIC */
     bool apic = false;
     int cpu_count = 1;
-    /* an i8042, which the FADT and the DSDT then report */
+    /* an i8042, which the FADT then reports */
     bool i8042 = false;
     /* an HPET, described by its capabilities' low half; 0 when there is
        none */
     uint32_t hpet_block_id = 0;
-    /* the GSI each of PIRQA-D is routed to */
-    const uint8_t *pci_gsis = nullptr;
-    /* where the OS may place memory BARs */
-    PcPciApertures pci_apertures;
+    /* what \_SB holds: the chipset and the devices */
+    AmlBytes sb;
 };
 
 
@@ -79,6 +77,10 @@ struct PcAcpiConfig {
    0xe0000-0xfffff finds it. */
 #define PC_ACPI_ADDR 0xe0000
 #define PC_ACPI_SIZE 0x10000
+
+/* Describes the parts of the chipset the machine provides itself: the
+   8259s, the PIT, the RTC and the ports of the motherboard. */
+void pc_acpi_chipset(AcpiContext &ctx);
 
 /* Writes the RSDP, RSDT, XSDT, FACS, FADT, DSDT, with APICs the MADT and
    with an HPET its table to 'mem', which the guest sees at PC_ACPI_ADDR. */

@@ -50,9 +50,5 @@ enum I440FXVariant {
    itself. */
 I440FXState *i440fx_node_state(Device *dev);
 
-/* What a realized node decodes, for the machine to describe. */
-PcPciApertures i440fx_node_apertures(Device *dev);
-
 /* In case no BIOS is used, map the interrupts. */
-void i440fx_map_interrupts(I440FXState *s, uint8_t *elcr,
-                           const uint8_t *pci_irqs);
+void i440fx_map_interrupts(I440FXState *s, uint8_t *elcr);

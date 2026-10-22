@@ -21,6 +21,7 @@
  */
 #include "hpet.h"
 
+#include "acpi.h"
 #include "bits.h"
 #include "devices.h"
 #include "host_time.h"
@@ -447,6 +448,18 @@ public:
         sys->MemMap()->RegisterDevice(fRegs->base, fRegs->size, &fHpet,
                                       DEVIO_SIZE32);
         return true;
+    }
+
+    /* what reserves the registers; the HPET table describes the timer */
+    void BuildAML(AcpiContext &ctx) override
+    {
+        AmlBytes r;
+
+        aml_res_memory32_fixed(r, fRegs->base, fRegs->size);
+        AmlBytes dev = aml_name("_HID", aml_eisaid("PNP0103"));
+        aml_append(dev, aml_name("_UID", aml_int(0)));
+        aml_append(dev, aml_name("_CRS", aml_resource_template(r)));
+        aml_append(*ctx.aml, aml_device(ctx.NewName("HPET").c_str(), dev));
     }
 };
 

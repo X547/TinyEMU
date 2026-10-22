@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "acpi.h"
 #include "bits.h"
 #include "devices.h"
 #include "fdt.h"
@@ -244,6 +245,22 @@ public:
            assigned, so the path can never name a node that is not there. */
         snprintf(ctx.stdout_path, sizeof(ctx.stdout_path),
                  "/soc/serial@%" PRIx64, fRegs->base);
+    }
+
+    void BuildAML(AcpiContext &ctx) override
+    {
+        if (fRegs->type != RES_IO) {
+            return;
+        }
+        AmlBytes r;
+        aml_res_io(r, fRegs->base, fRegs->size);
+        aml_res_irq(r, fIrq->base);
+
+        /* the port tells the ports apart */
+        AmlBytes dev = aml_name("_HID", aml_eisaid("PNP0501"));
+        aml_append(dev, aml_name("_UID", aml_int(fRegs->base)));
+        aml_append(dev, aml_name("_CRS", aml_resource_template(r)));
+        aml_append(*ctx.aml, aml_device(ctx.NewName("COM").c_str(), dev));
     }
 };
 

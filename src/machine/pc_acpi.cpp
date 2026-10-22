@@ -154,75 +154,54 @@ static void table_finish(AmlBytes &t)
 }
 
 
-/* What the host bridge decodes: every bus, the port space but for the
-   configuration ports, the VGA hole and its apertures. */
-static AmlBytes pci0_resources(const PcAcpiConfig &config)
+/* A device of fixed resources, by its EISA ID. */
+static AmlBytes fixed_device(const std::string &name, const char *hid,
+                             const AmlBytes &r)
+{
+    AmlBytes dev = aml_name("_HID", aml_eisaid(hid));
+
+    aml_append(dev, aml_name("_CRS", aml_resource_template(r)));
+    return aml_device(name.c_str(), dev);
+}
+
+void pc_acpi_chipset(AcpiContext &ctx)
 {
     AmlBytes r;
 
-    aml_res_word_space(r, 2, 0, 0x00, 0xff);
-    /* the configuration ports, which it consumes */
-    aml_res_io(r, 0xcf8, 8);
-    aml_res_word_space(r, 1, 3, 0x0000, 0x0cf7);
-    aml_res_word_space(r, 1, 3, 0x0d00, 0xffff);
-    const PcPciApertures &a = config.pci_apertures;
-    aml_res_dword_memory(r, 0xa0000, 0xbffff);
-    if (a.mmio_end > a.mmio_base)
-        aml_res_dword_memory(r, a.mmio_base, a.mmio_end - 1);
-    if (a.mmio64_end > a.mmio64_base)
-        aml_res_qword_memory(r, a.mmio64_base, a.mmio64_end - 1);
-    return aml_resource_template(r);
+    aml_res_io(r, 0x20, 2);
+    aml_res_io(r, 0xa0, 2);
+    aml_res_irq(r, 2);
+    aml_append(*ctx.aml, fixed_device(ctx.NewName("PIC_"), "PNP0000", r));
+
+    r.clear();
+    aml_res_io(r, 0x40, 4);
+    aml_res_irq(r, 0);
+    aml_append(*ctx.aml, fixed_device(ctx.NewName("TMR_"), "PNP0100", r));
+
+    r.clear();
+    aml_res_io(r, 0x61, 1);
+    aml_append(*ctx.aml, fixed_device(ctx.NewName("SPKR"), "PNP0800", r));
+
+    r.clear();
+    aml_res_io(r, 0x70, 2);
+    aml_res_irq(r, 8);
+    aml_append(*ctx.aml, fixed_device(ctx.NewName("RTC_"), "PNP0B00", r));
+
+    /* the ports no device above names: the POST code, the fast reset, the
+       ELCR and the PM block */
+    r.clear();
+    aml_res_io(r, 0x80, 2);
+    aml_res_io(r, 0x92, 2);
+    aml_res_io(r, 0x4d0, 2);
+    aml_res_io(r, ACPI_PM_BASE, ACPI_PM_SIZE);
+    aml_append(*ctx.aml, fixed_device(ctx.NewName("MBRS"), "PNP0C02", r));
 }
 
 static AmlBytes build_dsdt(const PcAcpiConfig &config)
 {
     AmlBytes t = table_header("DSDT", 2);
-    AmlBytes sb;
 
-    /* The host bridge. Every slot's INTx pins are swizzled onto PIRQA-D
-       the way the root bus does it. */
-    std::vector<AmlBytes> prt;
-    for (int slot = 0; slot < 32; slot++) {
-        for (int pin = 0; pin < 4; pin++) {
-            prt.push_back(aml_package({
-                aml_int((slot << 16) | 0xffff), aml_int(pin), aml_int(0),
-                aml_int(config.pci_gsis[(pin + slot - 1) & 3]),
-            }));
-        }
-    }
-    AmlBytes pci0 = aml_name("_HID", aml_eisaid("PNP0A03"));
-    aml_append(pci0, aml_name("_ADR", aml_int(0)));
-    aml_append(pci0, aml_name("_CRS", pci0_resources(config)));
-    aml_append(pci0, aml_name("_PRT", aml_package(prt)));
-    aml_append(sb, aml_device("PCI0", pci0));
-
-    /* Linux finds the i8042 only through these once ACPI is on. */
-    if (config.i8042) {
-        AmlBytes r;
-        aml_res_io(r, 0x60, 1);
-        aml_res_io(r, 0x64, 1);
-        aml_res_irq(r, 1);
-        AmlBytes kbd = aml_name("_HID", aml_eisaid("PNP0303"));
-        aml_append(kbd, aml_name("_CRS", aml_resource_template(r)));
-        aml_append(sb, aml_device("KBD_", kbd));
-        r.clear();
-        aml_res_irq(r, 12);
-        AmlBytes mou = aml_name("_HID", aml_eisaid("PNP0F13"));
-        aml_append(mou, aml_name("_CRS", aml_resource_template(r)));
-        aml_append(sb, aml_device("MOU_", mou));
-    }
-
-    /* what reserves the HPET's registers */
-    if (config.hpet_block_id != 0) {
-        AmlBytes hpet = aml_name("_HID", aml_eisaid("PNP0103"));
-        aml_append(hpet, aml_name("_UID", aml_int(0)));
-        AmlBytes r;
-        aml_res_memory32_fixed(r, HPET_ADDR, HPET_SIZE);
-        aml_append(hpet, aml_name("_CRS", aml_resource_template(r)));
-        aml_append(sb, aml_device("HPET", hpet));
-    }
-
-    aml_append(t, aml_scope("\\_SB_", sb));
+    aml_append(t, aml_scope("\\_SB_", config.sb));
 
     aml_append(t, aml_name("_S5_", aml_package({
         aml_int(SLP_TYP_S5), aml_int(SLP_TYP_S5), aml_int(0), aml_int(0),

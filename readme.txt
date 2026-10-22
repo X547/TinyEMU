@@ -236,11 +236,13 @@ BeOS R5 maps the 3dfx frame buffer uncached, counting on an MTRR to make it
 write-combining, and WHP and KVM ignore guest MTRRs. A guest that programs
 PAT itself replaces the value.
 
-The root bus is { type: "fdt", devices: [ ... ] } on a RISC-V machine and
-{ type: "pc", devices: [ ... ] } on the PC. docs/devices.md describes how
-devices and buses nest, every device type and its properties, and gives an
-example definition for each; the sections below explain how the device models
-behave.
+The root bus is { type: "fdt", devices: [ ... ] } on a RISC-V machine. On
+the PC it is { type: "pc", devices: [ ... ] } under firmware, and
+{ type: "acpi", devices: [ ... ] } when the machine loads the kernel itself
+and describes the devices in the ACPI tables it builds. docs/devices.md
+describes how devices and buses nest, every device type and its properties,
+and gives an example definition for each; the sections below explain how the
+device models behave.
 
 The virtio devices work on either transport: attached to the FDT bus they
 appear as virtio-mmio, and attached to a PCI bus they appear as PCI devices.
@@ -254,7 +256,7 @@ are separate parts:
 
     pc bus -> pci-host-i440fx -> PCI bus -> pci-ide -> ATA bus -> ata-disk
 
-Only "i8042", "ns16550a" and "hpet" go straight on the pc bus; everything
+Only "i8042", "ns16550a" and "hpet" go straight on the root bus; everything
 else a PC carries is a PCI device and belongs inside the bridge. sample-pc.cfg
 is a commented example of a whole PC, as sample-riscv64.cfg is of an FDT
 machine.
@@ -716,7 +718,7 @@ RAM, the two interrupt controllers, the timer and the clock. Everything else
 -- the host bridge, the display, the keyboard controller, the disks -- is
 declared, and where a device may sit is decided by the hierarchy: a PCI device
 only works inside a "pci-host-i440fx" or "pci-host-cloudhv", and only
-"i8042", "ns16550a" and "hpet" go straight on the pc bus.
+"i8042", "ns16550a" and "hpet" go straight on the root bus.
 
 The x86 emulator comes from my JS/Linux project (2011) which was one
 of the first emulator running Linux fully implemented in

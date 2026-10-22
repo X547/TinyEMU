@@ -64,7 +64,7 @@ These keys sit at the top level of the file, next to `bus`.
 | `cpus` | all | Number of processors, default 1. Up to 64 harts on RISC-V. Up to 255 on the PC with `interrupt_controller: "apic"`, otherwise 1. |
 | `interrupt_controller` | all | RISC-V: `"plic"` (default), `"aplic"` or `"aplic-imsic"`. PC: `"pic"` (default, the two 8259s only) or `"apic"` (adds a local APIC and an IOAPIC). |
 | `bios` | all | Firmware image. On RISC-V it runs in M-mode. On the PC it is SeaBIOS or similar. |
-| `kernel` | all | Kernel image. On the PC it is a bzImage, or an ELF with a PVH entry point. |
+| `kernel` | all | Kernel image. On the PC it is a bzImage, or an ELF with a PVH entry point, and the machine builds ACPI tables for it when the root bus is `acpi`. |
 | `initrd` | all | Initial RAM disk. |
 | `cmdline` | all | Kernel command line. `-append` adds to it. |
 | `sbi` | RISC-V | `"firmware"` (default) runs `bios` in M-mode. `"native"` loads no bios, and the emulator itself answers SBI calls. |
@@ -116,7 +116,8 @@ FDT bus -> pci-host-ecam-generic -> PCI bus -> xhci -> USB bus
 | Bus `type` | Provided by | Carries |
 | --- | --- | --- |
 | `fdt` | the RISC-V machine (root) | memory-mapped devices, PCI host bridges |
-| `pc` | the PC machine (root) | `ns16550a`, `i8042`, `hpet`, `ne2000`, `pci-host-i440fx`, `pci-host-cloudhv` |
+| `pc` | the PC machine (root), for firmware | `ns16550a`, `i8042`, `hpet`, `ne2000`, `pci-host-i440fx`, `pci-host-cloudhv` |
+| `acpi` | the PC machine (root), for a kernel it loads | as `pc`, described in the DSDT |
 | `pci` | PCI host bridges, `pci-bridge` | PCI devices |
 | `ps2` | `i8042` | `ps2-keyboard`, `ps2-mouse` |
 | `ata` | `pci-ide` | `ata-disk`, `atapi` |
@@ -143,8 +144,15 @@ describes what it assigned in the device tree. The only exception is
 The PC machine places nothing. Its devices sit at the fixed addresses a PC
 has always used, and the machine only checks that two devices do not
 overlap. Only `ns16550a`, `i8042`, `hpet` and the ISA form of `ne2000` go
-straight on the `pc` bus. Everything else is a PCI device and goes inside
+straight on the root bus. Everything else is a PCI device and goes inside
 `pci-host-i440fx` or `pci-host-cloudhv`.
+
+The PC's root bus is `pc` when firmware (`bios`) runs, since firmware builds
+its own ACPI tables. It is `acpi` when the machine loads `kernel` itself: the
+machine then builds the tables, and describes the devices on the root bus in
+the DSDT along with the 8259s, the PIT and the RTC. A kernel finds other
+processors and the IOAPIC only in those tables, so `cpus` above 1 or
+`interrupt_controller: "apic"` with a `kernel` need `acpi`.
 
 ### PCI Express topology
 
@@ -225,7 +233,7 @@ Without `quirks`, the device follows its specification.
 ## 5. Device reference
 
 Placement is given as the bus the device goes on: **FDT** is the RISC-V root
-bus, **PC** is the PC root bus, and **PCI** is any PCI bus (behind any host
+bus, **PC** is the PC root bus (`pc` or `acpi`), and **PCI** is any PCI bus (behind any host
 bridge, on either machine).
 
 The examples are fragments: each is one entry of the `devices` array of the
@@ -361,7 +369,8 @@ bridges, because a guest may accept only PCI domains 0 and 1.
 
 Placement: PC. No properties. Provides a `pci` bus, the CF8/CFC
 configuration ports, and the PIIX3 ISA bridge that routes INTx onto the
-8259s. Every PCI device of a PC goes inside it.
+8259s. Every PCI device of a PC goes inside it. PIRQA-D take lines 10 and
+11, which no other device may then use.
 
 ```js
 /* pc bus */
@@ -414,7 +423,8 @@ port, or nest switches to build a deeper hierarchy.
 ### PC platform devices
 
 The PC machine always has RAM, the two 8259 PICs, the 8254 PIT and the
-MC146818 RTC/CMOS. These are not declared.
+MC146818 RTC/CMOS. These are not declared. On the `acpi` root bus the
+machine describes them in the DSDT, and line 9 is the SCI's.
 
 #### `i8042` — PC keyboard controller
 
@@ -982,7 +992,7 @@ master, so all data passes through its single data port.
 | Property | Default | Meaning |
 | --- | --- | --- |
 | `reg` | `0x300` | PC bus only: I/O port base. |
-| `irq` | `9` | PC bus only: ISA interrupt line. |
+| `irq` | `9` | PC bus only: ISA interrupt line. On the `acpi` root bus line 9 is the SCI's, so another has to be named. |
 
 ```js
 /* pci bus */
