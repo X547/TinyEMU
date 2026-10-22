@@ -335,6 +335,9 @@ IRQSignal *SystemBus::IrqSignalFor(uint64_t line)
 
 bool SystemBus::AssignOne(Resource *res, const char *owner)
 {
+    if (res->assigned) {
+        return true;
+    }
     switch (res->type) {
     case RES_MMIO: return fMmioAlloc.Assign(res, owner);
     case RES_IO:   return fIoAlloc.Assign(res, owner);
@@ -344,8 +347,37 @@ bool SystemBus::AssignOne(Resource *res, const char *owner)
 }
 
 
+/* Any device below may name a range or a line of the machine's, since the
+   buses in between pass those up. */
+bool SystemBus::ClaimFixed(Bus *bus)
+{
+    for (int i = 0; i < bus->DeviceCount(); i++) {
+        Device *dev = bus->DeviceAt(i);
+        for (int j = 0; j < dev->ResourceCount(); j++) {
+            Resource *res = dev->ResourceAt(j);
+            if (res->fixed && !AssignOne(res, dev->Name())) {
+                return false;
+            }
+        }
+        Bus *child = dev->ChildBus();
+        if (child != nullptr && !ClaimFixed(child)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+
 bool SystemBus::AssignResources(Device *dev)
 {
+    /* Every fixed range and line in the tree is taken before any is handed
+       out, so a device the bus places never lands on one named later. */
+    if (!fFixedClaimed) {
+        fFixedClaimed = true;
+        if (!ClaimFixed(this)) {
+            return false;
+        }
+    }
     for (int i = 0; i < dev->ResourceCount(); i++) {
         if (!AssignOne(dev->ResourceAt(i), dev->Name())) {
             return false;

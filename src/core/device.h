@@ -212,12 +212,15 @@ private:
     RangeAllocator fMmioAlloc {"MMIO"};
     RangeAllocator fIoAlloc {"IO"};
     RangeAllocator fIrqAlloc {"IRQ"};
+    bool fFixedClaimed = false;
     IRQSignal fIrqSignals[SYSTEM_BUS_MAX_IRQ] {};
     /* fIrqSignals, or the machine's own array when it wired the lines
        itself. */
     IRQSignal *fIrqTable = fIrqSignals;
     int fIrqCount;
     PCIMsiTarget *fMsiTarget = nullptr;
+
+    bool ClaimFixed(Bus *bus);
 
 public:
     SystemBus(PhysMemoryMap *mem_map, IRQTarget *irq_target, int irq_count);
