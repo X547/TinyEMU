@@ -63,6 +63,11 @@ private:
     uint8_t fMsr = 0;
     uint8_t fScr = 0;
     uint8_t fFcr = 0;
+    /* The transmitter holding register empty interrupt is an event, not the
+       state of THRE: it is raised when the register empties or the interrupt
+       is enabled while it is empty, and taken back by writing the register
+       or by reading IIR while IIR reports it. */
+    bool fThrIpending = false;
 
     IRQSignal *fIrq = nullptr;
     HostConsole *fOutput = nullptr;

@@ -23,7 +23,7 @@ void SerialState::UpdateIRQ()
 {
     if ((fLsr & UART_LSR_DR) && (fIer & UART_IER_RDI)) {
         fIir = UART_IIR_RDI;
-    } else if ((fLsr & UART_LSR_THRE) && (fIer & UART_IER_THRI)) {
+    } else if (fThrIpending && (fIer & UART_IER_THRI)) {
         fIir = UART_IIR_THRI;
     } else {
         fIir = UART_IIR_NO_INT;
@@ -63,6 +63,7 @@ void SerialState::Write(uint32_t offset, uint32_t val, int size_log2)
             } else {
                 uint8_t ch;
                 fLsr &= ~UART_LSR_THRE;
+                fThrIpending = false;
                 UpdateIRQ();
 
                 /* write to the terminal */
@@ -71,6 +72,7 @@ void SerialState::Write(uint32_t offset, uint32_t val, int size_log2)
                     fOutput->WriteData(&ch, 1);
                 fLsr |= UART_LSR_THRE;
                 fLsr |= UART_LSR_TEMT;
+                fThrIpending = true;
                 UpdateIRQ();
             }
             break;
@@ -78,6 +80,12 @@ void SerialState::Write(uint32_t offset, uint32_t val, int size_log2)
             if (fLcr & UART_LCR_DLAB) {
                 fDivider = (fDivider & 0x00ff) | (val << 8);
             } else {
+                if (val & UART_IER_THRI) {
+                    if (!(fIer & UART_IER_THRI) && (fLsr & UART_LSR_THRE))
+                        fThrIpending = true;
+                } else {
+                    fThrIpending = false;
+                }
                 fIer = val;
                 UpdateIRQ();
             }
@@ -132,6 +140,10 @@ uint32_t SerialState::Read(uint32_t offset, int size_log2)
             ret = fIir;
             if (fFcr & UART_FCR_FE) {
                 ret |= UART_IIR_FE;
+            }
+            if (fIir == UART_IIR_THRI) {
+                fThrIpending = false;
+                UpdateIRQ();
             }
             break;
         case 3:
