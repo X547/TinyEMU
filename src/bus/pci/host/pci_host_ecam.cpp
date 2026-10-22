@@ -218,8 +218,10 @@ void PCIHostECAMDevice::BuildFDT(FDTContext &ctx)
     }
     fdt->PropCells("ranges");
 
-    /* Only the device number and the pin select an entry. */
-    fdt->AddCellU32(0xf800);
+    /* Only the low two bits of the device number and the pin select an entry:
+       the swizzle repeats every four slots, so four of them describe all 32,
+       as on QEMU virt. Some guests accept no longer a table. */
+    fdt->AddCellU32(0x1800);
     fdt->AddCellU32(0);
     fdt->AddCellU32(0);
     fdt->AddCellU32(7);
@@ -227,7 +229,7 @@ void PCIHostECAMDevice::BuildFDT(FDTContext &ctx)
 
     /* Derive the table from the routing function itself: whatever swizzle
        pci_bus_map_irq() implements is what the guest is told. */
-    for (int slot = 0; slot < PCIE_ECAM_SLOT_COUNT; slot++) {
+    for (int slot = 0; slot < 4; slot++) {
         for (int pin = 1; pin <= 4; pin++) {
             int intx = pci_bus_map_irq(slot << 3, pin - 1);
             fdt->AddCellU32(slot << 11); /* child unit address, phys.hi */
