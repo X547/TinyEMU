@@ -68,6 +68,7 @@ These keys sit at the top level of the file, next to `bus`.
 | `initrd` | all | Initial RAM disk. |
 | `cmdline` | all | Kernel command line. `-append` adds to it. |
 | `sbi` | RISC-V | `"firmware"` (default) runs `bios` in M-mode. `"native"` loads no bios, and the emulator itself answers SBI calls. |
+| `compatible` | RISC-V | A string put before `"ucbbar,riscvemu-bar_dev"` in the device tree's root `compatible`, for a guest that recognises only the machine it names, such as `"riscv-virtio"` for QEMU virt. |
 | `vga_bios` | PC | The option ROM of the `vga` device. |
 | `accel` | all | `"auto"` (default) uses a host hypervisor when there is one. `"none"` always uses the interpreter, as `-no-accel` does. |
 | `hypervisor_intc` | all | Boolean, default `true`. Lets the hypervisor provide the interrupt controllers it can. |

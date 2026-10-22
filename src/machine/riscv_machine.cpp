@@ -80,6 +80,9 @@ public:
     uint64_t ram_size = 0;
     /* the harts answer the SBI, with no firmware in M-mode */
     bool native_sbi = false;
+    /* the configuration's "compatible", before the machine's own; empty
+       when it gave none */
+    std::string compatible;
     HostConsole *fConsole = nullptr;
     std::unique_ptr<Clint> clint;
     std::unique_ptr<HTIF> htif;
@@ -340,7 +343,11 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
     fdt.BeginNode("");
     fdt.PropU32("#address-cells", 2);
     fdt.PropU32("#size-cells", 2);
-    fdt.PropStr("compatible", "ucbbar,riscvemu-bar_dev");
+    if (m->compatible.empty())
+        fdt.PropStr("compatible", "ucbbar,riscvemu-bar_dev");
+    else
+        fdt.PropStrList("compatible", m->compatible.c_str(),
+                        "ucbbar,riscvemu-bar_dev", NULL);
     fdt.PropStr("model", "ucbbar,riscvemu-bare");
 
     max_xlen = m->max_xlen;
@@ -874,6 +881,8 @@ riscv_machine_init(const VirtMachineParams *p)
     s->ram_size = p->ram_size;
     s->max_xlen = max_xlen;
     s->native_sbi = native_sbi;
+    if (p->compatible)
+        s->compatible = p->compatible;
     s->fConsole = p->platform->Console();
 
     if (p->accel_enable &&

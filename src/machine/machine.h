@@ -121,6 +121,9 @@ typedef struct {
     /* who implements the RISC-V SBI: "firmware" or "native"; NULL when the
        configuration does not say */
     char *sbi;
+    /* an entry put before the machine's own in the device tree's root
+       "compatible"; NULL when the configuration does not give one */
+    char *compatible;
     bool rtc_real_time;
     bool rtc_local_time;
     Platform *platform;
