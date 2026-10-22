@@ -189,6 +189,8 @@ void PCIHostECAMDevice::BuildFDT(FDTContext &ctx)
     fdt->AddCellU32(fBusCount - 1);
     fdt->PropCells("bus-range");
 
+    fdt->PropEmpty("dma-coherent");
+
     /* An I/O window first, when the configuration asked for one. This is the
        only range that is not identity mapped: the child address is the port
        number and the parent address is the memory window a processor with no
