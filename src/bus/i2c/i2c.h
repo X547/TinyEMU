@@ -30,6 +30,10 @@
 #define I2C_ADDRESS_FIRST 0x08
 #define I2C_ADDRESS_LAST  0x77
 
+/* Transfers take no time here, so a target is described at the fastest
+   speed every controller can run, fast mode. */
+#define I2C_SPEED_HZ 400000
+
 
 class I2CBus;
 

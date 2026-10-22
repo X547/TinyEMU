@@ -117,7 +117,7 @@ FDT bus -> pci-host-ecam-generic -> PCI bus -> xhci -> USB bus
 | --- | --- | --- |
 | `fdt` | the RISC-V machine (root) | memory-mapped devices, PCI host bridges |
 | `pc` | the PC machine (root), for firmware | `ns16550a`, `i8042`, `hpet`, `ne2000`, `pci-host-i440fx`, `pci-host-cloudhv` |
-| `acpi` | the PC machine (root), for a kernel it loads | as `pc`, described in the DSDT |
+| `acpi` | the PC machine (root), for a kernel it loads | as `pc`, and `dw-i2c`; described in the DSDT |
 | `pci` | PCI host bridges, `pci-bridge` | PCI devices |
 | `ps2` | `i8042` | `ps2-keyboard`, `ps2-mouse` |
 | `ata` | `pci-ide` | `ata-disk`, `atapi` |
@@ -602,7 +602,8 @@ needs a separate `usb-hid` for each function.
 #### `i2c-hid` — HID over I2C
 
 Placement: `i2c` bus. Provides a `hid` bus carrying one function, and takes
-an interrupt line of its own.
+an interrupt line of its own. In ACPI it is a `PNP0C50` device whose `_DSM`
+gives the HID descriptor's register.
 
 | Property | Default | Meaning |
 | --- | --- | --- |
@@ -619,15 +620,18 @@ an interrupt line of its own.
 
 #### `dw-i2c` — Synopsys DesignWare I2C controller
 
-Placement: FDT. Provides an `i2c` bus. The bus places targets that name no
-address and describes them in the device tree.
+Placement: FDT, or the PC's `acpi` root bus. Provides an `i2c` bus. The bus
+places targets that name no address and describes them in the device tree
+or the DSDT. In ACPI the controller carries `SSCN` and `FMCN`, so a driver
+needs no reference clock.
 
 | Property | Default | Meaning |
 | --- | --- | --- |
 | `compatible` | `"snps,designware-i2c"` | Device tree compatible string. |
+| `acpi_hid` | `"AMDI0010"` | The `_HID` in ACPI. |
 
 ```js
-/* fdt bus */
+/* fdt or acpi bus */
 {
     type: "dw-i2c",
     id: "i2c0",

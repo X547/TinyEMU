@@ -25,6 +25,7 @@
 
 #include <algorithm>
 
+#include "acpi.h"
 #include "bits.h"
 #include "device_class.h"
 #include "fdt.h"
@@ -115,6 +116,18 @@
 /* The reference clock, which the driver divides down for the bus. */
 #define DW_I2C_CLOCK_HZ 100000000
 
+/* The SCL counts the registers reset to, and the SDA hold time. ACPI hands
+   them to a driver as the ones to use, which then needs no clock. */
+#define DW_I2C_SS_HCNT 0x190
+#define DW_I2C_SS_LCNT 0x1d6
+#define DW_I2C_FS_HCNT 0x3c
+#define DW_I2C_FS_LCNT 0x82
+#define DW_I2C_SDA_HOLD 1
+
+/* An ID drivers know with no private registers beyond the DesignWare
+   ones. */
+#define DW_I2C_DEFAULT_ACPI_HID "AMDI0010"
+
 /* A 32 bit APB interface, fast mode at most, a single combined interrupt,
    and the FIFO depths encoded as depth minus one. */
 #define DW_IC_COMP_PARAM_1_VALUE \
@@ -135,6 +148,7 @@
 class DWI2CDevice final: public Device, public DeviceIO {
 private:
     const char *fCompatible;
+    const char *fAcpiHid;
 
     IRQSignal *fIrq = nullptr;
     bool fIrqLevel = false;
@@ -187,12 +201,14 @@ private:
     void Abort(uint32_t source);
 
 public:
-    DWI2CDevice(const char *name, const char *compatible):
-        Device(name), fCompatible(compatible) {}
+    DWI2CDevice(const char *name, const char *compatible,
+                const char *acpi_hid):
+        Device(name), fCompatible(compatible), fAcpiHid(acpi_hid) {}
 
     bool Prepare() override;
     bool Realize() override;
     void BuildFDT(FDTContext &ctx) override;
+    void BuildAML(AcpiContext &ctx) override;
     Bus *ChildBus() override {return fChildBus.get();}
 
     uint32_t DeviceRead(uint32_t offset, int size_log2) override;
@@ -433,14 +449,14 @@ void DWI2CDevice::ResetRegs()
                      DW_IC_CON_RESTART_EN | DW_IC_CON_SLAVE_DISABLE;
     Reg(DW_IC_TAR) = 0x055;
     Reg(DW_IC_SAR) = 0x055;
-    Reg(DW_IC_SS_SCL_HCNT) = 0x190;
-    Reg(DW_IC_SS_SCL_LCNT) = 0x1d6;
-    Reg(DW_IC_FS_SCL_HCNT) = 0x3c;
-    Reg(DW_IC_FS_SCL_LCNT) = 0x82;
+    Reg(DW_IC_SS_SCL_HCNT) = DW_I2C_SS_HCNT;
+    Reg(DW_IC_SS_SCL_LCNT) = DW_I2C_SS_LCNT;
+    Reg(DW_IC_FS_SCL_HCNT) = DW_I2C_FS_HCNT;
+    Reg(DW_IC_FS_SCL_LCNT) = DW_I2C_FS_LCNT;
     Reg(DW_IC_HS_SCL_HCNT) = 0x6;
     Reg(DW_IC_HS_SCL_LCNT) = 0x10;
     Reg(DW_IC_INTR_MASK) = 0x8ff;
-    Reg(DW_IC_SDA_HOLD) = 1;
+    Reg(DW_IC_SDA_HOLD) = DW_I2C_SDA_HOLD;
 }
 
 
@@ -579,8 +595,11 @@ void DWI2CDevice::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
 
 bool DWI2CDevice::Prepare()
 {
-    if (ParentBus()->AsPCIBus() != nullptr) {
-        vm_error("%s: must be attached to a system bus\n", Name());
+    /* The targets are found only through the description of the bus. */
+    SystemBus *sys = dynamic_cast<SystemBus *>(ParentBus());
+    if (sys == nullptr || (sys->IsPortBased() && !sys->IsAcpi())) {
+        vm_error("%s: must be attached to the fdt or the acpi bus\n",
+                 Name());
         return false;
     }
     fMmioRes = AddResource(RES_MMIO, DW_I2C_REG_SIZE, DW_I2C_REG_SIZE);
@@ -638,6 +657,31 @@ void DWI2CDevice::BuildFDT(FDTContext &ctx)
 }
 
 
+void DWI2CDevice::BuildAML(AcpiContext &ctx)
+{
+    std::string name = ctx.NewName("I2C");
+    AmlBytes r;
+
+    aml_res_memory32_fixed(r, fMmioRes->base, fMmioRes->size);
+    ctx.AddInterrupt(r, fIrqRes->base);
+
+    AmlBytes dev = aml_name("_HID", aml_string(fAcpiHid));
+    aml_append(dev, aml_name("_UID", aml_int(ctx.NewUid(fAcpiHid))));
+    aml_append(dev, aml_name("_CRS", aml_resource_template(r)));
+    aml_append(dev, aml_name("SSCN", aml_package({
+        aml_int(DW_I2C_SS_HCNT), aml_int(DW_I2C_SS_LCNT),
+        aml_int(DW_I2C_SDA_HOLD),
+    })));
+    aml_append(dev, aml_name("FMCN", aml_package({
+        aml_int(DW_I2C_FS_HCNT), aml_int(DW_I2C_FS_LCNT),
+        aml_int(DW_I2C_SDA_HOLD),
+    })));
+    AcpiContext nested = ctx.Nested(name, &dev);
+    fChildBus->BuildAMLAll(nested);
+    aml_append(*ctx.aml, aml_device(name.c_str(), dev));
+}
+
+
 //#pragma mark - class
 
 class DWI2CClass final: public DeviceClass {
@@ -646,16 +690,20 @@ public:
 
     Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
     {
-        const char *compatible;
+        const char *compatible, *acpi_hid;
 
         (void)ctx;
-        if (!cfg.GetStrOpt("compatible", &compatible)) {
+        if (!cfg.GetStrOpt("compatible", &compatible) ||
+            !cfg.GetStrOpt("acpi_hid", &acpi_hid)) {
             return nullptr;
         }
         if (compatible == nullptr) {
             compatible = DW_I2C_DEFAULT_COMPATIBLE;
         }
-        return new DWI2CDevice(cfg.IdOr("dw-i2c"), compatible);
+        if (acpi_hid == nullptr) {
+            acpi_hid = DW_I2C_DEFAULT_ACPI_HID;
+        }
+        return new DWI2CDevice(cfg.IdOr("dw-i2c"), compatible, acpi_hid);
     }
 };
 

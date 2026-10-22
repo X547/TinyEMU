@@ -29,6 +29,7 @@
 
 AcpiContext::AcpiContext(AmlBytes *aml, const char *scope):
     fNames(std::make_shared<std::set<std::string>>()),
+    fUids(std::make_shared<std::map<std::string, int>>()),
     aml(aml),
     scope(scope)
 {
@@ -55,6 +56,18 @@ std::string AcpiContext::NewName(const char *prefix)
     }
     assert(0);
     return name + "_";
+}
+
+
+int AcpiContext::NewUid(const char *hid)
+{
+    return (*fUids)[hid]++;
+}
+
+
+void AcpiContext::AddInterrupt(AmlBytes &r, uint64_t line) const
+{
+    aml_res_interrupt(r, line, true, false);
 }
 
 
@@ -165,6 +178,16 @@ AmlBytes aml_int(uint32_t v)
 }
 
 
+AmlBytes aml_string(const char *s)
+{
+    AmlBytes b;
+
+    aml_put8(b, 0x0d); /* StringPrefix */
+    aml_put_str(b, s, strlen(s) + 1);
+    return b;
+}
+
+
 AmlBytes aml_name(const char *seg, const AmlBytes &value)
 {
     AmlBytes b;
@@ -232,6 +255,91 @@ AmlBytes aml_eisaid(const char *id)
 }
 
 
+/* The first three fields are stored little endian, the last two as they are
+   written. */
+AmlBytes aml_uuid(const char *uuid)
+{
+    static const int kOrder[16] = {
+        3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15,
+    };
+    uint8_t bytes[16];
+    int n = 0;
+
+    for (const char *p = uuid; *p != '\0' && n < 32; p++) {
+        int c = *p;
+        int digit;
+        if (c >= '0' && c <= '9') {
+            digit = c - '0';
+        } else if (c >= 'a' && c <= 'f') {
+            digit = c - 'a' + 10;
+        } else if (c >= 'A' && c <= 'F') {
+            digit = c - 'A' + 10;
+        } else {
+            continue;
+        }
+        if (n % 2 == 0) {
+            bytes[n / 2] = digit << 4;
+        } else {
+            bytes[n / 2] |= digit;
+        }
+        n++;
+    }
+    assert(n == 32);
+
+    AmlBytes data;
+    for (int i = 0; i < 16; i++) {
+        aml_put8(data, bytes[kOrder[i]]);
+    }
+    return aml_buffer(data);
+}
+
+
+AmlBytes aml_method(const char *seg, int arg_count, const AmlBytes &body)
+{
+    AmlBytes b;
+
+    aml_put_str(b, seg, 4);
+    aml_put8(b, arg_count); /* not serialized, sync level 0 */
+    aml_append(b, body);
+    return aml_with_length({0x14}, b); /* MethodOp */
+}
+
+
+AmlBytes aml_if(const AmlBytes &predicate, const AmlBytes &body)
+{
+    AmlBytes b = predicate;
+
+    aml_append(b, body);
+    return aml_with_length({0xa0}, b); /* IfOp */
+}
+
+
+AmlBytes aml_lequal(const AmlBytes &a, const AmlBytes &b)
+{
+    AmlBytes t {0x93}; /* LEqualOp */
+
+    aml_append(t, a);
+    aml_append(t, b);
+    return t;
+}
+
+
+AmlBytes aml_return(const AmlBytes &value)
+{
+    AmlBytes b {0xa4}; /* ReturnOp */
+
+    aml_append(b, value);
+    return b;
+}
+
+
+AmlBytes aml_arg(int index)
+{
+    assert(index >= 0 && index < 7);
+    return AmlBytes {(uint8_t)(0x68 + index)}; /* Arg0Op */
+}
+
+
 //#pragma mark - resource templates
 
 void aml_res_io(AmlBytes &r, uint16_t port, uint8_t len)
@@ -252,6 +360,18 @@ void aml_res_irq(AmlBytes &r, int irq)
 }
 
 
+void aml_res_interrupt(AmlBytes &r, uint32_t gsi, bool level,
+                       bool active_low)
+{
+    aml_put8(r, 0x89); /* extended interrupt descriptor */
+    aml_put16(r, 6);
+    /* consumer, exclusive */
+    aml_put8(r, 1 | (level ? 0 : 2) | (active_low ? 4 : 0));
+    aml_put8(r, 1);
+    aml_put32(r, gsi);
+}
+
+
 void aml_res_memory32_fixed(AmlBytes &r, uint32_t base, uint32_t size)
 {
     aml_put8(r, 0x86); /* 32 bit fixed memory range descriptor */
@@ -259,6 +379,26 @@ void aml_res_memory32_fixed(AmlBytes &r, uint32_t base, uint32_t size)
     aml_put8(r, 1); /* read/write */
     aml_put32(r, base);
     aml_put32(r, size);
+}
+
+
+void aml_res_i2c_serial_bus(AmlBytes &r, uint16_t address, uint32_t speed,
+                            const char *source)
+{
+    size_t source_len = strlen(source) + 1;
+
+    aml_put8(r, 0x8e); /* generic serial bus connection descriptor */
+    aml_put16(r, 15 + source_len);
+    aml_put8(r, 2); /* revision: V2 */
+    aml_put8(r, 0); /* resource source index */
+    aml_put8(r, 1); /* I2C */
+    aml_put8(r, 2); /* consumer, controller initiated, exclusive */
+    aml_put16(r, 0); /* 7 bit addressing */
+    aml_put8(r, 1); /* type specific revision */
+    aml_put16(r, 6); /* type data length */
+    aml_put32(r, speed);
+    aml_put16(r, address);
+    aml_put_str(r, source, source_len);
 }
 
 

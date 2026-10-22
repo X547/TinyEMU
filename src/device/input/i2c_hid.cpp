@@ -21,6 +21,7 @@
  */
 #include <string.h>
 
+#include "acpi.h"
 #include "bits.h"
 #include "cutils.h"
 #include "device_class.h"
@@ -59,6 +60,10 @@
 
 /* A response and its length prefix. */
 #define I2C_HID_READ_SIZE (I2C_HID_DESC_SIZE + HID_MAX_REPORT_SIZE)
+
+/* The _DSM function that returns the HID descriptor's register. */
+#define I2C_HID_DSM_UUID "3cdff6f7-4267-4555-ad05-b30a3d8938de"
+#define I2C_HID_DSM_DESC 1
 
 #define I2C_HID_VENDOR_ID  0x46f4 /* as the USB transport reports */
 #define I2C_HID_PRODUCT_ID 0x0005
@@ -110,6 +115,7 @@ public:
     bool Prepare() override;
     bool Realize() override;
     void BuildFDT(FDTContext &ctx) override;
+    void BuildAML(AcpiContext &ctx) override;
     Bus *ChildBus() override {return fChildBus.get();}
 
     bool Start(bool read) override;
@@ -445,6 +451,32 @@ void I2CHID::BuildFDT(FDTContext &ctx)
     fdt->PropU32("hid-descr-addr", I2C_HID_REG_DESC);
     fdt_prop_irq(ctx, fIrqRes->base);
     fdt->EndNode();
+}
+
+
+/* The scope is the controller's. Function 0 of the _DSM reports which
+   functions there are; the others return nothing. */
+void I2CHID::BuildAML(AcpiContext &ctx)
+{
+    AmlBytes r;
+
+    aml_res_i2c_serial_bus(r, Address(), I2C_SPEED_HZ, ctx.scope.c_str());
+    ctx.AddInterrupt(r, fIrqRes->base);
+
+    AmlBytes functions = aml_if(aml_lequal(aml_arg(2), aml_int(0)),
+        aml_return(aml_buffer({bit_at(0) | bit_at(I2C_HID_DSM_DESC)})));
+    aml_append(functions, aml_if(
+        aml_lequal(aml_arg(2), aml_int(I2C_HID_DSM_DESC)),
+        aml_return(aml_int(I2C_HID_REG_DESC))));
+    AmlBytes dsm = aml_if(aml_lequal(aml_arg(0), aml_uuid(I2C_HID_DSM_UUID)),
+                          functions);
+    aml_append(dsm, aml_return(aml_buffer({0})));
+
+    AmlBytes dev = aml_name("_HID", aml_eisaid("PNP0C50"));
+    aml_append(dev, aml_name("_UID", aml_int(ctx.NewUid("PNP0C50"))));
+    aml_append(dev, aml_name("_CRS", aml_resource_template(r)));
+    aml_append(dev, aml_method("_DSM", 4, dsm));
+    aml_append(*ctx.aml, aml_device(ctx.NewName("HID").c_str(), dev));
 }
 
 

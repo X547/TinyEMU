@@ -850,6 +850,7 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     if (!bus_config_attach(p->root_bus, "the pc machine",
                            [root, &acpi](const char *type) -> Bus * {
                                acpi = strcmp(type, "acpi") == 0;
+                               root->SetAcpi(acpi);
                                return acpi || strcmp(type, "pc") == 0 ?
                                    root : nullptr;
                            }, &ctx)) {

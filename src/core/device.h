@@ -209,6 +209,7 @@ private:
     PhysMemoryMap *fPortMap = nullptr;
     std::unique_ptr<PhysMemoryMap> fOwnedPortMap;
     bool fPortBased = false;
+    bool fAcpi = false;
     RangeAllocator fMmioAlloc {"MMIO"};
     RangeAllocator fIoAlloc {"IO"};
     RangeAllocator fIrqAlloc {"IRQ"};
@@ -233,6 +234,12 @@ public:
 
     PhysMemoryMap *MemMap() const {return fMemMap;}
     PhysMemoryMap *PortMap();
+
+    /* Whether the machine describes the devices here in ACPI tables. If not,
+       an FDT machine describes them in its device tree, and a PC not at
+       all: there only firmware knows of them. */
+    bool IsAcpi() const {return fAcpi;}
+    void SetAcpi(bool acpi) {fAcpi = acpi;}
 
     /* Where a device that names no space of its own puts its registers. */
     bool IsPortBased() const {return fPortBased;}
