@@ -472,6 +472,11 @@ machine's `vga_bios`. It displays text modes and the VBE linear modes at 8,
 15, 16, 24 and 32 bpp. Planar and chained modes in the `0xa0000` window are
 not drawn.
 
+Like QEMU's stdvga, it has a register BAR next to the frame buffer: an EDID
+whose preferred timing is the largest mode, the VGA ports and the VBE
+registers. EDK2's `QemuVideoDxe` starts in that mode, and firmware and
+drivers reach the registers there rather than through the ports.
+
 | Property | Default | Meaning |
 | --- | --- | --- |
 | `width` | required | Width of the largest mode, and the window's initial width. |

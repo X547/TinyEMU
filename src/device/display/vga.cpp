@@ -188,6 +188,13 @@ public:
     uint32_t VbeRead(uint32_t offset, int size_log2);
     void VbeWrite(uint32_t offset, uint32_t val, int size_log2);
 
+    /* the register BAR QEMU's stdvga has: the EDID, the VGA ports and the
+       VBE registers, which firmware and drivers prefer over the ports */
+    PhysMemoryRange *mmio_range = nullptr;
+    uint8_t edid[128] = {};
+    uint32_t MmioRead(uint32_t offset, int size_log2);
+    void MmioWrite(uint32_t offset, uint32_t val, int size_log2);
+
     VGAMode CurrentMode() const;
     void ApplyMode(const VGAMode &new_mode);
     void UpdateVbeVirtualSize();
@@ -203,6 +210,8 @@ public:
     VGAPortIO<0x3da> fIo3da {*this};
     DeviceIOAdapter<VGAState, &VGAState::VbeRead,
                     &VGAState::VbeWrite> fVbeIo {*this};
+    DeviceIOAdapter<VGAState, &VGAState::MmioRead,
+                    &VGAState::MmioWrite> fMmioIo {*this};
 };
 
 static void vga_draw_glyph8(uint8_t *d, int linesize,
@@ -975,13 +984,148 @@ uint32_t VGAState::VbeRead(uint32_t offset, int size_log2)
 }
 
 
+/* The register BAR, laid out as QEMU's stdvga has it */
+#define VGA_MMIO_SIZE        0x1000
+#define VGA_MMIO_EDID        0x000
+#define VGA_MMIO_VGA_PORTS   0x400 /* 0x3c0-0x3df */
+#define VGA_MMIO_VBE         0x500 /* one 16 bit register per VBE index */
+#define VGA_MMIO_QEXT        0x600 /* QEMU's extended registers, absent */
+
+uint32_t VGAState::MmioRead(uint32_t offset, int size_log2)
+{
+    int size = 1 << size_log2;
+    uint32_t val = 0;
+
+    if (offset < VGA_MMIO_VGA_PORTS) {
+        for (int i = 0; i < size; i++) {
+            if (offset + i < sizeof(edid))
+                val |= (uint32_t)edid[offset + i] << (i * 8);
+        }
+        return val;
+    }
+    if (offset < VGA_MMIO_VGA_PORTS + 0x20) {
+        for (int i = 0; i < size && offset + i < VGA_MMIO_VGA_PORTS + 0x20;
+             i++) {
+            val |= vga_ioport_read(this, 0x3c0 + offset + i -
+                                   VGA_MMIO_VGA_PORTS) << (i * 8);
+        }
+        return val;
+    }
+    if (offset >= VGA_MMIO_VBE &&
+        offset < VGA_MMIO_VBE + VBE_DISPI_INDEX_NB * 2) {
+        vbe_index = (offset - VGA_MMIO_VBE) / 2;
+        return VbeRead(1, 1);
+    }
+    /* Everything else, the extended registers among them, reads as zero: a
+       driver takes a zero size there as their absence. */
+    return 0;
+}
+
+void VGAState::MmioWrite(uint32_t offset, uint32_t val, int size_log2)
+{
+    int size = 1 << size_log2;
+
+    if (offset >= VGA_MMIO_VGA_PORTS && offset < VGA_MMIO_VGA_PORTS + 0x20) {
+        for (int i = 0; i < size && offset + i < VGA_MMIO_VGA_PORTS + 0x20;
+             i++) {
+            vga_ioport_write(this, 0x3c0 + offset + i - VGA_MMIO_VGA_PORTS,
+                             get_bits(val, i * 8, 8));
+        }
+        return;
+    }
+    if (offset >= VGA_MMIO_VBE &&
+        offset < VGA_MMIO_VBE + VBE_DISPI_INDEX_NB * 2) {
+        vbe_index = (offset - VGA_MMIO_VBE) / 2;
+        VbeWrite(1, get_bits(val, 0, 16), 1);
+    }
+}
+
 void VGAState::SetBar(int bar_num, uint64_t addr, bool enabled)
 {
     VGAState *s = this;
     if (bar_num == 0)
         s->mem_range->SetAddr(addr, enabled);
+    else if (bar_num == 2)
+        s->mmio_range->SetAddr(addr, enabled);
     else
         s->rom_range->SetAddr(addr, enabled);
+}
+
+/* An EDID 1.4 block whose preferred timing is the largest mode, so that
+   firmware starts in it rather than in a mode of its own choosing. The
+   blanking is CVT reduced blanking at 60 Hz. A size a detailed timing cannot
+   express is left out, and a guest then picks a mode by itself. */
+static void vga_build_edid(uint8_t *e, int width, int height)
+{
+    static const uint8_t header[8] = { 0x00, 0xff, 0xff, 0xff,
+                                       0xff, 0xff, 0xff, 0x00 };
+    const int hblank = 160, hfront = 48, hsync = 32;
+    const int vblank = 23, vfront = 3, vsync = 6;
+    const int width_mm = 300, height_mm = 225;
+    uint8_t *d;
+    uint8_t sum;
+    int i;
+
+    memset(e, 0, 128);
+    memcpy(e, header, sizeof(header));
+    /* manufacturer "TEM", packed as three 5 bit letters, big endian */
+    e[8] = (('T' - '@') << 2) | (('E' - '@') >> 3);
+    e[9] = (('E' - '@') << 5) | ('M' - '@');
+    e[10] = 0x01; /* product code */
+    e[16] = 1;    /* week of manufacture */
+    e[17] = 2026 - 1990;
+    e[18] = 1;    /* EDID 1.4 */
+    e[19] = 4;
+    e[20] = 0xa5; /* digital input, 8 bits per colour, DisplayPort */
+    e[21] = width_mm / 10;
+    e[22] = height_mm / 10;
+    e[23] = 120;  /* gamma 2.2 */
+    e[24] = 0x06; /* RGB colour, preferred timing in the first descriptor */
+    /* sRGB chromaticity */
+    e[25] = 0xee; e[26] = 0x91; e[27] = 0xa3; e[28] = 0x54;
+    e[29] = 0x4c; e[30] = 0x99; e[31] = 0x26; e[32] = 0x0f;
+    e[33] = 0x50; e[34] = 0x54;
+    /* no standard timings */
+    for (i = 38; i < 54; i++)
+        e[i] = 0x01;
+
+    d = e + 54;
+    if (width > 0 && width <= 4095 && height > 0 && height <= 4095) {
+        uint32_t clock = (uint32_t)((uint64_t)(width + hblank) *
+                                    (height + vblank) * 60 / 10000);
+        if (clock > 0xffff)
+            clock = 0xffff;
+        d[0] = clock & 0xff;
+        d[1] = clock >> 8;
+        d[2] = width & 0xff;
+        d[3] = hblank & 0xff;
+        d[4] = ((width >> 8) << 4) | (hblank >> 8);
+        d[5] = height & 0xff;
+        d[6] = vblank & 0xff;
+        d[7] = ((height >> 8) << 4) | (vblank >> 8);
+        d[8] = hfront;
+        d[9] = hsync;
+        d[10] = (vfront << 4) | vsync;
+        d[11] = 0;
+        d[12] = width_mm & 0xff;
+        d[13] = height_mm & 0xff;
+        d[14] = ((width_mm >> 8) << 4) | (height_mm >> 8);
+        d[17] = 0x1e; /* digital separate sync, positive polarities */
+    } else {
+        d[3] = 0x10;  /* a dummy descriptor */
+    }
+    /* the monitor name */
+    d = e + 72;
+    d[3] = 0xfc;
+    memcpy(d + 5, "TinyEMU VGA\n ", 13);
+    /* two dummy descriptors */
+    e[90 + 3] = 0x10;
+    e[108 + 3] = 0x10;
+
+    sum = 0;
+    for (i = 0; i < 127; i++)
+        sum += e[i];
+    e[127] = -sum;
 }
 
 static std::unique_ptr<FBDevice> pci_vga_init(PCIBus *bus, int width,
@@ -1023,6 +1167,12 @@ static std::unique_ptr<FBDevice> pci_vga_init(PCIBus *bus, int width,
     while (bar_size < fb_dev->fb_size)
         bar_size <<= 1;
     pci_register_bar(d, 0, bar_size, PCI_ADDRESS_SPACE_MEM, s.get());
+
+    vga_build_edid(s->edid, width, height);
+    s->mmio_range = mem_map->RegisterDevice(0, VGA_MMIO_SIZE, &s->fMmioIo,
+                                            DEVIO_SIZE8 | DEVIO_SIZE16 |
+                                            DEVIO_SIZE32 | DEVIO_DISABLED);
+    pci_register_bar(d, 2, VGA_MMIO_SIZE, PCI_ADDRESS_SPACE_MEM, s.get());
 
     if (vga_rom_size > 0) {
         int rom_size;
