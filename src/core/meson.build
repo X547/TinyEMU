@@ -4,6 +4,7 @@ cutils_src = files('cutils.cpp')
 emu_libs += static_library('core',
   cutils_src,
   files(
+    'acpi.cpp',
     'device.cpp',
     'device_class.cpp',
     'fdt.cpp',
