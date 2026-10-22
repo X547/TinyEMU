@@ -1051,8 +1051,9 @@ static std::unique_ptr<FBDevice> pci_vga_init(PCIBus *bus, int width,
     port_map->RegisterDevice(0x3ba, 1, &s->fIo3ba, DEVIO_SIZE8);
     port_map->RegisterDevice(0x3da, 1, &s->fIo3da, DEVIO_SIZE8);
 
-    /* VBE extension */
-    port_map->RegisterDevice(0x1ce, 2, &s->fVbeIo, DEVIO_SIZE16);
+    /* VBE extension: the index at 0x1ce, and the data at 0x1cf as Bochs has
+       it and at 0x1d0 as QEMU also has it, which is where EDK2 looks */
+    port_map->RegisterDevice(0x1ce, 4, &s->fVbeIo, DEVIO_SIZE16);
     
     s->vbe_regs[VBE_DISPI_INDEX_ID] = VBE_DISPI_ID5;
     s->vbe_regs[VBE_DISPI_INDEX_VIDEO_MEMORY_64K] = fb_dev->fb_size >> 16;
@@ -1071,7 +1072,7 @@ static const struct {
     uint32_t base;
     uint32_t size;
 } kVgaPorts[] = {
-    {0x1ce, 2},  /* VBE index and data */
+    {0x1ce, 4},  /* VBE index and data */
     {0x3b4, 2},  /* monochrome CRT controller */
     {0x3ba, 1},  /* monochrome feature control and input status */
     {0x3c0, 16}, /* attribute, sequencer, DAC and graphics controllers */
