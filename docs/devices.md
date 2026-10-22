@@ -154,6 +154,10 @@ the DSDT along with the 8259s, the PIT and the RTC. A kernel finds other
 processors and the IOAPIC only in those tables, so `cpus` above 1 or
 `interrupt_controller: "apic"` with a `kernel` need `acpi`.
 
+A device on the PC that names no interrupt line, such as `dw-i2c` or
+`i2c-hid`, gets one of the IOAPIC's inputs 16-23 with
+`interrupt_controller: "apic"`, and a free ISA line otherwise.
+
 ### PCI Express topology
 
 On the ECAM bridge, bus 0 holds as many devices as it has slots. Behind the

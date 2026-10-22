@@ -106,7 +106,8 @@ public:
     PhysMemoryMap *port_map;
 
     std::unique_ptr<I8259Pair> pic_state;
-    IRQSignal pic_irq[16];
+    /* the lines of the 8259s, then the IOAPIC's inputs no 8259 has */
+    IRQSignal irq_lines[IOAPIC_PINS];
     std::unique_ptr<I8254> pit_state;
     std::unique_ptr<MC146818> cmos_state;
     /* what the ACPI tables of a kernel boot describe */
@@ -427,8 +428,8 @@ void PCMachine::SendMsi(uint64_t addr, uint32_t data)
         mem_map->IoWrite(addr, data, 2);
 }
 
-/* The two PICs give sixteen lines, and the port space is what a 16 bit port
-   number can name. */
+/* The two PICs give sixteen lines, which an IOAPIC follows with eight of its
+   own; the port space is what a 16 bit port number can name. */
 #define PC_IRQ_COUNT 16
 /* xAPIC IDs 0 to 254 */
 #define PC_MAX_CPUS 255
@@ -735,7 +736,7 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     s->fHypervisorIrqchip = s->fCpus->HasInterruptControllers();
     if (s->fHypervisorIrqchip) {
         for (int i = 0; i < 16; i++) {
-            s->pic_irq[i].Init(&s->fHypervisorIrqTarget, i);
+            s->irq_lines[i].Init(&s->fHypervisorIrqTarget, i);
         }
     }
     /* the others wait for their STARTUP IPIs */
@@ -781,13 +782,13 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     if (!s->fHypervisorIrqchip) {
         s->pic_state = std::make_unique<I8259Pair>(s->port_map, 0x20, 0xa0,
                                                    0x4d0, 0x4d1, *s,
-                                                   s->pic_irq);
+                                                   s->irq_lines);
         if (s->fLocalApic) {
             s->fIoApic = std::make_unique<IOAPIC>(*s, 0);
             s->mem_map->RegisterDevice(IOAPIC_ADDR, IOAPIC_SIZE,
                                        s->fIoApic.get(), DEVIO_SIZE32);
             for (int i = 0; i < PC_IRQ_COUNT; i++)
-                s->pic_irq[i].Init(&s->fIrqFanout, i);
+                s->irq_lines[i].Init(&s->fIrqFanout, i);
         }
         /* the 8259s then reach the first processor through its LINT0 */
         if (machine_lapics) {
@@ -797,11 +798,18 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
                                        DEVIO_SIZE32);
         }
         s->pit_state = std::make_unique<I8254>(s->port_map, 0x40, 0x61,
-                                               &s->pic_irq[0]);
+                                               &s->irq_lines[0]);
     }
+    IRQTarget *ioapic = nullptr;
+    if (s->fIoApic)
+        ioapic = s->fIoApic.get();
+    else if (s->fHypervisorIrqchip && s->fLocalApic)
+        ioapic = &s->fHypervisorIrqTarget;
+    for (int i = PC_IRQ_COUNT; ioapic != nullptr && i < IOAPIC_PINS; i++)
+        s->irq_lines[i].Init(ioapic, i);
 
     s->cmos_state = std::make_unique<MC146818>(s->port_map, 0x70,
-                                               &s->pic_irq[8],
+                                               &s->irq_lines[8],
                                                p->rtc_local_time);
 
     /* various cmos data */
@@ -827,11 +835,16 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     /* The devices the configuration declares. Everything above this point is
        what a PC has before any of them exists: RAM, the interrupt
        controllers, the timer and the clock. */
-    s->bus = new SystemBus(s->mem_map, s->port_map, s->pic_irq,
-                           PC_IRQ_COUNT);
+    s->bus = new SystemBus(s->mem_map, s->port_map, s->irq_lines,
+                           ioapic != nullptr ? IOAPIC_PINS : PC_IRQ_COUNT);
     if (s->fLocalApic)
         s->bus->SetMsiTarget(s);
     s->bus->IoAlloc().SetWindow(0, PC_IO_SPACE_SIZE);
+    /* A device that names no line gets one of the IOAPIC's own, which no
+       ISA device and no 8259 shares. */
+    if (ioapic != nullptr)
+        s->bus->IrqAlloc().SetWindow(PC_IRQ_COUNT,
+                                     IOAPIC_PINS - PC_IRQ_COUNT);
     s->bus->MmioAlloc().SetWindow(PC_DEVICE_WINDOW_BASE,
                                   PC_DEVICE_WINDOW_SIZE);
 
@@ -897,20 +910,19 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     }
 
     /* The HPET's legacy replacement lines are the PIT's and the RTC's.
-       Routed, it may use the IOAPIC inputs no ISA line reaches, when the
-       guest is told of an IOAPIC. */
+       Routed, it may use the IOAPIC inputs no ISA line reaches and no
+       device took, when the guest is told of an IOAPIC. */
+    uint32_t free_pins = 0;
+    for (int i = PC_IRQ_COUNT; ioapic != nullptr && i < IOAPIC_PINS; i++) {
+        if (s->bus->IrqAlloc().FindOverlap(i, 1) == nullptr)
+            free_pins |= bit_at(i);
+    }
     for (int i = 0; i < s->bus->DeviceCount(); i++) {
         HPET *hpet = hpet_node_state(s->bus->DeviceAt(i));
         if (hpet == nullptr)
             continue;
-        IRQTarget *ioapic = nullptr;
-        if (s->fIoApic)
-            ioapic = s->fIoApic.get();
-        else if (s->fHypervisorIrqchip && s->fLocalApic)
-            ioapic = &s->fHypervisorIrqTarget;
-        hpet->SetOutputs(&s->pic_irq[0], &s->pic_irq[8], ioapic,
-                         ioapic ? field_mask(PC_IRQ_COUNT,
-                                             IOAPIC_PINS - PC_IRQ_COUNT) : 0);
+        hpet->SetOutputs(&s->irq_lines[0], &s->irq_lines[8], ioapic,
+                         free_pins);
         s->fHpet = hpet;
         break;
     }
