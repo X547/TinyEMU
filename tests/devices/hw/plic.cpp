@@ -162,17 +162,20 @@ void Plic::Unroute(uint32_t line)
 
 void Plic::Reset()
 {
+    /* Completing a source that is not in service changes nothing, and one
+       that is: but only while it is enabled for the context. */
+    for (uint32_t src = 1; src <= fSources; src++) {
+        Write(PLIC_PRIORITY(src), 0);
+        if (fMyContext >= 0) {
+            SetEnabled(fMyContext, src, true);
+            Complete(fMyContext, src);
+        }
+        fRoutes[src] = {};
+    }
     for (int ctx = 0; ctx < fContexts; ctx++) {
         for (uint32_t w = 0; w <= fSources / 32; w++)
             Write(PLIC_ENABLE(ctx, w), 0);
         Write(PLIC_THRESHOLD(ctx), 0);
-    }
-    /* completing a source that is not in service changes nothing */
-    for (uint32_t src = 1; src <= fSources; src++) {
-        Write(PLIC_PRIORITY(src), 0);
-        if (fMyContext >= 0)
-            Complete(fMyContext, src);
-        fRoutes[src] = {};
     }
 }
 

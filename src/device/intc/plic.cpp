@@ -156,9 +156,10 @@ void PLIC::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
         if (reg == 0) {
             fThreshold[ctx] = val & PLIC_MAX_PRIORITY;
         } else if (reg == 4) {
-            /* complete; like QEMU, whether the source is still enabled for
-               this context does not matter */
-            if (val == 0 || val >= PLIC_NUM_SOURCES)
+            /* complete; one for a source this context no longer has enabled
+               is ignored, by the PLIC specification */
+            if (val == 0 || val >= PLIC_NUM_SOURCES ||
+                !get_bit(fEnable[ctx], val))
                 return;
             fServed = set_bit(fServed, val, false);
         } else {

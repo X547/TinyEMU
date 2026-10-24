@@ -236,10 +236,14 @@ TEST(plic, complete_while_disabled)
     tc_irq_lower(0);
     s.plic->SetEnabled(s.ctx, src, false);
     s.plic->Complete(s.ctx, src);
-    /* whether a completion for a source no longer enabled counts */
+    /* a completion for a source the context no longer has enabled is
+       ignored, by the PLIC specification: the gateway stays closed */
     s.plic->SetEnabled(s.ctx, src, true);
     tc_irq_raise(0);
-    SNAP("claim_after", "%s", s.plic->Claim(s.ctx) == src ? "src" : "none");
+    EXPECT_EQ(s.plic->Claim(s.ctx), 0u);
+    s.plic->Complete(s.ctx, src);
+    EXPECT_EQ(s.plic->Claim(s.ctx), src);
+    tc_irq_lower(0);
     s.plic->Complete(s.ctx, src);
 }
 
