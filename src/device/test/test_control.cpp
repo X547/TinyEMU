@@ -31,6 +31,7 @@
 #include "machine.h"
 
 #define TEST_CONTROL_SIZE 0x1000
+#define TEST_CONTROL_DEFAULT_IRQS 4
 
 
 class TestControlDevice final: public Device {
@@ -38,6 +39,13 @@ private:
     DeviceContext *fCtx;
     VirtMachine *fMachine = nullptr;
     Resource *fMmio = nullptr;
+    /* Lines given by number, or else how many to allocate. */
+    int fFixedLines[TEST_CONTROL_MAX_IRQS];
+    int fIrqCount = 0;
+    bool fFixed = false;
+    Resource *fIrqRes[TEST_CONTROL_MAX_IRQS] {};
+    IRQSignal *fIrq[TEST_CONTROL_MAX_IRQS] {};
+    uint32_t fIrqLevel = 0;
     /* the output file, or stderr when the configuration names none */
     FILE *fOutput = stderr;
     bool fOwnsOutput = false;
@@ -56,6 +64,13 @@ public:
         if (fOwnsOutput) {
             fclose(fOutput);
         }
+    }
+
+    void SetIrqCount(int count) {fIrqCount = count;}
+    void AddFixedLine(int line)
+    {
+        fFixed = true;
+        fFixedLines[fIrqCount++] = line;
     }
 
     bool Open(const char *path)
@@ -79,7 +94,15 @@ public:
             return false;
         }
         fMmio = AddResource(RES_MMIO, TEST_CONTROL_SIZE, TEST_CONTROL_SIZE);
-        return fMmio != nullptr;
+        if (fMmio == nullptr)
+            return false;
+        for (int i = 0; i < fIrqCount; i++) {
+            fIrqRes[i] = fFixed ? AddFixedResource(RES_IRQ, fFixedLines[i], 1)
+                                : AddResource(RES_IRQ, 1);
+            if (fIrqRes[i] == nullptr)
+                return false;
+        }
+        return true;
     }
 
     bool Realize() override
@@ -90,6 +113,14 @@ public:
         if (fMachine == nullptr) {
             vm_error("%s: the machine cannot be stopped\n", Name());
             return false;
+        }
+        for (int i = 0; i < fIrqCount; i++) {
+            fIrq[i] = sys->IrqSignalFor(fIrqRes[i]->base);
+            if (fIrq[i] == nullptr) {
+                vm_error("%s: bad interrupt line %d\n", Name(),
+                         (int)fIrqRes[i]->base);
+                return false;
+            }
         }
         sys->MemMap()->RegisterDevice(fMmio->base, fMmio->size, &fIo,
                                       DEVIO_SIZE32);
@@ -103,6 +134,13 @@ public:
         fdt->BeginNodeNum("test-control", fMmio->base);
         fdt->PropStr("compatible", TEST_CONTROL_COMPATIBLE);
         fdt->PropU64Range("reg", fMmio->base, fMmio->size);
+        if (fIrqCount > 0) {
+            for (int i = 0; i < fIrqCount; i++) {
+                fdt->AddCellU32(ctx.irq_phandle);
+                fdt_add_irq_spec(ctx, fIrqRes[i]->base);
+            }
+            fdt->PropCells("interrupts-extended");
+        }
         fdt->EndNode();
     }
 
@@ -112,6 +150,8 @@ public:
         AmlBytes r;
 
         aml_res_memory32_fixed(r, fMmio->base, fMmio->size);
+        for (int i = 0; i < fIrqCount; i++)
+            ctx.AddInterrupt(r, fIrqRes[i]->base);
         AmlBytes dev = aml_name("_HID", aml_string(TEST_CONTROL_ACPI_HID));
         aml_append(dev, aml_name("_UID",
                                  aml_int(ctx.NewUid(TEST_CONTROL_ACPI_HID))));
@@ -129,6 +169,10 @@ uint32_t TestControlDevice::Read(uint32_t offset, int size_log2)
         return TEST_CONTROL_MAGIC;
     case TEST_CONTROL_VERSION:
         return TEST_CONTROL_REVISION;
+    case TEST_CONTROL_IRQ_COUNT:
+        return fIrqCount;
+    case TEST_CONTROL_IRQ_LEVEL:
+        return fIrqLevel;
     default:
         return 0;
     }
@@ -152,6 +196,14 @@ void TestControlDevice::Write(uint32_t offset, uint32_t val, int size_log2)
         /* as for HTIF: a status that does not fit is a failure, not 0 */
         fMachine->RequestShutdown(val < 256 ? (int)val : 255);
         break;
+    case TEST_CONTROL_IRQ_LEVEL:
+        val &= (1u << fIrqCount) - 1;
+        for (int i = 0; i < fIrqCount; i++) {
+            if (((val ^ fIrqLevel) >> i) & 1)
+                fIrq[i]->Set((val >> i) & 1);
+        }
+        fIrqLevel = val;
+        break;
     default:
         break;
     }
@@ -161,8 +213,9 @@ void TestControlDevice::Write(uint32_t offset, uint32_t val, int size_log2)
 //#pragma mark - class
 
 /* The guest's end of the device test suite: an output stream for its report
-   that leaves the consoles alone, and a way to stop the emulator with an
-   exit status. Only in builds with the test_fixtures option. */
+   that leaves the consoles alone, a way to stop the emulator with an exit
+   status, and interrupt lines the guest drives itself, to test interrupt
+   controllers with. Only in builds with the test_fixtures option. */
 class TestControlClass final: public DeviceClass {
 public:
     TestControlClass(): DeviceClass("test-control") {}
@@ -174,6 +227,31 @@ public:
             return nullptr;
         }
         auto *dev = new TestControlDevice(cfg.IdOr("test-control"), ctx);
+        /* "irqs": how many lines to allocate, or the lines themselves */
+        JSONValue irqs = cfg.Get("irqs");
+        if (json_is_undefined(irqs)) {
+            dev->SetIrqCount(TEST_CONTROL_DEFAULT_IRQS);
+        } else if (irqs.type == JSON_INT && irqs.u.int32 >= 0 &&
+                   irqs.u.int32 <= TEST_CONTROL_MAX_IRQS) {
+            dev->SetIrqCount(irqs.u.int32);
+        } else if (irqs.type == JSON_ARRAY &&
+                   irqs.u.array->Length() <= TEST_CONTROL_MAX_IRQS) {
+            for (int i = 0; i < irqs.u.array->Length(); i++) {
+                JSONValue v = json_array_get(irqs, i);
+                if (v.type != JSON_INT || v.u.int32 < 0) {
+                    vm_error("%s: \"irqs\" holds line numbers\n",
+                             dev->Name());
+                    delete dev;
+                    return nullptr;
+                }
+                dev->AddFixedLine(v.u.int32);
+            }
+        } else {
+            vm_error("%s: \"irqs\" is a count of at most %d or an array of "
+                     "lines\n", dev->Name(), TEST_CONTROL_MAX_IRQS);
+            delete dev;
+            return nullptr;
+        }
         if (output != nullptr) {
             char *path = cfg.ResolvePath(output);
             bool ok = dev->Open(path);

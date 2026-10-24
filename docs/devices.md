@@ -294,14 +294,17 @@ The RISC-V machine also always has an HTIF console and power-off register at
 
 Placement: FDT, or the PC's `acpi` root bus. Only in a build configured with
 `-Dtest_fixtures=true`. The guest's end of the device test suite: a byte
-stream for its report that leaves the consoles alone, and a register that
-stops the emulator with an exit status. It is `tinyemu,test-control` in the
-device tree and `TEMU0001` in the DSDT; `src/device/test/test_control.h`
-lists the registers.
+stream for its report that leaves the consoles alone, a register that stops
+the emulator with an exit status, and interrupt lines whose levels the
+guest sets itself, which interrupt controllers are tested with. It is
+`tinyemu,test-control` in the device tree and `TEMU0001` in the DSDT, with
+its lines in `interrupts-extended` or `_CRS`;
+`src/device/test/test_control.h` lists the registers.
 
 | Property | Default | Meaning |
 | --- | --- | --- |
 | `output` | standard error | File the report stream is written to. |
+| `irqs` | `4` | How many interrupt lines to allocate, at most 8, or an array of the line numbers to take. |
 
 ```js
 { type: "test-control", output: "report.txt" }

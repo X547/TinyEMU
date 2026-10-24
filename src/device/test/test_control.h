@@ -30,6 +30,10 @@
 #define TEST_CONTROL_VERSION  0x04 /* RO */
 #define TEST_CONTROL_OUTPUT   0x08 /* WO: low byte appended to the output */
 #define TEST_CONTROL_EXIT     0x0c /* WO: stops the emulator with this status */
+#define TEST_CONTROL_IRQ_COUNT 0x10 /* RO: the interrupt lines it drives */
+#define TEST_CONTROL_IRQ_LEVEL 0x14 /* RW: bit n is the level of line n */
+
+#define TEST_CONTROL_MAX_IRQS 8
 
 #define TEST_CONTROL_MAGIC    0x54455354 /* "TEST" */
 #define TEST_CONTROL_REVISION 1
