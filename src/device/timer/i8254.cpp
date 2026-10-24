@@ -29,30 +29,51 @@
 
 #define PIT_FREQ 1193182
 
-#define RW_STATE_LSB 0
-#define RW_STATE_MSB 1
-#define RW_STATE_WORD0 2
-#define RW_STATE_WORD1 3
-#define RW_STATE_LATCHED_WORD0 4
-#define RW_STATE_LATCHED_WORD1 5
+/* the access field of a control word */
+#define ACCESS_LATCH 0
+#define ACCESS_LSB   1
+#define ACCESS_MSB   2
+#define ACCESS_WORD  3
+
+/* port B */
+#define PORT_B_GATE2     bit_at(0)
+#define PORT_B_ENABLES   0x0c      /* the SERR# and IOCHK# enables */
+/* the refresh request, bit 4, toggles every 15.085 us */
+#define REFRESH_NS 15085
 
 //#define DEBUG_PIT
 
 
+/* One counter, by the 8254 data sheet. Time is counted in PIT clocks from
+   'count_load_time' while it runs; while the gate holds it, or before a
+   trigger, 'held' is how far it got. */
 typedef struct {
-    uint32_t count;
-    uint32_t latched_count;
-    uint8_t rw_state;
-    uint8_t mode;
+    uint32_t count;         /* 1 to 65536, or to 10000 in BCD */
+    uint8_t access;
+    uint8_t mode;           /* 0 to 5 */
     uint8_t bcd;
     uint8_t gate;
+    bool loaded;            /* a count was written since the control word */
+    bool running;
+    bool triggered;         /* modes 1 and 5: the gate rose since the count */
+    bool null_count;        /* a control word, and no count loaded since */
+    bool write_msb;         /* a word's LSB was written, the MSB is next */
+    bool read_msb;          /* a word's LSB was read, the MSB is next */
+    uint16_t write_lsb;
+    bool count_latched;
+    bool latch_msb;         /* the latched LSB was read */
+    uint16_t latched_count;
+    bool status_latched;
+    uint8_t latched_status;
     int64_t count_load_time;
+    int64_t held;
     int64_t last_irq_time;
 } PITChannel;
 
 struct PITState {
     PITChannel pit_channels[3] {};
     uint8_t speaker_data_on = 0;
+    uint8_t port_b_enables = 0;
     IRQSignal *irq = nullptr;
 
     uint32_t Read(uint32_t offset, int size_log2);
@@ -65,32 +86,6 @@ struct PITState {
                     &PITState::SpeakerWrite> fSpeakerIo {*this};
 };
 
-static void pit_load_count(PITChannel *pc, int val);
-
-I8254::I8254(PhysMemoryMap *port_map, int addr0, int addr1, IRQSignal *irq)
-{
-    std::unique_ptr<PITState> &s = fState;
-    PITChannel *pc;
-    int i;
-
-    s = std::make_unique<PITState>();
-
-    s->irq = irq;
-    
-    for(i = 0; i < 3; i++) {
-        pc = &s->pit_channels[i];
-        pc->mode = 3;
-        pc->gate = (i != 2) >> 0;
-        pit_load_count(pc, 0);
-    }
-    s->speaker_data_on = 0;
-
-    port_map->RegisterDevice(addr0, 4, &s->fIo, DEVIO_SIZE8);
-    port_map->RegisterDevice(addr1, 1, &s->fSpeakerIo, DEVIO_SIZE8);
-}
-
-I8254::~I8254() = default;
-
 /* unit = PIT frequency  */
 static int64_t pit_get_time()
 {
@@ -99,151 +94,300 @@ static int64_t pit_get_time()
     return (us / 1000000) * PIT_FREQ + (us % 1000000) * PIT_FREQ / 1000000;
 }
 
-static uint32_t pit_get_count(PITChannel *pc)
+static uint32_t from_bcd(uint32_t v)
 {
-    uint32_t counter;
-    uint64_t d;
-    
-    d = pit_get_time() - pc->count_load_time;
-    switch(pc->mode) {
-    case 0:
-    case 1:
-    case 4:
-    case 5:
-        counter = get_bits(pc->count - d, 0, 16);
-        break;
-    default:
-        counter = pc->count - (d % pc->count);
-        break;
-    }
-    return counter;
+    return get_bits(v, 12, 4) * 1000 + get_bits(v, 8, 4) * 100 +
+        get_bits(v, 4, 4) * 10 + get_bits(v, 0, 4);
 }
 
-/* get pit output bit */
-static int pit_get_out(PITChannel *pc)
+static uint32_t to_bcd(uint32_t v)
 {
-    int out;
-    int64_t d;
-    
-    d = pit_get_time() - pc->count_load_time;
-    switch(pc->mode) {
-    default:
-    case 0:
-        out = (d >= pc->count) >> 0;
-        break;
-    case 1:
-        out = (d < pc->count) >> 0;
-        break;
-    case 2:
-        /* mode used by Linux */
-        if ((d % pc->count) == 0 && d != 0)
-            out = 1;
-        else
-            out = 0;
-        break;
-    case 3:
-        out = ((d % pc->count) < (pc->count >> 1)) >> 0;
-        break;
-    case 4:
-    case 5:
-        out = (d == pc->count) >> 0;
-        break;
-    }
-    return out;
+    return (v / 1000 % 10) << 12 | (v / 100 % 10) << 8 | (v / 10 % 10) << 4 |
+        v % 10;
 }
 
-static void pit_load_count(PITChannel *s, int val)
+/* A count as written, where 0 is the largest there is. Modes 1 and 5 wait
+   for the gate to rise; the others count while it is high. */
+static void pit_load_count(PITChannel *s, uint32_t val, int64_t now)
 {
+    if (s->bcd)
+        val = from_bcd(val);
     if (val == 0)
-        val = 0x10000;
-    s->count_load_time = pit_get_time();
-    s->last_irq_time = 0;
+        val = s->bcd ? 10000 : 0x10000;
     s->count = val;
+    s->loaded = true;
+    s->null_count = false;
+    s->triggered = false;
+    s->count_load_time = now;
+    s->held = 0;
+    s->last_irq_time = 0;
+    s->running = s->mode != 1 && s->mode != 5 && s->gate;
+}
+
+/* Clocks counted since the count was loaded or triggered. */
+static int64_t pit_elapsed(const PITChannel *s, int64_t now)
+{
+    return s->running ? now - s->count_load_time : s->held;
+}
+
+/* What the counting element holds, in binary. */
+static uint32_t pit_get_count(const PITChannel *s, int64_t now)
+{
+    int64_t d = pit_elapsed(s, now);
+    int64_t wrap = s->bcd ? 10000 : 0x10000;
+
+    if (!s->loaded)
+        return 0;
+    switch(s->mode) {
+    case 1:
+    case 5:
+        if (!s->triggered)
+            return s->count % wrap;
+        /* fall through */
+    case 0:
+    case 4:
+        /* on past the terminal count, wrapping */
+        return ((s->count - d) % wrap + wrap) % wrap;
+    case 2:
+        return s->count - d % s->count;
+    default: {
+        /* mode 3 counts down by two, twice a period */
+        uint32_t half = (s->count + 1) / 2;
+        uint32_t into = d % s->count;
+        if (into >= half)
+            into -= half;
+        return (s->count - 2 * into) & ~1u;
+    }
+    }
+}
+
+static int pit_get_out(const PITChannel *s, int64_t now)
+{
+    int64_t d = pit_elapsed(s, now);
+
+    if (!s->loaded)
+        return s->mode != 0;
+    switch(s->mode) {
+    default:
+    case 0:
+        /* low from the control word to the terminal count */
+        return d >= s->count;
+    case 1:
+        /* a one-shot pulse, low from the trigger to the terminal count */
+        return !s->triggered || d >= s->count;
+    case 2:
+        /* low for one clock before each reload */
+        return !s->running || d % s->count != s->count - 1;
+    case 3:
+        /* a square wave, high for the first half */
+        return !s->running || d % s->count < (s->count + 1) / 2;
+    case 4:
+        /* a strobe, low for one clock at the terminal count */
+        return d != s->count;
+    case 5:
+        return !s->triggered || d != s->count;
+    }
+}
+
+static uint8_t pit_status(const PITChannel *s, int64_t now)
+{
+    return pit_get_out(s, now) << 7 | s->null_count << 6 | s->access << 4 |
+        s->mode << 1 | s->bcd;
+}
+
+static void pit_latch_count(PITChannel *s, int64_t now)
+{
+    /* a latch holds until it is read */
+    if (s->count_latched)
+        return;
+    uint32_t v = pit_get_count(s, now);
+    s->latched_count = s->bcd ? to_bcd(v) : v;
+    s->count_latched = true;
+    s->latch_msb = false;
+}
+
+/* The gate: modes 0 and 4 count only while it is high; modes 2 and 3 hold
+   their count with it low, output high, and start over as it rises; modes
+   1 and 5 start, or start again, as it rises. */
+static void pit_set_gate(PITChannel *s, int level, int64_t now)
+{
+    level = !!level;
+    if (level == s->gate)
+        return;
+    s->gate = level;
+    if (!s->loaded)
+        return;
+    switch(s->mode) {
+    case 0:
+    case 4:
+        if (level) {
+            s->count_load_time = now - s->held;
+            s->running = true;
+        } else {
+            s->held = now - s->count_load_time;
+            s->running = false;
+        }
+        break;
+    default:
+        if (level) {
+            s->count_load_time = now;
+            s->last_irq_time = 0;
+            s->running = true;
+            s->triggered = true;
+        } else if (s->running && (s->mode == 2 || s->mode == 3)) {
+            s->held = now - s->count_load_time;
+            s->running = false;
+        }
+        break;
+    }
+}
+
+I8254::I8254(PhysMemoryMap *port_map, int addr0, int addr1, IRQSignal *irq)
+{
+    std::unique_ptr<PITState> &s = fState;
+    int64_t now = pit_get_time();
+
+    s = std::make_unique<PITState>();
+    s->irq = irq;
+    /* Counting from reset, as firmware leaves them: square waves, the gates
+       of channels 0 and 1 tied high, channel 2's on port B. */
+    for(int i = 0; i < 3; i++) {
+        PITChannel *pc = &s->pit_channels[i];
+        pc->mode = 3;
+        pc->access = ACCESS_WORD;
+        pc->gate = i != 2;
+        pit_load_count(pc, 0, now);
+    }
+
+    port_map->RegisterDevice(addr0, 4, &s->fIo, DEVIO_SIZE8);
+    port_map->RegisterDevice(addr1, 1, &s->fSpeakerIo, DEVIO_SIZE8);
+}
+
+I8254::~I8254() = default;
+
+/* Read-back: bit 5 clear latches the counts, bit 4 clear the status, of
+   the channels bits 1 to 3 select. */
+static void pit_read_back(PITState *pit, uint32_t val, int64_t now)
+{
+    for (int i = 0; i < 3; i++) {
+        PITChannel *s = &pit->pit_channels[i];
+        if (!get_bit(val, 1 + i))
+            continue;
+        if (!get_bit(val, 4) && !s->status_latched) {
+            s->latched_status = pit_status(s, now);
+            s->status_latched = true;
+        }
+        if (!get_bit(val, 5))
+            pit_latch_count(s, now);
+    }
 }
 
 void PITState::Write(uint32_t offset, uint32_t val, int size_log2)
 {
-    PITState *pit = this;
-    int channel, access, addr;
+    int64_t now = pit_get_time();
+    int addr = offset & 3;
     PITChannel *s;
 
-    addr = offset & 3;
 #ifdef DEBUG_PIT
     printf("pit_write: off=%d val=0x%02x\n", addr, val);
 #endif
     if (addr == 3) {
-        channel = val >> 6;
-        if (channel == 3)
+        int channel = get_bits(val, 6, 2);
+        if (channel == 3) {
+            pit_read_back(this, val, now);
             return;
-        s = &pit->pit_channels[channel];
-        access = get_bits(val, 4, 2);
-        switch(access) {
-        case 0:
-            s->latched_count = pit_get_count(s);
-            s->rw_state = RW_STATE_LATCHED_WORD0;
-            break;
-        default:
-            s->mode = get_bits(val, 1, 3);
-            s->bcd = val & 1;
-            s->rw_state = access - 1 +  RW_STATE_LSB;
-            break;
         }
-    } else {
-        s = &pit->pit_channels[addr];
-        switch(s->rw_state) {
-        case RW_STATE_LSB:
-            pit_load_count(s, val);
-            break;
-        case RW_STATE_MSB:
-            pit_load_count(s, val << 8);
-            break;
-        case RW_STATE_WORD0:
-        case RW_STATE_WORD1:
-            if (s->rw_state & 1) {
-                pit_load_count(s,
-                               concat_bits<uint32_t>(val, s->latched_count, 8));
-            } else {
-                s->latched_count = val;
+        s = &pit_channels[channel];
+        int access = get_bits(val, 4, 2);
+        if (access == ACCESS_LATCH) {
+            pit_latch_count(s, now);
+            return;
+        }
+        /* A control word starts the counter over, waiting for a count.
+           Modes 6 and 7 are 2 and 3. */
+        s->access = access;
+        s->mode = get_bits(val, 1, 3);
+        if (s->mode >= 6)
+            s->mode -= 4;
+        s->bcd = val & 1;
+        s->loaded = false;
+        s->running = false;
+        s->null_count = true;
+        s->write_msb = false;
+        s->read_msb = false;
+        s->count_latched = false;
+        s->status_latched = false;
+        return;
+    }
+
+    s = &pit_channels[addr];
+    switch(s->access) {
+    case ACCESS_LSB:
+        pit_load_count(s, val, now);
+        break;
+    case ACCESS_MSB:
+        pit_load_count(s, val << 8, now);
+        break;
+    default:
+        if (!s->write_msb) {
+            s->write_lsb = val;
+            s->write_msb = true;
+            /* in mode 0 the first byte stops the count */
+            if (s->mode == 0 && s->running) {
+                s->held = now - s->count_load_time;
+                s->running = false;
             }
-            s->rw_state ^= 1;
-            break;
+        } else {
+            s->write_msb = false;
+            pit_load_count(s, concat_bits<uint32_t>(val, s->write_lsb, 8),
+                           now);
         }
+        break;
     }
 }
 
 uint32_t PITState::Read(uint32_t offset, int size_log2)
 {
-    PITState *pit = this;
+    int64_t now = pit_get_time();
+    int addr = offset & 3;
     PITChannel *s;
-    int ret, count, addr;
-    
-    addr = offset & 3;
+    uint32_t ret;
+
+    /* the control word register cannot be read */
     if (addr == 3)
         return 0xff;
 
-    s = &pit->pit_channels[addr];
-    switch(s->rw_state) {
-    case RW_STATE_LSB:
-    case RW_STATE_MSB:
-    case RW_STATE_WORD0:
-    case RW_STATE_WORD1:
-        count = pit_get_count(s);
-        if (s->rw_state & 1)
-            ret = get_bits(count, 8, 8);
+    s = &pit_channels[addr];
+    if (s->status_latched) {
+        s->status_latched = false;
+        ret = s->latched_status;
+    } else {
+        bool latched = s->count_latched;
+        uint32_t count;
+        if (latched)
+            count = s->latched_count;
+        else if (s->bcd)
+            count = to_bcd(pit_get_count(s, now));
         else
-            ret = get_bits(count, 0, 8);
-        if (s->rw_state & 2)
-            s->rw_state ^= 1;
-        break;
-    default:
-    case RW_STATE_LATCHED_WORD0:
-    case RW_STATE_LATCHED_WORD1:
-        if (s->rw_state & 1)
-            ret = s->latched_count >> 8;
-        else
-            ret = get_bits(s->latched_count, 0, 8);
-        s->rw_state ^= 1;
-        break;
+            count = pit_get_count(s, now);
+        bool *msb = latched ? &s->latch_msb : &s->read_msb;
+        bool high;
+        switch(s->access) {
+        case ACCESS_LSB:
+            high = false;
+            break;
+        case ACCESS_MSB:
+            high = true;
+            break;
+        default:
+            high = *msb;
+            *msb = !*msb;
+            break;
+        }
+        ret = get_bits(count, high ? 8 : 0, 8);
+        /* a latch is spent once its bytes are read */
+        if (latched && (s->access != ACCESS_WORD || high))
+            s->count_latched = false;
     }
 #ifdef DEBUG_PIT
     printf("pit_read: off=%d val=0x%02x\n", addr, ret);
@@ -253,31 +397,27 @@ uint32_t PITState::Read(uint32_t offset, int size_log2)
 
 void PITState::SpeakerWrite(uint32_t offset, uint32_t val, int size_log2)
 {
-    PITState *pit = this;
-    pit->speaker_data_on = get_bit(val, 1);
-    pit->pit_channels[2].gate = val & 1;
+    speaker_data_on = get_bit(val, 1);
+    port_b_enables = val & PORT_B_ENABLES;
+    pit_set_gate(&pit_channels[2], val & PORT_B_GATE2, pit_get_time());
 }
 
 uint32_t PITState::SpeakerRead(uint32_t offset, int size_log2)
 {
-    PITState *pit = this;
-    PITChannel *s;
-    int out, val;
+    PITChannel *s = &pit_channels[2];
+    uint64_t refresh = host_monotonic_us() * 1000 / REFRESH_NS;
 
-    s = &pit->pit_channels[2];
-    out = pit_get_out(s);
-    val = (pit->speaker_data_on << 1) | s->gate | (out << 5);
-#ifdef DEBUG_PIT
-    //    console.log("speaker_read: addr=" + toHex2(addr) + " val=" + toHex2(val));
-#endif
-    return val;
+    return s->gate | speaker_data_on << 1 | port_b_enables |
+        (refresh & 1) << 4 | pit_get_out(s, pit_get_time()) << 5;
 }
 
-/* Channel 0's ticks until its next interrupt, which may be due already, or
-   INT64_MAX once a one-shot count has fired. */
-static int64_t pit_next_ticks(PITChannel *s)
+/* Channel 0's ticks until its next interrupt, which comes as its output
+   rises, or INT64_MAX when none will. */
+static int64_t pit_next_ticks(PITChannel *s, int64_t now)
 {
-    int64_t d = pit_get_time() - s->count_load_time;
+    if (!s->running)
+        return INT64_MAX;
+    int64_t d = now - s->count_load_time;
 
     switch(s->mode) {
     default:
@@ -286,7 +426,7 @@ static int64_t pit_next_ticks(PITChannel *s)
     case 4:
     case 5:
         return s->last_irq_time == 0 ? s->count - d : INT64_MAX;
-    case 2: /* mode used by Linux */
+    case 2:
     case 3:
         return s->last_irq_time + s->count - d;
     }
@@ -295,7 +435,7 @@ static int64_t pit_next_ticks(PITChannel *s)
 /* The microseconds until channel 0's next interrupt, rounded up, or -1. */
 static int64_t pit_delay_us(PITState *pit)
 {
-    int64_t ticks = pit_next_ticks(&pit->pit_channels[0]);
+    int64_t ticks = pit_next_ticks(&pit->pit_channels[0], pit_get_time());
 
     if (ticks == INT64_MAX)
         return -1;
@@ -304,39 +444,39 @@ static int64_t pit_delay_us(PITState *pit)
     return (ticks * 1000000 + PIT_FREQ - 1) / PIT_FREQ;
 }
 
-/* set the IRQ if necessary and return the delay in us until the next
-   IRQ, or -1. Note: The code does not handle all the PIT configurations.
-   Without 'deliver' the line is someone else's: the counting goes on, the
-   interrupts are dropped. */
+/* Raises the IRQ if it is due and returns the delay in us until the next
+   one, or -1. Without 'deliver' the line is someone else's: the counting
+   goes on, the interrupts are dropped. */
 static int64_t pit_update_irq(PITState *pit, bool deliver)
 {
     PITChannel *s = &pit->pit_channels[0];
-    int64_t d = pit_get_time() - s->count_load_time;
 
-    switch(s->mode) {
-    default:
-    case 0:
-    case 1:
-    case 4:
-    case 5:
-        if (s->last_irq_time == 0 && s->count <= d) {
-            if (deliver) {
-                pit->irq->Set(1);
-                pit->irq->Set(0);
+    if (s->running) {
+        int64_t d = pit_get_time() - s->count_load_time;
+        bool fire = false;
+        switch(s->mode) {
+        default:
+        case 0:
+        case 1:
+        case 4:
+        case 5:
+            if (s->last_irq_time == 0 && s->count <= d) {
+                fire = true;
+                s->last_irq_time = d;
             }
-            s->last_irq_time = d;
-        }
-        break;
-    case 2: /* mode used by Linux */
-    case 3:
-        if (s->last_irq_time + s->count <= d) {
-            if (deliver) {
-                pit->irq->Set(1);
-                pit->irq->Set(0);
+            break;
+        case 2:
+        case 3:
+            if (s->last_irq_time + s->count <= d) {
+                fire = true;
+                s->last_irq_time += s->count;
             }
-            s->last_irq_time += s->count;
+            break;
         }
-        break;
+        if (fire && deliver) {
+            pit->irq->Set(1);
+            pit->irq->Set(0);
+        }
     }
     return pit_delay_us(pit);
 }

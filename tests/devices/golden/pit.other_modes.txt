@@ -1,4 +1,0 @@
-mode1_counting 1
-mode6_counting 0
-mode7_toggles 1
-mode6_interrupts one

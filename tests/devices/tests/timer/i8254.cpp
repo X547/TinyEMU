@@ -98,8 +98,8 @@ FRESH_TEST(pit, reset_state)
 {
     Pit p = need_pit();
     if (p.speaker)
-        /* without channel 2's output, which runs from reset */
-        SNAP("speaker", "%#x", inb(p.speaker) & ~0x20);
+        /* without the refresh toggle and channel 2's output */
+        SNAP("speaker", "%#x", inb(p.speaker) & ~0x30);
     SNAP("table_irq", "%d", registry_find("PNP0100")->nirqs);
 }
 
@@ -184,55 +184,150 @@ TEST(pit, mode3_square_wave)
     EXPECT_TRUE(seen[1]);
 }
 
+/* The one-shots the gate triggers, by the 8254 data sheet. */
+TEST(pit, gate_triggered_modes)
+{
+    Pit p = need_pit();
+    if (!p.speaker)
+        t_skip("no speaker port");
+    /* mode 1: output high, and the count held, until the gate rises; low
+       from then to the terminal count */
+    gate2(p, true);
+    program(p, 2, 1, 1193 * 5);
+    EXPECT_TRUE(out2(p));
+    EXPECT_EQ(latch(p, 2), 1193u * 5);
+    gate2(p, false);
+    gate2(p, true);
+    EXPECT_FALSE(out2(p));
+    t_delay_us(100);
+    EXPECT_LT(latch(p, 2), 1193u * 5);
+    EXPECT_TRUE(t_wait_until([] { return out2(sPit); }, 50000));
+    /* mode 5: a strobe at the terminal count, counted from the trigger */
+    program(p, 2, 5, 0xffff);
+    EXPECT_TRUE(out2(p));
+    EXPECT_EQ(latch(p, 2), 0xffffu);
+    gate2(p, false);
+    gate2(p, true);
+    EXPECT_TRUE(out2(p));
+    t_delay_us(100);
+    EXPECT_LT(latch(p, 2), 0xffffu);
+    /* channel 0's gate is tied high, so it never rises: no interrupt */
+    sCount = 0;
+    ASSERT_TRUE(irq_route_isa(p.irq, [](void *) {
+        sCount = sCount + 1;
+    }, nullptr));
+    program(p, 0, 1, 1193);
+    arch_irq_enable();
+    t_delay_us(10000);
+    arch_irq_disable();
+    EXPECT_EQ(sCount, 0);
+}
+
+/* The gate holds modes 0 and 4 where they are, and stops modes 2 and 3
+   with their output high, starting them over as it rises. */
+TEST(pit, gate_holds)
+{
+    Pit p = need_pit();
+    if (!p.speaker)
+        t_skip("no speaker port");
+    gate2(p, false);
+    program(p, 2, 0, 0xffff);
+    uint16_t a = latch(p, 2);
+    t_delay_us(2000);
+    EXPECT_EQ(latch(p, 2), a);
+    gate2(p, true);
+    t_delay_us(2000);
+    EXPECT_LT(latch(p, 2), a);
+    /* mode 2 */
+    program(p, 2, 2, 0xffff);
+    t_delay_us(2000);
+    gate2(p, false);
+    EXPECT_TRUE(out2(p));
+    uint16_t b = latch(p, 2);
+    t_delay_us(2000);
+    EXPECT_EQ(latch(p, 2), b);
+    gate2(p, true);
+    t_delay_us(1000);
+    uint16_t c = latch(p, 2);
+    EXPECT_GT(c, 0xffff - 1193 * 2);
+}
+
+/* Modes 6 and 7 are 2 and 3. */
 TEST(pit, other_modes)
 {
     Pit p = need_pit();
     if (!p.speaker)
         t_skip("no speaker port");
     gate2(p, true);
-    /* mode 1, a one-shot the gate starts: the output while counting */
-    program(p, 2, 1, 0xffff);
-    SNAP("mode1_counting", "%d", out2(p));
-    /* modes 6 and 7, which the 8254 takes as 2 and 3 */
-    program(p, 2, 6, 0xffff);
-    SNAP("mode6_counting", "%d", out2(p));
+    program(p, 2, 6, 1193);
+    /* mode 2: high but for one clock a period, and periodic */
+    EXPECT_TRUE(out2(p));
+    t_delay_us(3000);
+    EXPECT_LE(latch(p, 2), 1193u);
     program(p, 2, 7, 1193 * 2);
     bool seen[2] = {};
     uint64_t end = t_now_us() + 10000;
-    while (t_now_us() < end)
+    while (t_now_us() < end && !(seen[0] && seen[1]))
         seen[out2(p)] = true;
-    SNAP("mode7_toggles", "%d", seen[0] && seen[1]);
-    /* and on channel 0, whose interrupt they then decide */
+    EXPECT_TRUE(seen[0] && seen[1]);
+    /* and on channel 0, an interrupt a period */
     sCount = 0;
     ASSERT_TRUE(irq_route_isa(p.irq, [](void *) {
         sCount = sCount + 1;
     }, nullptr));
     program(p, 0, 6, 1193);
     arch_irq_enable();
-    t_delay_us(10000);
+    EXPECT_TRUE(t_wait_until([] { return sCount > 1; }, 100000));
     arch_irq_disable();
-    SNAP("mode6_interrupts", "%s", sCount == 0 ? "none" : sCount == 1 ?
-         "one" : "several");
 }
 
+/* Port B: the gate and speaker bits, the two NMI enables, read back; the
+   refresh bit toggling; channel 2's output. */
 TEST(pit, speaker_port)
 {
     Pit p = need_pit();
     if (!p.speaker)
         t_skip("no speaker port");
-    outb(p.speaker, 0x03);
-    SNAP("on", "%#x", inb(p.speaker) & ~0x20);
+    outb(p.speaker, 0x0f);
+    EXPECT_EQ(inb(p.speaker) & 0x0fu, 0x0fu);
+    bool seen[2] = {};
+    uint64_t end = t_now_us() + 2000;
+    while (t_now_us() < end && !(seen[0] && seen[1]))
+        seen[(inb(p.speaker) >> 4) & 1] = true;
+    EXPECT_TRUE(seen[0] && seen[1]);
     outb(p.speaker, 0x00);
-    SNAP("off", "%#x", inb(p.speaker) & ~0x20);
+    EXPECT_EQ(inb(p.speaker) & 0x0fu, 0u);
 }
 
+/* The control word register cannot be read; read-back latches status and
+   counts. */
 TEST(pit, control_port)
 {
     Pit p = need_pit();
     SNAP("read", "%#x", inb(p.base + 3));
-    /* a read-back command for channel 0's count and status */
-    outb(p.base + 3, 0xc2);
-    SNAP("readback", "%s", inb(p.base) == 0xff ? "ff" : "other");
+    if (!p.speaker)
+        t_skip("no speaker port for channel 2's gate");
+    gate2(p, true);
+    /* a control word and no count yet: null count */
+    outb(p.base + 3, 0x80 | 0x30 | 2 << 1);
+    outb(p.base + 3, 0xe8); /* status of channel 2 */
+    EXPECT_EQ((uint32_t)inb(p.base + 2), 0x40u | 0x30 | 2 << 1 | 0x80);
+    outb(p.base + 2, 0x00);
+    outb(p.base + 2, 0x80);
+    /* status then count: output high, word access, mode 2, binary */
+    outb(p.base + 3, 0xc8);
+    EXPECT_EQ((uint32_t)inb(p.base + 2), 0x80u | 0x30 | 2 << 1);
+    uint16_t c = inb(p.base + 2);
+    c |= inb(p.base + 2) << 8;
+    EXPECT_LE(c, 0x8000u);
+    EXPECT_GT(c, 0x8000u - 1193 * 5);
+    /* a second latch before the first is read changes nothing */
+    outb(p.base + 3, 0x80);
+    t_delay_us(2000);
+    outb(p.base + 3, 0x80);
+    uint16_t first = inb(p.base + 2);
+    first |= inb(p.base + 2) << 8;
+    EXPECT_GT(first, latch(p, 2));
 }
 
 TEST(pit, periodic_interrupt)
@@ -268,8 +363,9 @@ TEST(pit, bcd)
     Pit p = need_pit();
     if (!p.speaker)
         t_skip("no speaker port");
-    /* BCD counting, periodic: in BCD the count stays a valid decimal
-       number, in binary any value up to 0x1000 */
+    gate2(p, true);
+    /* BCD counting, periodic: 1000 written as 0x1000, and every value read
+       a decimal number up to it */
     outb(p.base + 3, 0x80 | 0x30 | 2 << 1 | 1);
     outb(p.base + 2, 0x00);
     outb(p.base + 2, 0x10);
@@ -278,8 +374,16 @@ TEST(pit, bcd)
         uint16_t c = latch(p, 2);
         for (int d = 0; d < 4; d++)
             decimal &= ((c >> (4 * d)) & 0xf) <= 9;
+        decimal &= c <= 0x1000;
     }
-    SNAP("decimal_counts", "%d", decimal);
+    EXPECT_TRUE(decimal);
+    /* and 0 is 10000 */
+    outb(p.base + 3, 0x80 | 0x30 | 0 << 1 | 1);
+    outb(p.base + 2, 0x00);
+    outb(p.base + 2, 0x00);
+    t_delay_us(100);
+    uint16_t c = latch(p, 2);
+    EXPECT_GT(c, 0x9000u);
 }
 
 #endif

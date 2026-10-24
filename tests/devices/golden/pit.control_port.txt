@@ -1,2 +1,1 @@
 read 0xff
-readback other
