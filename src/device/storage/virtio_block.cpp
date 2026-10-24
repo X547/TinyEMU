@@ -171,8 +171,13 @@ int VIRTIOBlockDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
     BlockRequestHeader h;
     int len, ret;
 
-    if (memcpy_from_queue(s, &h, queue_idx, desc_idx, 0, sizeof(h)) < 0)
+    /* Without a byte for the status there is no answering the request, so
+       it is handed back with nothing written. */
+    if (write_size < 1 ||
+        memcpy_from_queue(s, &h, queue_idx, desc_idx, 0, sizeof(h)) < 0) {
+        virtio_consume_desc(s, queue_idx, desc_idx, 0);
         return 0;
+    }
     auto req = std::make_unique<BlockRequest>(*this);
     req->type = h.type;
     req->queue_idx = queue_idx;
@@ -186,7 +191,6 @@ int VIRTIOBlockDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
                             (write_size - 1) / SECTOR_SIZE, req.get());
         break;
     case VIRTIO_BLK_T_OUT:
-        assert(write_size >= 1);
         if (read_only) {
             ret = -1;
             break;
