@@ -238,7 +238,7 @@ struct PcMemoryRange {
     uint64_t size;
     uint32_t type; /* E820_* */
 };
-#define PC_MEMORY_RANGES_MAX 5
+#define PC_MEMORY_RANGES_MAX 6
 
 static void copy_kernel(PCMachine *s, const uint8_t *buf, int buf_len,
                         const char *cmd_line, uint32_t bios_size);
@@ -1324,7 +1324,8 @@ static_assert(PC_MEMORY_RANGES_MAX <= PVH_MEMMAP_MAX,
               "the memory map does not fit in the PVH boot data");
 
 /* The RAM there is, less the boot data page, the VGA hole and the BIOS
-   area. A kernel booted without firmware is given this map. */
+   area. A kernel booted without firmware is given this map. The VGA hole is
+   a gap, as a BIOS leaves it, not reserved: the PCI root decodes it. */
 static int pc_memory_ranges(PCMachine *s, uint32_t bios_size,
                             PcMemoryRange *ranges)
 {
@@ -1334,7 +1335,8 @@ static int pc_memory_ranges(PCMachine *s, uint32_t bios_size,
         ranges[n++] = {addr, size, type};
     };
     add(0, PVH_BOOT_DATA_ADDR, E820_RAM);
-    add(PVH_BOOT_DATA_ADDR, 0x100000 - PVH_BOOT_DATA_ADDR, E820_RESERVED);
+    add(PVH_BOOT_DATA_ADDR, 0xa0000 - PVH_BOOT_DATA_ADDR, E820_RESERVED);
+    add(0xc0000, 0x100000 - 0xc0000, E820_RESERVED);
     add(0x100000, s->fLowRamSize - 0x100000, E820_RAM);
     if (bios_size != 0)
         add(PC_HIGH_RAM_BASE - bios_size, bios_size, E820_RESERVED);
