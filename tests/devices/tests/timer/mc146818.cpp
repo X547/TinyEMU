@@ -200,7 +200,9 @@ FRESH_TEST(rtc, reset_state)
     (void)r;
     SNAP("a", "%#x", rd(RTC_A) & 0x7f);
     SNAP("b", "%#x", rd(RTC_B));
-    SNAP("c", "%#x", rd(RTC_C));
+    /* the periodic and update flags set by now, or not, as boot time
+       went: only IRQF and the alarm flag are the reset state */
+    SNAP("c", "%#x", rd(RTC_C) & ~0x50);
     SNAP("d", "%#x", rd(RTC_D));
     /* what the machine put in the NVRAM: the equipment byte and the
        memory sizes */
@@ -346,8 +348,10 @@ TEST(rtc, update_in_progress)
 {
     need_rtc();
     bool seen = false, torn = false;
-    uint64_t end = t_now_us() + 1200000;
+    int polls = 0;
+    uint64_t end = t_now_us() + 2200000;
     while (t_now_us() < end) {
+        polls++;
         if (rd(RTC_A) & 0x80) {
             seen = true;
             continue;
@@ -357,8 +361,11 @@ TEST(rtc, update_in_progress)
         if (!(rd(RTC_A) & 0x80))
             torn |= s1 != s2;
     }
-    EXPECT_TRUE(seen);
     EXPECT_FALSE(torn);
+    /* a window of 2.2 ms a second, which a slower poll may step over */
+    if (polls < 2200)
+        t_skip("polling too slow to catch UIP");
+    EXPECT_TRUE(seen);
 }
 
 TEST(rtc, nvram)
@@ -404,30 +411,44 @@ TEST(rtc, rates)
     need_rtc();
     char buf[96];
     size_t n = 0;
-    /* Periods in 50 ms, counted by polling C, which keeps up with 1 kHz
-       but not with the fastest rates: those are only checked to be
-       faster. */
+    /* Periods in 100 ms, counted by polling C, and the polls made: a poll
+       sees a flag for every period since the last one, so the rates can
+       be told apart only up to half the polling rate. */
+    static int sPolls;
     auto periods_at = [](uint8_t rate) {
         wr(RTC_B, B_24H);
         wr(RTC_A, 0x20 | rate);
         wr(RTC_B, B_24H | B_PIE);
         rd(RTC_C);
         int periods = 0;
-        uint64_t end = t_now_us() + 50000;
-        while (t_now_us() < end)
+        sPolls = 0;
+        uint64_t start = t_now_us(), end = start + 100000;
+        while (t_now_us() < end) {
             periods += (rd(RTC_C) & 0x40) != 0;
-        return periods;
+            sPolls++;
+        }
+        return periods * 1000000 / (int)(t_now_us() - start);
     };
     static const uint8_t rates[] = {0, 1, 2, 6, 7, 8, 9};
     for (uint8_t rate : rates) {
-        int periods = periods_at(rate);
-        const char *hz = periods == 0 ? "off" : periods > 38 ? "1024+" :
-            periods > 19 ? "512" : periods > 9 ? "256" : "128";
+        int hz = periods_at(rate);
+        if (sPolls < 2048 / 10)
+            t_skip("polling too slow to tell 1 kHz from 512 Hz");
         n += snprintf(buf + n, sizeof(buf) - n, "%s%u:%s", n ? " " : "",
-                      rate, hz);
+                      rate, hz == 0 ? "off" : hz > 768 ? "1024+" :
+                      hz > 384 ? "512" : hz > 192 ? "256" : "128");
     }
     SNAP("hz", "%s", buf);
-    EXPECT_GT(periods_at(3), 38);
+    /* 8192 Hz: faster than any poll, so every one sees a period */
+    periods_at(3);
+    int polls = sPolls;
+    int periods = 0;
+    rd(RTC_C);
+    for (int i = 0; i < polls / 10; i++) {
+        t_delay_us(200);
+        periods += (rd(RTC_C) & 0x40) != 0;
+    }
+    EXPECT_GE(periods, polls / 10 * 9 / 10);
 }
 
 TEST(rtc, periodic_interrupt)

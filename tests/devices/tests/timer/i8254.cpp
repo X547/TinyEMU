@@ -109,15 +109,28 @@ TEST(pit, counts_down)
     if (!p.speaker)
         t_skip("no speaker port for channel 2's gate");
     gate2(p, true);
-    program(p, 2, 0, 0xffff);
-    uint16_t a = latch(p, 2);
-    t_delay_us(10000);
-    uint16_t b = latch(p, 2);
-    EXPECT_LT(b, a);
-    /* about 11932 counts in 10 ms */
-    uint32_t delta = a - b;
-    EXPECT_GT(delta, 9000u);
-    EXPECT_LT(delta, 16000u);
+    /* Each latch bracketed by the clock, over 20 ms, and taken again if the
+       brackets are too wide to tell. At 1.193182 MHz. */
+    uint32_t delta = 0;
+    uint64_t expected = 0;
+    for (int tries = 0; tries < 5; tries++) {
+        program(p, 2, 0, 0xffff);
+        uint64_t t0 = arch_ticks();
+        uint16_t a = latch(p, 2);
+        uint64_t t1 = arch_ticks();
+        while (arch_ticks() - t1 < arch_tick_hz() / 50)
+            arch_cpu_relax();
+        uint64_t t2 = arch_ticks();
+        uint16_t b = latch(p, 2);
+        uint64_t t3 = arch_ticks();
+        uint64_t elapsed = (t2 + t3 - t0 - t1) / 2;
+        delta = (uint16_t)(a - b);
+        expected = elapsed * PIT_HZ / arch_tick_hz();
+        if ((t1 - t0) + (t3 - t2) < elapsed / 20)
+            break;
+    }
+    EXPECT_GT(delta, expected * 9 / 10);
+    EXPECT_LT(delta, expected * 11 / 10);
 }
 
 TEST(pit, latch_holds)
@@ -175,10 +188,10 @@ TEST(pit, mode3_square_wave)
     if (!p.speaker)
         t_skip("no speaker port");
     gate2(p, true);
-    program(p, 2, 3, 1193 * 2); /* 2 ms period */
+    program(p, 2, 3, 0xffff); /* 55 ms period */
     bool seen[2] = {};
-    uint64_t end = t_now_us() + 10000;
-    while (t_now_us() < end)
+    uint64_t end = t_now_us() + 200000;
+    while (t_now_us() < end && !(seen[0] && seen[1]))
         seen[out2(p)] = true;
     EXPECT_TRUE(seen[0]);
     EXPECT_TRUE(seen[1]);
@@ -193,15 +206,15 @@ TEST(pit, gate_triggered_modes)
     /* mode 1: output high, and the count held, until the gate rises; low
        from then to the terminal count */
     gate2(p, true);
-    program(p, 2, 1, 1193 * 5);
+    program(p, 2, 1, 0xffff);
     EXPECT_TRUE(out2(p));
-    EXPECT_EQ(latch(p, 2), 1193u * 5);
+    EXPECT_EQ(latch(p, 2), 0xffffu);
     gate2(p, false);
     gate2(p, true);
     EXPECT_FALSE(out2(p));
     t_delay_us(100);
-    EXPECT_LT(latch(p, 2), 1193u * 5);
-    EXPECT_TRUE(t_wait_until([] { return out2(sPit); }, 50000));
+    EXPECT_LT(latch(p, 2), 0xffffu);
+    EXPECT_TRUE(t_wait_until([] { return out2(sPit); }, 200000));
     /* mode 5: a strobe at the terminal count, counted from the trigger */
     program(p, 2, 5, 0xffff);
     EXPECT_TRUE(out2(p));
@@ -246,10 +259,15 @@ TEST(pit, gate_holds)
     uint16_t b = latch(p, 2);
     t_delay_us(2000);
     EXPECT_EQ(latch(p, 2), b);
+    /* started over: no further down from the full count than the time
+       since the gate rose allows, which held where it was would be */
+    uint64_t t0 = arch_ticks();
     gate2(p, true);
     t_delay_us(1000);
     uint16_t c = latch(p, 2);
-    EXPECT_GT(c, 0xffff - 1193 * 2);
+    uint64_t most = (arch_ticks() - t0) * PIT_HZ / arch_tick_hz() + 16;
+    EXPECT_GE(c, 0xffff - most);
+    EXPECT_GT(0xffffu - b, 16u);
 }
 
 /* Modes 6 and 7 are 2 and 3. */
@@ -264,9 +282,9 @@ TEST(pit, other_modes)
     EXPECT_TRUE(out2(p));
     t_delay_us(3000);
     EXPECT_LE(latch(p, 2), 1193u);
-    program(p, 2, 7, 1193 * 2);
+    program(p, 2, 7, 0xffff);
     bool seen[2] = {};
-    uint64_t end = t_now_us() + 10000;
+    uint64_t end = t_now_us() + 200000;
     while (t_now_us() < end && !(seen[0] && seen[1]))
         seen[out2(p)] = true;
     EXPECT_TRUE(seen[0] && seen[1]);
@@ -291,7 +309,7 @@ TEST(pit, speaker_port)
     outb(p.speaker, 0x0f);
     EXPECT_EQ(inb(p.speaker) & 0x0fu, 0x0fu);
     bool seen[2] = {};
-    uint64_t end = t_now_us() + 2000;
+    uint64_t end = t_now_us() + 100000;
     while (t_now_us() < end && !(seen[0] && seen[1]))
         seen[(inb(p.speaker) >> 4) & 1] = true;
     EXPECT_TRUE(seen[0] && seen[1]);
@@ -377,13 +395,19 @@ TEST(pit, bcd)
         decimal &= c <= 0x1000;
     }
     EXPECT_TRUE(decimal);
-    /* and 0 is 10000 */
+    /* and 0 is 10000: a one-shot from there, down by no more than the
+       time since allows */
     outb(p.base + 3, 0x80 | 0x30 | 0 << 1 | 1);
     outb(p.base + 2, 0x00);
+    uint64_t t0 = arch_ticks();
     outb(p.base + 2, 0x00);
     t_delay_us(100);
     uint16_t c = latch(p, 2);
-    EXPECT_GT(c, 0x9000u);
+    uint64_t most = (arch_ticks() - t0) * PIT_HZ / arch_tick_hz() + 16;
+    int value = (c >> 12) * 1000 + ((c >> 8) & 0xf) * 100 +
+        ((c >> 4) & 0xf) * 10 + (c & 0xf);
+    EXPECT_LE(value, 10000);
+    EXPECT_GE((uint64_t)value, most < 10000 ? 10000 - most : 0);
 }
 
 #endif

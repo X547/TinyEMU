@@ -476,14 +476,26 @@ TEST(lapic, timer_divide)
     for (uint32_t d : divides) {
         l->Write(LAPIC_TIMER_DIVIDE, d);
         l->Write(LAPIC_TIMER_INITIAL, 0xffffffff);
-        uint64_t start = arch_ticks();
-        uint32_t c1 = l->Read(LAPIC_TIMER_CURRENT);
-        while (arch_ticks() - start < arch_tick_hz() / 1000)
-            arch_cpu_relax();
-        uint32_t c2 = l->Read(LAPIC_TIMER_CURRENT);
+        /* Each read of the count bracketed by the clock, over 10 ms, and
+           taken again if the brackets are too wide to tell, as they are
+           when the processor was held up meanwhile. */
+        uint64_t per_ms = 0;
+        for (int tries = 0; tries < 5; tries++) {
+            uint64_t t0 = arch_ticks();
+            uint32_t c1 = l->Read(LAPIC_TIMER_CURRENT);
+            uint64_t t1 = arch_ticks();
+            while (arch_ticks() - t1 < arch_tick_hz() / 100)
+                arch_cpu_relax();
+            uint64_t t2 = arch_ticks();
+            uint32_t c2 = l->Read(LAPIC_TIMER_CURRENT);
+            uint64_t t3 = arch_ticks();
+            uint64_t elapsed = (t2 + t3 - t0 - t1) / 2;
+            per_ms = (uint64_t)(c1 - c2) * arch_tick_hz() / 1000 / elapsed;
+            if ((t1 - t0) + (t3 - t2) < elapsed / 10)
+                break;
+        }
         /* counts per millisecond, to the nearest divisor of 1 GHz: the
            bands meet halfway between powers of two */
-        uint32_t per_ms = c1 - c2;
         n += snprintf(buf + n, sizeof(buf) - n, "%s%x:%s", n ? " " : "", d,
                       per_ms > 750000 ? "1G" : per_ms > 375000 ? "1/2" :
                       per_ms > 187500 ? "1/4" : per_ms > 93750 ? "1/8" :
