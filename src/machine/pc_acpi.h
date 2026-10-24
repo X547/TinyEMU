@@ -82,6 +82,9 @@ struct PcAcpiConfig {
    8259s, the PIT, the RTC and the ports of the motherboard. */
 void pc_acpi_chipset(AcpiContext &ctx);
 
+/* Declares the processors the MADT lists, which the UIDs tie together. */
+void pc_acpi_processors(AcpiContext &ctx, int cpu_count);
+
 /* Writes the RSDP, RSDT, XSDT, FACS, FADT, DSDT, with APICs the MADT and
    with an HPET its table to 'mem', which the guest sees at PC_ACPI_ADDR. */
 void pc_acpi_build(uint8_t *mem, const PcAcpiConfig &config);

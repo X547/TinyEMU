@@ -1259,6 +1259,7 @@ static void pc_acpi_setup(PCMachine *s)
     config.cpu_count = s->fCpuCount;
     config.hpet_block_id = s->fHpet ? s->fHpet->BlockId() : 0;
     AcpiContext ctx(&config.sb, "\\_SB");
+    pc_acpi_processors(ctx, s->fCpuCount);
     pc_acpi_chipset(ctx);
     s->bus->BuildAMLAll(ctx);
     assert(mem != NULL);

@@ -197,6 +197,19 @@ void pc_acpi_chipset(AcpiContext &ctx)
     aml_append(*ctx.aml, fixed_device(ctx.NewName("MBRS"), "PNP0C02", r));
 }
 
+/* An OS may start only the processors the namespace declares too, by the
+   UIDs of their MADT entries. */
+void pc_acpi_processors(AcpiContext &ctx, int cpu_count)
+{
+    for (int i = 0; i < cpu_count; i++) {
+        char name[8];
+        snprintf(name, sizeof(name), "C%03X", i);
+        AmlBytes dev = aml_name("_HID", aml_string("ACPI0007"));
+        aml_append(dev, aml_name("_UID", aml_int(i)));
+        aml_append(*ctx.aml, aml_device(ctx.NewName(name).c_str(), dev));
+    }
+}
+
 static AmlBytes build_dsdt(const PcAcpiConfig &config)
 {
     AmlBytes t = table_header("DSDT", 2);
