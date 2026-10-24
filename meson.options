@@ -58,6 +58,11 @@ option('slirp',
   value: true,
   description: 'build the user space network redirector')
 
+option('test_fixtures',
+  type: 'boolean',
+  value: false,
+  description: 'build the devices the device test suite drives the emulator through')
+
 option('int128',
   type: 'boolean',
   value: false,

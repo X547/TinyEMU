@@ -363,6 +363,11 @@ subdir('src/device/net')
 subdir('src/device/power')
 subdir('src/device/storage')
 subdir('src/device/timer')
+# Test fixtures stay out of a regular build.
+test_fixtures = get_option('test_fixtures')
+if test_fixtures
+  subdir('src/device/test')
+endif
 subdir('src/machine')
 subdir('src/platform')
 subdir('src/main')
@@ -402,4 +407,5 @@ summary({
   'network filesystem': fs_net_enabled,
   'builtin crypto': fs_net_enabled and builtin_crypto,
   'RISCV max XLEN': max_xlen,
+  'test fixtures': test_fixtures,
 }, section: 'Configuration', bool_yn: true)

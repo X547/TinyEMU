@@ -63,6 +63,9 @@ TinyEMU System Emulator by Fabrice Bellard
   int128          build the 128 bit RISCV target; the compiler must
                   support the __int128 C extension, so this does not work
                   on 32 bit hosts (boolean, default false)
+  test_fixtures   the devices the device test suite drives the emulator
+                  through, such as "test-control"; not for regular use
+                  (boolean, default false)
 
   For example, to build with the network filesystem enabled and without
   the x86 emulator:

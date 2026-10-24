@@ -290,6 +290,23 @@ The RISC-V machine also always has an HTIF console and power-off register at
 `0x40008000`, described in the device tree as `ucb,htif0` with `fromhost` and
 `tohost` in that order. It is not declared in the configuration.
 
+#### `test-control` — device test suite control
+
+Placement: FDT, or the PC's `acpi` root bus. Only in a build configured with
+`-Dtest_fixtures=true`. The guest's end of the device test suite: a byte
+stream for its report that leaves the consoles alone, and a register that
+stops the emulator with an exit status. It is `tinyemu,test-control` in the
+device tree and `TEMU0001` in the DSDT; `src/device/test/test_control.h`
+lists the registers.
+
+| Property | Default | Meaning |
+| --- | --- | --- |
+| `output` | standard error | File the report stream is written to. |
+
+```js
+{ type: "test-control", output: "report.txt" }
+```
+
 ### PCI host bridges and switches
 
 #### `pci-host-ecam-generic` — generic ECAM PCIe host bridge
