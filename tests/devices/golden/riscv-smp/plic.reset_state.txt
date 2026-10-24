@@ -1,0 +1,7 @@
+priority 0
+enable0 0
+threshold 0
+pending0 0
+claim 0
+sources 31
+contexts 4

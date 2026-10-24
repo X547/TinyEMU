@@ -108,8 +108,20 @@ while the next one runs on. Each file in `tests/` goes in `meson.build`.
 
 Snapshots are what makes these characterization tests: a test records what
 the device does today, `--update-golden` writes it to `golden/<test>.txt`,
-and any later difference fails the test until it is looked at. A target
-whose values differ from the others gets `golden/<target>/<test>.txt`.
+and any later difference fails the test until it is looked at. Where runs
+differ, the copy is looked for in `golden/<machine>/<target>/`, then
+`golden/<target>/`, then `golden/<machine>/`, then `golden/`, and
+`--update-golden` writes the least particular copies that hold.
+
+A test that records reset values is a `FRESH_TEST`: when other tests ran
+before it in the same machine, it answers `RERUN` and `run.py` runs it again
+in a machine of its own.
+
+Between tests the runner turns interrupts off, lowers the test-control
+lines and resets every interrupt controller that was used.
+`irq_route(device, index, handler, ctx)` delivers a device's interrupt
+through whichever controller the tables name; the interrupt controller tests
+drive their registers themselves, with the test-control lines as sources.
 
 `known-failures.txt` lists failures that should not fail a run.
 

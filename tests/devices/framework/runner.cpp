@@ -25,7 +25,9 @@
 #include "console.h"
 #include "format.h"
 #include "heap.h"
+#include "intc.h"
 #include "power.h"
+#include "testctl.h"
 
 extern "C" TestCase __devtests_start[], __devtests_end[];
 
@@ -36,11 +38,12 @@ extern "C" TestCase __devtests_start[], __devtests_end[];
      LOG <message>
      SNAP <key> <value>
      CRASH <what>
-     END <name> PASS|FAIL|SKIP|CRASH <microseconds> [<reason>]
+     END <name> PASS|FAIL|SKIP|CRASH|RERUN <microseconds> [<reason>]
      DONE pass=N fail=N skip=N crash=N
 
    with "TEST <name>" lines instead when only listing. The runner treats a
-   BEGIN without its END as a test that killed the machine. */
+   BEGIN without its END as a test that killed the machine, and RERUN as a
+   test that needs a machine of its own. */
 
 namespace {
 
@@ -214,9 +217,47 @@ const HwDevice *t_require_device(const char *compat)
 }
 
 
+void t_require_tc_irqs(int count)
+{
+    int n = tc_irq_count();
+    if (n < count)
+        t_skip("needs %d test-control interrupt lines, has %d", count, n);
+}
+
+
+void t_require_mode(const char *mode)
+{
+    if (strcmp(arch_mode(), mode) != 0)
+        t_skip("only in %s mode", mode);
+}
+
+
 uint64_t t_elapsed_us()
 {
     return now_us() - sTestStart;
+}
+
+
+uint64_t t_now_us()
+{
+    return now_us();
+}
+
+
+void t_delay_us(uint64_t us)
+{
+    uint64_t end = now_us() + us;
+    while (now_us() < end)
+        arch_cpu_relax();
+}
+
+
+/* What a test may have left behind that would reach the next one. */
+static void quiesce()
+{
+    arch_irq_reset();
+    tc_irq_set_levels(0);
+    intc_reset_all();
 }
 
 
@@ -280,6 +321,7 @@ void run_tests(const char *cmdline)
     }
 
     int pass = 0, fail = 0, skip = 0, crash = 0;
+    bool touched = false;
     for (int i = 0; i < count; i++) {
         const TestCase *tc = order[i];
         if (!selected(tc, opt))
@@ -290,6 +332,11 @@ void run_tests(const char *cmdline)
         }
 
         report("BEGIN %s", tc->name);
+        if ((tc->flags & TEST_FRESH) && touched) {
+            report("END %s RERUN 0", tc->name);
+            continue;
+        }
+        touched = true;
         HeapMark mark = heap_mark();
         sFailures = 0;
         sSkipReason[0] = '\0';
@@ -302,6 +349,7 @@ void run_tests(const char *cmdline)
         }
         sCurrent = nullptr;
         uint64_t us = now_us() - sTestStart;
+        quiesce();
         heap_release(mark);
 
         if (outcome == OUTCOME_CRASH) {

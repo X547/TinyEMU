@@ -1,0 +1,1 @@
+threshold_mask 0x7

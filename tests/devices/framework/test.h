@@ -37,7 +37,8 @@
    same mark; what a test allocates is released after it. A test that
    traps is reported as crashed and the next one runs. */
 
-#define TEST_META 0x1 /* a test of the framework itself, run on request */
+#define TEST_META  0x1 /* a test of the framework itself, run on request */
+#define TEST_FRESH 0x2 /* needs a machine no other test has touched */
 
 struct TestCase {
     const char *name;
@@ -57,6 +58,9 @@ struct TestCase {
 
 #define TEST(suite, name) TEST_DEFINE(suite, name, 0)
 #define META_TEST(suite, name) TEST_DEFINE(suite, name, TEST_META)
+/* For reset values: run.py gives such a test a machine of its own when
+   others ran before it. */
+#define FRESH_TEST(suite, name) TEST_DEFINE(suite, name, TEST_FRESH)
 
 /* A failure: reported, and the test goes on. */
 void t_fail(const char *file, int line, const char *fmt, ...)
@@ -74,8 +78,29 @@ void t_snap(const char *key, const char *fmt, ...)
 /* The first device that is 'compat', or the test is skipped. */
 const HwDevice *t_require_device(const char *compat);
 
+/* At least 'count' test-control interrupt lines, or the test is skipped. */
+void t_require_tc_irqs(int count);
+/* The privilege the image runs at ("M", "S", "pvh"), or the test is
+   skipped. */
+void t_require_mode(const char *mode);
+
 /* Microseconds since the test began. */
 uint64_t t_elapsed_us();
+uint64_t t_now_us();
+void t_delay_us(uint64_t us);
+
+/* Poll until 'cond' holds; false after 'timeout_us'. */
+template <typename F>
+bool t_wait_until(F cond, uint64_t timeout_us = 100000)
+{
+    uint64_t end = t_now_us() + timeout_us;
+    for (;;) {
+        if (cond())
+            return true;
+        if (t_now_us() >= end)
+            return cond();
+    }
+}
 
 #define T_FMT_VAL(v) ((unsigned long long)(v))
 

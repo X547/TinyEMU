@@ -75,16 +75,21 @@ sources = files(
   'hw/acpi.cpp',
   'hw/console.cpp',
   'hw/fdt.cpp',
+  'hw/intc.cpp',
   'hw/memory.cpp',
+  'hw/plic.cpp',
   'hw/power.cpp',
   'hw/registry.cpp',
+  'hw/testctl.cpp',
   'lib/cxxrt.cpp',
   'lib/divmod.cpp',
   'lib/format.cpp',
   'lib/heap.cpp',
   'lib/klib.cpp',
   'tests/framework/meta.cpp',
+  'tests/intc/plic.cpp',
   'tests/platform/platform.cpp',
+  'tests/timer/clint.cpp',
 )
 
 # The linker is run directly rather than through the compiler driver, which

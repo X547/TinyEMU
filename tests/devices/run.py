@@ -108,7 +108,7 @@ class Entry:
     def counts(self):
         c = {v: 0 for v in VERDICTS}
         for r in self.results.values():
-            c[r.verdict] += 1
+            c[r.verdict] = c.get(r.verdict, 0) + 1
         return c
 
 
@@ -263,6 +263,19 @@ def run_entry(opts, entry):
     if opts.skip:
         base.append('skip=' + ','.join(opts.skip))
 
+    def run_alone(name):
+        """One test in a machine of its own; False when it did not boot."""
+        finished, current, why = run_once(
+            opts, entry, work,
+            ' '.join([a for a in base if not a.startswith('tests=')]
+                     + ['tests=' + name]), log)
+        if current is not None:
+            _killed(current, why)
+        elif not finished and name not in entry.results:
+            entry.boot_error = why
+            return False
+        return True
+
     with open(os.path.join(work, 'temu.log'), 'w') as log:
         if opts.list:
             finished, _, why = run_once(opts, entry, work,
@@ -280,14 +293,7 @@ def run_entry(opts, entry):
             names = entry.listed
             entry.listed = []
             for name in names:
-                finished, current, why = run_once(
-                    opts, entry, work,
-                    ' '.join([a for a in base if not a.startswith('tests=')]
-                             + ['tests=' + name]), log)
-                if current is not None:
-                    _killed(current, why)
-                elif not finished and name not in entry.results:
-                    entry.boot_error = why
+                if not run_alone(name):
                     return entry
             return entry
 
@@ -311,6 +317,12 @@ def run_entry(opts, entry):
             if entry.restarts > opts.max_restarts:
                 entry.boot_error = 'more than %d restarts' % opts.max_restarts
                 break
+
+        # tests that need a machine no other test touched
+        for r in [r for r in entry.results.values() if r.verdict == 'RERUN']:
+            del entry.results[r.name]
+            if not run_alone(r.name):
+                break
     return entry
 
 
@@ -322,9 +334,15 @@ def _killed(result, why):
 # ----------------------------------------------------------------------------
 # golden snapshots and known failures
 
-def golden_paths(opts, target, test):
-    return (os.path.join(opts.golden, target, test + '.txt'),
-            os.path.join(opts.golden, test + '.txt'))
+def golden_paths(opts, machine, target, test):
+    """Where a test's golden copy may be, the most particular first: for
+    the machine and target, the target, the machine, or all of them."""
+    g = opts.golden
+    name = test + '.txt'
+    return [os.path.join(g, machine, target, name),
+            os.path.join(g, target, name),
+            os.path.join(g, machine, name),
+            os.path.join(g, name)]
 
 
 def read_golden(path):
@@ -342,11 +360,13 @@ def check_golden(opts, entry):
     for r in entry.results.values():
         if not r.snaps or r.verdict != 'PASS':
             continue
-        specific, shared = golden_paths(opts, entry.target.name, r.name)
-        path = specific if os.path.exists(specific) else shared
-        if not os.path.exists(path):
+        paths = [p for p in golden_paths(opts, entry.machine,
+                                         entry.target.name, r.name)
+                 if os.path.exists(p)]
+        if not paths:
             r.golden = 'new'
             continue
+        path = paths[0]
         want = read_golden(path)
         got = [(k, v) for k, v in r.snaps]
         if want == got:
@@ -363,31 +383,64 @@ def check_golden(opts, entry):
 
 
 def update_golden(opts, entries):
-    """The commonest snapshot of a test is the shared copy; targets that
-    differ from it get one of their own."""
+    """The commonest snapshot of a test is the shared copy. A target, then
+    a machine, whose runs all differ from it alike gets one of its own, and
+    what is still left over one per machine and target, matching the order
+    golden_paths() looks in."""
     by_test = {}
     for e in entries:
         for r in e.results.values():
             if r.snaps and r.verdict in ('PASS', 'FAIL') and not r.fails:
-                by_test.setdefault(r.name, []).append((e.target.name, r))
+                by_test.setdefault(r.name, {})[(e.machine, e.target.name)] = \
+                    tuple(r.snaps)
+    g = opts.golden
     written = 0
     for test, runs in sorted(by_test.items()):
-        variants = {}
-        for target, r in runs:
-            variants.setdefault(tuple(r.snaps), set()).add(target)
-        common = max(variants, key=lambda v: len(variants[v]))
-        _write_golden(os.path.join(opts.golden, test + '.txt'), common)
+        name = test + '.txt'
+        for m, t in runs:
+            for p in golden_paths(opts, m, t, test)[:3]:
+                if os.path.exists(p):
+                    os.remove(p)
+        counts = {}
+        for snaps in runs.values():
+            counts[snaps] = counts.get(snaps, 0) + 1
+        shared = max(counts, key=lambda v: counts[v])
+
+        def agreed(values):
+            values = set(values)
+            if len(values) == 1:
+                v = values.pop()
+                if v != shared:
+                    return v
+            return None
+
+        by_target = {}
+        for t in {t for _, t in runs}:
+            v = agreed(s for (_, tt), s in runs.items() if tt == t)
+            if v:
+                by_target[t] = v
+        by_machine = {}
+        for m in {m for m, _ in runs}:
+            rest = [s for (mm, t), s in runs.items()
+                    if mm == m and t not in by_target]
+            v = agreed(rest) if rest else None
+            if v:
+                by_machine[m] = v
+
+        _write_golden(os.path.join(g, name), shared)
         written += 1
-        for snaps, targets in variants.items():
-            for target in targets:
-                path = os.path.join(opts.golden, target, test + '.txt')
-                if snaps != common:
-                    _write_golden(path, snaps)
-                    written += 1
-                elif os.path.exists(path):
-                    os.remove(path)
-    print('golden: wrote %d files under %s' % (written,
-                                                os.path.relpath(opts.golden)))
+        for t, v in by_target.items():
+            _write_golden(os.path.join(g, t, name), v)
+            written += 1
+        for m, v in by_machine.items():
+            _write_golden(os.path.join(g, m, name), v)
+            written += 1
+        for (m, t), snaps in runs.items():
+            effective = by_target.get(t) or by_machine.get(m) or shared
+            if snaps != effective:
+                _write_golden(os.path.join(g, m, t, name), snaps)
+                written += 1
+    print('golden: wrote %d files under %s' % (written, os.path.relpath(g)))
 
 
 def _write_golden(path, snaps):
@@ -464,7 +517,7 @@ def summarize(opts, entries):
         unexpected = [r for r in e.results.values()
                       if r.known and r.verdict == 'PASS']
         bad = [r for r in e.results.values()
-               if not r.known and r.verdict in ('FAIL', 'CRASH', 'TIMEOUT')]
+               if not r.known and r.verdict not in ('PASS', 'SKIP')]
         print('%-22s pass=%-4d fail=%-3d skip=%-3d crash=%-3d timeout=%-3d '
               'known=%-3d restarts=%d' % (
                   e.key, c['PASS'], c['FAIL'], c['SKIP'], c['CRASH'],

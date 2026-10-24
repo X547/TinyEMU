@@ -37,6 +37,16 @@ namespace {
 bool sMachineMode;
 uint64_t sTickHz;
 
+#define MAX_IRQ 64
+#define MSTATUS_MIE 0x8
+#define SSTATUS_SIE 0x2
+
+struct HandlerSlot {
+    IrqHandler fn;
+    void *ctx;
+};
+HandlerSlot sHandlers[MAX_IRQ];
+
 const char *cause_name(unsigned long cause)
 {
     static const char *const names[] = {
@@ -96,6 +106,14 @@ extern "C" [[noreturn]] void riscv_boot(unsigned long hart, const void *fdt,
 extern "C" void riscv_trap(unsigned long *frame, unsigned long is_m)
 {
     (void)is_m;
+    unsigned long cause = frame[FRAME_CAUSE];
+    if ((long)cause < 0) {
+        unsigned num = cause & (MAX_IRQ - 1);
+        if (sHandlers[num].fn) {
+            sHandlers[num].fn(sHandlers[num].ctx);
+            return;
+        }
+    }
     TrapInfo info {};
     info.cause = frame[FRAME_CAUSE];
     info.pc = frame[FRAME_EPC];
@@ -172,6 +190,102 @@ void arch_illegal_instruction()
 {
     /* all zeros is reserved as illegal in every encoding */
     __asm__ volatile(".4byte 0");
+}
+
+
+unsigned long riscv_ip()
+{
+    return sMachineMode ? CSR_READ(mip) : CSR_READ(sip);
+}
+
+
+void riscv_ie_set(unsigned long bits)
+{
+    if (sMachineMode)
+        CSR_SET(mie, bits);
+    else
+        CSR_SET(sie, bits);
+}
+
+
+void riscv_ie_clear(unsigned long bits)
+{
+    if (sMachineMode)
+        CSR_CLEAR(mie, bits);
+    else
+        CSR_CLEAR(sie, bits);
+}
+
+
+unsigned riscv_ext_irq()
+{
+    return sMachineMode ? IRQ_M_EXT : IRQ_S_EXT;
+}
+
+
+unsigned riscv_timer_irq()
+{
+    return sMachineMode ? IRQ_M_TIMER : IRQ_S_TIMER;
+}
+
+
+unsigned riscv_soft_irq()
+{
+    return sMachineMode ? IRQ_M_SOFT : IRQ_S_SOFT;
+}
+
+
+void arch_set_irq_handler(unsigned num, IrqHandler fn, void *ctx)
+{
+    if (num < MAX_IRQ)
+        sHandlers[num] = {fn, ctx};
+}
+
+
+void arch_irq_enable()
+{
+    if (sMachineMode)
+        CSR_SET(mstatus, MSTATUS_MIE);
+    else
+        CSR_SET(sstatus, SSTATUS_SIE);
+}
+
+
+void arch_irq_disable()
+{
+    if (sMachineMode)
+        CSR_CLEAR(mstatus, MSTATUS_MIE);
+    else
+        CSR_CLEAR(sstatus, SSTATUS_SIE);
+}
+
+
+void arch_wait_irq()
+{
+    /* wfi with interrupts off returns once one is pending, which is then
+       taken as soon as they are on; no wakeup can fall between the two */
+    arch_irq_disable();
+    __asm__ volatile("wfi");
+    arch_irq_enable();
+    arch_irq_disable();
+}
+
+
+void arch_irq_reset()
+{
+    arch_irq_disable();
+    if (sMachineMode) {
+        CSR_WRITE(mie, 0);
+        /* the M-mode software interrupt bit is the CLINT's; the supervisor
+           ones M-mode may clear itself */
+        CSR_CLEAR(mip, (1ul << IRQ_S_SOFT) | (1ul << IRQ_S_TIMER) |
+                       (1ul << IRQ_S_EXT));
+    } else {
+        CSR_WRITE(sie, 0);
+        CSR_CLEAR(sip, 1ul << IRQ_S_SOFT);
+    }
+    for (auto &h : sHandlers)
+        h = {};
 }
 
 

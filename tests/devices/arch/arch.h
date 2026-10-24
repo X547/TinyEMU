@@ -81,3 +81,17 @@ extern "C" [[noreturn]] void arch_longjmp(JmpBuf *buf, int value);
 
 /* An instruction that no processor here executes. */
 void arch_illegal_instruction();
+
+/* Interrupts. A handler is per interrupt number: on RISC-V the cause (1
+   supervisor software, 3 machine software, 5 and 7 the timers, 9 and 11
+   external), on x86 the vector (32 to 255). An interrupt nobody handles is
+   an unexpected trap. */
+typedef void (*IrqHandler)(void *ctx);
+void arch_set_irq_handler(unsigned num, IrqHandler fn, void *ctx);
+void arch_irq_enable();
+void arch_irq_disable();
+/* Wait for an interrupt with interrupts enabled; returns after one ran. */
+void arch_wait_irq();
+/* Between tests: interrupts off, every handler gone, and on RISC-V every
+   interrupt source the processor has masked. */
+void arch_irq_reset();

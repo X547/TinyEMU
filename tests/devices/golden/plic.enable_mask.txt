@@ -1,0 +1,2 @@
+word0 0xfffffffe
+word1 0

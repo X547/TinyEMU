@@ -1,0 +1,2 @@
+after_write8 0
+read8 0

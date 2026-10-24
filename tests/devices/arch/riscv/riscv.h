@@ -30,9 +30,32 @@
 #define CSR_WRITE(csr, val) \
     __asm__ volatile("csrw " #csr ", %0" : : "r"((unsigned long)(val)))
 
+#define CSR_SET(csr, bits) \
+    __asm__ volatile("csrs " #csr ", %0" : : "r"((unsigned long)(bits)))
+#define CSR_CLEAR(csr, bits) \
+    __asm__ volatile("csrc " #csr ", %0" : : "r"((unsigned long)(bits)))
+
 /* Whether the image runs in M-mode, as the machine's firmware, rather than
    in S-mode under an SBI. */
 bool riscv_machine_mode();
+
+/* Interrupt causes, which are also the bits of mie/mip and sie/sip. */
+#define IRQ_S_SOFT  1
+#define IRQ_M_SOFT  3
+#define IRQ_S_TIMER 5
+#define IRQ_M_TIMER 7
+#define IRQ_S_EXT   9
+#define IRQ_M_EXT   11
+
+/* The pending and enable registers of the mode the image runs in: mip and
+   mie in M-mode, sip and sie in S-mode. */
+unsigned long riscv_ip();
+void riscv_ie_set(unsigned long bits);
+void riscv_ie_clear(unsigned long bits);
+/* The cause the mode's own external, timer and software interrupts use. */
+unsigned riscv_ext_irq();
+unsigned riscv_timer_irq();
+unsigned riscv_soft_irq();
 
 #define SBI_EXT_BASE 0x10
 #define SBI_EXT_SRST 0x53525354

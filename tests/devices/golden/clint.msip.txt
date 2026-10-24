@@ -1,0 +1,2 @@
+upper_bits 0
+bit0_and_1 0x1

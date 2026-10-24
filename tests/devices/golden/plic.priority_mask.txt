@@ -1,0 +1,2 @@
+all_ones 0x7
+past_last 0

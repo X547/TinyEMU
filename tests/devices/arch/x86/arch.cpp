@@ -83,6 +83,12 @@ struct __attribute__((packed)) DescriptorPointer {
 IdtGate sIdt[256] __attribute__((aligned(16)));
 uint64_t sTickHz;
 
+struct HandlerSlot {
+    IrqHandler fn;
+    void *ctx;
+};
+HandlerSlot sHandlers[256];
+
 #ifdef __x86_64__
 constexpr uint16_t kCodeSelector = SEL_CODE64;
 #else
@@ -157,6 +163,11 @@ extern "C" [[noreturn]] void x86_boot(const HvmStartInfo *si)
 
 extern "C" void x86_trap(X86TrapFrame *frame)
 {
+    HandlerSlot &h = sHandlers[frame->vector & 0xff];
+    if (frame->vector >= 32 && h.fn) {
+        h.fn(h.ctx);
+        return;
+    }
     TrapInfo info {};
     info.cause = frame->vector;
     info.pc = frame->ip;
@@ -242,4 +253,39 @@ void arch_cpu_relax()
 void arch_illegal_instruction()
 {
     __asm__ volatile("ud2");
+}
+
+
+void arch_set_irq_handler(unsigned num, IrqHandler fn, void *ctx)
+{
+    if (num >= 32 && num < 256)
+        sHandlers[num] = {fn, ctx};
+}
+
+
+void arch_irq_enable()
+{
+    __asm__ volatile("sti" ::: "memory");
+}
+
+
+void arch_irq_disable()
+{
+    __asm__ volatile("cli" ::: "memory");
+}
+
+
+void arch_wait_irq()
+{
+    /* the instruction after sti runs before any interrupt is taken, so
+       none can fall between the two */
+    __asm__ volatile("sti; hlt; cli" ::: "memory");
+}
+
+
+void arch_irq_reset()
+{
+    arch_irq_disable();
+    for (auto &h : sHandlers)
+        h = {};
 }
