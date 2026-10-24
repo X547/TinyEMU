@@ -1,0 +1,2 @@
+intx masked 0 unmasked 1 released 0
+msi raised 1 cleared 0

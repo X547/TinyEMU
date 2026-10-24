@@ -138,10 +138,12 @@ def write_config(template, target, image, cmdline, fixtures, out_dir):
     }
     for k, v in subst.items():
         text = text.replace(k, v)
-    # @FIXTURE@, or @FIXTURE(properties)@ to give it some
-    text = re.sub(r'@FIXTURE(?:\((.*?)\))?@',
-                  lambda m: ('{ type: "test-control"%s },' %
-                             (', ' + m.group(1) if m.group(1) else ''))
+    # @FIXTURE@, or @FIXTURE(properties)@ to give it some;
+    # @FIXTURE:type(properties)@ for another fixture than test-control
+    text = re.sub(r'@FIXTURE(?::([\w-]+))?(?:\((.*?)\))?@',
+                  lambda m: ('{ type: "%s"%s },' %
+                             (m.group(1) or 'test-control',
+                              ', ' + m.group(2) if m.group(2) else ''))
                   if fixtures else '', text)
     path = os.path.join(out_dir, 'machine.cfg')
     with open(path, 'w') as f:

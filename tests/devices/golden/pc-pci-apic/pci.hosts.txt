@@ -1,0 +1,1 @@
+host0 cf8 buses 0-255 io yes mem yes mem64 yes msi lapic

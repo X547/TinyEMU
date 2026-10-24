@@ -1,0 +1,3 @@
+3:00.0 pin 1 plic 3
+4:00.0 pin 2 plic 5
+1:00.0@1 pin 3 plda 2

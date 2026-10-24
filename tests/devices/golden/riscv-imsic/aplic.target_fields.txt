@@ -1,3 +1,0 @@
-all_ones 0xfffc07ff
-zero 0
-after_inactive 0

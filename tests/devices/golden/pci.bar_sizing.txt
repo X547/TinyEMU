@@ -1,0 +1,7 @@
+bar0 fffff000
+bar1 ffffffc1
+bar2 fff0000c
+bar3 ffffffff
+bar4 fffff008
+bar5 00000000
+rom fffff801

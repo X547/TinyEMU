@@ -1,0 +1,3 @@
+mmsiaddrcfgh_flags 0x80000000
+smsiaddrcfgh_flags 0
+child_mmsiaddrcfg 0

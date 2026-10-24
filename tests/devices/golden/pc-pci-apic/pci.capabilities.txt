@@ -1,0 +1,5 @@
+caps0:00.0 status 0000 list ext type -1
+caps0:01.0 status 0000 list ext type -1
+caps0:02.0 status 0000 list ext type -1
+caps1:00.0 status 0010 list 05@4c 11@40 ext type -1
+caps0:03.0 status 0010 list 05@4c 11@40 ext type -1

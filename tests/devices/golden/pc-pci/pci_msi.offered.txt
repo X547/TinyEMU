@@ -1,0 +1,4 @@
+fn1:00.0 info 00000000 msi ffff msix ffff 00000000 00000000
+fn1:01.0 info 00000000 msi ffff msix ffff 00000000 00000000
+fn0:03.0 info 00000000 msi ffff msix ffff 00000000 00000000
+fn0:04.0 info 00000000 msi ffff msix ffff 00000000 00000000

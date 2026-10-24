@@ -86,8 +86,17 @@ different `--temu-args`.
 `machines/*.cfg` are temu configurations with `@...@` placeholders that
 `run.py` fills in for each target: the boot method, the command line, the
 root bus and the test-control device, which `@FIXTURE(irqs: [5, 7])@` gives
-properties. The first comment names the targets a machine is for. A test
-that needs a device the machine lacks skips.
+properties. `@FIXTURE:pci-test(slot: 3)@` puts in another fixture, here the
+PCI test function. The first comment names the targets a machine is for. A
+test that needs a device the machine lacks skips.
+
+The fixtures, in temu's `src/device/test`:
+
+* `test-control`: the report stream, the exit status, and interrupt lines
+  the guest drives.
+* `pci-test`: a PCI function with BARs of every kind (32 and 64 bit
+  memory, I/O, an expansion ROM), an INTx pin, MSI and MSI-X it sends on
+  request, and DMA to RAM, for testing the buses and host bridges.
 
 ## Writing tests
 
@@ -130,6 +139,17 @@ lines. The interrupt controller tests drive their registers themselves,
 with the test-control lines as sources. `t_trap(fn)` runs code that is
 meant to trap.
 
+PCI is found and set up as firmware would, the first time a test asks for
+it: `pci_enumerate()` numbers the buses of every host bridge in the tables
+(ECAM, DesignWare, PLDA, or the PC's ports 0xcf8 and 0xcfc), places every
+BAR and bridge window in the host's apertures and turns decoding on.
+`pci_require(vendor, device)` gives a function or skips; `pci_bar_read()`
+reaches its registers through the host's windows, and
+`pci_intx_route()` and the host's `msi` sink deliver its interrupts as the
+tables say. A test that changes configuration space puts it back with
+`pci_restore_all()`. Where a read may find nothing, `pci_space_probe()`
+survives the fault an unclaimed address raises on RISC-V.
+
 `smp_run(cpu, fn, ctx)` runs a function on another processor, which is
 started the first time: by INIT and STARTUP on x86, by its software
 interrupt in M-mode and by the SBI in S-mode. `t_require_other_cpu()` gives
@@ -169,7 +189,7 @@ hung.
 | --- | --- |
 | `arch/` | entry, traps, time and setjmp per architecture |
 | `lib/` | the freestanding basics: strings, formatting, the heap |
-| `hw/` | the device tree and ACPI readers, the device registry, output, power off |
+| `hw/` | the device tree and ACPI readers, the device registry, output, power off, interrupt controllers, PCI |
 | `framework/` | registering and running tests |
 | `tests/` | the tests |
 | `machines/` | machine templates |

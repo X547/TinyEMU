@@ -1,0 +1,9 @@
+fn0:00.0 1b36:0001 class 060400 rev 00 header 01 pin 0 buses 1-4
+fn1:00.0 1b36:0001 class 060400 rev 00 header 01 pin 0 buses 2-4
+fn2:00.0 1b36:0001 class 060400 rev 00 header 01 pin 0 buses 3-3
+fn3:00.0 7e57:0001 class ff0000 rev 01 header 00 pin 3
+fn2:01.0 1b36:0001 class 060400 rev 00 header 01 pin 0 buses 4-4
+fn4:00.0 7e57:0001 class ff0000 rev 01 header 00 pin 1
+fn0:01.0 7e57:0001 class ff0000 rev 01 header 00 pin 1
+fn0:02.0 7e57:0001 class ff0000 rev 01 header 80 pin 2
+fn0:02.3 7e57:0001 class ff0000 rev 01 header 00 pin 4

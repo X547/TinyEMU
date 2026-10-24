@@ -1,0 +1,4 @@
+function_mask pba 00000002 then delivered 00000000 pba 00000002
+vector_unmask 00000002 pba 00000000
+both_enabled 00030003
+msi_alone 00010003

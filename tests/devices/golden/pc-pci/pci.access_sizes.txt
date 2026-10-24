@@ -1,0 +1,3 @@
+line_pin 01a5
+absent ffffffff ffff ff
+unclaimed_bus ffffffff

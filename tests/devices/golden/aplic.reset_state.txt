@@ -1,12 +1,8 @@
-domaincfg 0x80000000
+domaincfg 0x80000004
 sourcecfg 0
 target 0
 setip0 0
 setie0 0
 sources 31
-idelivery 0
-iforce 0
-ithreshold 0
-topi 0
-child_domaincfg 0x80000000
+child_domaincfg 0x80000004
 child_sourcecfg 0

@@ -1,0 +1,2 @@
+memory_off ffffffff
+io_off ffffffff

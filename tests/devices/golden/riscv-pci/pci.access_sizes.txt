@@ -1,0 +1,5 @@
+line_pin 03a5
+absent ffffffff ffff ff
+unclaimed_bus ffffffff
+dsn found
+last_word 00000000

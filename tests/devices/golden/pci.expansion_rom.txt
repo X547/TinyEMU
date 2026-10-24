@@ -1,0 +1,2 @@
+disabled fault
+memory_off fault

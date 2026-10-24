@@ -1,0 +1,2 @@
+memory_off fault
+io_off ffffffff

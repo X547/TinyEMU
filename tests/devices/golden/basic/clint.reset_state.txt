@@ -1,5 +1,0 @@
-msip 0
-mtimecmp 0
-mip_mtip 1
-mip_msip 0
-harts 1

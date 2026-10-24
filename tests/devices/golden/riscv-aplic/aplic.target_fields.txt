@@ -1,0 +1,3 @@
+all_ones 0xfffc00ff
+zero 0x1
+after_inactive 0x1

@@ -1,0 +1,6 @@
+address 12345678
+disabled ffffffff ffff ff
+host_bridge 0d578086
+device_word 0d57
+class 06000002
+subsystem 11001af4

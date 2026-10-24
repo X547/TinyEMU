@@ -1,0 +1,2 @@
+window_regs 1200 1220 1201 1221
+io_regs 11 11

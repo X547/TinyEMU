@@ -1,0 +1,5 @@
+3:00.0 pin 3 plic 3
+4:00.0 pin 1 plic 2
+0:01.0 pin 1 plic 2
+0:02.0 pin 2 plic 4
+0:02.3 pin 4 plic 2

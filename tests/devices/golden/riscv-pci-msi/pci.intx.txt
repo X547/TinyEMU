@@ -1,0 +1,2 @@
+3:00.0 pin 2 aplic 2
+0:01.0 pin 1 aplic 2

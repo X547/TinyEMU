@@ -1,0 +1,3 @@
+entry0 11223344 55667788 99aabbcc ffffffff
+narrow 1122ab44 cdef7788 ab cdef
+past_end 00000000 00000000

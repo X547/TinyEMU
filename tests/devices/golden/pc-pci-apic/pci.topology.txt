@@ -1,0 +1,5 @@
+fn0:00.0 8086:0d57 class 060000 rev 02 header 00 pin 0
+fn0:01.0 8086:7000 class 060100 rev 00 header 80 pin 0
+fn0:02.0 1b36:0001 class 060400 rev 00 header 01 pin 0 buses 1-1
+fn1:00.0 7e57:0001 class ff0000 rev 01 header 00 pin 2
+fn0:03.0 7e57:0001 class ff0000 rev 01 header 00 pin 1

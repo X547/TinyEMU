@@ -1,0 +1,2 @@
+1:00.0 pin 2 ioapic 10
+0:03.0 pin 1 ioapic 10
