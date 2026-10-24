@@ -24,5 +24,6 @@
 /* Power off with an exit status, by the first of these the machine has:
    the test-control device, HTIF, a syscon-poweroff register, the SBI's
    system reset, ACPI S5. Only the first three carry the status; the runner
-   does not depend on it. Halts if none works. */
+   does not depend on it. The processor halts after writing the register,
+   so a machine it fails to stop hangs there. */
 [[noreturn]] void power_off(int code);

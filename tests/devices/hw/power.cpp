@@ -36,20 +36,10 @@
 
 namespace {
 
-/* Gives the write a moment to stop the machine before the next method is
-   tried. */
-void settle()
-{
-    uint64_t hz = arch_tick_hz();
-    if (hz == 0) {
-        for (int i = 0; i < 1000000; i++)
-            __asm__ volatile("");
-        return;
-    }
-    uint64_t end = arch_ticks() + hz / 10;
-    while (arch_ticks() < end)
-        arch_cpu_relax();
-}
+/* A register the tables describe is trusted to stop the machine: the
+   processor halts after writing it rather than trying the next method.
+   The emulator may run on for a while after the request, and a fallback
+   that got as far as a second device would show up in the coverage. */
 
 void try_test_control(int code)
 {
@@ -59,7 +49,7 @@ void try_test_control(int code)
         mmio_read32(r->base + TEST_CONTROL_ID) != TEST_CONTROL_MAGIC)
         return;
     mmio_write32(r->base + TEST_CONTROL_EXIT, code);
-    settle();
+    arch_halt();
 }
 
 void try_htif(int code)
@@ -70,7 +60,7 @@ void try_htif(int code)
     uint64_t tohost = d->regions[1].base;
     mmio_write32(tohost, (uint32_t)code << 1 | 1);
     mmio_write32(tohost + 4, 0);
-    settle();
+    arch_halt();
 }
 
 void try_syscon(int code)
@@ -91,7 +81,7 @@ void try_syscon(int code)
     if (code != 0 && fdt_is_compatible(syscon, "sifive,test0"))
         value = (uint32_t)code << 16 | SIFIVE_TEST_FAIL;
     mmio_write32(base + offset, value);
-    settle();
+    arch_halt();
 }
 
 void try_sbi(int code)
@@ -99,9 +89,9 @@ void try_sbi(int code)
 #ifdef __riscv
     if (riscv_machine_mode() || !sbi_probe(SBI_EXT_SRST))
         return;
+    /* returns only when it failed */
     sbi_call(SBI_EXT_SRST, 0, SBI_SRST_SHUTDOWN,
              code ? SBI_SRST_REASON_FAILURE : SBI_SRST_REASON_NONE);
-    settle();
 #else
     (void)code;
 #endif
@@ -122,7 +112,7 @@ void try_acpi()
     outw(pm1a, (typa.integer & 7) << 10 | PM1_CNT_SLP_EN);
     if (pm1b)
         outw(pm1b, (typb.integer & 7) << 10 | PM1_CNT_SLP_EN);
-    settle();
+    arch_halt();
 #endif
 }
 

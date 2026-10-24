@@ -37,6 +37,8 @@ import tempfile
 import threading
 import time
 
+import covreport
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
 PROTOCOL_VERSION = 1
@@ -149,9 +151,9 @@ def write_config(template, target, image, cmdline, fixtures, out_dir):
 class Run:
     """One temu process, read line by line."""
 
-    def __init__(self, temu, args, cfg, cwd, log):
+    def __init__(self, temu, args, cfg, cwd, log, env):
         self.proc = subprocess.Popen(
-            [temu] + args + [os.path.basename(cfg)], cwd=cwd,
+            [temu] + args + [os.path.basename(cfg)], cwd=cwd, env=env,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT)
         self.lines = queue.Queue()
@@ -198,7 +200,7 @@ def run_once(opts, entry, cfg_dir, cmdline, log):
     cfg = write_config(opts.machine_files[entry.machine], entry.target,
                        opts.images[entry.target.arch], cmdline,
                        opts.fixtures, cfg_dir)
-    run = Run(opts.temu, opts.temu_args, cfg, cfg_dir, log)
+    run = Run(opts.temu, opts.temu_args, cfg, cfg_dir, log, opts.env)
     current = None
     why = ''
     finished = False
@@ -565,7 +567,7 @@ def main():
     ap.add_argument('targets', nargs='*',
                     help='targets to run (default: all): ' +
                     ' '.join(TARGETS))
-    ap.add_argument('--temu', default=find_temu(),
+    ap.add_argument('--temu',
                     help='temu built with -Dtest_fixtures=true '
                     '(default: $TEMU or a build-*fixtures dir)')
     ap.add_argument('--temu-args', default='',
@@ -591,11 +593,28 @@ def main():
                     help='temu without the test-control device')
     ap.add_argument('--no-build', action='store_true',
                     help='use the images as they are')
+    ap.add_argument('--coverage', action='store_true',
+                    help='run on a coverage build of temu (build-coverage, '
+                    'made with clang if missing) and report')
+    ap.add_argument('--coverage-keep', action='store_true',
+                    help='add to the profiles earlier runs left')
+    ap.add_argument('--update-coverage-baseline', action='store_true',
+                    help='record this coverage as the baseline')
     ap.add_argument('-j', '--jobs', type=int, default=os.cpu_count() or 1)
     ap.add_argument('--work', default=os.path.join(HERE, 'work'))
     ap.add_argument('-v', '--verbose', action='store_true')
     opts = ap.parse_args()
 
+    opts.env = None
+    if opts.coverage:
+        if opts.temu is None:
+            opts.temu = covreport.build_temu()
+            if opts.temu is None:
+                return 1
+        opts.env = dict(os.environ, LLVM_PROFILE_FILE=covreport.prepare(
+            opts.work, opts.coverage_keep))
+    elif opts.temu is None:
+        opts.temu = find_temu()
     if not opts.temu or not os.path.exists(opts.temu):
         ap.error('no temu with test fixtures found; pass --temu or set TEMU')
     opts.temu = os.path.abspath(opts.temu)
@@ -680,6 +699,11 @@ def main():
     status = summarize(opts, entries)
     if opts.update_golden:
         update_golden(opts, entries)
+    if opts.coverage:
+        whole = not (opts.targets or opts.machine or opts.tests or opts.skip)
+        status |= covreport.report(opts.work, opts.temu,
+                                  opts.update_coverage_baseline, whole,
+                                  opts.verbose)
     return status
 
 

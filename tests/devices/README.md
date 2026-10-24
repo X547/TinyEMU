@@ -58,6 +58,28 @@ Options worth knowing:
 Each run's console output is in `work/<target>/<machine>/temu.log`, and
 everything is in `work/results.json`.
 
+## Coverage
+
+```sh
+python3 run.py --coverage            # run everything, report, compare
+python3 run.py --coverage -v         # with the table for every file
+```
+
+`--coverage` runs on `build-coverage` in the TinyEMU root, a temu built by
+clang with source based coverage and the test fixtures, which it configures
+the first time. Each temu process writes its own profile as it runs, so a
+run killed after a timeout counts as well. The profiles are merged into
+`work/coverage/summary.txt` and an HTML report in `work/coverage/html`, for
+the files `coverage-scope.txt` names.
+
+A whole run (all targets, machines and tests) is compared with
+`coverage/baseline-<host>.txt`, and a file whose line coverage fell by more
+than two points fails the run. `--update-coverage-baseline` records the new
+figures once more tests cover more. The baselines are per host because the
+compilers count differently and x86 runs on different backends.
+`--coverage-keep` adds to the profiles of earlier runs, to sum up runs with
+different `--temu-args`.
+
 ## Machines
 
 `machines/*.cfg` are temu configurations with `@...@` placeholders that

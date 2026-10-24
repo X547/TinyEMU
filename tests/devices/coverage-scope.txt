@@ -1,0 +1,16 @@
+# The temu sources the suite is meant to cover, as globs relative to the
+# TinyEMU root ('*' also matches '/'). A line starting with '!' takes files
+# back out. Later lines win.
+
+src/device/*
+src/bus/*
+src/machine/*
+src/core/acpi.cpp
+src/core/device.cpp
+src/core/device_class.cpp
+src/core/fdt.cpp
+src/core/iomem.cpp
+src/core/resource.cpp
+
+# what the device test suite drives the emulator through, not a device
+!src/device/test/*
