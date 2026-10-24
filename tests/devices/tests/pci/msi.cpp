@@ -233,16 +233,17 @@ TEST(pci_msi, msix_delivery)
     send(m.f, 1);
     settle();
     EXPECT_EQ(sGot, 0u);
-    uint32_t pending = pba(m.f);
+    EXPECT_EQ(pba(m.f), 2u);
+    /* lifting it sends what is pending, by the PCI specification */
     msix_control(m, MSIX_ENABLE);
     settle();
-    SNAP("function_mask", "pba %08x then delivered %08x pba %08x", pending,
-         sGot, pba(m.f));
-    /* sent on the next unmask of the vector */
+    EXPECT_EQ(sGot, 2u);
+    EXPECT_EQ(pba(m.f), 0u);
+    /* and nothing is left for the vector's own unmask */
     set_msix_entry(m.f, 1, 3, 1);
     set_msix_entry(m.f, 1, 3, 0);
     settle();
-    SNAP("vector_unmask", "%08x pba %08x", sGot, pba(m.f));
+    EXPECT_EQ(sGot, 2u);
 
     /* MSI-X wins when a driver turns on both */
     uint32_t msi = pci_find_cap(m.f, PCI_CAP_MSI);

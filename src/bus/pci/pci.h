@@ -67,6 +67,7 @@ typedef std::unique_ptr<PCIBus, PCIBusDeleter> PCIBusPtr;
 #define PCI_COMMAND		0x04	/* 16 bits */
 #define PCI_COMMAND_IO		(1 << 0)
 #define PCI_COMMAND_MEMORY	(1 << 1)
+#define PCI_COMMAND_MASTER	(1 << 2)
 /* Set by a driver that intends to poll rather than take INTx. */
 #define PCI_COMMAND_INTX_DISABLE bit_at(10)
 #define PCI_STATUS		0x06	/* 16 bits */
@@ -190,7 +191,6 @@ private:
     std::unique_ptr<PCIMsixEntry[]> fTable;
     std::unique_ptr<uint32_t[]> fPba; /* one bit per vector */
 
-    bool MaskedAll() const;
     uint32_t *TableSlot(uint32_t offset);
 
 public:
@@ -215,6 +215,11 @@ public:
     /* Post one vector, or record it pending if it is masked. A masked vector
        is delivered when the mask is lifted. */
     void Send(int vector);
+
+    /* The function mask, and what lifting it does: the vectors pending
+       that are not masked themselves are sent. */
+    bool MaskedAll() const;
+    void FunctionMaskLifted();
 
     /* The table and the pending bit array are read and written a word at a
        time like any other register. Offsets are relative to each window. */
@@ -441,6 +446,11 @@ void pci_device_send_msi(PCIDevice *d, uint64_t addr, uint32_t data);
 
 void pci_device_set_config8(PCIDevice *d, uint16_t addr, uint8_t val);
 void pci_device_set_config16(PCIDevice *d, uint16_t addr, uint16_t val);
+/* The bits of the 'size' bytes at 'addr' a guest may write, little endian
+   in 'mask'. Past the header a device's own registers are writable and its
+   capabilities read only, so a capability opens the fields a driver sets. */
+void pci_device_set_wmask(PCIDevice *d, uint16_t addr, uint32_t mask,
+                          int size);
 /* Read back a device's own configuration space. A device whose behaviour
    depends on a register the guest writes through the generic config path (the
    MSI-X control word, say) reads it here rather than shadowing the write. */

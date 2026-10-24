@@ -51,6 +51,12 @@ struct PCIDevice: public IRQTarget {
     /* The pins the function asserts, before its INTx Disable bit gates them */
     uint8_t irq_request;
     uint8_t config[PCI_EXT_CONFIG_SIZE];
+    /* The bits of each byte past the header a write may change. Device
+       registers there are writable; capabilities are not, but for the
+       fields their code opens. */
+    uint8_t wmask[PCI_CONFIG_SIZE];
+    /* the MSI-X capability, told when its function mask is lifted */
+    PCIMsixState *msix;
     uint16_t next_cap_offset; /* offset of the next capability */
     uint16_t next_ext_cap_offset; /* offset of the next extended capability */
     std::string name; /* for debug only */
@@ -199,6 +205,8 @@ static PCIDevice *pci_register_device_type(PCIBus *b, const char *name,
     d->next_cap_offset = first_cap_offset;
     d->next_ext_cap_offset = PCI_EXT_CAP_START;
     d->pcie_type = -1;
+    d->msix = nullptr;
+    memset(d->wmask + 0x40, 0xff, PCI_CONFIG_SIZE - 0x40);
 
     for(i = 0; i < 4; i++)
         d->irq[i].Init(d, i);
@@ -516,27 +524,40 @@ static int pci_write_bar(PCIDevice *d, uint32_t addr,
     return 0;
 }
 
-/* The bits a guest may change at 'addr'. Anything past the header is fully
-   writable, which is what lets a capability be programmed without having to
-   describe itself here; extended configuration space is read only, because
-   the only extended capability modelled is. */
+/* The bits a guest may change at 'addr', by the PCI Local Bus and PCI
+   Express specifications. Past the header the device and its capabilities
+   say; extended configuration space is read only, because the only
+   extended capability modelled is. */
 static uint8_t pci_config_wmask(const PCIDevice *d, uint32_t addr)
 {
+    bool pcie = d->pcie_type >= 0;
+
     if (addr >= PCI_CONFIG_SIZE)
         return 0x00;
     if (addr >= 0x40)
-        return 0xff;
+        return d->wmask[addr];
 
     switch(addr) {
+    /* I/O, memory and bus master enables, parity and SERR# responses, and
+       INTx disable; nothing here does special cycles, memory write and
+       invalidate, VGA palette snooping or fast back to back */
+    case PCI_COMMAND:
+        return 0x47;
+    case PCI_COMMAND + 1:
+        return 0x05;
     case 0x00: case 0x01: /* vendor id */
     case 0x02: case 0x03: /* device id */
     case 0x06: case 0x07: /* status; its error bits clear on a written one */
     case 0x08:            /* revision */
     case 0x09: case 0x0a: case 0x0b: /* class code */
     case 0x0e:            /* header type */
+    case 0x0f:            /* BIST, which nothing offers */
     case 0x34:            /* capability list pointer */
+    case 0x35: case 0x36: case 0x37: /* reserved */
     case 0x3d:            /* interrupt pin */
         return 0x00;
+    case 0x0d:            /* latency timer, which PCI Express has not */
+        return pcie ? 0x00 : 0xff;
     }
 
     if (pci_is_bridge(d)) {
@@ -548,6 +569,8 @@ static uint8_t pci_config_wmask(const PCIDevice *d, uint32_t addr)
         /* expansion rom */
         case PCI_ROM_ADDRESS1 ... PCI_ROM_ADDRESS1 + 3:
             return 0x00;
+        case PCI_SEC_LATENCY_TIMER:
+            return pcie ? 0x00 : 0xff;
         /* The low nibble of a window register reports what the bridge can
            decode rather than where it decodes, so it is read only. */
         case PCI_IO_BASE:
@@ -557,6 +580,12 @@ static uint8_t pci_config_wmask(const PCIDevice *d, uint32_t addr)
         case PCI_PREF_MEMORY_BASE:
         case PCI_PREF_MEMORY_LIMIT:
             return 0xf0;
+        /* bridge control: PCI Express keeps parity, SERR#, ISA, VGA, VGA
+           16 bit decode and secondary bus reset of it */
+        case PCI_BRIDGE_CONTROL:
+            return pcie ? 0x5f : 0xff;
+        case PCI_BRIDGE_CONTROL + 1:
+            return pcie ? 0x00 : 0x0f;
         }
         return 0xff;
     }
@@ -566,8 +595,11 @@ static uint8_t pci_config_wmask(const PCIDevice *d, uint32_t addr)
     case PCI_BASE_ADDRESS_0 ... PCI_BASE_ADDRESS_0 + 23:
     /* subsystem ids */
     case PCI_SUBSYSTEM_VENDOR_ID ... PCI_SUBSYSTEM_ID + 1:
-    /* expansion rom */
+    /* expansion rom, and the reserved word after the capability pointer */
     case PCI_ROM_ADDRESS ... PCI_ROM_ADDRESS + 3:
+    case 0x38 ... 0x3b:
+    /* Min_Gnt and Max_Lat */
+    case 0x3e: case 0x3f:
         return 0x00;
     }
     return 0xff;
@@ -612,6 +644,7 @@ static void pci_device_config_write(PCIDevice *d, uint32_t addr,
         if (pci_write_bar(d, addr, data) == 0)
             return;
     }
+    bool msix_masked = d->msix != nullptr && d->msix->MaskedAll();
     size = 1 << size_log2;
     for(i = 0; i < size; i++) {
         addr1 = addr + i;
@@ -619,6 +652,8 @@ static void pci_device_config_write(PCIDevice *d, uint32_t addr,
             pci_device_config_write8(d, addr1, get_bits(data, i * 8, 8));
         }
     }
+    if (msix_masked && !d->msix->MaskedAll())
+        d->msix->FunctionMaskLifted();
     if (PCI_COMMAND >= addr && PCI_COMMAND < addr + size) {
         pci_update_mappings(d);
     }
@@ -857,6 +892,9 @@ void pci_bus_config_write(PCIBus *b, uint32_t addr, uint32_t data,
    the given address */
 uint8_t *pci_device_get_dma_ptr(PCIDevice *d, uint64_t addr, bool is_rw)
 {
+    /* without bus mastering a function reaches no memory */
+    if (!(get_le16(&d->config[PCI_COMMAND]) & PCI_COMMAND_MASTER))
+        return nullptr;
     return d->bus->mem_map->GetRamPtr(addr, is_rw);
 }
 
@@ -864,6 +902,10 @@ void pci_device_send_msi(PCIDevice *d, uint64_t addr, uint32_t data)
 {
     PCIBus *b = d->bus;
     PCIMsiTarget *target = pci_bus_msi_target(b);
+
+    /* a message is a memory write, which takes bus mastering */
+    if (!(get_le16(&d->config[PCI_COMMAND]) & PCI_COMMAND_MASTER))
+        return;
 
     if (target) {
         target->SendMsi(addr, data);
@@ -890,6 +932,14 @@ void pci_device_set_config16(PCIDevice *d, uint16_t addr, uint16_t val)
 {
     assert(addr + 1 < PCI_EXT_CONFIG_SIZE);
     put_le16(&d->config[addr], val);
+}
+
+void pci_device_set_wmask(PCIDevice *d, uint16_t addr, uint32_t mask,
+                          int size)
+{
+    assert(addr >= 0x40 && addr + size <= PCI_CONFIG_SIZE);
+    for (int i = 0; i < size; i++)
+        d->wmask[addr + i] = get_bits(mask, 8 * i, 8);
 }
 
 uint32_t pci_device_get_config(PCIDevice *d, uint16_t addr, int size_log2)
@@ -920,6 +970,8 @@ int pci_add_capability(PCIDevice *d, const uint8_t *buf, int size)
     d->next_cap_offset += size;
     d->config[PCI_STATUS] |= PCI_STATUS_CAP_LIST;
     memcpy(d->config + offset, buf, size);
+    /* read only, but for the fields its code opens */
+    memset(d->wmask + offset, 0, size);
     d->config[offset + 1] = d->config[PCI_CAPABILITY_LIST];
     d->config[PCI_CAPABILITY_LIST] = offset;
     return offset;
@@ -981,6 +1033,15 @@ int pci_add_pcie_capability(PCIDevice *d, int port_type)
     if (offset < 0)
         return -1;
     d->pcie_type = port_type;
+    /* the control registers: device, link, slot and root, and device 2 */
+    pci_device_set_wmask(d, offset + 0x08, 0x7fff, 2);
+    pci_device_set_wmask(d, offset + 0x10, 0x0ffb, 2);
+    if (port_type == PCI_EXP_TYPE_ROOT_PORT ||
+        port_type == PCI_EXP_TYPE_DOWNSTREAM)
+        pci_device_set_wmask(d, offset + 0x18, 0x1fff, 2);
+    if (port_type == PCI_EXP_TYPE_ROOT_PORT)
+        pci_device_set_wmask(d, offset + 0x1c, 0x001f, 2);
+    pci_device_set_wmask(d, offset + 0x28, 0xffff, 2);
 
     /* One extended capability, so that a guest walking the chain above 256
        bytes finds a well formed one rather than having to trust that the
@@ -1019,6 +1080,10 @@ bool PCIMsixState::Init(PCIDevice *dev, int bar_num, int vector_count,
     fCapOffset = offset;
     fVectorCount = vector_count;
     fTable = std::make_unique<PCIMsixEntry[]>(vector_count);
+    /* the enable and the function mask */
+    pci_device_set_wmask(dev, offset + PCI_MSIX_FLAGS,
+                         PCI_MSIX_FLAGS_ENABLE | PCI_MSIX_FLAGS_MASKALL, 2);
+    dev->msix = this;
     fPba = std::make_unique<uint32_t[]>((vector_count + 31) / 32);
     return true;
 }
@@ -1035,6 +1100,18 @@ bool PCIMsixState::MaskedAll() const
 {
     uint32_t ctrl = pci_device_get_config(fDev, fCapOffset + PCI_MSIX_FLAGS, 1);
     return (ctrl & PCI_MSIX_FLAGS_MASKALL) != 0;
+}
+
+
+void PCIMsixState::FunctionMaskLifted()
+{
+    if (!Enabled())
+        return;
+    for (int i = 0; i < fVectorCount; i++) {
+        if (get_bit(fPba[i / 32], i % 32) &&
+            !(fTable[i].vector_ctrl & PCI_MSIX_ENTRY_CTRL_MASKBIT))
+            Send(i);
+    }
 }
 
 uint16_t PCIMsixState::AcceptVector(uint32_t vector) const
@@ -1147,6 +1224,12 @@ bool PCIMsiState::Init(PCIDevice *dev, int vector_count)
     fDev = dev;
     fCapOffset = offset;
     fVectorCount = 1 << log2_count;
+    /* the enable, the vectors taken, the address and the data */
+    pci_device_set_wmask(dev, offset + PCI_MSI_FLAGS,
+                         PCI_MSI_FLAGS_ENABLE | PCI_MSI_FLAGS_QSIZE, 2);
+    pci_device_set_wmask(dev, offset + PCI_MSI_ADDRESS_LO, 0xfffffffc, 4);
+    pci_device_set_wmask(dev, offset + PCI_MSI_ADDRESS_HI, 0xffffffff, 4);
+    pci_device_set_wmask(dev, offset + PCI_MSI_DATA, 0xffff, 2);
     return true;
 }
 

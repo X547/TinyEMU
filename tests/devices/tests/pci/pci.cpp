@@ -251,6 +251,13 @@ TEST(pci, capability_writes)
         pci_write32(f, cap, before);
         snprintf(k, sizeof(k), "cap%02x", id);
         SNAP(k, "%08x zeros %08x ones %08x", before, zeros, ones);
+        /* the ID, the next pointer and what the function reports are read
+           only; MSI-X has its enable and function mask, MSI its enable and
+           the vectors taken */
+        uint32_t writable = id == PCI_CAP_MSIX ? 0xc0000000u
+                          : id == PCI_CAP_MSI ? 0x00710000u : 0;
+        EXPECT_EQ(zeros, before & ~writable);
+        EXPECT_EQ(ones, before | writable);
     }
 }
 
@@ -299,6 +306,9 @@ TEST(pci, write_masks)
         pci_write16(f, PCI_COMMAND, 0xffff);
         SNAP(f->bridge ? "bridge_command" : "ep_command", "%04x",
              pci_read16(f, PCI_COMMAND));
+        /* the enables, parity and SERR# responses and INTx disable; the
+           rest is reserved, or what nothing here does */
+        EXPECT_EQ(pci_read16(f, PCI_COMMAND), 0x0547u);
         pci_write16(f, PCI_COMMAND, cmd);
     }
 }
@@ -611,6 +621,44 @@ TEST(pci, intx_shared)
     EXPECT_GE(sIrqs, 1);
     /* whether the controller takes the input again while it stays up */
     SNAP("redelivered", "%d", sIrqs > 3);
+}
+
+/* Without Bus Master Enable a function issues no memory requests, by the
+   PCI specification: no DMA, and no message, which is a memory write. */
+TEST(pci, bus_master_enable)
+{
+    PciFunc *f = pt_require();
+    volatile uint32_t *buf = (volatile uint32_t *)heap_alloc(
+        16, 16, ARCH_ADDRESS_LIMIT);
+    ASSERT_TRUE(buf != nullptr);
+    uint64_t a = (uint64_t)(uintptr_t)buf;
+    buf[0] = 0x1111;
+    pt_write(f, TEST_PCI_DMA_LO, (uint32_t)a);
+    pt_write(f, TEST_PCI_DMA_HI, a >> 32);
+    pci_write16(f, PCI_COMMAND, f->command & ~PCI_CMD_MASTER);
+    pt_write(f, TEST_PCI_DMA_DATA, 0x2222);
+    EXPECT_EQ(buf[0], 0x1111u);
+    EXPECT_EQ(pt_read(f, TEST_PCI_DMA_STATUS), 1u);
+    /* an MSI-X message into the same RAM, as a host without a receiver
+       of its own writes it */
+    uint32_t cap = pci_find_cap(f, PCI_CAP_MSIX);
+    if (cap && (f->host->kind == PCI_HOST_DW ||
+                f->host->kind == PCI_HOST_PLDA)) {
+        uint32_t e = TEST_PCI_MSIX_TABLE;
+        pci_bar_write(f, TEST_PCI_BAR_MSIX, e, (uint32_t)a, 2);
+        pci_bar_write(f, TEST_PCI_BAR_MSIX, e + 4, a >> 32, 2);
+        pci_bar_write(f, TEST_PCI_BAR_MSIX, e + 8, 0x3333, 2);
+        pci_bar_write(f, TEST_PCI_BAR_MSIX, e + 12, 0, 2);
+        pci_write16(f, cap + 2, pci_read16(f, cap + 2) | 0x8000);
+        pt_write(f, TEST_PCI_MSI_SEND, 0);
+        EXPECT_EQ(buf[0], 0x1111u);
+        pci_write16(f, PCI_COMMAND, f->command);
+        pt_write(f, TEST_PCI_MSI_SEND, 0);
+        EXPECT_EQ(buf[0], 0x3333u);
+    }
+    pci_write16(f, PCI_COMMAND, f->command);
+    pt_write(f, TEST_PCI_DMA_DATA, 0x2222);
+    EXPECT_EQ(buf[0], 0x2222u);
 }
 
 /* The test function writing and reading RAM. */

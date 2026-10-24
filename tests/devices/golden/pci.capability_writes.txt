@@ -1,3 +1,3 @@
-cap10 00020010 zeros 00000010 ones ffffffff
-cap11 00034011 zeros 00004011 ones ffffffff
-cap05 00847c05 zeros 00007c05 ones ffffffff
+cap10 00020010 zeros 00020010 ones 00020010
+cap11 00034011 zeros 00034011 ones c0034011
+cap05 00847c05 zeros 00847c05 ones 00f57c05
