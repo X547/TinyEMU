@@ -43,6 +43,9 @@ struct PICState {
     uint8_t rotate_on_autoeoi;
     uint8_t init4; /* true if 4 byte init */
     uint8_t single; /* initialized without a cascade, so no ICW3 */
+    uint8_t sfnm; /* special fully nested mode */
+    uint8_t poll; /* the next command port read is a poll */
+    uint8_t is_master;
     uint8_t elcr; /* PIIX edge/trigger selection*/
     uint8_t elcr_mask;
     I8259Pair *update_target;
@@ -91,6 +94,8 @@ static void pic_reset(PICState *s)
     s->rotate_on_autoeoi = 0;
     s->init4 = 0; /* true if 4 byte init */
     s->single = 0;
+    s->sfnm = 0;
+    s->poll = 0;
 }
 
 /* set irq level. If an edge is detected, then the IRR is set to 1 */
@@ -142,8 +147,16 @@ static int pic_get_irq(PICState *s)
     priority = pic_get_priority(s, mask);
     if (priority == 8)
         return -1;
-    /* compute current priority */
-    cur_priority = pic_get_priority(s, s->isr);
+    /* What is in service holds back what ranks below it, except, in special
+       mask mode, an input that is masked as well; and, in special fully
+       nested mode, the cascade input, so that a higher request on the slave
+       gets through while a lower one is served. */
+    mask = s->isr;
+    if (s->special_mask)
+        mask &= ~s->imr;
+    if (s->sfnm && s->is_master)
+        mask = set_bit(mask, 2, false);
+    cur_priority = pic_get_priority(s, mask);
     if (priority < cur_priority) {
         /* higher priority found: an irq should be generated */
         return (priority + s->priority_add) & 7;
@@ -187,6 +200,7 @@ void PICState::Write(uint32_t offset, uint32_t val, int size_log2)
         } else if (get_bit(val, 3)) {
             if (get_bit(val, 1))
                 s->read_reg_select = get_bit(val, 0);
+            s->poll = get_bit(val, 2);
             if (get_bit(val, 6)) {
                 s->special_mask = get_bit(val, 5);
                 /* which requests outrank what is in service has changed */
@@ -205,10 +219,12 @@ void PICState::Write(uint32_t offset, uint32_t val, int size_log2)
             case 0xa0:
                 priority = pic_get_priority(s, s->isr);
                 if (priority < 8) {
-                    s->isr &= ~(1 << ((priority + s->priority_add) & 7));
+                    int irq = (priority + s->priority_add) & 7;
+                    s->isr = set_bit(s->isr, irq, false);
+                    /* the input just served becomes the lowest */
+                    if (val == 0xa0)
+                        s->priority_add = (irq + 1) & 7;
                 }
-                if (val == 0xa0)
-                    s->priority_add = (s->priority_add + 1) & 7;
                 break;
             case 0x60:
             case 0x61:
@@ -269,6 +285,7 @@ void PICState::Write(uint32_t offset, uint32_t val, int size_log2)
             break;
         case 3:
             s->auto_eoi = get_bit(val, 1);
+            s->sfnm = get_bit(val, 4);
             s->init_state = 0;
             break;
         }
@@ -281,7 +298,19 @@ uint32_t PICState::Read(uint32_t offset, int size_log2)
     int addr, ret;
 
     addr = get_bit(offset, 0);
-    if (addr == 0) {
+    if (s->poll) {
+        /* A poll is an acknowledge by read: bit 7 says whether an input
+           wanted service, and the low bits which one. */
+        s->poll = 0;
+        ret = pic_get_irq(s);
+        if (ret >= 0) {
+            pic_intack(s, ret);
+            ret |= 0x80;
+        } else {
+            ret = 0;
+        }
+        s->update_target->Update();
+    } else if (addr == 0) {
         if (s->read_reg_select)
             ret = s->isr;
         else
@@ -316,6 +345,7 @@ I8259Pair::I8259Pair(PhysMemoryMap *port_map, uint32_t addr0, uint32_t addr1,
         irqs[i].Init(this, i);
     fPics[0] = pic_init(port_map, addr0, elcr_addr0, 0xf8, this);
     fPics[1] = pic_init(port_map, addr1, elcr_addr1, 0xde, this);
+    fPics[0]->is_master = 1;
 }
 
 I8259Pair::~I8259Pair() = default;

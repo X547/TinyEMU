@@ -321,14 +321,15 @@ TEST(i8259, auto_eoi)
 
 namespace {
 
-/* Raise two master lines and record the order they are taken in, ending
-   each by 'eoi'. */
-void take_both(const Setup &s, uint8_t eoi)
+/* Raise the first 'count' of two master lines and record the order they
+   are taken in, ending each by 'eoi'. */
+void take_both(const Setup &s, uint8_t eoi, int count = 2)
 {
     sSetup = s;
     sCount = 0;
     sOrder[7] = eoi;
-    for (int i = 0; i < 2; i++) {
+    sOrder[6] = count;
+    for (int i = 0; i < count; i++) {
         arch_set_irq_handler(vector(s.line[i]), [](void *p) {
             int i = (int)(uintptr_t)p;
             sOrder[sCount] = sSetup.line[i];
@@ -339,11 +340,22 @@ void take_both(const Setup &s, uint8_t eoi)
         }, (void *)(uintptr_t)i);
         s.pic->SetMasked(s.line[i], false);
     }
-    tc_irq_raise(s.index[0]);
-    tc_irq_raise(s.index[1]);
+    for (int i = 0; i < count; i++)
+        tc_irq_raise(s.index[i]);
     arch_irq_enable();
-    t_wait_until([] { return sCount >= 2; });
+    t_wait_until([] { return sCount >= sOrder[6]; });
     arch_irq_disable();
+}
+
+/* 's' with its line 'i' first */
+Setup first(const Setup &s, int i)
+{
+    Setup r = s;
+    r.line[0] = s.line[i];
+    r.index[0] = s.index[i];
+    r.line[1] = s.line[1 - i];
+    r.index[1] = s.index[1 - i];
+    return r;
 }
 
 }
@@ -351,13 +363,20 @@ void take_both(const Setup &s, uint8_t eoi)
 TEST(i8259, rotate_on_eoi)
 {
     Setup s = need_pic(2, 0);
-    uint32_t lo = min(s.line[0], s.line[1]);
-    /* a rotating EOI after 'lo' makes it the lowest priority */
-    take_both(s, 0xa0);
-    EXPECT_EQ(sCount, 2);
-    sCount = 0;
+    int lo_i = s.line[0] < s.line[1] ? 0 : 1;
+    Setup lo_first = first(s, lo_i), hi_first = first(s, 1 - lo_i);
+    /* By the 8259A data sheet, a rotating EOI makes the input just served
+       the lowest priority: after 'lo' alone, 'hi' outranks it, whatever
+       the two lines are. */
+    take_both(lo_first, 0xa0, 1);
+    EXPECT_EQ(sCount, 1);
     take_both(s, 0x20);
-    SNAP("second_round_first", "%s", sOrder[0] == (int)lo ? "lo" : "hi");
+    EXPECT_EQ(sCount, 2);
+    EXPECT_EQ(sOrder[0], (int)hi_first.line[0]);
+    /* and after 'hi' alone, 'lo' comes first again */
+    take_both(hi_first, 0xa0, 1);
+    take_both(s, 0x20);
+    EXPECT_EQ(sOrder[0], (int)lo_first.line[0]);
 }
 
 TEST(i8259, rotate_on_specific_eoi)
@@ -394,7 +413,8 @@ TEST(i8259, rotate_in_auto_eoi)
     take_both(s, 0);
     sCount = 0;
     take_both(s, 0);
-    SNAP("second_round_first", "%s", sOrder[0] == (int)lo ? "lo" : "hi");
+    /* the last one acknowledged, 'hi', became the lowest */
+    EXPECT_EQ(sOrder[0], (int)lo);
     outb(s.pic->CommandPort(0), 0x00);
 }
 
@@ -457,7 +477,7 @@ TEST(i8259, special_mask)
     arch_irq_enable();
     t_wait_until([] { return sCount > 100; }, 2000);
     arch_irq_disable();
-    SNAP("lower_delivered", "%d", sCount > 100);
+    EXPECT_GT(sCount, 100);
     outb(s.pic->CommandPort(0), 0x48);
     outb(s.pic->CommandPort(0), 0x20);
     outb(s.pic->CommandPort(0), 0x20);
@@ -466,10 +486,22 @@ TEST(i8259, special_mask)
 TEST(i8259, poll_command)
 {
     Setup s = need_pic(1, 0);
+    uint32_t l = s.line[0];
+    s.pic->SetMasked(l, false);
     tc_irq_raise(s.index[0]);
-    /* OCW3 poll: the next read gives the highest request, bit 7 set */
+    /* OCW3 poll: the next read gives the highest request with bit 7 set,
+       and acknowledges it, by the 8259A data sheet */
     outb(s.pic->CommandPort(0), 0x0c);
-    SNAP("poll", "%#x", inb(s.pic->CommandPort(0)));
+    EXPECT_EQ(inb(s.pic->CommandPort(0)), 0x80u | (l & 7));
+    EXPECT_TRUE(s.pic->Isr(0) & bit(l));
+    EXPECT_FALSE(s.pic->Irr(0) & bit(l));
+    /* with nothing requested it reads 0 */
+    outb(s.pic->CommandPort(0), 0x0c);
+    EXPECT_EQ(inb(s.pic->CommandPort(0)), 0u);
+    /* and only the read after the command polls */
+    EXPECT_EQ(inb(s.pic->CommandPort(0)), s.pic->Irr(0));
+    tc_irq_lower(s.index[0]);
+    outb(s.pic->CommandPort(0), 0x20);
 }
 
 TEST(i8259, level_init_word)
