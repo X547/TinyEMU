@@ -95,6 +95,25 @@ enum {
 
 #define SVR_ENABLE 8
 
+/* ESR bits, by the Intel SDM */
+#define ESR_SEND_ILLEGAL_VECTOR bit_at(5)
+#define ESR_RECV_ILLEGAL_VECTOR bit_at(6)
+#define ESR_ILLEGAL_REGISTER    bit_at(7)
+
+/* The bits each LVT keeps, indexed like fLvt: vector, delivery mode,
+   polarity and trigger where the entry has them, the mask, and the
+   timer's periodic mode. The delivery status and remote IRR are read only
+   and never set here. */
+static const uint32_t kLvtWritable[7] = {
+    0x000107ff, /* CMCI */
+    0x000300ff, /* timer, without TSC deadline mode */
+    0x000107ff, /* thermal */
+    0x000107ff, /* performance counters */
+    0x0001a7ff, /* LINT0 */
+    0x0001a7ff, /* LINT1 */
+    0x000100ff, /* error */
+};
+
 /* version 0x14 with 7 LVT entries */
 #define LAPIC_VERSION 0x00060014
 
@@ -133,6 +152,8 @@ void LocalApic::Init()
         lvt = bit_at(LVT_MASKED);
     fDivide = 0;
     fInitialCount = 0;
+    fTimerArmed = false;
+    fEsr = fEsrPending = 0;
     for (int i = 0; i < 8; i++)
         fIrr[i] = fIsr[i] = fTmr[i] = 0;
     Update();
@@ -152,6 +173,15 @@ bool LocalApic::AcceptsExtInt() const
     return !get_bit(fBase, BASE_ENABLE) ||
         (!get_bit(lint0, LVT_MASKED) &&
          get_bits(lint0, DELIVERY_MODE, 3) == MODE_EXTINT);
+}
+
+
+/* The offsets no register answers at in xAPIC mode, by the Intel SDM. */
+static bool reserved_register(uint32_t offset)
+{
+    return offset <= 0x010 || (offset >= 0x040 && offset <= 0x070) ||
+        offset == 0x0c0 || (offset >= 0x290 && offset <= 0x2e0) ||
+        (offset >= 0x3a0 && offset <= 0x3d0) || offset == 0x3f0;
 }
 
 
@@ -191,12 +221,27 @@ void LocalApic::Update()
 void LocalApic::Accept(int vector, bool level)
 {
     /* vectors 0-15 are illegal */
-    if (vector < 16)
+    if (vector < 16) {
+        Error(ESR_RECV_ILLEGAL_VECTOR);
         return;
+    }
     int word = vector / 32, bit = vector % 32;
     fIrr[word] = set_bit(fIrr[word], bit, true);
     fTmr[word] = set_bit(fTmr[word], bit, level);
     Update();
+}
+
+
+/* An error is recorded for the next ESR write to show, and interrupts
+   through the error LVT the first time it is found. Its own vector being
+   illegal is then an error already recorded, which ends there. */
+void LocalApic::Error(uint32_t bit)
+{
+    if (fEsrPending & bit)
+        return;
+    fEsrPending |= bit;
+    if (!get_bit(fLvt[LVT_ERROR], LVT_MASKED))
+        Accept(get_bits(fLvt[LVT_ERROR], 0, 8), false);
 }
 
 
@@ -266,6 +311,14 @@ int LocalApic::Acknowledge()
 
 void LocalApic::SendIpi()
 {
+    int mode = get_bits(fIcrLow, DELIVERY_MODE, 3);
+    /* a fixed or lowest priority message names a vector, which 0-15 is not;
+       such a message is not sent */
+    if ((mode == MODE_FIXED || mode == MODE_LOWEST) &&
+        get_bits(fIcrLow, 0, 8) < 16) {
+        Error(ESR_SEND_ILLEGAL_VECTOR);
+        return;
+    }
     fBus.Send(fId, get_bits(fIcrLow, ICR_SHORTHAND, 2),
               get_bits(fIcrHigh, 24, 8), get_bit(fIcrLow, ICR_LOGICAL),
               get_bits(fIcrLow, DELIVERY_MODE, 3), get_bits(fIcrLow, 0, 8),
@@ -323,7 +376,7 @@ uint32_t LocalApic::CurrentCount(uint64_t now) const
    microsecond, or UINT64_MAX with no count running. */
 uint64_t LocalApic::TimerDue() const
 {
-    if (fInitialCount == 0)
+    if (!fTimerArmed)
         return UINT64_MAX;
     uint64_t ticks = (fTimerFired + 1) * fInitialCount * TimerDivisor();
     return fTimerStart + (ticks + TIMER_HZ / 1000000 - 1) /
@@ -334,7 +387,7 @@ uint64_t LocalApic::TimerDue() const
 /* Periods that ran out while nobody looked are one interrupt. */
 int64_t LocalApic::RunTimer()
 {
-    if (fInitialCount == 0)
+    if (!fTimerArmed)
         return -1;
     uint64_t now = host_monotonic_us();
     uint64_t periods = TimerTicks(now) / fInitialCount;
@@ -343,8 +396,10 @@ int64_t LocalApic::RunTimer()
         fTimerFired = periods;
         if (!get_bit(fLvt[LVT_TIMER], LVT_MASKED))
             Accept(get_bits(fLvt[LVT_TIMER], 0, 8), false);
+        /* a one-shot count stays in the initial count register, and the
+           current count stops at 0 */
         if (!periodic) {
-            fInitialCount = 0;
+            fTimerArmed = false;
             return -1;
         }
     }
@@ -395,7 +450,11 @@ uint32_t LocalApic::DeviceRead(uint32_t offset, int size_log2)
         return fIrr[(offset - REG_IRR) / 16];
     if (offset >= REG_LVT_TIMER && offset <= REG_LVT_ERROR)
         return fLvt[LVT_TIMER + (offset - REG_LVT_TIMER) / 16];
-    /* APR, ESR and the reserved registers */
+    if (offset == REG_ESR)
+        return fEsr;
+    if (reserved_register(offset))
+        Error(ESR_ILLEGAL_REGISTER);
+    /* APR, EOI and the reserved registers */
     return 0;
 }
 
@@ -441,34 +500,46 @@ void LocalApic::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
     case REG_ICR_HIGH:
         fIcrHigh = val & 0xff000000;
         return;
-    case REG_LVT_CMCI:
-        fLvt[LVT_CMCI] = val;
+    case REG_ESR:
+        /* shows the errors found since the last write */
+        fEsr = fEsrPending;
+        fEsrPending = 0;
         return;
     case REG_INITIAL_COUNT:
         fInitialCount = val;
+        fTimerArmed = val != 0;
         fTimerStart = host_monotonic_us();
         fTimerFired = 0;
         fHost.ApicTimerChanged(TimerDue());
         return;
     case REG_DIVIDE:
-        /* a count in progress starts over at the new rate */
         fDivide = val & 0xb;
-        fTimerStart = host_monotonic_us();
-        fTimerFired = 0;
-        fHost.ApicTimerChanged(TimerDue());
+        /* a count in progress starts over at the new rate */
+        if (fTimerArmed) {
+            fTimerStart = host_monotonic_us();
+            fTimerFired = 0;
+            fHost.ApicTimerChanged(TimerDue());
+        }
         return;
     }
-    if (offset >= REG_LVT_TIMER && offset <= REG_LVT_ERROR) {
-        int i = LVT_TIMER + (offset - REG_LVT_TIMER) / 16;
+    int lvt = -1;
+    if (offset == REG_LVT_CMCI)
+        lvt = LVT_CMCI;
+    else if (offset >= REG_LVT_TIMER && offset <= REG_LVT_ERROR)
+        lvt = LVT_TIMER + (offset - REG_LVT_TIMER) / 16;
+    if (lvt >= 0) {
+        val &= kLvtWritable[lvt];
         if (!get_bit(fSvr, SVR_ENABLE))
             val = set_bit(val, LVT_MASKED, true);
-        fLvt[i] = val;
+        fLvt[lvt] = val;
         Update();
-        if (i == LVT_TIMER)
+        if (lvt == LVT_TIMER)
             fHost.ApicTimerChanged(TimerDue());
+        return;
     }
-    /* ID and the read only registers ignore writes; ESR has nothing to
-       report */
+    if (reserved_register(offset))
+        Error(ESR_ILLEGAL_REGISTER);
+    /* ID and the read only registers ignore writes */
 }
 
 

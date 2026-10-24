@@ -78,9 +78,14 @@ private:
     uint32_t fIsr[8] = {};
     uint32_t fTmr[8] = {};
     bool fLint0 = false;
+    /* The errors software was shown at its last write of the ESR, and those
+       found since. */
+    uint32_t fEsr = 0;
+    uint32_t fEsrPending = 0;
 
     /* the timer */
     uint32_t fInitialCount = 0;
+    bool fTimerArmed = false;   /* a count runs and will interrupt */
     uint64_t fTimerStart = 0;   /* host microseconds */
     uint64_t fTimerFired = 0;   /* periods counted so far */
 
@@ -89,6 +94,7 @@ private:
     bool Deliverable() const;
     void Update();
     void Accept(int vector, bool level);
+    void Error(uint32_t bit);
     bool MatchesLogical(uint32_t dest) const;
     void Init();
     void SendIpi();

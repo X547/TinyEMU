@@ -98,10 +98,13 @@ TEST(lapic, read_only)
     EXPECT_EQ(l->Read(LAPIC_VERSION), ver);
     EXPECT_EQ(l->Read(LAPIC_PPR), 0u);
     l->Write(LAPIC_ESR, 0);
-    SNAP("esr", "%#x", l->Read(LAPIC_ESR));
+    l->Write(LAPIC_ESR, 0);
+    EXPECT_EQ(l->Read(LAPIC_ESR), 0u);
     SNAP("apr", "%#x", l->Read(LAPIC_APR));
-    /* a reserved register */
-    SNAP("reserved_40", "%#x", l->Read(0x40));
+    /* a reserved register reads 0 and is an illegal register address */
+    EXPECT_EQ(l->Read(0x40), 0u);
+    l->Write(LAPIC_ESR, 0);
+    EXPECT_EQ(l->Read(LAPIC_ESR), 0x80u);
 }
 
 TEST(lapic, register_masks)
@@ -114,10 +117,18 @@ TEST(lapic, register_masks)
         LAPIC_LVT_TIMER, LAPIC_LVT_THERMAL, LAPIC_LVT_PERF, LAPIC_LVT_LINT0,
         LAPIC_LVT_LINT1, LAPIC_LVT_ERROR, LAPIC_TIMER_DIVIDE,
     };
-    for (uint32_t reg : regs) {
-        l->Write(reg, 0xffffffff);
-        n += snprintf(buf + n, sizeof(buf) - n, "%s%x", n ? " " : "",
-                      l->Read(reg));
+    /* by the Intel SDM: no TSC deadline mode, and the delivery status and
+       remote IRR read only */
+    static const uint32_t want[] = {
+        0xff, 0xff000000, 0xffffffff, 0xff000000, 0x107ff,
+        0x300ff, 0x107ff, 0x107ff, 0x1a7ff,
+        0x1a7ff, 0x100ff, 0xb,
+    };
+    for (size_t i = 0; i < ARRAY_SIZE(regs); i++) {
+        l->Write(regs[i], 0xffffffff);
+        uint32_t v = l->Read(regs[i]);
+        n += snprintf(buf + n, sizeof(buf) - n, "%s%x", n ? " " : "", v);
+        EXPECT_EQ(v, want[i]);
     }
     SNAP("all_ones", "%s", buf);
 }
@@ -236,9 +247,31 @@ TEST(lapic, shorthands)
 TEST(lapic, illegal_vector)
 {
     Lapic *l = need_lapic();
+    l->Write(LAPIC_ESR, 0);
+    /* sending one is an error, and nothing is sent */
     l->SendIpi(0, LAPIC_ICR_SELF | 5);
     EXPECT_EQ(l->Read(LAPIC_IRR(0)), 0u);
-    SNAP("esr", "%#x", l->Read(LAPIC_ESR));
+    EXPECT_EQ(l->Read(LAPIC_ESR), 0u);
+    l->Write(LAPIC_ESR, 0);
+    EXPECT_EQ(l->Read(LAPIC_ESR), 0x20u);
+    /* so is receiving one, from a local source */
+    l->Write(LAPIC_LVT_TIMER, 5);
+    l->Write(LAPIC_TIMER_DIVIDE, 0xb);
+    l->Write(LAPIC_TIMER_INITIAL, 1000);
+    t_delay_us(1000);
+    l->Write(LAPIC_ESR, 0);
+    EXPECT_EQ(l->Read(LAPIC_ESR), 0x40u);
+    /* the error LVT interrupts for a new error */
+    sCount = 0;
+    arch_set_irq_handler(VEC_TEST, count_and_eoi, nullptr);
+    l->Write(LAPIC_LVT_ERROR, VEC_TEST);
+    l->SendIpi(0, LAPIC_ICR_SELF | 5);
+    arch_irq_enable();
+    EXPECT_TRUE(t_wait_until([] { return sCount > 0; }));
+    arch_irq_disable();
+    l->Write(LAPIC_LVT_ERROR, LAPIC_LVT_MASKED);
+    l->Write(LAPIC_ESR, 0);
+    l->Write(LAPIC_ESR, 0);
 }
 
 TEST(lapic, unmodelled_modes)
@@ -395,7 +428,8 @@ TEST(lapic, timer_one_shot)
     arch_irq_disable();
     EXPECT_EQ(sCount, 1);
     EXPECT_EQ(l->Read(LAPIC_TIMER_CURRENT), 0u);
-    SNAP("initial_after", "%#x", l->Read(LAPIC_TIMER_INITIAL));
+    /* the count expired, not the register */
+    EXPECT_EQ(l->Read(LAPIC_TIMER_INITIAL), 2000000u);
 }
 
 TEST(lapic, timer_periodic)
