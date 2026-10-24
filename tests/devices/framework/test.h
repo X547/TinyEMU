@@ -21,6 +21,7 @@
  */
 #pragma once
 
+#include "arch.h"
 #include "klib.h"
 #include "registry.h"
 
@@ -77,6 +78,10 @@ void t_snap(const char *key, const char *fmt, ...)
 
 /* The first device that is 'compat', or the test is skipped. */
 const HwDevice *t_require_device(const char *compat);
+
+/* Run 'fn' and report whether it trapped, and how in 'info'; a trap there
+   is expected rather than a crash. */
+bool t_trap(void (*fn)(void *), void *ctx = nullptr, TrapInfo *info = nullptr);
 
 /* At least 'count' test-control interrupt lines, or the test is skipped. */
 void t_require_tc_irqs(int count);

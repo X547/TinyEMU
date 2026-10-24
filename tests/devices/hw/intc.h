@@ -52,7 +52,8 @@ void irq_unroute(const HwDevice *dev, int index);
 /* Reset every controller that was used. */
 void intc_reset_all();
 
-/* For the drivers: remember a controller so that it is reset. */
+/* For the drivers, as each is created: remember a controller so that it is
+   reset, whether a test routes through it or drives it directly. */
 void intc_register(IntController *ctrl);
 
 /* RISC-V: the phandle of a hart's local interrupt controller, the

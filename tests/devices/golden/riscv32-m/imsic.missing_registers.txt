@@ -1,0 +1,4 @@
+odd_eip ok
+iprio0 ok
+reserved_71 ok
+below_30 trap

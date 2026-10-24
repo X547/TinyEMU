@@ -104,6 +104,10 @@ FRESH_TEST(clint, reset_state)
     Clint c = need_clint();
     SNAP("msip", "%#x", mmio_read32(c.base + CLINT_MSIP(c.index)));
     SNAP("mtimecmp", "%#llx", T_FMT_VAL(mtimecmp(c)));
+    /* temu raises MTIP when its timer loop next runs, which a read right
+       after reset may come before: only what it settles to is recorded */
+    t_log("mip_mtip at first read: %d", mip(IRQ_M_TIMER));
+    t_wait_until([] { return mip(IRQ_M_TIMER); }, 10000);
     SNAP("mip_mtip", "%d", mip(IRQ_M_TIMER));
     SNAP("mip_msip", "%d", mip(IRQ_M_SOFT));
     SNAP("harts", "%d", c.harts);
@@ -151,9 +155,10 @@ TEST(clint, timer_pending)
     /* a compare value in the future takes it back */
     set_mtimecmp(c, UINT64_MAX);
     EXPECT_FALSE(mip(IRQ_M_TIMER));
-    /* and one in the past raises it at once */
+    /* and one in the past raises it, when temu's timer loop next runs
+       rather than at once */
     set_mtimecmp(c, 0);
-    EXPECT_TRUE(t_wait_until([] { return mip(IRQ_M_TIMER); }, 1000));
+    EXPECT_TRUE(t_wait_until([] { return mip(IRQ_M_TIMER); }, 100000));
     set_mtimecmp(c, UINT64_MAX);
 }
 

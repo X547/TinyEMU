@@ -317,6 +317,16 @@ TEST(plic, past_last_context)
     SNAP("claim", "%#x", s.plic->Read(PLIC_CLAIM(ctx)));
 }
 
+TEST(plic, context_reserved)
+{
+    Setup s = need_plic(1);
+    uint32_t reserved = PLIC_THRESHOLD(s.ctx) + 8;
+    s.plic->Write(PLIC_THRESHOLD(s.ctx), 2);
+    s.plic->Write(reserved, 5);
+    SNAP("read", "%#x", s.plic->Read(reserved));
+    EXPECT_EQ(s.plic->Read(PLIC_THRESHOLD(s.ctx)), 2u);
+}
+
 TEST(plic, narrow_access)
 {
     Setup s = need_plic(1);

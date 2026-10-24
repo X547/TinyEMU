@@ -66,6 +66,9 @@ struct Options {
 };
 
 JmpBuf sTestJmp;
+/* set while t_trap() expects one */
+JmpBuf *sTrapJmp;
+TrapInfo sTrapInfo;
 const TestCase *sCurrent;
 bool sInTrap;
 int sFailures;
@@ -255,14 +258,38 @@ void t_delay_us(uint64_t us)
 /* What a test may have left behind that would reach the next one. */
 static void quiesce()
 {
+    sTrapJmp = nullptr;
     arch_irq_reset();
     tc_irq_set_levels(0);
     intc_reset_all();
 }
 
 
+bool t_trap(void (*fn)(void *), void *ctx, TrapInfo *info)
+{
+    JmpBuf jb;
+    JmpBuf *outer = sTrapJmp;
+    sTrapJmp = &jb;
+    if (arch_setjmp(&jb) == 0) {
+        fn(ctx);
+        sTrapJmp = outer;
+        return false;
+    }
+    sTrapJmp = outer;
+    if (info)
+        *info = sTrapInfo;
+    return true;
+}
+
+
 void trap_unexpected(const TrapInfo &info)
 {
+    if (sTrapJmp != nullptr) {
+        JmpBuf *jb = sTrapJmp;
+        sTrapJmp = nullptr;
+        sTrapInfo = info;
+        arch_longjmp(jb, 1);
+    }
     if (sCurrent == nullptr || sInTrap)
         return;
     sInTrap = true;

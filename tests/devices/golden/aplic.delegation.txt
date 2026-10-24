@@ -1,0 +1,2 @@
+root_delegated 0x400
+leaf_delegate 0

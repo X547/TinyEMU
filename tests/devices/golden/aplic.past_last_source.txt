@@ -1,0 +1,3 @@
+sourcecfg 0
+target 0
+source0 0x80000000

@@ -50,6 +50,9 @@ Plic *Plic::Get(const FdtNode *node)
                 void *mem = boot_alloc(sizeof(Plic), alignof(Plic));
                 sPlics[i] = new (mem) Plic(registry_at(j));
                 sNodes[i] = node;
+                /* reset between tests whether routed through or driven
+                   directly */
+                intc_register(sPlics[i]);
                 return sPlics[i];
             }
             return nullptr;
@@ -136,7 +139,6 @@ bool Plic::Route(uint32_t line, IrqHandler fn, void *ctx)
 {
     if (fMyContext < 0 || line == 0 || line > fSources)
         return false;
-    intc_register(this);
     fRoutes[line] = {fn, ctx};
     Write(PLIC_PRIORITY(line), 1);
     Write(PLIC_THRESHOLD(fMyContext), 0);

@@ -1,0 +1,6 @@
+eidelivery 0
+eithreshold 0
+eip0 0
+eie0 0
+topei 0
+ids 255

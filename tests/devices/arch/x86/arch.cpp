@@ -201,10 +201,32 @@ const char *arch_mode()
 }
 
 
+uint8_t gPitResetStatus[3];
+
+/* A PC's PIT counts from reset and interrupts every 55 ms, which no
+   firmware has stopped here. Left alone, whether a tick falls inside a run
+   would depend on how long the host took, and so would the coverage of the
+   timer and the 8259s. Channel 0 is set to fire once, now, and then stay
+   quiet; what each channel was doing is kept for the PIT's tests. */
+static void quiet_pit()
+{
+    const uint16_t ctrl = 0x43, ch0 = 0x40;
+    for (int ch = 0; ch < 3; ch++) {
+        /* read-back: status only, of this channel */
+        outb(ctrl, 0xe0 | (2 << ch));
+        gPitResetStatus[ch] = inb(ch0 + ch);
+    }
+    outb(ctrl, 0x30); /* channel 0, low byte then high, mode 0 */
+    outb(ch0, 1);
+    outb(ch0, 0);
+}
+
 /* The TSC against the ACPI PM timer, which runs at 3.579545 MHz on every
    machine that has one. */
 void arch_init()
 {
+    quiet_pit();
+
     uint16_t port;
     bool ext32;
     if (!acpi_pm_timer(&port, &ext32))

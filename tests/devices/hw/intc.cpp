@@ -21,6 +21,7 @@
  */
 #include "intc.h"
 
+#include "aplic.h"
 #include "plic.h"
 
 namespace {
@@ -60,6 +61,8 @@ bool intc_resolve(const HwDevice *dev, int index, IntController **ctrl,
         if (parent == nullptr)
             return false;
         IntController *c = Plic::Get(parent);
+        if (c == nullptr)
+            c = Aplic::Get(parent);
         if (c == nullptr)
             return false;
         *ctrl = c;
