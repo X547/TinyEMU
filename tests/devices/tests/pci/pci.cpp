@@ -618,9 +618,8 @@ TEST(pci, intx_shared)
     t_wait_until([] {return sIrqs > 3;}, 20000);
     arch_irq_disable();
     pci_intx_unroute(a);
-    EXPECT_GE(sIrqs, 1);
-    /* whether the controller takes the input again while it stays up */
-    SNAP("redelivered", "%d", sIrqs > 3);
+    /* the input stays up, so the interrupt comes again */
+    EXPECT_GT(sIrqs, 3);
 }
 
 /* Without Bus Master Enable a function issues no memory requests, by the

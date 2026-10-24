@@ -101,6 +101,7 @@ public:
 private:
     Aplic(const FdtNode *root, const FdtNode *child);
     static void Dispatch(void *self);
+    static void MsiDispatch(void *slot);
 
     Domain fRoot {};
     Domain fChild {};
@@ -108,5 +109,8 @@ private:
     struct Slot {
         IrqHandler fn;
         void *ctx;
+        Aplic *aplic;   /* MSI mode */
+        uint32_t line;
+        bool level;
     } fRoutes[1024] {};
 };

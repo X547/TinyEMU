@@ -158,6 +158,22 @@ void Aplic::SetIdc(const Domain &d, uint32_t reg, uint32_t value) const
 }
 
 
+/* In MSI mode a level source is sent again only on a rising edge, by the
+   AIA specification, so one still asserted once its handler has run is
+   made pending again, as an operating system does. */
+void Aplic::MsiDispatch(void *slot)
+{
+    Slot *s = (Slot *)slot;
+    s->fn(s->ctx);
+    if (!s->level)
+        return;
+    const Domain &d = s->aplic->Mine();
+    uint32_t rectified = s->aplic->Read(d, APLIC_IN_CLRIP(s->line / 32));
+    if ((rectified >> (s->line % 32)) & 1)
+        s->aplic->Write(d, APLIC_SETIPNUM, s->line);
+}
+
+
 void Aplic::Dispatch(void *self)
 {
     Aplic *a = (Aplic *)self;
@@ -182,11 +198,13 @@ bool Aplic::Route(uint32_t line, IrqHandler fn, void *ctx, bool level)
     if (MsiMode()) {
         /* the source's own number as the identity */
         Imsic *imsic = Imsic::Mine();
-        if (imsic == nullptr || !imsic->Route(line, fn, ctx))
+        fRoutes[line] = {fn, ctx, this, line, level};
+        if (imsic == nullptr ||
+            !imsic->Route(line, MsiDispatch, &fRoutes[line]))
             return false;
         Write(d, APLIC_TARGET(line), APLIC_TARGET_HART(hart) | line);
     } else {
-        fRoutes[line] = {fn, ctx};
+        fRoutes[line] = {fn, ctx, nullptr, line, level};
         Write(d, APLIC_TARGET(line), APLIC_TARGET_HART(hart) | 1);
         SetIdc(d, APLIC_ITHRESHOLD, 0);
         SetIdc(d, APLIC_IDELIVERY, 1);
