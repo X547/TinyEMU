@@ -44,18 +44,6 @@ struct PCIBus;
 struct PhysMemoryRange;
 
 
-/* Implemented by a device that answers the VMware backdoor port. The call
-   carries the processor's registers rather than the port's data, which is how
-   the protocol passes its arguments, so the machine performs the access and
-   the device only interprets it. */
-class VMPortTarget {
-public:
-    virtual ~VMPortTarget() = default;
-
-    virtual void VMPortCommand(uint32_t *regs) = 0;
-};
-
-
 /* A frame buffer the guest writes directly, shown on the host screen. */
 class FBDevice: public ScreenSource {
 public:

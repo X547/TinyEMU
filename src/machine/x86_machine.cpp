@@ -117,8 +117,6 @@ public:
     SystemBus *bus = nullptr;
     I440FXState *i440fx_state = nullptr;
     FBDevice *fb_dev = nullptr;
-    /* The device answering the VMware backdoor port, and where it is. */
-    VMPortTarget *vmport = nullptr;
     uint64_t fb_base = 0;
 
     /* the processors have local APICs, and MSIs go to them */
@@ -167,13 +165,11 @@ public:
     int CurrentCpu() const;
     LocalApic &CurrentApic() {return fLapics->Apic(CurrentCpu());}
 
-    /* fixed-function port stubs and the VMware backdoor port */
+    /* fixed-function port stubs */
     uint32_t Port80Read(uint32_t offset, int size_log2);
     void Port80Write(uint32_t offset, uint32_t val, int size_log2);
     uint32_t Port92Read(uint32_t offset, int size_log2);
     void Port92Write(uint32_t offset, uint32_t val, int size_log2);
-    uint32_t VmPortRead(uint32_t addr, int size_log2);
-    void VmPortWrite(uint32_t addr, uint32_t val, int size_log2);
     uint32_t BiosDebugRead(uint32_t offset, int size_log2);
     void BiosDebugWrite(uint32_t offset, uint32_t val, int size_log2);
     /* X86CpuTarget */
@@ -209,8 +205,6 @@ public:
                     &PCMachine::Port80Write> fPort80Io {*this};
     DeviceIOAdapter<PCMachine, &PCMachine::Port92Read,
                     &PCMachine::Port92Write> fPort92Io {*this};
-    DeviceIOAdapter<PCMachine, &PCMachine::VmPortRead,
-                    &PCMachine::VmPortWrite> fVmPortIo {*this};
     DeviceIOAdapter<PCMachine, &PCMachine::BiosDebugRead,
                     &PCMachine::BiosDebugWrite> fBiosDebugIo {*this};
     DeviceIOAdapter<PCMachine, &PCMachine::LapicRead,
@@ -300,53 +294,6 @@ uint32_t PCMachine::Port92Read(uint32_t offset, int size_log2)
     (void)size_log2;
     int a20 = 1; /* A20=0 is not supported */
     return a20 << 1;
-}
-
-#define VMPORT_MAGIC   0x564D5868
-#define REG_EAX 0
-#define REG_EBX 1
-#define REG_ECX 2
-#define REG_EDX 3
-#define REG_ESI 4
-#define REG_EDI 5
-
-uint32_t PCMachine::VmPortRead(uint32_t addr, int size_log2)
-{
-    PCMachine *s = this;
-    X86Vcpu &vcpu = s->fCpus->Vcpu(CurrentCpu());
-    uint32_t regs[6];
-    X86Regs r;
-
-    vcpu.GetRegs(&r);
-    regs[REG_EAX] = r.gpr[0];
-    regs[REG_EBX] = r.gpr[3];
-    regs[REG_ECX] = r.gpr[1];
-    regs[REG_EDX] = r.gpr[2];
-    regs[REG_ESI] = r.gpr[6];
-    regs[REG_EDI] = r.gpr[7];
-
-    if (regs[REG_EAX] == VMPORT_MAGIC) {
-
-        s->vmport->VMPortCommand(regs);
-
-        /* Note: in 64 bits the high parts are reset to zero
-           in all cases. */
-        r.gpr[0] = regs[REG_EAX];
-        r.gpr[3] = regs[REG_EBX];
-        r.gpr[1] = regs[REG_ECX];
-        r.gpr[2] = regs[REG_EDX];
-        r.gpr[6] = regs[REG_ESI];
-        r.gpr[7] = regs[REG_EDI];
-        vcpu.SetRegs(r);
-    }
-    return regs[REG_EAX];
-}
-
-void PCMachine::VmPortWrite(uint32_t addr, uint32_t val, int size_log2)
-{
-    (void)addr;
-    (void)val;
-    (void)size_log2;
 }
 
 void PCMachine::SetCPUIRQ(int level)
@@ -890,14 +837,6 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     device_context_connect(&ctx);
     s->fb_dev = ctx.fb_dev;
     s->fb_base = ctx.fb_base;
-
-    /* The VMware backdoor is read through the processor's registers, so the
-       machine owns the port and the device only interprets the call. */
-    s->vmport = ctx.vmport;
-    if (s->vmport != NULL) {
-        s->port_map->RegisterDevice(ctx.vmport_base, 1, &s->fVmPortIo,
-                                    DEVIO_SIZE32);
-    }
 
     /* With no firmware to program the PIRQ registers, copy_kernel() routes
        the INTx lines itself, which needs the bridge the tree built. */

@@ -33,11 +33,6 @@
 #define I8042_IRQ_KBD 1
 #define I8042_IRQ_AUX 12
 
-/* The VMware backdoor. A guest driver that speaks the protocol reads absolute
-   pointer positions from this port instead of decoding the relative packets
-   the PS/2 pointer sends. */
-#define I8042_VMPORT 0x5658
-
 /* The two ports the PC's controller has: the keyboard one, and the auxiliary
    one a pointer usually hangs off. The configuration numbers them from 0. */
 #define I8042_PORT_KBD 0

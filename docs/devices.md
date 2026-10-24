@@ -432,11 +432,7 @@ machine describes them in the DSDT, and line 9 is the SCI's.
 
 #### `i8042` — PC keyboard controller
 
-Placement: PC. Provides a `ps2` bus with two ports.
-
-| Property | Default | Meaning |
-| --- | --- | --- |
-| `vmmouse` | `1` | Adds the VMware backdoor port for absolute pointer input; `0` leaves it out. |
+Placement: PC. No properties. Provides a `ps2` bus with two ports.
 
 ```js
 /* pc bus */

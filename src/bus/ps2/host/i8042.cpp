@@ -30,7 +30,6 @@
 #include "bits.h"
 #include "devices.h"
 #include "machine.h"
-#include "vmmouse.h"
 
 /* debug PC keyboard */
 //#define DEBUG_KBD
@@ -445,17 +444,13 @@ void I8042Controller::DataWrite(uint32_t addr, uint32_t val, int size_log2)
 
 //#pragma mark - the configuration node
 
-/* Routes the window's input events to whichever of the two protocols the
-   guest is driving: key events reach the keyboard, and pointer events go
-   through the backdoor, which passes them on to the PS/2 pointer for as long
-   as no driver has turned the absolute protocol on. Either device may be
-   missing, and then its events go nowhere. */
-class I8042Input final: public KeyboardTarget, public PointerTarget,
-    public VMPortTarget {
+/* Routes the window's key events to the keyboard and its pointer events to
+   the PS/2 pointer. Either device may be missing, and then its events go
+   nowhere. */
+class I8042Input final: public KeyboardTarget, public PointerTarget {
 public:
     PS2Keyboard *kbd = nullptr;
     PS2Mouse *mouse = nullptr;
-    VMMousePtr vmmouse;
 
     void SendKeyEvent(bool is_down, uint16_t key_code) override
     {
@@ -467,26 +462,12 @@ public:
     void SendMouseEvent(int dx, int dy, int dz,
                         unsigned int buttons) override
     {
-        if (vmmouse != nullptr) {
-            vmmouse_send_mouse_event(vmmouse.get(), dx, dy, dz, buttons);
-        } else if (mouse != nullptr) {
+        if (mouse != nullptr) {
             mouse->MouseEvent(dx, dy, dz, buttons);
         }
     }
 
-    bool MouseIsAbsolute() override
-    {
-        return vmmouse != nullptr && vmmouse_is_absolute(vmmouse.get());
-    }
-
-    void VMPortCommand(uint32_t *regs) override
-    {
-        /* Without a pointer the registers come back untouched, which a
-           driver reads as no backdoor. */
-        if (vmmouse != nullptr) {
-            vmmouse_handler(vmmouse.get(), regs);
-        }
-    }
+    bool MouseIsAbsolute() override {return false;}
 };
 
 
@@ -496,19 +477,17 @@ public:
 class I8042Device final: public Device, public PS2BusTarget {
 private:
     DeviceContext *fCtx;
-    bool fVmmouse;
     std::unique_ptr<I8042Controller> fController;
     I8042Input fInput;
     std::unique_ptr<PS2Bus> fChildBus;
     Resource *fDataRes = nullptr;
     Resource *fCmdRes = nullptr;
-    Resource *fVmportRes = nullptr;
     Resource *fKbdIrqRes = nullptr;
     Resource *fAuxIrqRes = nullptr;
 
 public:
-    I8042Device(DeviceContext *ctx, bool vmmouse):
-        Device("i8042"), fCtx(ctx), fVmmouse(vmmouse) {}
+    explicit I8042Device(DeviceContext *ctx):
+        Device("i8042"), fCtx(ctx) {}
 
     bool Prepare() override
     {
@@ -526,12 +505,6 @@ public:
             fKbdIrqRes == nullptr || fAuxIrqRes == nullptr) {
             return false;
         }
-        if (fVmmouse) {
-            fVmportRes = AddFixedResource(RES_IO, I8042_VMPORT, 1);
-            if (fVmportRes == nullptr) {
-                return false;
-            }
-        }
         fChildBus = std::make_unique<PS2Bus>(this, this);
         return true;
     }
@@ -544,10 +517,6 @@ public:
             sys->PortMap(), sys->IrqSignalFor(fKbdIrqRes->base),
             sys->IrqSignalFor(fAuxIrqRes->base), fDataRes->base,
             fCtx->machine);
-        if (fVmmouse) {
-            fCtx->vmport = &fInput;
-            fCtx->vmport_base = fVmportRes->base;
-        }
         return true;
     }
 
@@ -587,9 +556,6 @@ public:
             fCtx->keyboard = &fInput;
         } else if (PS2Mouse *mouse = dynamic_cast<PS2Mouse *>(dev)) {
             fInput.mouse = mouse;
-            if (fVmmouse) {
-                fInput.vmmouse = vmmouse_init(mouse);
-            }
             fCtx->mouse = &fInput;
         }
         return true;
@@ -600,19 +566,15 @@ public:
 //#pragma mark - classes
 
 /* The controller on the addresses a PC has always had it on, and a PS/2 bus
-   carrying the devices declared on its ports. "vmmouse" adds the backdoor
-   port the pointer's absolute protocol is read through. */
+   carrying the devices declared on its ports. */
 class I8042Class final: public DeviceClass {
 public:
     I8042Class(): DeviceClass("i8042") {}
 
     Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
     {
-        int vmmouse;
-        if (!cfg.GetInt("vmmouse", &vmmouse, 1)) {
-            return nullptr;
-        }
-        return new I8042Device(ctx, vmmouse != 0);
+        (void)cfg;
+        return new I8042Device(ctx);
     }
 };
 

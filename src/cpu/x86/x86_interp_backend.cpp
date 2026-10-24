@@ -155,9 +155,8 @@ void X86InterpVcpu::GetRegs(X86Regs *regs)
 }
 
 
-/* Called in the middle of an instruction, as for the VMware backdoor, the
-   decoder holds RIP and the flags as it goes, so only a change is
-   written. */
+/* Called in the middle of an instruction, the decoder holds RIP and the
+   flags as it goes, so only a change is written. */
 void X86InterpVcpu::SetRegs(const X86Regs &regs)
 {
     for (int i = 0; i < 8; i++)

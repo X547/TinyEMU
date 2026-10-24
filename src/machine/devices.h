@@ -70,10 +70,6 @@ struct DeviceContext {
        place from it; 0 when there is none. */
     uint64_t boot_flash_base = 0;
     std::vector<HostEthernet *> ethernet;
-    /* The VMware backdoor, when a device answers it. The machine installs the
-       port, because reading it means reading the processor's registers. */
-    VMPortTarget *vmport = nullptr;
-    uint64_t vmport_base = 0;
 };
 
 
