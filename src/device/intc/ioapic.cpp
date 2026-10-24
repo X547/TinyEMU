@@ -42,6 +42,10 @@
 #define RTE_LEVEL           bit_at<uint64_t>(15)
 #define RTE_MASKED          bit_at<uint64_t>(16)
 #define RTE_READ_ONLY       (RTE_DELIVERY_STATUS | RTE_REMOTE_IRR)
+/* What a write sets: the destination, and in the low word everything but
+   the read only bits and the reserved 17-31. */
+#define RTE_WRITABLE_LOW    0x0001afffu
+#define RTE_WRITABLE_HIGH   0xff000000u
 
 
 IOAPIC::IOAPIC(PCIMsiTarget &output, int id):
@@ -150,10 +154,11 @@ void IOAPIC::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
         uint64_t rte = fRedirection[pin];
 
         if (fSelect & 1) {
-            rte = (rte & 0xffffffffULL) | ((uint64_t)val << 32);
+            rte = (rte & 0xffffffffULL) |
+                ((uint64_t)(val & RTE_WRITABLE_HIGH) << 32);
         } else {
             rte = (rte & ~0xffffffffULL) | (rte & RTE_READ_ONLY) |
-                (val & ~(uint32_t)RTE_READ_ONLY);
+                (val & RTE_WRITABLE_LOW);
             /* an edge triggered entry has nothing to wait for */
             if (!(rte & RTE_LEVEL))
                 rte &= ~RTE_REMOTE_IRR;

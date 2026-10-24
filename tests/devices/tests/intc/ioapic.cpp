@@ -118,8 +118,9 @@ TEST(ioapic, rte_bits)
     uint32_t pin = s.pin[0];
     s.io->Write(IOAPIC_REG_RTE(pin), 0xffffffff);
     s.io->Write(IOAPIC_REG_RTE(pin) + 1, 0xffffffff);
-    /* delivery status and remote IRR are read-only */
-    SNAP("all_ones", "%#llx", T_FMT_VAL(s.io->Rte(pin)));
+    /* by the 82093AA data sheet: delivery status and remote IRR are read
+       only, and bits 17-55 reserved */
+    EXPECT_EQ(s.io->Rte(pin), 0xff0000000001afffull);
     s.io->SetRte(pin, RTE_MASKED);
 }
 
