@@ -38,6 +38,14 @@
 /* PM1 control */
 #define PM1_CNT_SCI_EN bit_at(0)
 #define PM1_CNT_SLP_EN bit_at(13)
+/* The bits the ACPI specification defines: in the status register the
+   timer, bus master, global, power and sleep button, RTC, PCI Express wake
+   and wake status, which a written one clears; in the enable register
+   their enables; in the control register the bus master reload and the
+   sleep type, GBL_RLS and SLP_EN being write only. */
+#define PM1_STS_DEFINED 0xc731
+#define PM1_EN_DEFINED  0x4721
+#define PM1_CNT_KEPT    0x1c03
 
 /* the sleep type \_S5 names */
 #define SLP_TYP_S5 5
@@ -74,10 +82,11 @@ void AcpiPmBlock::WriteByte(uint32_t offset, uint8_t val)
 
     switch (offset) {
     case 0: case 1:
-        fStatus &= ~(val << shift);
+        fStatus &= ~((val << shift) & PM1_STS_DEFINED);
         break;
     case 2: case 3:
-        fEnable = (fEnable & ~(0xff << shift)) | (val << shift);
+        fEnable = ((fEnable & ~(0xff << shift)) | (val << shift)) &
+            PM1_EN_DEFINED;
         break;
     case 4: case 5:
         fControl = (fControl & ~(0xff << shift)) | (val << shift);
@@ -113,6 +122,7 @@ void AcpiPmBlock::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
         if (get_bits(fControl, 10, 3) == SLP_TYP_S5)
             fMachine.RequestShutdown(0);
     }
+    fControl &= PM1_CNT_KEPT;
 }
 
 

@@ -1,5 +1,5 @@
 status 0
-enable_all_ones 0xffff
+enable_all_ones 0x4721
 control 0x1
 after_s1 0x401
 byte_write 0x1

@@ -150,12 +150,18 @@ TEST(acpi, pm1_registers)
     EXPECT_EQ(inw(evt), 0);
     outw(evt + 2, 0xffff);
     SNAP("enable_all_ones", "%#x", inw(evt + 2));
+    /* the enables the ACPI specification defines: timer, global, power
+       and sleep button, RTC and PCI Express wake */
+    EXPECT_EQ(inw(evt + 2), 0x4721);
     outw(evt + 2, 0);
     /* control: SCI_EN stays on, there being no SMI port to leave ACPI by */
     uint16_t c = inw(cnt);
     SNAP("control", "%#x", c);
     outw(cnt, 0);
     EXPECT_EQ(inw(cnt) & 1, 1);
+    /* reserved bits and the write only GBL_RLS read 0 */
+    outw(cnt, 0xc000 | 1 << 2);
+    EXPECT_EQ(inw(cnt), 1);
     /* a sleep state other than S5 is not entered, and SLP_EN reads 0 */
     outw(cnt, 1 << 10 | 1 << 13);
     SNAP("after_s1", "%#x", inw(cnt));
