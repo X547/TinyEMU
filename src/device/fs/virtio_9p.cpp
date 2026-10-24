@@ -30,11 +30,18 @@
 
 #include <algorithm>
 #include <map>
+#include <vector>
 
 #include "cutils.h"
 #include "host_fs.h"
 #include "virtio.h"
 #include "virtio_priv.h"
+
+/* What a read or write message holds besides its data, which the I/O unit
+   reported to the guest leaves room for. */
+#define P9_IOHDRSZ 24
+/* The smallest message size taken: one that holds a page of data. */
+#define P9_MIN_MSIZE 4096
 
 
 struct VIRTIO9PDevice: public VIRTIODevice {
@@ -409,7 +416,7 @@ static void virtio_9p_open_reply(HostFileSystem *fs, FSQID *qid, int err,
         virtio_9p_send_error(s, oi->queue_idx, oi->desc_idx, oi->tag, err);
     } else {
         buf_len = marshall(s, buf, sizeof(buf),
-                           "Qw", qid, s->msize - 24);
+                           "Qw", qid, s->msize - P9_IOHDRSZ);
         virtio_9p_send_reply(s, oi->queue_idx, oi->desc_idx, 12, oi->tag,
                              buf, buf_len);
     }
@@ -540,7 +547,7 @@ int VIRTIO9PDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
             if (err) 
                 goto error;
             buf_len = marshall(s, buf, sizeof(buf),
-                               "Qw", &qid, s->msize - 24);
+                               "Qw", &qid, s->msize - P9_IOHDRSZ);
             virtio_9p_send_reply(s, queue_idx, desc_idx, id, tag, buf, buf_len);
         }
         break;
@@ -614,8 +621,11 @@ int VIRTIO9PDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
             }
             if (err)
                 goto error;
-            buf_len = marshall(s, buf, sizeof(buf), "s", buf1);
-            virtio_9p_send_reply(s, queue_idx, desc_idx, id, tag, buf, buf_len);
+            /* the target and its length field */
+            uint8_t reply[sizeof(buf1) + 2];
+            buf_len = marshall(s, reply, sizeof(reply), "s", buf1);
+            virtio_9p_send_reply(s, queue_idx, desc_idx, id, tag, reply,
+                                 buf_len);
         }
         break;
     case 24: /* getattr */
@@ -691,6 +701,8 @@ int VIRTIO9PDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
             f = fid_find(s, fid);
             if (!f)
                 goto fid_not_found;
+            /* no more than a reply of msize holds */
+            count = std::min<uint32_t>(count, s->msize - P9_IOHDRSZ);
             buf = static_cast<uint8_t *>(malloc(count + 4));
             n = fs->ReadDir(f, offs, buf + 4, count);
             if (n < 0) {
@@ -755,12 +767,15 @@ int VIRTIO9PDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
                 free(lock.client_id);
                 goto error;
             }
-            buf_len = marshall(s, buf, sizeof(buf), "bddws",
-                               &lock.type,
-                               &lock.start, &lock.length,
-                               &lock.proc_id, &lock.client_id);
+            /* the client id is the guest's, up to 64 KB of it */
+            std::vector<uint8_t> reply(1 + 8 + 8 + 4 + 2 +
+                                       strlen(lock.client_id));
+            buf_len = marshall(s, reply.data(), reply.size(), "bddws",
+                               lock.type, lock.start, lock.length,
+                               lock.proc_id, lock.client_id);
             free(lock.client_id);
-            virtio_9p_send_reply(s, queue_idx, desc_idx, id, tag, buf, buf_len);
+            virtio_9p_send_reply(s, queue_idx, desc_idx, id, tag,
+                                 reply.data(), buf_len);
         }
         break;
     case 70: /* link */
@@ -869,6 +884,11 @@ int VIRTIO9PDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
             if (unmarshall(s, queue_idx, desc_idx, &offset, 
                            "ws", &msize, &version))
                 goto protocol_error;
+            if (msize < P9_MIN_MSIZE) {
+                free(version);
+                err = -P9_EINVAL;
+                goto error;
+            }
             /* A message's pages and headers must fit the queue's
                descriptors, as there are no indirect ones: half of them for
                the pages leaves room for the rest. */
@@ -975,6 +995,8 @@ int VIRTIO9PDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
             f = fid_find(s, fid);
             if (!f)
                 goto fid_not_found;
+            /* no more than a reply of msize holds */
+            count = std::min<uint32_t>(count, s->msize - P9_IOHDRSZ);
             buf = static_cast<uint8_t *>(malloc(count + 4));
             n = fs->Read(f, offs, buf + 4, count);
             if (n < 0) {
@@ -1001,6 +1023,10 @@ int VIRTIO9PDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
             f = fid_find(s, fid);
             if (!f)
                 goto fid_not_found;
+            if (count > s->msize - P9_IOHDRSZ) {
+                err = -P9_EINVAL;
+                goto error;
+            }
             buf1 = static_cast<uint8_t *>(malloc(count));
             if (memcpy_from_queue(s1, buf1, queue_idx, desc_idx, offset,
                                   count)) {
