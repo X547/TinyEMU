@@ -91,9 +91,10 @@ public:
     uint32_t Idc(const Domain &d, uint32_t reg) const;
     void SetIdc(const Domain &d, uint32_t reg, uint32_t value) const;
 
-    /* IntController: a level source, active high */
+    /* IntController: active high, level or rising edge */
     const char *Kind() const override {return "aplic";}
-    bool Route(uint32_t line, IrqHandler fn, void *ctx) override;
+    bool Route(uint32_t line, IrqHandler fn, void *ctx,
+               bool level = true) override;
     void Unroute(uint32_t line) override;
     void Reset() override;
 

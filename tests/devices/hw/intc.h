@@ -32,9 +32,11 @@ class IntController {
 public:
     virtual ~IntController() = default;
     virtual const char *Kind() const = 0;
-    /* Deliver input 'line' to 'fn', which quiets the device; the
-       controller acknowledges the interrupt around it. */
-    virtual bool Route(uint32_t line, IrqHandler fn, void *ctx) = 0;
+    /* Deliver input 'line', level or edge triggered, to 'fn', which
+       quiets the device; the controller acknowledges the interrupt around
+       it. A controller that has only one kind of input ignores 'level'. */
+    virtual bool Route(uint32_t line, IrqHandler fn, void *ctx,
+                       bool level = true) = 0;
     virtual void Unroute(uint32_t line) = 0;
     /* Between tests: every input masked, nothing left in service. */
     virtual void Reset() = 0;
@@ -44,6 +46,9 @@ public:
    as the tables say. False when it is none the suite drives. */
 bool intc_resolve(const HwDevice *dev, int index, IntController **ctrl,
                   uint32_t *line);
+
+/* Whether the tables say the interrupt is level triggered. */
+bool intc_level(const HwDevice *dev, int index);
 
 /* intc_resolve() and Route() in one. */
 bool irq_route(const HwDevice *dev, int index, IrqHandler fn, void *ctx);

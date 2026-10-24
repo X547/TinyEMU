@@ -22,6 +22,8 @@
 #include "intc.h"
 
 #include "aplic.h"
+#include "i8259.h"
+#include "ioapic.h"
 #include "plic.h"
 
 namespace {
@@ -69,7 +71,38 @@ bool intc_resolve(const HwDevice *dev, int index, IntController **ctrl,
         *line = irq.cells[0];
         return true;
     }
+    if (dev->acpi) {
+        /* an IOAPIC when there is one, as an OS would choose, else the
+           8259s */
+        uint32_t gsi = irq.isa ? acpi_isa_irq_gsi(irq.line, nullptr)
+                               : irq.line;
+        if (IoApic *io = IoApic::ForGsi(gsi)) {
+            *ctrl = io;
+            *line = gsi;
+            return true;
+        }
+        I8259 *pic = I8259::Get();
+        if (pic && irq.line < 16) {
+            *ctrl = pic;
+            *line = irq.line;
+            return true;
+        }
+    }
     return false;
+}
+
+
+bool intc_level(const HwDevice *dev, int index)
+{
+    if (index >= dev->nirqs)
+        return true;
+    const HwIrq &irq = dev->irqs[index];
+    if (dev->fdt) {
+        /* the trigger cell, when the controller has one: 1 and 2 are the
+           edges, 4 and 8 the levels */
+        return irq.ncells < 2 || (irq.cells[1] & 0xc) != 0;
+    }
+    return irq.level;
 }
 
 
@@ -77,7 +110,8 @@ bool irq_route(const HwDevice *dev, int index, IrqHandler fn, void *ctx)
 {
     IntController *c;
     uint32_t line;
-    return intc_resolve(dev, index, &c, &line) && c->Route(line, fn, ctx);
+    return intc_resolve(dev, index, &c, &line) &&
+           c->Route(line, fn, ctx, intc_level(dev, index));
 }
 
 

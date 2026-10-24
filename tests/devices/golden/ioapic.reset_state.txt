@@ -1,0 +1,6 @@
+regsel 0
+id 0
+version 0x170011
+arbitration 0
+rte0 0x10000
+rte_last 0x10000

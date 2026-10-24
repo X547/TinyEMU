@@ -380,6 +380,141 @@ bool acpi_pm1_control(uint16_t *pm1a, uint16_t *pm1b)
 }
 
 
+//#pragma mark - MADT
+
+namespace {
+
+/* Calls fn(type, entry, len) for each interrupt controller structure. */
+template <typename F>
+void madt_walk(F fn)
+{
+    const uint8_t *m = acpi_table("APIC");
+    if (m == nullptr)
+        return;
+    uint32_t len = le32(m + 4);
+    for (uint32_t off = 44; off + 2 <= len;) {
+        uint8_t type = m[off], elen = m[off + 1];
+        if (elen < 2 || off + elen > len)
+            break;
+        fn(type, m + off, elen);
+        off += elen;
+    }
+}
+
+}
+
+
+bool acpi_madt_present()
+{
+    return acpi_table("APIC") != nullptr;
+}
+
+
+uint64_t acpi_madt_lapic_address()
+{
+    const uint8_t *m = acpi_table("APIC");
+    uint64_t addr = m ? le32(m + 36) : 0;
+    /* the 64 bit override, type 5 */
+    madt_walk([&](uint8_t type, const uint8_t *e, uint8_t len) {
+        if (type == 5 && len >= 12)
+            addr = le64(e + 4);
+    });
+    return addr;
+}
+
+
+bool acpi_madt_pcat_compat()
+{
+    const uint8_t *m = acpi_table("APIC");
+    return m && (le32(m + 40) & 1);
+}
+
+
+int acpi_madt_cpu_count()
+{
+    int n = 0;
+    madt_walk([&](uint8_t type, const uint8_t *e, uint8_t len) {
+        if (type == 0 && len >= 8 && (le32(e + 4) & 1))
+            n++;
+    });
+    return n;
+}
+
+
+uint32_t acpi_madt_cpu_apic_id(int index)
+{
+    uint32_t id = 0;
+    int n = 0;
+    madt_walk([&](uint8_t type, const uint8_t *e, uint8_t len) {
+        if (type == 0 && len >= 8 && (le32(e + 4) & 1) && n++ == index)
+            id = e[3];
+    });
+    return id;
+}
+
+
+int acpi_madt_ioapic_count()
+{
+    int n = 0;
+    madt_walk([&](uint8_t type, const uint8_t *, uint8_t len) {
+        if (type == 1 && len >= 12)
+            n++;
+    });
+    return n;
+}
+
+
+MadtIoApic acpi_madt_ioapic(int index)
+{
+    MadtIoApic io {};
+    int n = 0;
+    madt_walk([&](uint8_t type, const uint8_t *e, uint8_t len) {
+        if (type == 1 && len >= 12 && n++ == index)
+            io = {e[2], le32(e + 4), le32(e + 8)};
+    });
+    return io;
+}
+
+
+int acpi_madt_override_count()
+{
+    int n = 0;
+    madt_walk([&](uint8_t type, const uint8_t *, uint8_t len) {
+        if (type == 2 && len >= 10)
+            n++;
+    });
+    return n;
+}
+
+
+MadtOverride acpi_madt_override(int index)
+{
+    MadtOverride o {};
+    int n = 0;
+    madt_walk([&](uint8_t type, const uint8_t *e, uint8_t len) {
+        if (type == 2 && len >= 10 && n++ == index)
+            o = {e[3], le32(e + 4), le16(e + 8)};
+    });
+    return o;
+}
+
+
+uint32_t acpi_isa_irq_gsi(uint8_t irq, uint16_t *flags)
+{
+    if (flags)
+        *flags = 0;
+    for (int i = 0; i < acpi_madt_override_count(); i++) {
+        MadtOverride o = acpi_madt_override(i);
+        if (o.isa_irq == irq) {
+            if (flags)
+                *flags = o.flags;
+            return o.gsi;
+        }
+    }
+    return irq;
+}
+
+
 const AcpiNode *acpi_root()
 {
     return sRoot;

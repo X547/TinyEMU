@@ -1,0 +1,3 @@
+esr 0
+apr 0
+reserved_40 0

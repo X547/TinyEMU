@@ -1,0 +1,8 @@
+irr0 0x1
+isr0 0
+imr0 0
+elcr0 0
+irr1 0
+isr1 0
+imr1 0
+elcr1 0

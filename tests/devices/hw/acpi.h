@@ -36,6 +36,31 @@ const uint8_t *acpi_table_at(int index);
 bool acpi_pm_timer(uint16_t *port, bool *ext32);
 bool acpi_pm1_control(uint16_t *pm1a, uint16_t *pm1b);
 
+/* From the MADT. */
+struct MadtIoApic {
+    uint32_t id;
+    uint64_t address;
+    uint32_t gsi_base;
+};
+struct MadtOverride {
+    uint8_t isa_irq;
+    uint32_t gsi;
+    uint16_t flags; /* MPS INTI: polarity bits 0-1, trigger bits 2-3 */
+};
+bool acpi_madt_present();
+uint64_t acpi_madt_lapic_address();
+/* Whether the 8259s are there too (PCAT_COMPAT). */
+bool acpi_madt_pcat_compat();
+int acpi_madt_cpu_count();
+/* APIC ID of the index'th enabled processor. */
+uint32_t acpi_madt_cpu_apic_id(int index);
+int acpi_madt_ioapic_count();
+MadtIoApic acpi_madt_ioapic(int index);
+int acpi_madt_override_count();
+MadtOverride acpi_madt_override(int index);
+/* The GSI an ISA IRQ arrives at, through the overrides. */
+uint32_t acpi_isa_irq_gsi(uint8_t irq, uint16_t *flags);
+
 
 /* The namespace the DSDT and SSDTs declare, as far as it is made of named
    objects: Scope, Device and Name are read, a Method is recorded but not

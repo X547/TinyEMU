@@ -1,0 +1,4 @@
+regsel 0x12
+regsel_wide 0xff
+offset_4 0
+offset_20 0

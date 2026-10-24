@@ -135,8 +135,9 @@ void Plic::Dispatch(void *self)
 }
 
 
-bool Plic::Route(uint32_t line, IrqHandler fn, void *ctx)
+bool Plic::Route(uint32_t line, IrqHandler fn, void *ctx, bool level)
 {
+    (void)level; /* the gateways are level triggered */
     if (fMyContext < 0 || line == 0 || line > fSources)
         return false;
     fRoutes[line] = {fn, ctx};

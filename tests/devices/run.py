@@ -135,10 +135,14 @@ def write_config(template, target, image, cmdline, fixtures, out_dir):
         '@BOOT@': boot,
         '@CMDLINE@': cmdline,
         '@ROOT@': target.root,
-        '@FIXTURE@': '{ type: "test-control" },' if fixtures else '',
     }
     for k, v in subst.items():
         text = text.replace(k, v)
+    # @FIXTURE@, or @FIXTURE(properties)@ to give it some
+    text = re.sub(r'@FIXTURE(?:\((.*?)\))?@',
+                  lambda m: ('{ type: "test-control"%s },' %
+                             (', ' + m.group(1) if m.group(1) else ''))
+                  if fixtures else '', text)
     path = os.path.join(out_dir, 'machine.cfg')
     with open(path, 'w') as f:
         f.write(text)
@@ -624,7 +628,11 @@ def main():
                     help='temu built with -Dtest_fixtures=true '
                     '(default: $TEMU or a build-*fixtures dir)')
     ap.add_argument('--temu-args', default='',
-                    help='extra temu arguments, e.g. "-no-accel"')
+                    help='extra temu arguments')
+    ap.add_argument('--accel', action='store_true',
+                    help='let temu use a hypervisor, whose interrupt '
+                    'controllers then stand in for temu\'s own; by default '
+                    'it runs the interpreter (-no-accel)')
     ap.add_argument('-m', '--machine', action='append', default=[],
                     help='machines/<name>.cfg to run on (default: all)')
     ap.add_argument('-t', '--tests', action='append', default=[],
@@ -672,6 +680,8 @@ def main():
         ap.error('no temu with test fixtures found; pass --temu or set TEMU')
     opts.temu = os.path.abspath(opts.temu)
     opts.temu_args = opts.temu_args.split()
+    if not opts.accel:
+        opts.temu_args.insert(0, '-no-accel')
     opts.fixtures = not opts.no_fixtures
     opts.meta = False
     opts.golden = os.path.join(HERE, 'golden')

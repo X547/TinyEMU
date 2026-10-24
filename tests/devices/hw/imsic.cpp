@@ -182,8 +182,9 @@ void Imsic::Dispatch(void *self)
 }
 
 
-bool Imsic::Route(uint32_t line, IrqHandler fn, void *ctx)
+bool Imsic::Route(uint32_t line, IrqHandler fn, void *ctx, bool level)
 {
+    (void)level; /* messages */
     if (line == 0 || line > fIds)
         return false;
     fRoutes[line] = {fn, ctx};

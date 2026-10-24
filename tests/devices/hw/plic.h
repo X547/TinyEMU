@@ -58,7 +58,8 @@ public:
 
     /* IntController */
     const char *Kind() const override {return "plic";}
-    bool Route(uint32_t line, IrqHandler fn, void *ctx) override;
+    bool Route(uint32_t line, IrqHandler fn, void *ctx,
+               bool level = true) override;
     void Unroute(uint32_t line) override;
     void Reset() override;
 

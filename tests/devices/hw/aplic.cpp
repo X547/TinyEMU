@@ -172,13 +172,13 @@ void Aplic::Dispatch(void *self)
 }
 
 
-bool Aplic::Route(uint32_t line, IrqHandler fn, void *ctx)
+bool Aplic::Route(uint32_t line, IrqHandler fn, void *ctx, bool level)
 {
     const Domain &d = Mine();
     int hart = HartIndex(d);
     if (d.node == nullptr || hart < 0 || line == 0 || line > fSources)
         return false;
-    Write(d, APLIC_SOURCECFG(line), APLIC_SM_LEVEL1);
+    Write(d, APLIC_SOURCECFG(line), level ? APLIC_SM_LEVEL1 : APLIC_SM_EDGE1);
     if (MsiMode()) {
         /* the source's own number as the identity */
         Imsic *imsic = Imsic::Mine();
