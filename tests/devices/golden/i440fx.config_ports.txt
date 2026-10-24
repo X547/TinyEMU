@@ -1,4 +1,3 @@
-address 12345678
 disabled ffffffff ffff ff
 host_bridge 0d578086
 device_word 0d57

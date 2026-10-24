@@ -76,7 +76,8 @@ TEST(i440fx, config_ports)
     need_cf8();
     uint32_t saved = inl(0xcf8);
     outl(0xcf8, 0x12345678);
-    SNAP("address", "%08x", inl(0xcf8));
+    /* bits 24-30 and 0-1 are reserved, by the PIIX3 data sheet */
+    EXPECT_EQ(inl(0xcf8), 0x00345678u);
     outl(0xcf8, 0x00000000);
     SNAP("disabled", "%08x %04x %02x", inl(0xcfc), inw(0xcfe), inb(0xcfd));
     outl(0xcfc, 0xffffffff); /* goes nowhere */
@@ -144,8 +145,9 @@ TEST(i440fx, pirq_reroute)
     t_delay_us(5000);
     int disabled = sIrqs;
     pt_write(f, TEST_PCI_INTX, 0);
-    SNAP("disabled", "irqs %d route %02x", disabled,
-         pci_read8(piix, PIRQ_ROUTE(pirq)));
+    /* bit 7 turns the routing off, and stays set */
+    EXPECT_EQ(disabled, 0);
+    EXPECT_EQ(pci_read8(piix, PIRQ_ROUTE(pirq)), line | PIRQ_DISABLE);
 
     /* a line past the 8259s' sixteen */
     sIrqs = 0;
@@ -157,6 +159,17 @@ TEST(i440fx, pirq_reroute)
     EXPECT_EQ(sIrqs, 0);
     pic->Unroute(line);
     SNAP("saved", "%02x", saved);
+}
+
+/* The reset control register keeps its two bits; only RCPU rising resets,
+   which the test leaves alone. */
+TEST(i440fx, reset_control)
+{
+    need_cf8();
+    outb(0xcf9, 0xfa);
+    EXPECT_EQ(inb(0xcf9), 0x02u);
+    outb(0xcf9, 0x00);
+    EXPECT_EQ(inb(0xcf9), 0u);
 }
 
 #endif

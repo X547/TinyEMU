@@ -40,6 +40,15 @@
 /* PIRQA..PIRQD routing registers of the PIIX3, one byte each. Bit 7 disables
    the line; the low bits name the PIC input it lands on. */
 #define PIIX3_PIRQ_ROUTE 0x60
+#define PIIX3_PIRQ_DISABLE 0x80
+
+/* the PIIX3's reset control register: a rising RCPU resets the machine */
+#define PIIX3_RESET_CONTROL 0xcf9
+#define RC_SRST 0x02
+#define RC_RCPU 0x04
+
+/* the bits of the configuration address register that exist */
+#define CONFIG_ADDRESS_MASK 0x80fffffc
 
 /* Where a kernel boot routes PIRQA-D: two lines no ISA device of a PC owns,
    leaving 9 for the SCI and 12 for the PS/2 mouse. Firmware picks the same
@@ -64,16 +73,24 @@ struct I440FXState: public IRQTarget {
     uint32_t config_reg;
     uint8_t pic_irq_state[16];
     IRQSignal *pic_irqs; /* 16 irqs */
+    /* the PIC input each of PIRQA-D drives, or -1 */
+    int pirq_line[4] = {-1, -1, -1, -1};
+    VirtMachine *machine = nullptr;
+    uint8_t reset_control = 0;
 
     uint32_t ReadAddr(uint32_t offset, int size_log2);
     void WriteAddr(uint32_t offset, uint32_t data, int size_log2);
     uint32_t ReadData(uint32_t offset, int size_log2);
     void WriteData(uint32_t offset, uint32_t data, int size_log2);
+    uint32_t ReadReset(uint32_t offset, int size_log2);
+    void WriteReset(uint32_t offset, uint32_t data, int size_log2);
 
     DeviceIOAdapter<I440FXState, &I440FXState::ReadAddr,
                     &I440FXState::WriteAddr> fAddrIo {*this};
     DeviceIOAdapter<I440FXState, &I440FXState::ReadData,
                     &I440FXState::WriteData> fDataIo {*this};
+    DeviceIOAdapter<I440FXState, &I440FXState::ReadReset,
+                    &I440FXState::WriteReset> fResetIo {*this};
 
     void SetIRQ(int irq_num, int level) override;
 };
@@ -81,7 +98,7 @@ struct I440FXState: public IRQTarget {
 void I440FXState::WriteAddr(uint32_t offset, uint32_t data, int size_log2)
 {
     I440FXState *s = this;
-    s->config_reg = data;
+    s->config_reg = data & CONFIG_ADDRESS_MASK;
 }
 
 uint32_t I440FXState::ReadAddr(uint32_t offset, int size_log2)
@@ -132,22 +149,51 @@ uint32_t I440FXState::ReadData(uint32_t offset, int size_log2)
                                size_log2);
 }
 
+/* Drives 'line' for PIRQ 'irq_num'; several PIRQs may share a line. */
+static void i440fx_drive(I440FXState *s, int line, int irq_num, int level)
+{
+    s->pic_irq_state[line] = set_bit(s->pic_irq_state[line], irq_num, level);
+    s->pic_irqs[line].Set(s->pic_irq_state[line] != 0);
+}
+
+/* A PIRQ goes to the PIC input its route register names, by the PIIX3 data
+   sheet: none while bit 7 is set, and none for the inputs the register
+   reserves. A PIRQ that falls is let go of where it was raised. */
 void I440FXState::SetIRQ(int irq_num, int irq_level)
 {
     I440FXState *s = this;
-    PCIDevice *hd = s->piix3_dev;
-    uint16_t route = PIIX3_PIRQ_ROUTE + irq_num;
-    int pic_irq;
+    uint8_t route = pci_device_get_config(s->piix3_dev,
+                                          PIIX3_PIRQ_ROUTE + irq_num, 0);
+    int line = get_bits(route, 0, 4);
 
-    /* map to the PIC irq (different IRQs can be mapped to the same
-       PIC irq) */
-    pic_irq = pci_device_get_config(hd, route, 0) & ~0x80;
-    pci_device_set_config8(hd, route, pic_irq);
-    if (pic_irq < 16) {
-        s->pic_irq_state[pic_irq] =
-            set_bit(s->pic_irq_state[pic_irq], irq_num, irq_level);
-        s->pic_irqs[pic_irq].Set((s->pic_irq_state[pic_irq] != 0));
+    if ((route & PIIX3_PIRQ_DISABLE) || line <= 2 || line == 8 || line == 13)
+        line = -1;
+    if (s->pirq_line[irq_num] >= 0 && (!irq_level ||
+                                       s->pirq_line[irq_num] != line)) {
+        i440fx_drive(s, s->pirq_line[irq_num], irq_num, 0);
+        s->pirq_line[irq_num] = -1;
     }
+    if (irq_level && line >= 0) {
+        i440fx_drive(s, line, irq_num, 1);
+        s->pirq_line[irq_num] = line;
+    }
+}
+
+uint32_t I440FXState::ReadReset(uint32_t offset, int size_log2)
+{
+    (void)offset;
+    (void)size_log2;
+    return reset_control;
+}
+
+void I440FXState::WriteReset(uint32_t offset, uint32_t data, int size_log2)
+{
+    (void)offset;
+    (void)size_log2;
+    bool rising = (data & RC_RCPU) && !(reset_control & RC_RCPU);
+    reset_control = data & (RC_SRST | RC_RCPU);
+    if (rising && machine != nullptr)
+        machine->RequestReset();
 }
 
 //#pragma mark - the configuration node
@@ -167,11 +213,12 @@ private:
     Resource *fPirqRes[2] {};
     I440FXVariant fVariant;
     PcPciApertures fSpace;
+    VirtMachine *fMachine;
 
 public:
     I440FXDevice(const char *name, I440FXVariant variant,
-                 const PcPciApertures &space):
-        Device(name), fVariant(variant), fSpace(space) {}
+                 const PcPciApertures &space, VirtMachine *machine):
+        Device(name), fVariant(variant), fSpace(space), fMachine(machine) {}
 
     I440FXState *State() const {return fState.get();}
 
@@ -221,6 +268,7 @@ public:
         }
 
         fState = std::make_unique<I440FXState>();
+        fState->machine = fMachine;
         fPciBus = pci_bus_init(sys->MemMap(), sys->PortMap());
         /* The messages go to the machine's local APICs, when it has them. */
         if (sys->MsiTarget() != nullptr) {
@@ -271,6 +319,8 @@ public:
                                        &fState->fDataIo,
                                        DEVIO_SIZE8 | DEVIO_SIZE16 |
                                        DEVIO_SIZE32);
+        sys->PortMap()->RegisterDevice(PIIX3_RESET_CONTROL, 1,
+                                       &fState->fResetIo, DEVIO_SIZE8);
         return true;
     }
 
@@ -347,7 +397,7 @@ public:
             return nullptr;
         }
         return new I440FXDevice(cfg.IdOr("i440fx"), fVariant,
-                                *ctx->pc_pci_space);
+                                *ctx->pc_pci_space, ctx->machine);
     }
 };
 
