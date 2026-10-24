@@ -462,13 +462,7 @@ void KvmRISCVVcpu::ExitMmio()
         if (pr->is_ram && !((pr->devram_flags & DEVRAM_FLAG_ROM) &&
                             pr->io != nullptr))
             return;
-        uint64_t offset = paddr - pr->addr;
-        if (get_bit(pr->devio_flags, size_log2)) {
-            pr->io->DeviceWrite(offset, val, size_log2);
-        } else if ((pr->devio_flags & DEVIO_SIZE32) && size_log2 == 3) {
-            pr->io->DeviceWrite(offset, (uint32_t)val, 2);
-            pr->io->DeviceWrite(offset + 4, (uint32_t)(val >> 32), 2);
-        }
+        pr->DeviceWrite(paddr - pr->addr, val, size_log2);
     } else {
         if (pr == nullptr) {
             val = 0;
@@ -477,13 +471,7 @@ void KvmRISCVVcpu::ExitMmio()
             if (offset + len <= pr->size)
                 memcpy(&val, pr->phys_mem + offset, len);
         } else {
-            uint64_t offset = paddr - pr->addr;
-            if (get_bit(pr->devio_flags, size_log2)) {
-                val = pr->io->DeviceRead(offset, size_log2);
-            } else if ((pr->devio_flags & DEVIO_SIZE32) && size_log2 == 3) {
-                val = pr->io->DeviceRead(offset, 2);
-                val |= (uint64_t)pr->io->DeviceRead(offset + 4, 2) << 32;
-            }
+            pr->DeviceRead(paddr - pr->addr, size_log2, &val);
         }
         memcpy(run->mmio.data, &val, len);
     }

@@ -34,8 +34,10 @@
 #define DEVIO_SIZE8  bit_at(0)
 #define DEVIO_SIZE16 bit_at(1)
 #define DEVIO_SIZE32 bit_at(2)
-/* not supported, could add specific 64 bit callbacks when needed */
-//#define DEVIO_SIZE64 (1 << 3)
+/* 8 byte accesses as one call to DeviceRead64()/DeviceWrite64(), for
+   registers a processor must read or write atomically. Without it they
+   reach a range that takes 4 byte ones in two halves. */
+#define DEVIO_SIZE64 bit_at(3)
 #define DEVIO_DISABLED bit_at(4)
 
 #define DEVRAM_FLAG_ROM        bit_at(0) /* not writable */
@@ -56,8 +58,14 @@ class DeviceIO {
 public:
     virtual ~DeviceIO() = default;
 
+    /* 'size_log2' is 0 to 2. */
     virtual uint32_t DeviceRead(uint32_t offset, int size_log2) = 0;
     virtual void DeviceWrite(uint32_t offset, uint32_t val, int size_log2) = 0;
+
+    /* For a range registered with DEVIO_SIZE64, which must implement
+       both. */
+    virtual uint64_t DeviceRead64(uint32_t offset);
+    virtual void DeviceWrite64(uint32_t offset, uint64_t val);
 };
 
 
@@ -122,6 +130,13 @@ struct PhysMemoryRange {
     const uint32_t *DirtyBits();
     void ResetDirtyBit(size_t offset);
     void SetAddr(uint64_t addr, bool enabled);
+
+    /* One device access of 1 to 8 bytes as a processor makes it: one call
+       where the range takes the width, an 8 byte one in two 4 byte halves
+       where it takes only those. False, with nothing done, when it takes
+       neither. */
+    bool DeviceRead(uint32_t offset, int size_log2, uint64_t *val);
+    bool DeviceWrite(uint32_t offset, uint64_t val, int size_log2);
 
     /* The bitmap in use may be switched by GetDirtyBits() on another
        thread meanwhile. */

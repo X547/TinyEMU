@@ -483,26 +483,14 @@ void PCMachine::MmioWrite(uint64_t paddr, const uint8_t *data, int len)
     }
     switch(len) {
     case 1:
-        if (pr->devio_flags & DEVIO_SIZE8) {
-            pr->io->DeviceWrite(addr, *(const uint8_t *)data, 0);
-        }
-        break;
     case 2:
-        if (pr->devio_flags & DEVIO_SIZE16) {
-            pr->io->DeviceWrite(addr, *(const uint16_t *)data, 1);
-        }
-        break;
     case 4:
-        if (pr->devio_flags & DEVIO_SIZE32) {
-            pr->io->DeviceWrite(addr, *(const uint32_t *)data, 2);
-        }
+    case 8: {
+        uint64_t val = 0;
+        memcpy(&val, data, len);
+        pr->DeviceWrite(addr, val, __builtin_ctz(len));
         break;
-    case 8:
-        if (pr->devio_flags & DEVIO_SIZE32) {
-            pr->io->DeviceWrite(addr, *(const uint32_t *)data, 2);
-            pr->io->DeviceWrite(addr + 4, *(const uint32_t *)(data + 4), 2);
-        }
-        break;
+    }
     default:
         /* What a hypervisor decoded from a wider instruction, an SSE move
            say: in quadwords where it divides into them, else bytes. */
@@ -529,26 +517,15 @@ void PCMachine::MmioRead(uint64_t paddr, uint8_t *data, int len)
     }
     switch(len) {
     case 1:
-        if (!(pr->devio_flags & DEVIO_SIZE8))
-            goto no_dev;
-        *(uint8_t *)data = pr->io->DeviceRead(addr, 0);
-        break;
     case 2:
-        if (!(pr->devio_flags & DEVIO_SIZE16))
-            goto no_dev;
-        *(uint16_t *)data = pr->io->DeviceRead(addr, 1);
-        break;
     case 4:
-        if (!(pr->devio_flags & DEVIO_SIZE32))
+    case 8: {
+        uint64_t val;
+        if (!pr->DeviceRead(addr, __builtin_ctz(len), &val))
             goto no_dev;
-        *(uint32_t *)data = pr->io->DeviceRead(addr, 2);
+        memcpy(data, &val, len);
         break;
-    case 8:
-        if (!(pr->devio_flags & DEVIO_SIZE32))
-            goto no_dev;
-        *(uint32_t *)data = pr->io->DeviceRead(addr, 2);
-        *(uint32_t *)(data + 4) = pr->io->DeviceRead(addr + 4, 2);
-        break;
+    }
     default:
         for (int i = 0, step = len % 8 == 0 ? 8 : 1; i < len; i += step)
             MmioRead(paddr + i, data + i, step);

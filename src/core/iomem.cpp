@@ -34,6 +34,25 @@
 #include "host_memory.h"
 
 
+//#pragma mark - DeviceIO
+
+/* Reached only for a range registered with DEVIO_SIZE64 whose device left
+   these out, which is a bug in the device. */
+uint64_t DeviceIO::DeviceRead64(uint32_t offset)
+{
+    (void)offset;
+    abort();
+}
+
+
+void DeviceIO::DeviceWrite64(uint32_t offset, uint64_t val)
+{
+    (void)offset;
+    (void)val;
+    abort();
+}
+
+
 //#pragma mark - PhysMemoryRange
 
 const uint32_t *PhysMemoryRange::DirtyBits()
@@ -69,6 +88,50 @@ void PhysMemoryRange::SetAddr(uint64_t addr, bool enabled)
     } else {
         map->SetRamAddr(this, addr, enabled);
     }
+}
+
+
+bool PhysMemoryRange::DeviceRead(uint32_t offset, int size_log2,
+                                 uint64_t *val)
+{
+    if (size_log2 == 3) {
+        if (devio_flags & DEVIO_SIZE64) {
+            *val = io->DeviceRead64(offset);
+            return true;
+        }
+        if (devio_flags & DEVIO_SIZE32) {
+            *val = concat_bits(io->DeviceRead(offset + 4, 2),
+                               io->DeviceRead(offset, 2), 32);
+            return true;
+        }
+        return false;
+    }
+    if (!get_bit(devio_flags, size_log2))
+        return false;
+    *val = io->DeviceRead(offset, size_log2);
+    return true;
+}
+
+
+bool PhysMemoryRange::DeviceWrite(uint32_t offset, uint64_t val,
+                                  int size_log2)
+{
+    if (size_log2 == 3) {
+        if (devio_flags & DEVIO_SIZE64) {
+            io->DeviceWrite64(offset, val);
+            return true;
+        }
+        if (devio_flags & DEVIO_SIZE32) {
+            io->DeviceWrite(offset, get_bits(val, 0, 32), 2);
+            io->DeviceWrite(offset + 4, get_bits(val, 32, 32), 2);
+            return true;
+        }
+        return false;
+    }
+    if (!get_bit(devio_flags, size_log2))
+        return false;
+    io->DeviceWrite(offset, val, size_log2);
+    return true;
 }
 
 

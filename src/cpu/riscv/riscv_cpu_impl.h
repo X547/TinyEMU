@@ -573,18 +573,13 @@ int RISCVCPUState<MaxXlen>::target_read_slow(RISCVCPUState *s,
         } else {
             DeviceLocker locker(*s->device_lock);
             offset = paddr - pr->addr;
+            uint64_t val;
             if (!device_maps(pr, paddr)) {
                 ret = 0;
-            } else if (get_bit(pr->devio_flags, size_log2)) {
-                ret = pr->io->DeviceRead(offset, size_log2);
-            }
-            else if ((pr->devio_flags & DEVIO_SIZE32) && size_log2 == 3) {
-                /* emulate 64 bit access */
-                ret = pr->io->DeviceRead(offset, 2);
-                ret |= (uint64_t)pr->io->DeviceRead(offset + 4, 2) << 32;
-                
-            }
-            else {
+            } else if (size_log2 <= 3 &&
+                       pr->DeviceRead(offset, size_log2, &val)) {
+                ret = val;
+            } else {
 #ifdef DUMP_INVALID_MEM_ACCESS
                 printf("unsupported device read access: addr=0x");
                 print_target_ulong(paddr);
@@ -609,17 +604,10 @@ void RISCVCPUState<MaxXlen>::device_write(RISCVCPUState *s,
 
     if (!device_maps(pr, paddr)) {
         /* dropped */
-    } else if (get_bit(pr->devio_flags, size_log2)) {
-        pr->io->DeviceWrite(offset, val, size_log2);
-    }
-    else if ((pr->devio_flags & DEVIO_SIZE32) && size_log2 == 3) {
-        /* emulate 64 bit access */
-        pr->io->DeviceWrite(offset,
-                       get_bits(val, 0, 32), 2);
-        pr->io->DeviceWrite(offset + 4,
-                       get_bits(val, 32, 32), 2);
-    }
-    else {
+    } else if (size_log2 <= 3 &&
+               pr->DeviceWrite(offset, (uint64_t)val, size_log2)) {
+        /* done */
+    } else {
 #ifdef DUMP_INVALID_MEM_ACCESS
         printf("unsupported device write access: addr=0x");
         print_target_ulong(paddr);
