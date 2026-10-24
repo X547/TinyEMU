@@ -82,10 +82,39 @@ _start:
     mv a0, s0
     mv a1, s1
     mv a2, s2
+    mv tp, s0
     call riscv_boot
+
+/* The harts that lost the lottery wait for the boot hart to release them
+   with an entry point and a stack in their hart ID's slot, woken by their
+   machine software interrupt. a0 is the hart ID. */
 .Lpark:
+    li t0, 1 << 3 /* MSIE, so that wfi wakes; MIE stays off */
+    csrw mie, t0
     wfi
-    j .Lpark
+    li t0, MAX_HARTS
+    bgeu a0, t0, .Lpark
+    slli t1, a0, REGBYTES_LOG2
+    lla t0, riscv_hart_entry
+    add t0, t0, t1
+    REG_L t2, 0(t0)
+    beqz t2, .Lpark
+    lla t0, riscv_hart_stack
+    add t0, t0, t1
+    REG_L sp, 0(t0)
+    csrw mie, zero
+    mv tp, a0
+    jr t2
+
+/* A hart the SBI started: a0 its hart ID, a1 the stack. */
+    .globl riscv_hart_start_s
+    .balign 4
+riscv_hart_start_s:
+    mv sp, a1
+    mv tp, a0
+    lla t0, riscv_hart_entry_s
+    REG_L t0, 0(t0)
+    jr t0
 
 
 /* The trap vectors: everything is saved on the stack the trap arrived on,
@@ -182,8 +211,16 @@ _start:
 
 
     .data
-    .balign 4
+    .balign 8
 /* In .data, not .bss: the boot hart clears the BSS while the others may
    still be on their way here. */
 boot_lottery:
     .word 0
+    .balign 8
+    .globl riscv_hart_entry, riscv_hart_stack, riscv_hart_entry_s
+riscv_hart_entry:
+    .skip MAX_HARTS * REGBYTES
+riscv_hart_stack:
+    .skip MAX_HARTS * REGBYTES
+riscv_hart_entry_s:
+    .skip REGBYTES

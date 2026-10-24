@@ -1,0 +1,7 @@
+cap 0x8086a201 0x989680
+config 0
+status 0
+counter 0
+t0 0x30 0 0xffffffffffffffff
+t1 0x30 0 0xffffffffffffffff
+t2 0x30 0 0xffffffffffffffff

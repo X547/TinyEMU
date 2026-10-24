@@ -47,6 +47,12 @@ public:
 bool intc_resolve(const HwDevice *dev, int index, IntController **ctrl,
                   uint32_t *line);
 
+/* x86: an ISA IRQ whose device the tables give no interrupt for, as the
+   AT's fixed lines are: through the IOAPIC at the GSI the MADT's overrides
+   say, with their trigger mode, or else through the 8259s. */
+bool irq_route_isa(uint32_t irq, IrqHandler fn, void *ctx);
+void irq_unroute_isa(uint32_t irq);
+
 /* Whether the tables say the interrupt is level triggered. */
 bool intc_level(const HwDevice *dev, int index);
 

@@ -79,6 +79,10 @@ void t_snap(const char *key, const char *fmt, ...)
 /* The first device that is 'compat', or the test is skipped. */
 const HwDevice *t_require_device(const char *compat);
 
+/* Have 'fn' run once the test is over, however it ended: to put back
+   what the runner does not reset by itself. */
+void t_on_cleanup(void (*fn)());
+
 /* Run 'fn' and report whether it trapped, and how in 'info'; a trap there
    is expected rather than a crash. */
 bool t_trap(void (*fn)(void *), void *ctx = nullptr, TrapInfo *info = nullptr);

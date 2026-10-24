@@ -72,6 +72,7 @@ inc = include_directories('.', 'arch', 'lib', 'hw', 'framework',
 sources = files(
   'main.cpp',
   'framework/runner.cpp',
+  'framework/smp.cpp',
   'hw/acpi.cpp',
   'hw/aplic.cpp',
   'hw/console.cpp',
@@ -98,8 +99,13 @@ sources = files(
   'tests/intc/ioapic.cpp',
   'tests/intc/lapic.cpp',
   'tests/intc/plic.cpp',
+  'tests/platform/acpi.cpp',
   'tests/platform/platform.cpp',
+  'tests/platform/smp.cpp',
   'tests/timer/clint.cpp',
+  'tests/timer/hpet.cpp',
+  'tests/timer/i8254.cpp',
+  'tests/timer/mc146818.cpp',
 )
 
 # The linker is run directly rather than through the compiler driver, which
@@ -126,6 +132,7 @@ else
   # Linked where the PVH loader puts it, at the physical address of its
   # PT_LOAD segments.
   sources += files(
+    'arch/x86/ap.S',
     'arch/x86/arch.cpp',
     'arch/x86/setjmp.S',
     'arch/x86/traps.S',

@@ -1,0 +1,6 @@
+status 0
+enable_all_ones 0xffff
+control 0x1
+after_s1 0x401
+byte_write 0x1
+offset_6 0

@@ -27,6 +27,7 @@
 #include "heap.h"
 #include "intc.h"
 #include "power.h"
+#include "smp.h"
 #include "testctl.h"
 
 extern "C" TestCase __devtests_start[], __devtests_end[];
@@ -255,11 +256,30 @@ void t_delay_us(uint64_t us)
 }
 
 
+static void (*sCleanups[8])();
+static int sCleanupCount;
+
+void t_on_cleanup(void (*fn)())
+{
+    for (int i = 0; i < sCleanupCount; i++) {
+        if (sCleanups[i] == fn)
+            return;
+    }
+    if (sCleanupCount == (int)ARRAY_SIZE(sCleanups))
+        panic("more than %d cleanups", (int)ARRAY_SIZE(sCleanups));
+    sCleanups[sCleanupCount++] = fn;
+}
+
 /* What a test may have left behind that would reach the next one. */
 static void quiesce()
 {
     sTrapJmp = nullptr;
+    smp_quiesce();
     arch_irq_reset();
+    /* the test's own first, while its interrupts are off */
+    for (int i = sCleanupCount - 1; i >= 0; i--)
+        sCleanups[i]();
+    sCleanupCount = 0;
     tc_irq_set_levels(0);
     intc_reset_all();
 }
@@ -284,6 +304,12 @@ bool t_trap(void (*fn)(void *), void *ctx, TrapInfo *info)
 
 void trap_unexpected(const TrapInfo &info)
 {
+    if (smp_current() != smp_boot_index()) {
+        report("CRASH cpu %d: %s (cause %#llx) at pc %#llx addr %#llx",
+               smp_current(), info.name, T_FMT_VAL(info.cause),
+               T_FMT_VAL(info.pc), T_FMT_VAL(info.addr));
+        smp_ap_trapped();
+    }
     if (sTrapJmp != nullptr) {
         JmpBuf *jb = sTrapJmp;
         sTrapJmp = nullptr;

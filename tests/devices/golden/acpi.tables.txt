@@ -1,0 +1,2 @@
+rsdp rev 2 oem TINYEM
+list FACP/4/TINYEM DSDT/2/TINYEM

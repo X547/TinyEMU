@@ -24,6 +24,7 @@
 #include "intc.h"
 #include "mmio.h"
 #include "riscv.h"
+#include "smp.h"
 #include "test.h"
 
 /* The core local interruptor: a software interrupt and a timer per hart,
@@ -212,6 +213,87 @@ TEST(clint, software_interrupt)
     EXPECT_TRUE(t_wait_until([] { return sCount > 0; }, 100000));
     arch_irq_disable();
     EXPECT_EQ(sCount, 1);
+}
+
+namespace {
+
+volatile int sApReady;
+uint64_t sOtherMsip;
+
+/* the slot a hart has in the CLINT */
+int slot_of(const Clint &c, uint32_t hart)
+{
+    const HwDevice *d = registry_find("riscv,clint0");
+    const FdtProp *ext = fdt_prop(d->fdt, "interrupts-extended");
+    uint32_t intc = hart_intc_phandle(hart);
+    for (uint32_t i = 0; ext && 16 * i + 16 <= ext->len; i++) {
+        if (be32(ext->data + 16 * i) == intc)
+            return i;
+    }
+    (void)c;
+    return -1;
+}
+
+/* On the other hart: one interrupt of 'bit', or a while */
+void ap_wait_irq(void *bit)
+{
+    CSR_SET(mie, 1ul << (uintptr_t)bit);
+    __atomic_store_n(&sApReady, 1, __ATOMIC_RELEASE);
+    arch_irq_enable();
+    uint64_t end = t_now_us() + 200000;
+    while (sCount == 0 && t_now_us() < end)
+        arch_cpu_relax();
+    arch_irq_disable();
+    CSR_CLEAR(mie, 1ul << (uintptr_t)bit);
+}
+
+}
+
+TEST(clint, software_interrupt_to_other_hart)
+{
+    Clint c = need_clint();
+    int other = t_require_other_cpu();
+    int slot = slot_of(c, arch_cpu_hw_id(other));
+    ASSERT_GE(slot, 0);
+    sOtherMsip = c.base + CLINT_MSIP(slot);
+    sCount = 0;
+    sApReady = 0;
+    arch_set_irq_handler(IRQ_M_SOFT, [](void *) {
+        sCount = sCount + 1;
+        mmio_write32(sOtherMsip, 0);
+    }, nullptr);
+    ASSERT_TRUE(smp_post(other, ap_wait_irq, (void *)(uintptr_t)IRQ_M_SOFT));
+    t_wait_until([] { return __atomic_load_n(&sApReady, __ATOMIC_ACQUIRE); });
+    mmio_write32(sOtherMsip, 1);
+    /* this hart's own is untouched */
+    EXPECT_FALSE(mip(IRQ_M_SOFT));
+    EXPECT_TRUE(smp_wait(other));
+    EXPECT_EQ(sCount, 1);
+}
+
+TEST(clint, timer_on_other_hart)
+{
+    sClint = need_clint();
+    int other = t_require_other_cpu();
+    int slot = slot_of(sClint, arch_cpu_hw_id(other));
+    ASSERT_GE(slot, 0);
+    static Clint theirs;
+    theirs = sClint;
+    theirs.index = slot;
+    sCount = 0;
+    sApReady = 0;
+    set_mtimecmp(theirs, UINT64_MAX);
+    arch_set_irq_handler(IRQ_M_TIMER, [](void *) {
+        sCount = sCount + 1;
+        set_mtimecmp(theirs, UINT64_MAX);
+    }, nullptr);
+    ASSERT_TRUE(smp_post(other, ap_wait_irq, (void *)(uintptr_t)IRQ_M_TIMER));
+    t_wait_until([] { return __atomic_load_n(&sApReady, __ATOMIC_ACQUIRE); });
+    set_mtimecmp(theirs, mtime(theirs) + us_to_ticks(1000));
+    EXPECT_TRUE(smp_wait(other));
+    EXPECT_EQ(sCount, 1);
+    set_mtimecmp(sClint, UINT64_MAX);
+    EXPECT_FALSE(mip(IRQ_M_TIMER));
 }
 
 TEST(clint, past_last_hart)

@@ -25,11 +25,16 @@
 #define REG_L ld
 #define REG_S sd
 #define REGBYTES 8
+#define REGBYTES_LOG2 3
 #else
 #define REG_L lw
 #define REG_S sw
 #define REGBYTES 4
+#define REGBYTES_LOG2 2
 #endif
+
+/* the hart IDs a parked hart can be released by */
+#define MAX_HARTS 64
 
 /* Trap frame layout, shared with arch.cpp: x1..x31 at their index, then
    the trap CSRs. */

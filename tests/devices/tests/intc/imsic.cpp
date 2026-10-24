@@ -24,6 +24,7 @@
 #include "imsic.h"
 #include "mmio.h"
 #include "riscv.h"
+#include "smp.h"
 #include "test.h"
 
 /* The boot hart's interrupt file at the privilege the image runs at, fed
@@ -222,6 +223,55 @@ TEST(imsic, other_hart)
         t_skip("one hart");
     mmio_write32(other, 11);
     EXPECT_FALSE(f->Pending(11));
+}
+
+namespace {
+
+volatile int sApReady;
+volatile int sApCount;
+
+/* On the other hart, in its own file: identity 14 on, one interrupt of it
+   or a while */
+void ap_take_msi(void *)
+{
+    Imsic *f = Imsic::Mine();
+    f->SetEnabled(14, true);
+    f->WriteReg(ISEL_EITHRESHOLD, 0);
+    f->WriteReg(ISEL_EIDELIVERY, 1);
+    riscv_ie_set(1ul << riscv_ext_irq());
+    __atomic_store_n(&sApReady, 1, __ATOMIC_RELEASE);
+    arch_irq_enable();
+    uint64_t end = t_now_us() + 200000;
+    while (sApCount == 0 && t_now_us() < end)
+        arch_cpu_relax();
+    arch_irq_disable();
+    riscv_ie_clear(1ul << riscv_ext_irq());
+    f->WriteReg(ISEL_EIDELIVERY, 0);
+    f->SetEnabled(14, false);
+}
+
+}
+
+TEST(imsic, msi_to_other_hart)
+{
+    Imsic *f = need_imsic();
+    int other = t_require_other_cpu();
+    uint64_t page = f->PageOf(arch_cpu_hw_id(other));
+    ASSERT_NE(page, 0u);
+    sApReady = 0;
+    sApCount = 0;
+    arch_set_irq_handler(riscv_ext_irq(), [](void *) {
+        Imsic *f = Imsic::Mine();
+        if ((f->Topei() >> 16) == 14)
+            sApCount = sApCount + 1;
+        f->ClaimTop();
+    }, nullptr);
+    ASSERT_TRUE(smp_post(other, ap_take_msi, nullptr));
+    t_wait_until([] { return __atomic_load_n(&sApReady, __ATOMIC_ACQUIRE); });
+    mmio_write32(page, 14);
+    EXPECT_TRUE(smp_wait(other));
+    EXPECT_EQ(sApCount, 1);
+    EXPECT_FALSE(f->Pending(14));
 }
 
 TEST(imsic, supervisor_file_from_m)

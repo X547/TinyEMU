@@ -1,0 +1,3 @@
+number 0
+min_tick 0
+protection 0

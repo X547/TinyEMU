@@ -1,0 +1,2 @@
+speaker 0
+table_irq 1

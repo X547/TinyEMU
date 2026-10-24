@@ -27,6 +27,13 @@
 #define SEL_DATA   0x10
 #define SEL_CODE64 0x18
 
+/* the GDT's descriptors: null, code32 and data, and code64 for x86_64 */
+#ifdef __x86_64__
+#define GDT_LIMIT (4 * 8 - 1)
+#else
+#define GDT_LIMIT (3 * 8 - 1)
+#endif
+
 /* flat 4 GB descriptors */
 #define GDT_CODE32 0x00cf9a000000ffff
 #define GDT_DATA   0x00cf92000000ffff

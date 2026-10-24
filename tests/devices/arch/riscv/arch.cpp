@@ -23,6 +23,8 @@
 
 #include "asm.h"
 #include "fdt.h"
+#include "intc.h"
+#include "mmio.h"
 #include "riscv.h"
 
 extern "C" char __image_start[], __image_end[];
@@ -286,6 +288,115 @@ void arch_irq_reset()
     }
     for (auto &h : sHandlers)
         h = {};
+}
+
+
+//#pragma mark - other harts
+
+extern "C" uintptr_t riscv_hart_entry[MAX_HARTS];
+extern "C" uintptr_t riscv_hart_stack[MAX_HARTS];
+extern "C" uintptr_t riscv_hart_entry_s;
+extern "C" void riscv_hart_start_s();
+
+#define SBI_EXT_HSM 0x48534d
+
+namespace {
+
+/* the cpu nodes, in order */
+const FdtNode *cpu_node(int index)
+{
+    const FdtNode *cpus = fdt_find_path("/cpus");
+    int n = 0;
+    for (const FdtNode *c = cpus ? cpus->child : nullptr; c; c = c->sibling) {
+        const char *type = fdt_prop_str(c, "device_type");
+        if (type == nullptr || strcmp(type, "cpu") != 0 || !fdt_is_enabled(c))
+            continue;
+        if (n++ == index)
+            return c;
+    }
+    return nullptr;
+}
+
+/* A hart's msip register in the CLINT, or 0. */
+uint64_t msip_of(uint32_t hart)
+{
+    const FdtNode *clint = fdt_find_compatible("riscv,clint0");
+    uint64_t base, size;
+    if (clint == nullptr || !fdt_reg(clint, 0, &base, &size))
+        return 0;
+    const FdtProp *ext = fdt_prop(clint, "interrupts-extended");
+    uint32_t intc = hart_intc_phandle(hart);
+    for (uint32_t i = 0; ext && 16 * i + 16 <= ext->len; i++) {
+        if (be32(ext->data + 16 * i) == intc)
+            return base + 4 * i;
+    }
+    return 0;
+}
+
+}
+
+
+int arch_cpu_count()
+{
+    int n = 0;
+    while (cpu_node(n))
+        n++;
+    return n ? n : 1;
+}
+
+
+uint32_t arch_cpu_hw_id(int index)
+{
+    const FdtNode *c = cpu_node(index);
+    uint32_t reg = gBoot.boot_cpu;
+    if (c)
+        fdt_prop_u32(c, "reg", &reg);
+    return reg;
+}
+
+
+uint32_t arch_this_cpu_hw_id()
+{
+    /* the entry code keeps the hart ID in tp */
+    unsigned long tp;
+    __asm__ volatile("mv %0, tp" : "=r"(tp));
+    return tp;
+}
+
+
+bool arch_cpu_start(int index, void (*entry)(), uintptr_t stack_top)
+{
+    uint32_t hart = arch_cpu_hw_id(index);
+    if (sMachineMode) {
+        /* parked in the entry code: released by its slot and its software
+           interrupt */
+        uint64_t msip = msip_of(hart);
+        if (hart >= MAX_HARTS || msip == 0)
+            return false;
+        riscv_hart_stack[hart] = stack_top;
+        __atomic_store_n(&riscv_hart_entry[hart], (uintptr_t)entry,
+                         __ATOMIC_RELEASE);
+        mmio_write32(msip, 1);
+        return true;
+    }
+    riscv_hart_entry_s = (uintptr_t)entry;
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    SbiRet r = sbi_call(SBI_EXT_HSM, 0, hart, (uintptr_t)riscv_hart_start_s,
+                        stack_top);
+    return r.error == 0;
+}
+
+
+void arch_ap_init()
+{
+    if (sMachineMode) {
+        CSR_WRITE(mtvec, (uintptr_t)riscv_trap_entry_m);
+        CSR_WRITE(mcounteren, 7);
+        if (uint64_t msip = msip_of(arch_this_cpu_hw_id()))
+            mmio_write32(msip, 0);
+    } else {
+        CSR_WRITE(stvec, (uintptr_t)riscv_trap_entry_s);
+    }
 }
 
 

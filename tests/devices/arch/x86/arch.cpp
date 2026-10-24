@@ -22,6 +22,8 @@
 #include "arch.h"
 
 #include "acpi.h"
+#include "i8259.h"
+#include "lapic.h"
 #include "mmio.h"
 #include "x86_asm.h"
 
@@ -201,28 +203,43 @@ const char *arch_mode()
 }
 
 
-uint8_t gPitResetStatus[3];
-
 /* A PC's PIT counts from reset and interrupts every 55 ms, which no
    firmware has stopped here. Left alone, whether a tick falls inside a run
    would depend on how long the host took, and so would the coverage of the
    timer and the 8259s. Channel 0 is set to fire once, now, and then stay
-   quiet; what each channel was doing is kept for the PIT's tests. */
+   quiet. */
 static void quiet_pit()
 {
     const uint16_t ctrl = 0x43, ch0 = 0x40;
-    for (int ch = 0; ch < 3; ch++) {
-        /* read-back: status only, of this channel */
-        outb(ctrl, 0xe0 | (2 << ch));
-        gPitResetStatus[ch] = inb(ch0 + ch);
-    }
     outb(ctrl, 0x30); /* channel 0, low byte then high, mode 0 */
     outb(ch0, 1);
     outb(ch0, 0);
 }
 
+uint8_t gPicResetState[8]; /* IRR, ISR, IMR and ELCR of each 8259 */
+
+/* From reset the 8259s have every input unmasked and a vector base of 0,
+   and the PIT just raised IRQ 0: interrupts on would take it as vector 0,
+   through the local APIC's LINT0 where there is one. Firmware sets them up
+   before anything else; so does the image, after keeping what they held
+   for the 8259 tests. */
+static void quiet_pic()
+{
+    I8259 *pic = I8259::Get();
+    if (pic == nullptr)
+        return;
+    for (int i = 0; i < 2; i++) {
+        gPicResetState[4 * i] = pic->Irr(i);
+        gPicResetState[4 * i + 1] = pic->Isr(i);
+        gPicResetState[4 * i + 2] = pic->Imr(i);
+        gPicResetState[4 * i + 3] = pic->Elcr(i);
+    }
+    pic->Reset();
+}
+
 /* The TSC against the ACPI PM timer, which runs at 3.579545 MHz on every
-   machine that has one. */
+   machine that has one. The 8259s are set up after it: by then the PIT's
+   last edge has surely reached them, and is cleared with the rest. */
 void arch_init()
 {
     quiet_pit();
@@ -244,6 +261,12 @@ void arch_init()
     sTickHz = (tsc_end - tsc_start) * 3579545 / elapsed;
     if (sTickHz == 0)
         panic("the TSC does not advance");
+
+    quiet_pic();
+    /* the boot processor by its APIC ID, which the other processors are
+       told apart from it by */
+    if (Lapic *l = Lapic::Get())
+        gBoot.boot_cpu = l->Id();
 }
 
 
@@ -310,4 +333,112 @@ void arch_irq_reset()
     arch_irq_disable();
     for (auto &h : sHandlers)
         h = {};
+}
+
+
+//#pragma mark - other processors
+
+extern "C" char x86_ap_trampoline[], x86_ap_trampoline_end[];
+extern "C" {
+uintptr_t x86_ap_stack;
+void (*x86_ap_entry)();
+}
+
+namespace {
+
+uint64_t sTrampoline;
+
+#define E820_RAM 1
+
+struct E820Entry {
+    uint64_t addr;
+    uint64_t size;
+    uint32_t type;
+    uint32_t reserved;
+} __attribute__((packed));
+
+bool overlaps(uint64_t a, uint64_t alen, uint64_t b, uint64_t blen)
+{
+    return a < b + blen && b < a + alen;
+}
+
+/* A page of RAM below 1 MB, which the STARTUP vector can name, that holds
+   nothing the boot passed. */
+uint64_t trampoline_page()
+{
+    const E820Entry *e = (const E820Entry *)gBoot.memmap;
+    for (uint32_t i = 0; i < gBoot.memmap_entries; i++) {
+        if (e[i].type != E820_RAM)
+            continue;
+        for (uint64_t page = align_up(e[i].addr, 0x1000);
+             page + 0x1000 <= e[i].addr + e[i].size && page < 0xa0000;
+             page += 0x1000) {
+            if (page == 0)
+                continue;
+            if (overlaps(page, 0x1000, (uintptr_t)gBoot.memmap,
+                         gBoot.memmap_entries * sizeof(E820Entry)) ||
+                (gBoot.cmdline &&
+                 overlaps(page, 0x1000, (uintptr_t)gBoot.cmdline,
+                          strlen(gBoot.cmdline) + 1)))
+                continue;
+            return page;
+        }
+    }
+    return 0;
+}
+
+}
+
+
+int arch_cpu_count()
+{
+    int n = acpi_madt_cpu_count();
+    return n ? n : 1;
+}
+
+
+uint32_t arch_cpu_hw_id(int index)
+{
+    return acpi_madt_cpu_count() ? acpi_madt_cpu_apic_id(index)
+                                 : gBoot.boot_cpu;
+}
+
+
+uint32_t arch_this_cpu_hw_id()
+{
+    Lapic *l = Lapic::Get();
+    return l ? l->Id() : gBoot.boot_cpu;
+}
+
+
+bool arch_cpu_start(int index, void (*entry)(), uintptr_t stack_top)
+{
+    Lapic *l = Lapic::Get();
+    if (l == nullptr)
+        return false;
+    if (sTrampoline == 0)
+        sTrampoline = trampoline_page();
+    if (sTrampoline == 0)
+        return false;
+    memcpy((void *)(uintptr_t)sTrampoline, x86_ap_trampoline,
+           x86_ap_trampoline_end - x86_ap_trampoline);
+    x86_ap_stack = stack_top;
+    x86_ap_entry = entry;
+    __asm__ volatile("" ::: "memory");
+    uint32_t apic = arch_cpu_hw_id(index);
+    /* INIT, then one STARTUP: a second one would restart a processor that
+       took the first */
+    l->SendIpi(apic, LAPIC_MODE_INIT | LAPIC_ICR_ASSERT);
+    uint64_t end = arch_ticks() + arch_tick_hz() / 100;
+    while (arch_ticks() < end)
+        arch_cpu_relax();
+    l->SendIpi(apic, LAPIC_MODE_STARTUP | (uint32_t)(sTrampoline >> 12));
+    return true;
+}
+
+
+void arch_ap_init()
+{
+    DescriptorPointer p {sizeof(sIdt) - 1, (uintptr_t)sIdt};
+    __asm__ volatile("lidt %0" : : "m"(p));
 }

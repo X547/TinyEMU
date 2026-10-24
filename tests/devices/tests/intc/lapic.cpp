@@ -23,6 +23,7 @@
 
 #include "format.h"
 #include "lapic.h"
+#include "smp.h"
 #include "test.h"
 #include "vectors.h"
 
@@ -477,6 +478,114 @@ TEST(lapic, apic_base_msr)
     EXPECT_FALSE(rdmsr(MSR_APIC_BASE) & (1u << 11));
     wrmsr(MSR_APIC_BASE, base);
     l->Enable();
+}
+
+namespace {
+
+volatile int sApCount;
+volatile int sApReady;
+
+void ap_ipi_handler(void *)
+{
+    sApCount = sApCount + 1;
+    Lapic::Get()->Eoi();
+}
+
+/* On the other processor: its APIC on, interrupts on, until one came or a
+   while went by. */
+void ap_wait_ipi(void *ldr)
+{
+    Lapic *l = Lapic::Get();
+    l->Enable();
+    l->Write(LAPIC_TPR, 0);
+    l->Write(LAPIC_DFR, 0xffffffff);
+    l->Write(LAPIC_LDR, (uint32_t)(uintptr_t)ldr);
+    __atomic_store_n(&sApReady, 1, __ATOMIC_RELEASE);
+    arch_irq_enable();
+    uint64_t end = t_now_us() + 200000;
+    while (sApCount == 0 && t_now_us() < end)
+        arch_cpu_relax();
+    arch_irq_disable();
+}
+
+int ap_waiting(uint32_t ldr = 0)
+{
+    int other = t_require_other_cpu();
+    sApCount = 0;
+    sApReady = 0;
+    arch_set_irq_handler(VEC_IPI, ap_ipi_handler, nullptr);
+    if (!smp_post(other, ap_wait_ipi, (void *)(uintptr_t)ldr))
+        t_skip("the other processor is busy");
+    t_wait_until([] {
+        return __atomic_load_n(&sApReady, __ATOMIC_ACQUIRE) != 0;
+    });
+    return other;
+}
+
+}
+
+TEST(lapic, ipi_to_other)
+{
+    Lapic *l = need_lapic();
+    int other = ap_waiting();
+    l->SendIpi(arch_cpu_hw_id(other), VEC_IPI);
+    EXPECT_TRUE(smp_wait(other));
+    EXPECT_EQ(sApCount, 1);
+    EXPECT_FALSE(l->Requested(VEC_IPI));
+}
+
+TEST(lapic, ipi_from_other)
+{
+    Lapic *l = need_lapic();
+    int other = t_require_other_cpu();
+    static uint32_t me;
+    me = l->Id();
+    ASSERT_TRUE(smp_run(other, [](void *) {
+        Lapic::Get()->Enable();
+        Lapic::Get()->SendIpi(me, VEC_IPI);
+    }, nullptr));
+    EXPECT_TRUE(l->Requested(VEC_IPI));
+    sCount = 0;
+    arch_set_irq_handler(VEC_IPI, count_and_eoi, nullptr);
+    arch_irq_enable();
+    t_wait_until([] { return sCount > 0; });
+    arch_irq_disable();
+    EXPECT_EQ(sCount, 1);
+}
+
+TEST(lapic, all_but_self_to_other)
+{
+    Lapic *l = need_lapic();
+    int other = ap_waiting();
+    l->SendIpi(0, LAPIC_ICR_OTHERS | VEC_IPI);
+    EXPECT_TRUE(smp_wait(other));
+    EXPECT_EQ(sApCount, 1);
+    EXPECT_FALSE(l->Requested(VEC_IPI));
+}
+
+TEST(lapic, lowest_priority_to_other)
+{
+    Lapic *l = need_lapic();
+    int other = ap_waiting();
+    /* this processor busier: the other one has the lowest priority */
+    l->Write(LAPIC_TPR, 0xf0);
+    l->SendIpi(0xff, LAPIC_MODE_LOWEST | VEC_IPI);
+    EXPECT_TRUE(smp_wait(other));
+    l->Write(LAPIC_TPR, 0);
+    EXPECT_EQ(sApCount, 1);
+    EXPECT_FALSE(l->Requested(VEC_IPI));
+}
+
+TEST(lapic, logical_to_other)
+{
+    Lapic *l = need_lapic();
+    l->Write(LAPIC_DFR, 0xffffffff);
+    l->Write(LAPIC_LDR, 0x01000000);
+    int other = ap_waiting(0x04000000);
+    l->SendIpi(0x04, LAPIC_ICR_LOGICAL | VEC_IPI);
+    EXPECT_TRUE(smp_wait(other));
+    EXPECT_EQ(sApCount, 1);
+    EXPECT_FALSE(l->Requested(VEC_IPI));
 }
 
 #ifdef __x86_64__

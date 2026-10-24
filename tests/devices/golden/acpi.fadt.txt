@@ -1,0 +1,10 @@
+revision 4
+sci_int 9
+smi_cmd 0
+pm1a_evt 0x600 len 4
+pm1a_cnt 0x604 len 2
+pm_tmr 0x608 len 4
+gpe0 0 len 0
+iapc_boot_arch 0x1
+flags 0x535
+x_pm_tmr 0 0 0

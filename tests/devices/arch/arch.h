@@ -95,3 +95,15 @@ void arch_wait_irq();
 /* Between tests: interrupts off, every handler gone, and on RISC-V every
    interrupt source the processor has masked. */
 void arch_irq_reset();
+
+/* The processors the tables list, in their order: index 0 up. The boot
+   processor is one of them. */
+int arch_cpu_count();
+uint32_t arch_cpu_hw_id(int index); /* APIC ID or hart ID */
+uint32_t arch_this_cpu_hw_id();
+/* Start processor 'index', which calls 'entry' on 'stack_top' with
+   interrupts off and never returns. False if it cannot be started. */
+bool arch_cpu_start(int index, void (*entry)(), uintptr_t stack_top);
+/* On a started processor, entered from 'entry': the trap handling the
+   boot processor has. */
+void arch_ap_init();

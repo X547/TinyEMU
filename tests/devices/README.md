@@ -44,8 +44,9 @@ lld, llvm-objcopy, meson, ninja and Python 3; WSL and Haiku have been tried.
 
 Options worth knowing:
 
-* `--temu-args=-no-accel` runs x86 on the interpreter rather than a
-  hypervisor.
+* `--accel` lets temu run x86 on a hypervisor. By default it runs the
+  interpreter, since a hypervisor's interrupt controllers stand in for
+  temu's own; `--temu-args` passes anything else.
 * `--isolate` gives each test a machine of its own.
 * `--timeout N` is how long a run may go without a line of output before it
   is killed, 30 seconds by default.
@@ -84,8 +85,9 @@ different `--temu-args`.
 
 `machines/*.cfg` are temu configurations with `@...@` placeholders that
 `run.py` fills in for each target: the boot method, the command line, the
-root bus and the test-control device. The first comment names the targets a
-machine is for. A test that needs a device the machine lacks skips.
+root bus and the test-control device, which `@FIXTURE(irqs: [5, 7])@` gives
+properties. The first comment names the targets a machine is for. A test
+that needs a device the machine lacks skips.
 
 ## Writing tests
 
@@ -118,10 +120,24 @@ before it in the same machine, it answers `RERUN` and `run.py` runs it again
 in a machine of its own.
 
 Between tests the runner turns interrupts off, lowers the test-control
-lines and resets every interrupt controller that was used.
-`irq_route(device, index, handler, ctx)` delivers a device's interrupt
-through whichever controller the tables name; the interrupt controller tests
-drive their registers themselves, with the test-control lines as sources.
+lines and resets every interrupt controller that was used, on every
+processor that was started. What else a test changes that would reach the
+next one it puts back with `t_on_cleanup(fn)`, which runs however the test
+ended. `irq_route(device, index, handler, ctx)` delivers a device's
+interrupt through whichever controller the tables name, with the trigger
+mode they give; `irq_route_isa()` does the same for the PC's fixed ISA
+lines. The interrupt controller tests drive their registers themselves,
+with the test-control lines as sources. `t_trap(fn)` runs code that is
+meant to trap.
+
+`smp_run(cpu, fn, ctx)` runs a function on another processor, which is
+started the first time: by INIT and STARTUP on x86, by its software
+interrupt in M-mode and by the SBI in S-mode. `t_require_other_cpu()` gives
+one or skips the test.
+
+The x86 image quiets the PIT, which counts from reset, and sets up the
+8259s before the first test, as firmware would; the 8259s' reset state is
+kept for `i8259.reset_state`.
 
 `known-failures.txt` lists failures that should not fail a run.
 

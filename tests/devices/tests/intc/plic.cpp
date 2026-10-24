@@ -25,6 +25,7 @@
 #include "mmio.h"
 #include "plic.h"
 #include "riscv.h"
+#include "smp.h"
 #include "test.h"
 #include "testctl.h"
 
@@ -304,6 +305,57 @@ TEST(plic, other_hart)
     EXPECT_EQ(s.plic->Claim(other), s.src[0]);
     tc_irq_lower(0);
     s.plic->Complete(other, s.src[0]);
+}
+
+namespace {
+
+volatile int sApReady;
+volatile int sApCount;
+Setup sOther;
+int sOtherCtx;
+
+void ap_take_plic(void *)
+{
+    sOther.plic->Write(PLIC_THRESHOLD(sOtherCtx), 0);
+    sOther.plic->SetEnabled(sOtherCtx, sOther.src[0], true);
+    riscv_ie_set(1ul << riscv_ext_irq());
+    __atomic_store_n(&sApReady, 1, __ATOMIC_RELEASE);
+    arch_irq_enable();
+    uint64_t end = t_now_us() + 200000;
+    while (sApCount == 0 && t_now_us() < end)
+        arch_cpu_relax();
+    arch_irq_disable();
+    riscv_ie_clear(1ul << riscv_ext_irq());
+}
+
+}
+
+TEST(plic, delivery_to_other_hart)
+{
+    Setup s = need_plic(1);
+    int other = t_require_other_cpu();
+    sOtherCtx = s.plic->ContextFor(arch_cpu_hw_id(other), riscv_machine_mode());
+    if (sOtherCtx < 0)
+        t_skip("no context for the other hart");
+    sOther = s;
+    sApReady = 0;
+    sApCount = 0;
+    s.plic->Write(PLIC_PRIORITY(s.src[0]), 1);
+    arch_set_irq_handler(riscv_ext_irq(), [](void *) {
+        uint32_t src = sOther.plic->Claim(sOtherCtx);
+        if (src == sOther.src[0]) {
+            sApCount = sApCount + 1;
+            tc_irq_lower(0);
+        }
+        if (src)
+            sOther.plic->Complete(sOtherCtx, src);
+    }, nullptr);
+    ASSERT_TRUE(smp_post(other, ap_take_plic, nullptr));
+    t_wait_until([] { return __atomic_load_n(&sApReady, __ATOMIC_ACQUIRE); });
+    tc_irq_raise(0);
+    EXPECT_FALSE(ext_pending());
+    EXPECT_TRUE(smp_wait(other));
+    EXPECT_EQ(sApCount, 1);
 }
 
 TEST(plic, past_last_context)

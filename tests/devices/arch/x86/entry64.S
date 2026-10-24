@@ -109,15 +109,16 @@ pvh_entry:
 
     .section .rodata
     .balign 8
-gdt:
+    .globl x86_gdt, x86_gdt_end
+x86_gdt:
     .quad 0
     .quad GDT_CODE32
     .quad GDT_DATA
     .quad GDT_CODE64
-gdt_end:
+x86_gdt_end:
 gdtr:
-    .word gdt_end - gdt - 1
-    .long gdt
+    .word GDT_LIMIT
+    .long x86_gdt
 
     .section .bss.pagetables, "aw", @nobits
     .balign 4096

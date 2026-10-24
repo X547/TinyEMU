@@ -115,6 +115,45 @@ bool irq_route(const HwDevice *dev, int index, IrqHandler fn, void *ctx)
 }
 
 
+#if defined(__i386__) || defined(__x86_64__)
+
+bool irq_route_isa(uint32_t irq, IrqHandler fn, void *ctx)
+{
+    uint16_t flags;
+    uint32_t gsi = acpi_isa_irq_gsi(irq, &flags);
+    /* MPS INTI trigger: 1 edge, 3 level, 0 the bus's own, edge for ISA */
+    bool level = ((flags >> 2) & 3) == 3;
+    if (IoApic *io = IoApic::ForGsi(gsi))
+        return io->Route(gsi, fn, ctx, level);
+    I8259 *pic = I8259::Get();
+    return pic && pic->Route(irq, fn, ctx, level);
+}
+
+
+void irq_unroute_isa(uint32_t irq)
+{
+    uint32_t gsi = acpi_isa_irq_gsi(irq, nullptr);
+    if (IoApic *io = IoApic::ForGsi(gsi))
+        io->Unroute(gsi);
+    else if (I8259 *pic = I8259::Get())
+        pic->Unroute(irq);
+}
+
+#else
+
+bool irq_route_isa(uint32_t, IrqHandler, void *)
+{
+    return false;
+}
+
+
+void irq_unroute_isa(uint32_t)
+{
+}
+
+#endif
+
+
 void irq_unroute(const HwDevice *dev, int index)
 {
     IntController *c;

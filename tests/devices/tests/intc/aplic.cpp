@@ -27,6 +27,7 @@
 #include "imsic.h"
 #include "mmio.h"
 #include "riscv.h"
+#include "smp.h"
 #include "test.h"
 #include "testctl.h"
 
@@ -354,6 +355,66 @@ TEST(aplic, other_hart_target)
     EXPECT_FALSE(ext_pending());
     EXPECT_EQ(s.a->Read(s.d, APLIC_IDC(other) + APLIC_TOPI),
               s.src[0] << 16 | 1);
+}
+
+namespace {
+
+volatile int sApReady;
+volatile int sApCount;
+Setup sOther;
+int sOtherIdc;
+
+void ap_take_aplic(void *)
+{
+    sOther.a->Write(sOther.d, APLIC_IDC(sOtherIdc) + APLIC_ITHRESHOLD, 0);
+    sOther.a->Write(sOther.d, APLIC_IDC(sOtherIdc) + APLIC_IDELIVERY, 1);
+    riscv_ie_set(1ul << riscv_ext_irq());
+    __atomic_store_n(&sApReady, 1, __ATOMIC_RELEASE);
+    arch_irq_enable();
+    uint64_t end = t_now_us() + 200000;
+    while (sApCount == 0 && t_now_us() < end)
+        arch_cpu_relax();
+    arch_irq_disable();
+    riscv_ie_clear(1ul << riscv_ext_irq());
+}
+
+}
+
+TEST(aplic, delivery_to_other_hart)
+{
+    Setup s = need_direct(1);
+    int other = t_require_other_cpu();
+    const FdtProp *ext = fdt_prop(s.d.node, "interrupts-extended");
+    uint32_t intc = hart_intc_phandle(arch_cpu_hw_id(other));
+    sOtherIdc = -1;
+    for (uint32_t i = 0; ext && 8 * i + 8 <= ext->len; i++) {
+        if (be32(ext->data + 8 * i) == intc)
+            sOtherIdc = i;
+    }
+    if (sOtherIdc < 0)
+        t_skip("the domain does not reach the other hart");
+    sOther = s;
+    sApReady = 0;
+    sApCount = 0;
+    s.wr(APLIC_SOURCECFG(s.src[0]), APLIC_SM_LEVEL1);
+    s.wr(APLIC_TARGET(s.src[0]), APLIC_TARGET_HART(sOtherIdc) | 1);
+    s.wr(APLIC_SETIENUM, s.src[0]);
+    s.wr(APLIC_DOMAINCFG, APLIC_DOMAINCFG_IE);
+    arch_set_irq_handler(riscv_ext_irq(), [](void *) {
+        uint32_t topi = sOther.a->Read(sOther.d,
+                                       APLIC_IDC(sOtherIdc) + APLIC_CLAIMI);
+        if ((topi >> 16) == sOther.src[0]) {
+            sApCount = sApCount + 1;
+            tc_irq_lower(0);
+        }
+    }, nullptr);
+    ASSERT_TRUE(smp_post(other, ap_take_aplic, nullptr));
+    t_wait_until([] { return __atomic_load_n(&sApReady, __ATOMIC_ACQUIRE); });
+    tc_irq_raise(0);
+    EXPECT_FALSE(ext_pending());
+    EXPECT_TRUE(smp_wait(other));
+    EXPECT_EQ(sApCount, 1);
+    s.wr(APLIC_IDC(sOtherIdc) + APLIC_IDELIVERY, 0);
 }
 
 TEST(aplic, idc_read_only)

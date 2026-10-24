@@ -90,22 +90,19 @@ Setup sSetup;
 }
 
 
+extern uint8_t gPicResetState[8];
+
 FRESH_TEST(i8259, reset_state)
 {
-    I8259 *pic = I8259::Get();
-    if (pic == nullptr)
+    if (I8259::Get() == nullptr)
         t_skip("no 8259s");
-    /* the image's boot made the PIT fire once, on line 0 */
-    for (int i = 0; i < 2; i++) {
+    /* as the boot found them, before setting them up; the PIT had fired
+       once on line 0 by then */
+    static const char *const names[] = {"irr", "isr", "imr", "elcr"};
+    for (int i = 0; i < 8; i++) {
         char key[16];
-        snprintf(key, sizeof(key), "irr%d", i);
-        SNAP(key, "%#x", pic->Irr(i));
-        snprintf(key, sizeof(key), "isr%d", i);
-        SNAP(key, "%#x", pic->Isr(i));
-        snprintf(key, sizeof(key), "imr%d", i);
-        SNAP(key, "%#x", pic->Imr(i));
-        snprintf(key, sizeof(key), "elcr%d", i);
-        SNAP(key, "%#x", pic->Elcr(i));
+        snprintf(key, sizeof(key), "%s%d", names[i % 4], i / 4);
+        SNAP(key, "%#x", gPicResetState[i]);
     }
 }
 
