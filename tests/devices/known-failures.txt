@@ -4,8 +4,3 @@
 #
 # Each field may be a glob. A listed test that passes is reported as an
 # unexpected pass, so the entry can be removed.
-
-# temu's 8259 calls abort() on an ICW1 with LTIM or SNGL set, which stops
-# the emulator rather than ignoring LTIM as a PIIX does or running single
-* * i8259.level_init_word        # abort() in pic Write, LTIM
-* * i8259.single_mode_init_word  # abort() in pic Write, SNGL

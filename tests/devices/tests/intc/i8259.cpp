@@ -476,22 +476,42 @@ TEST(i8259, level_init_word)
 {
     /* LTIM in ICW1 asks for level triggering of every input; a PIIX takes
        the ELCRs instead and ignores it */
-    Setup s = need_pic(1);
+    Setup s = need_pic(1, 0);
+    uint32_t l = s.line[0];
+    uint8_t elcr = s.pic->Elcr(0);
     outb(s.pic->CommandPort(0), 0x19);
     outb(s.pic->DataPort(0), VEC_PIC_MASTER);
     outb(s.pic->DataPort(0), 4);
     outb(s.pic->DataPort(0), 1);
     EXPECT_EQ(s.pic->Imr(0), 0);
+    /* the input stays edge triggered: a request held up is taken once */
+    s.pic->SetElcr(0, elcr & ~bit(l));
+    s.pic->SetImr(0, ~bit(l) & ~4);
+    sSetup = s;
+    sCount = 0;
+    arch_set_irq_handler(vector(l), [](void *) {
+        sCount = sCount + 1;
+        outb(sSetup.pic->CommandPort(0), 0x20);
+    }, nullptr);
+    tc_irq_raise(s.index[0]);
+    arch_irq_enable();
+    t_delay_us(2000);
+    arch_irq_disable();
+    tc_irq_lower(s.index[0]);
+    EXPECT_EQ(sCount, 1);
 }
 
 TEST(i8259, single_mode_init_word)
 {
-    /* SNGL in ICW1: a lone 8259, no ICW3 */
+    /* SNGL in ICW1: a lone 8259, which takes no ICW3, so the third byte is
+       ICW4 and the fourth the mask */
     Setup s = need_pic(1);
     outb(s.pic->CommandPort(1), 0x13);
     outb(s.pic->DataPort(1), VEC_PIC_SLAVE);
     outb(s.pic->DataPort(1), 1);
     EXPECT_EQ(s.pic->Imr(1), 0);
+    outb(s.pic->DataPort(1), 0x5a);
+    EXPECT_EQ(s.pic->Imr(1), 0x5a);
 }
 
 #endif

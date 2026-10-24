@@ -42,6 +42,7 @@ struct PICState {
     uint8_t auto_eoi;
     uint8_t rotate_on_autoeoi;
     uint8_t init4; /* true if 4 byte init */
+    uint8_t single; /* initialized without a cascade, so no ICW3 */
     uint8_t elcr; /* PIIX edge/trigger selection*/
     uint8_t elcr_mask;
     I8259Pair *update_target;
@@ -89,6 +90,7 @@ static void pic_reset(PICState *s)
     s->auto_eoi = 0;
     s->rotate_on_autoeoi = 0;
     s->init4 = 0; /* true if 4 byte init */
+    s->single = 0;
 }
 
 /* set irq level. If an edge is detected, then the IRR is set to 1 */
@@ -179,10 +181,9 @@ void PICState::Write(uint32_t offset, uint32_t val, int size_log2)
             pic_reset(s);
             s->init_state = 1;
             s->init4 = get_bit(val, 0);
-            if (get_bit(val, 1))
-                abort(); /* "single mode not supported" */
-            if (get_bit(val, 3))
-                abort(); /* "level sensitive irq not supported" */
+            /* SNGL: a lone 8259, which takes no ICW3. LTIM is ignored, as on
+               the PIIX: the ELCRs choose edge or level per input. */
+            s->single = get_bit(val, 1);
         } else if (get_bit(val, 3)) {
             if (get_bit(val, 1))
                 s->read_reg_select = get_bit(val, 0);
@@ -254,7 +255,10 @@ void PICState::Write(uint32_t offset, uint32_t val, int size_log2)
             break;
         case 1:
             s->irq_base = set_bits(val, 0, 3, 0);
-            s->init_state = 2;
+            if (!s->single)
+                s->init_state = 2;
+            else
+                s->init_state = s->init4 ? 3 : 0;
             break;
         case 2:
             if (s->init4) {
