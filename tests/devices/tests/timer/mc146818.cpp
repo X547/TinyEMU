@@ -110,6 +110,87 @@ int seconds_of_day(bool binary)
 
 volatile int sCount;
 
+int64_t days_from_civil(int64_t y, int m, int d)
+{
+    y -= m <= 2;
+    int64_t era = (y >= 0 ? y : y - 399) / 400;
+    int64_t yoe = y - era * 400;
+    int64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    return era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468;
+}
+
+void civil_from_days(int64_t z, int *y, int *m, int *d)
+{
+    z += 719468;
+    int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    int64_t doe = z - era * 146097;
+    int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    int64_t mp = (5 * doy + 2) / 153;
+    *d = doy - (153 * mp + 2) / 5 + 1;
+    *m = mp < 10 ? mp + 3 : mp - 9;
+    *y = yoe + era * 400 + (*m <= 2);
+}
+
+uint8_t to_bcd(int v)
+{
+    return (v / 10) << 4 | v % 10;
+}
+
+/* Sets the clock, BCD and 24 hour, under SET. */
+void set_clock(int year, int month, int day, int h, int m, int s, int dow)
+{
+    wr(RTC_B, B_24H | 0x80);
+    wr(0x32, to_bcd(year / 100));
+    wr(RTC_YEAR, to_bcd(year % 100));
+    wr(RTC_MONTH, to_bcd(month));
+    wr(RTC_DAY, to_bcd(day));
+    wr(RTC_WEEKDAY, dow);
+    wr(RTC_HOURS, to_bcd(h));
+    wr(RTC_MINUTES, to_bcd(m));
+    wr(RTC_SECONDS, to_bcd(s));
+    wr(RTC_B, B_24H);
+}
+
+struct SavedClock {
+    int64_t secs;
+    int dow;
+    uint64_t at_us;
+};
+
+SavedClock sSaved;
+
+/* Puts the clock back where it would have got to. */
+void restore_clock()
+{
+    int64_t secs = sSaved.secs + (t_now_us() - sSaved.at_us) / 1000000;
+    int64_t days = secs / 86400, sod = secs % 86400;
+    int64_t saved_days = sSaved.secs / 86400;
+    int y, mo, d;
+    civil_from_days(days, &y, &mo, &d);
+    set_clock(y, mo, d, sod / 3600, sod / 60 % 60, sod % 60,
+              (sSaved.dow - 1 + days - saved_days) % 7 + 1);
+}
+
+/* For a test that sets the clock: what it reads now, BCD and 24 hour, to
+   put back afterwards. */
+void save_clock()
+{
+    for (;;) {
+        uint8_t s = rd(RTC_SECONDS);
+        int64_t days = days_from_civil(from_bcd(rd(0x32)) * 100 +
+                                       from_bcd(rd(RTC_YEAR)),
+                                       from_bcd(rd(RTC_MONTH)),
+                                       from_bcd(rd(RTC_DAY)));
+        int sod = from_bcd(rd(RTC_HOURS)) * 3600 +
+            from_bcd(rd(RTC_MINUTES)) * 60 + from_bcd(s);
+        sSaved = {days * 86400 + sod, from_bcd(rd(RTC_WEEKDAY)), t_now_us()};
+        if (rd(RTC_SECONDS) == s)
+            break;
+    }
+    t_on_cleanup(restore_clock);
+}
+
 }
 
 
@@ -148,6 +229,9 @@ TEST(rtc, bcd_time)
     EXPECT_LE(from_bcd(rd(RTC_MONTH)), 12);
     EXPECT_GE(from_bcd(rd(RTC_DAY)), 1);
     EXPECT_LE(from_bcd(rd(RTC_DAY)), 31);
+    /* 1 to 7, Sunday being 1 */
+    EXPECT_GE(rd(RTC_WEEKDAY), 1);
+    EXPECT_LE(rd(RTC_WEEKDAY), 7);
     EXPECT_GE(from_bcd(rd(0x32)), 20);
 }
 
@@ -162,41 +246,89 @@ TEST(rtc, binary_mode)
     EXPECT_LE(bin - bcd, 2);
 }
 
+/* 12 hour mode shows 12 for midnight and noon, with bit 7 from noon on,
+   by the MC146818 data sheet. */
 TEST(rtc, twelve_hour_mode)
 {
     need_rtc();
-    uint8_t h24 = rd(RTC_HOURS);
-    wr(RTC_B, 0);
-    uint8_t h12 = rd(RTC_HOURS);
-    int hour = from_bcd(h24);
-    int shown = from_bcd(h12 & 0x7f);
-    bool pm = h12 & 0x80;
-    EXPECT_EQ(pm, hour >= 12);
-    SNAP("noon_and_midnight_as", "%s", hour % 12 == 0 ?
-         (shown == 12 ? "12" : "0") : "n/a");
-    if (hour % 12 != 0)
-        EXPECT_EQ(shown, hour % 12);
+    save_clock();
+    static const struct {
+        int hour;
+        uint8_t shown;
+    } cases[] = {{0, 0x12}, {1, 0x01}, {11, 0x11}, {12, 0x92}, {13, 0x81},
+                 {23, 0x91}};
+    for (const auto &c : cases) {
+        set_clock(2030, 6, 15, c.hour, 30, 0, 7);
+        wr(RTC_B, 0);
+        EXPECT_EQ(rd(RTC_HOURS), c.shown);
+        /* and written so, in the same mode: the part never converts what
+           its registers hold */
+        wr(RTC_B, 0x80);
+        wr(RTC_HOURS, c.shown);
+        wr(RTC_B, 0);
+        EXPECT_EQ(rd(RTC_HOURS), c.shown);
+    }
 }
 
-TEST(rtc, time_follows_host)
+/* The time is the guest's to set: held while SET is on, and counting on
+   from what was written once it is off. The day of the week is a counter
+   of its own. */
+TEST(rtc, set_time)
 {
     need_rtc();
-    uint8_t before = rd(RTC_SECONDS);
-    /* writes to the time do not stick: it is the host's clock */
-    wr(RTC_SECONDS, before == 0x30 ? 0x10 : 0x30);
-    wr(RTC_B, B_24H | 0x80); /* SET */
-    uint8_t after = rd(RTC_SECONDS);
-    SNAP("write_stuck", "%d", after == (before == 0x30 ? 0x10 : 0x30));
-    int start = seconds_of_day(false);
+    save_clock();
+    wr(RTC_B, B_24H | 0x80);
+    set_clock(2032, 2, 28, 23, 59, 59, 3); /* a Saturday, 7, said to be 3 */
+    wr(RTC_B, B_24H | 0x80);
+    uint8_t held = rd(RTC_SECONDS);
     t_delay_us(1100000);
-    int later = seconds_of_day(false);
-    EXPECT_TRUE(later == start + 1 || later == start + 2 ||
-                later < start); /* or midnight */
+    EXPECT_EQ(rd(RTC_SECONDS), held);
+    EXPECT_EQ(rd(RTC_HOURS), 0x23u);
+    wr(RTC_B, B_24H);
+    t_delay_us(1100000);
+    /* a leap year */
+    EXPECT_EQ(rd(RTC_DAY), 0x29u);
+    EXPECT_EQ(rd(RTC_MONTH), 0x02u);
+    EXPECT_EQ(rd(RTC_HOURS), 0x00u);
+    EXPECT_LE(rd(RTC_SECONDS), 0x01u);
+    EXPECT_EQ(rd(RTC_WEEKDAY), 4u);
+    EXPECT_EQ(rd(RTC_YEAR), 0x32u);
+    /* the end of a year, and the weekday counter wrapping */
+    set_clock(2099, 12, 31, 23, 59, 59, 7);
+    t_delay_us(1100000);
+    EXPECT_EQ(rd(RTC_YEAR), 0x00u);
+    EXPECT_EQ(rd(RTC_MONTH), 0x01u);
+    EXPECT_EQ(rd(RTC_DAY), 0x01u);
+    EXPECT_EQ(rd(RTC_WEEKDAY), 1u);
+    /* a field written while it runs takes at once */
+    wr(RTC_MINUTES, 0x42);
+    EXPECT_EQ(rd(RTC_MINUTES), 0x42u);
+}
+
+/* The divider held in reset stops the clock; out of reset, the first
+   update comes half a second later. */
+TEST(rtc, divider_reset)
+{
+    need_rtc();
+    save_clock();
+    set_clock(2030, 1, 1, 12, 0, 0, 3);
+    wr(RTC_A, 0x66);
+    t_delay_us(1100000);
+    EXPECT_EQ(rd(RTC_SECONDS), 0u);
+    wr(RTC_A, 0x26);
+    uint64_t start = t_now_us();
+    EXPECT_TRUE(t_wait_until([] { return rd(RTC_SECONDS) != 0; }, 1000000));
+    uint64_t took = t_now_us() - start;
+    EXPECT_GT(took, 400000u);
+    EXPECT_LT(took, 700000u);
 }
 
 TEST(rtc, read_only_registers)
 {
     need_rtc();
+    /* the periodic flag out of the way */
+    wr(RTC_A, 0x20);
+    rd(RTC_C);
     uint8_t d = rd(RTC_D);
     wr(RTC_C, 0xff);
     wr(RTC_D, 0x00);
@@ -207,15 +339,26 @@ TEST(rtc, read_only_registers)
     SNAP("a_after_uip_write", "%#x", rd(RTC_A) & 0x7f);
 }
 
+/* UIP is set 244 us before the time registers change and through the
+   update cycle, so a time read while it is clear holds: no read with UIP
+   clear before and after it sees the seconds change. */
 TEST(rtc, update_in_progress)
 {
     need_rtc();
-    /* set for 244 us of every second */
-    bool seen = false;
-    uint64_t end = t_now_us() + 1100000;
-    while (!seen && t_now_us() < end)
-        seen = rd(RTC_A) & 0x80;
+    bool seen = false, torn = false;
+    uint64_t end = t_now_us() + 1200000;
+    while (t_now_us() < end) {
+        if (rd(RTC_A) & 0x80) {
+            seen = true;
+            continue;
+        }
+        uint8_t s1 = rd(RTC_SECONDS);
+        uint8_t s2 = rd(RTC_SECONDS);
+        if (!(rd(RTC_A) & 0x80))
+            torn |= s1 != s2;
+    }
     EXPECT_TRUE(seen);
+    EXPECT_FALSE(torn);
 }
 
 TEST(rtc, nvram)
@@ -239,12 +382,21 @@ TEST(rtc, periodic_flags)
     rd(RTC_C);
     wr(RTC_A, 0x26); /* 1024 Hz */
     t_delay_us(5000);
-    /* not enabled: no flag */
-    EXPECT_EQ(rd(RTC_C), 0);
+    /* PF is set at the rate whether or not it may interrupt; IRQF only
+       when it may */
+    uint8_t c = rd(RTC_C);
+    EXPECT_EQ(c & 0xc0u, 0x40u);
     wr(RTC_B, B_24H | B_PIE);
-    EXPECT_TRUE(t_wait_until([] { return (rd(RTC_C) & 0x40) != 0; }, 20000));
+    EXPECT_TRUE(t_wait_until([] { return (rd(RTC_C) & 0xc0) == 0xc0; },
+                             20000));
     /* reading C cleared it */
     SNAP("c_right_after", "%#x", rd(RTC_C) & 0x80);
+    /* rate 0 stops it */
+    wr(RTC_B, B_24H);
+    wr(RTC_A, 0x20);
+    rd(RTC_C);
+    t_delay_us(5000);
+    EXPECT_EQ(rd(RTC_C) & 0x40u, 0u);
 }
 
 TEST(rtc, rates)
@@ -294,21 +446,58 @@ TEST(rtc, periodic_interrupt)
     arch_irq_disable();
 }
 
+/* The update ended flag every second, the alarm flag when the alarm
+   matches, a register with its top bits set matching anything; IRQF and
+   the line only for those enabled. */
 TEST(rtc, alarm_and_update)
 {
-    need_rtc();
+    Rtc r = need_rtc();
+    save_clock();
+    auto flags_for = [](uint64_t us) {
+        uint8_t flags = 0;
+        uint64_t end = t_now_us() + us;
+        while (t_now_us() < end)
+            flags |= rd(RTC_C);
+        return flags;
+    };
+    /* the periodic flag out of the way */
+    wr(RTC_A, 0x20);
     rd(RTC_C);
-    wr(RTC_B, B_24H | B_AIE | B_UIE);
-    /* the update interrupt comes once a second; the alarm, with every
-       field set to don't care, then as well */
     wr(0x01, 0xc0);
     wr(0x03, 0xc0);
     wr(0x05, 0xc0);
-    uint8_t flags = 0;
-    uint64_t end = t_now_us() + 1100000;
-    while (t_now_us() < end)
-        flags |= rd(RTC_C);
-    SNAP("flags", "%#x", flags);
+    /* not enabled: the flags, and no IRQF */
+    EXPECT_EQ(flags_for(1100000), 0x30u);
+    wr(RTC_B, B_24H | B_AIE | B_UIE);
+    EXPECT_EQ(flags_for(1100000), 0xb0u);
+    /* an alarm a second ahead matches, one far ahead does not */
+    wr(RTC_B, B_24H);
+    set_clock(2030, 1, 1, 10, 0, 0, 3);
+    wr(0x01, 0x01);
+    wr(0x03, 0x00);
+    wr(0x05, 0x10);
+    rd(RTC_C);
+    EXPECT_EQ(flags_for(1500000) & 0x20u, 0x20u);
+    wr(0x01, 0x30);
+    rd(RTC_C);
+    EXPECT_EQ(flags_for(1100000) & 0x20u, 0u);
+    /* SET holds the updates, and clears UIE */
+    wr(RTC_B, B_24H | 0x80 | B_UIE);
+    EXPECT_EQ(rd(RTC_B) & B_UIE, 0);
+    rd(RTC_C);
+    EXPECT_EQ(flags_for(1100000) & 0x10u, 0u);
+    wr(RTC_B, B_24H);
+    /* the update interrupt, on its line */
+    sCount = 0;
+    ASSERT_TRUE(irq_route_isa(r.irq, [](void *) {
+        sCount = sCount + 1;
+        rd(RTC_C);
+    }, nullptr));
+    rd(RTC_C);
+    wr(RTC_B, B_24H | B_UIE);
+    arch_irq_enable();
+    EXPECT_TRUE(t_wait_until([] { return sCount >= 2; }, 2500000));
+    arch_irq_disable();
 }
 
 #endif
