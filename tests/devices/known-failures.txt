@@ -1,0 +1,6 @@
+# Tests that fail today and should not fail a run, one per line:
+#
+#     <target> <machine> <test>   # why
+#
+# Each field may be a glob. A listed test that passes is reported as an
+# unexpected pass, so the entry can be removed.

@@ -1,0 +1,26 @@
+# riscv32 image: a firmware in M-mode or a kernel in S-mode.
+# No floating point, so neither mode has to turn the FPU on.
+
+[binaries]
+c = 'clang'
+cpp = 'clang++'
+ar = 'llvm-ar'
+strip = 'llvm-strip'
+
+[host_machine]
+system = 'none'
+cpu_family = 'riscv32'
+cpu = 'rv32imac'
+endian = 'little'
+
+[properties]
+needs_exe_wrapper = true
+
+[constants]
+target = ['--target=riscv32-unknown-elf', '-march=rv32imac_zicsr_zifencei', '-mabi=ilp32', '-mcmodel=medany', '-mno-relax']
+
+[built-in options]
+c_args = target + ['-nostdlibinc']
+cpp_args = target + ['-nostdlibinc']
+c_link_args = target + ['-fuse-ld=lld', '-nostdlib']
+cpp_link_args = target + ['-fuse-ld=lld', '-nostdlib']
