@@ -190,6 +190,7 @@ public:
     RISCVVcpu &Vcpu(int index) override {return *fVcpus[index];}
     const RISCVHartIsa &Isa() override {return fIsa;}
     uint64_t Time() override;
+    void SetTime(uint64_t time) override;
     uint64_t TimebaseFrequency() override {return fTimebaseFrequency;}
     bool RealTimeClock() override {return true;}
 
@@ -300,6 +301,20 @@ void KvmRISCVHypervisor::Init(const RISCVCpuOptions &options)
 uint64_t KvmRISCVHypervisor::Time()
 {
     return host_rdtime() + fTimeOffset;
+}
+
+
+/* The guest's counter is the kernel's, which only a vcpu's own thread may
+   set; a write to mtime is left undone. */
+void KvmRISCVHypervisor::SetTime(uint64_t time)
+{
+    static bool warned;
+
+    (void)time;
+    if (!warned) {
+        warned = true;
+        fprintf(stderr, "riscv kvm: writes to mtime are not supported\n");
+    }
 }
 
 

@@ -124,13 +124,27 @@ TEST(clint, mtime_is_time)
     EXPECT_LE(t, after);
 }
 
-TEST(clint, mtime_ignores_writes)
+/* mtime is read-write by the privileged specification, and the time CSR
+   shadows it. */
+TEST(clint, mtime_write)
 {
     Clint c = need_clint();
+    const uint64_t jump = 1ull << 40;
+    uint64_t slack = us_to_ticks(100000);
     uint64_t before = mtime(c);
-    mmio_write32(c.base + CLINT_MTIME, 0);
-    mmio_write32(c.base + CLINT_MTIME + 4, 0);
-    EXPECT_GE(mtime(c), before);
+    /* the high word first, so that the count never goes back */
+    mmio_write32(c.base + CLINT_MTIME + 4, (before + jump) >> 32);
+    mmio_write32(c.base + CLINT_MTIME, (uint32_t)(before + jump));
+    uint64_t after = mtime(c);
+    uint64_t csr = arch_ticks();
+    /* put it back where it would have been */
+    uint64_t now = mtime(c);
+    mmio_write32(c.base + CLINT_MTIME, (uint32_t)(now - jump));
+    mmio_write32(c.base + CLINT_MTIME + 4, (now - jump) >> 32);
+    EXPECT_GE(after, before + jump);
+    EXPECT_LT(after, before + jump + slack);
+    EXPECT_GE(csr, after);
+    EXPECT_LT(mtime(c), now);
 }
 
 TEST(clint, mtimecmp_readback)
@@ -319,6 +333,13 @@ TEST(clint, wide_access)
         (c.base + CLINT_MTIME);
     uint64_t t = *mt;
     EXPECT_LE(t, arch_ticks());
+    /* and written whole */
+    const uint64_t jump = 1ull << 40;
+    *mt = t + jump;
+    uint64_t moved = *mt;
+    *mt = *mt - jump;
+    EXPECT_GE(moved, t + jump);
+    EXPECT_LT(moved, t + jump + us_to_ticks(100000));
     set_mtimecmp(c, UINT64_MAX);
 #else
     t_skip("no 64 bit accesses");

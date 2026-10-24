@@ -142,6 +142,7 @@ public:
 
     /* ClintHost */
     uint64_t ClintTime() override;
+    void SetClintTime(uint64_t time) override;
     void SetClintIrq(int hart, bool timer, bool level) override;
     void ClintTimerChanged(uint64_t deadline) override;
 
@@ -684,6 +685,16 @@ uint64_t RISCVMachine::ClintTime()
     return fCpus->Time();
 }
 
+/* Every comparison with the counter may have changed, the harts' own
+   timers' too. */
+void RISCVMachine::SetClintTime(uint64_t time)
+{
+    fCpus->SetTime(time);
+    for (int hart = 0; hart < hart_count; hart++)
+        WakeHart(hart);
+    KickTimersBefore(0);
+}
+
 void RISCVMachine::SetClintIrq(int hart, bool timer, bool level)
 {
     fCpus->Vcpu(hart).SetIrqLine(timer ? MIP_MTIP : MIP_MSIP, level);
@@ -911,7 +922,7 @@ riscv_machine_init(const VirtMachineParams *p)
 
     s->clint = std::make_unique<Clint>(*s, s->hart_count);
     s->mem_map->RegisterDevice(CLINT_BASE_ADDR, CLINT_SIZE, s->clint.get(),
-                               DEVIO_SIZE32);
+                               DEVIO_SIZE32 | DEVIO_SIZE64);
     s->htif = std::make_unique<HTIF>(*s, p->platform->Console());
     s->mem_map->RegisterDevice(HTIF_BASE_ADDR, HTIF_REG_SIZE, s->htif.get(),
                                DEVIO_SIZE32);

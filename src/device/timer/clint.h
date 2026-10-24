@@ -41,8 +41,9 @@ class ClintHost {
 public:
     virtual ~ClintHost() = default;
 
-    /* mtime */
+    /* mtime, and a write to it */
     virtual uint64_t ClintTime() = 0;
+    virtual void SetClintTime(uint64_t time) = 0;
     /* Drives the machine software or timer interrupt of 'hart'. */
     virtual void SetClintIrq(int hart, bool timer, bool level) = 0;
     /* An mtimecmp now asks for the timers to be run by 'deadline'. */
@@ -72,4 +73,7 @@ public:
     /* DeviceIO */
     uint32_t DeviceRead(uint32_t offset, int size_log2) override;
     void DeviceWrite(uint32_t offset, uint32_t val, int size_log2) override;
+    /* mtime and mtimecmp are read and written whole by an 8 byte access */
+    uint64_t DeviceRead64(uint32_t offset) override;
+    void DeviceWrite64(uint32_t offset, uint64_t val) override;
 };

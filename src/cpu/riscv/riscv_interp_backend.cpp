@@ -19,6 +19,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#include <atomic>
 #include <memory>
 #include <vector>
 
@@ -89,6 +90,10 @@ private:
     RISCVHartIsa fIsa;
     bool fRealTime;
     uint64_t fStartTime = 0;
+    /* what mtime writes moved the counter by, read on any thread */
+    std::atomic<uint64_t> fTimeOffset {0};
+
+    uint64_t RawTime();
     /* before the harts, which use it until they go */
     PhysMemoryMap fMemoryMap;
     std::vector<std::unique_ptr<RISCVInterpVcpu>> fVcpus;
@@ -106,6 +111,7 @@ public:
     RISCVVcpu &Vcpu(int index) override {return *fVcpus[index];}
     const RISCVHartIsa &Isa() override {return fIsa;}
     uint64_t Time() override;
+    void SetTime(uint64_t time) override;
     uint64_t TimebaseFrequency() override {return RTC_FREQ;}
     bool RealTimeClock() override {return fRealTime;}
 
@@ -182,7 +188,7 @@ bool RISCVInterpBackend::Init(DeviceLock &lock,
 }
 
 
-uint64_t RISCVInterpBackend::Time()
+uint64_t RISCVInterpBackend::RawTime()
 {
     uint64_t val;
 
@@ -196,6 +202,18 @@ uint64_t RISCVInterpBackend::Time()
         val /= RTC_FREQ_DIV;
     }
     return val;
+}
+
+
+uint64_t RISCVInterpBackend::Time()
+{
+    return RawTime() + fTimeOffset.load(std::memory_order_relaxed);
+}
+
+
+void RISCVInterpBackend::SetTime(uint64_t time)
+{
+    fTimeOffset.store(time - RawTime(), std::memory_order_relaxed);
 }
 
 

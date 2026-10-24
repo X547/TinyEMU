@@ -161,6 +161,9 @@ public:
     /* The time counter the 'time' CSR reads and every timer runs on. Any
        thread. */
     virtual uint64_t Time() = 0;
+    /* mtime written: the counter goes on from 'time'. With the device
+       lock held. */
+    virtual void SetTime(uint64_t time) = 0;
     virtual uint64_t TimebaseFrequency() = 0;
     /* Whether the counter follows host time. */
     virtual bool RealTimeClock() = 0;
