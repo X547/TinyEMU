@@ -28,6 +28,8 @@
 #include <string.h>
 #include <assert.h>
 
+#include <algorithm>
+
 #include "acpi.h"
 #include "bits.h"
 #include "cutils.h"
@@ -43,6 +45,9 @@
    leaving 9 for the SCI and 12 for the PS/2 mouse. Firmware picks the same
    two. */
 static const uint8_t kPirqLines[4] = { 10, 11, 10, 11 };
+
+/* the port space, which a 16 bit port number names */
+#define PC_IO_PORTS 0x10000
 
 #define CLOUDHV_DEVICE_ID 0x0d57
 /* Cloud Hypervisor's 32 bit aperture, which its EDK2 build does not look
@@ -279,8 +284,21 @@ public:
         aml_res_word_space(r, 2, 0, 0x00, 0xff);
         /* the configuration ports, which it consumes */
         aml_res_io(r, fAddrRes->base, 8);
-        aml_res_word_space(r, 1, 3, 0x0000, 0x0cf7);
-        aml_res_word_space(r, 1, 3, 0x0d00, 0xffff);
+        /* The ports no fixed device claims, which leaves out the
+           configuration ports and the ISA devices beside the bus in \_SB:
+           Windows gives a root bus its windows whole, and fails to start one
+           that overlaps another device. */
+        SystemBus *sys = static_cast<SystemBus *>(ParentBus());
+        const RangeAllocator &io = sys->IoAlloc();
+        uint64_t next = 0;
+        for (int i = 0; i < io.Count(); i++) {
+            const AllocEntry &e = io.At(i);
+            if (e.base > next)
+                aml_res_word_space(r, 1, 3, next, e.base - 1);
+            next = std::max(next, e.base + e.size);
+        }
+        if (next < PC_IO_PORTS)
+            aml_res_word_space(r, 1, 3, next, PC_IO_PORTS - 1);
         aml_res_dword_memory(r, 0xa0000, 0xbffff);
         aml_res_dword_memory(r, fMmioRes->base, fMmioRes->End() - 1);
         if (fMmio64Res != nullptr) {
