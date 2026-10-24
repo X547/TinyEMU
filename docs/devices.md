@@ -287,7 +287,8 @@ off. Writing `0x5555` exits the emulator with status 0, and
 ```
 
 The RISC-V machine also always has an HTIF console and power-off register at
-`0x40008000`. It is not declared in the configuration.
+`0x40008000`, described in the device tree as `ucb,htif0` with `fromhost` and
+`tohost` in that order. It is not declared in the configuration.
 
 ### PCI host bridges and switches
 

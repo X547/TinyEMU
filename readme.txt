@@ -670,7 +670,9 @@ The standard HTIF console uses registers at variable addresses which
 are deduced by loading specific ELF symbols. TinyEMU does not rely on
 an ELF loader, so it is much simpler to use registers at fixed
 addresses (0x40008000). A small modification was made in the
-"riscv-pk" boot loader to support it. The HTIF console is only used to
+"riscv-pk" boot loader to support it. The device tree describes them
+too, in the "reg" of its "ucb,htif0" node, which is where OpenSBI looks
+for them. The HTIF console is only used to
 display boot messages and to power off the virtual system. The OS
 should use the VirtIO console.
 

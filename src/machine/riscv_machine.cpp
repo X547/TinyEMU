@@ -455,8 +455,15 @@ static int riscv_build_fdt(RISCVMachine *m, uint8_t *dst,
     fdt.PropU64Range("reg", RAM_BASE_ADDR, m->ram_size);
     fdt.EndNode(); /* memory */
 
-    fdt.BeginNode("htif");
+    /* The binding lists fromhost first and tohost second; here tohost is
+       the register at the base and fromhost the one after it. */
+    fdt.BeginNodeNum("htif", HTIF_BASE_ADDR + 8);
     fdt.PropStr("compatible", "ucb,htif0");
+    fdt.AddCellU64(HTIF_BASE_ADDR + 8);
+    fdt.AddCellU64(8);
+    fdt.AddCellU64(HTIF_BASE_ADDR);
+    fdt.AddCellU64(8);
+    fdt.PropCells("reg");
     fdt.EndNode(); /* htif */
 
     fdt.BeginNode("soc");
