@@ -117,9 +117,14 @@ Tests run in name order with interrupts off. Whatever a test allocates from
 the heap is released after it, and a test that traps is reported as crashed
 while the next one runs on. Each file in `tests/` goes in `meson.build`.
 
-Snapshots are what makes these characterization tests: a test records what
+Where the hardware's specification says what a register reads or a device
+does, a test asserts that, naming the document. Snapshots are for the rest,
+what the specification leaves to the implementation: a test records what
 the device does today, `--update-golden` writes it to `golden/<test>.txt`,
-and any later difference fails the test until it is looked at. Where runs
+and any later difference fails the test until it is looked at. A snapshot
+must not depend on timing; a test that measures time brackets each sample
+with the clock rather than trusting a fixed window, and skips when the
+machine is too slow to tell. Where runs
 differ, the copy is looked for in `golden/<machine>/<target>/`, then
 `golden/<target>/`, then `golden/<machine>/`, then `golden/`, and
 `--update-golden` writes the least particular copies that hold.
