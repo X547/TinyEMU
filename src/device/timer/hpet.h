@@ -66,9 +66,6 @@ private:
     /* the counter when fBaseUs was taken, or the whole of it while halted */
     uint64_t fCounterBase = 0;
     uint64_t fBaseUs = 0;
-    /* the counter a read of its low half returned, and when */
-    uint64_t fLowRead = 0;
-    uint64_t fLowReadUs = 0;
     Timer fTimers[HPET_TIMERS];
 
     bool Enabled() const;
@@ -79,8 +76,10 @@ private:
     int LineOf(int index) const;
     void SetLine(int line, int level);
     void UpdateLevel(int index);
-    uint32_t TimerRead(int index, uint32_t reg);
+    uint64_t TimerRead(int index, uint32_t reg);
     void TimerWrite(int index, uint32_t reg, uint32_t val, uint64_t now);
+    uint64_t Read(uint32_t reg, uint64_t now);
+    void Write(uint32_t offset, uint32_t val, uint64_t now);
 
 public:
     HPET(VirtMachine *machine);
@@ -103,6 +102,8 @@ public:
     /* DeviceIO */
     uint32_t DeviceRead(uint32_t offset, int size_log2) override;
     void DeviceWrite(uint32_t offset, uint32_t val, int size_log2) override;
+    uint64_t DeviceRead64(uint32_t offset) override;
+    void DeviceWrite64(uint32_t offset, uint64_t val) override;
 };
 
 

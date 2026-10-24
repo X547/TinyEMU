@@ -178,20 +178,38 @@ TEST(hpet, counter_runs_when_enabled)
     EXPECT_EQ(counter(), c);
 }
 
-TEST(hpet, counter_halves)
+TEST(hpet, counter_reads)
 {
     need_hpet();
     wr(HPET_CONFIG, 0);
-    set_counter(0x00000001fffffff0ull);
-    EXPECT_EQ(counter(), 0x00000001fffffff0ull);
+    set_counter(0x00000001fff00000ull);
+    EXPECT_EQ(counter(), 0x00000001fff00000ull);
     wr(HPET_CONFIG, CONF_ENABLE);
-    /* both halves of one read agree, across the carry */
-    bool consistent = true;
-    for (int i = 0; i < 1000; i++) {
-        uint64_t v = counter();
-        consistent &= v >= 0x00000001fffffff0ull;
+    /* Across the carry into the high half, by the specification: an 8 byte
+       read is atomic, and 4 byte ones take the high half again to see
+       whether it moved. Either way the count only goes up, and never by
+       anything like the 2^32 a torn read would add. */
+    uint64_t last = 0x00000001fff00000ull, max_step = 0;
+    bool monotonic = true;
+    uint64_t end = t_now_us() + 500000;
+    while (last < 0x0000000200100000ull && t_now_us() < end) {
+#if defined(__x86_64__)
+        uint64_t v = *(volatile uint64_t *)(uintptr_t)(sBase + HPET_COUNTER);
+#else
+        uint32_t hi, lo;
+        do {
+            hi = rd(HPET_COUNTER + 4);
+            lo = rd(HPET_COUNTER);
+        } while (rd(HPET_COUNTER + 4) != hi);
+        uint64_t v = (uint64_t)hi << 32 | lo;
+#endif
+        monotonic &= v >= last;
+        max_step = max(max_step, v - last);
+        last = v;
     }
-    EXPECT_TRUE(consistent);
+    EXPECT_TRUE(monotonic);
+    EXPECT_GT(last, 0x0000000200000000ull);
+    EXPECT_LT(max_step, 0x10000000ull);
 }
 
 TEST(hpet, register_masks)
@@ -201,7 +219,13 @@ TEST(hpet, register_masks)
     SNAP("config", "%#x", rd(HPET_CONFIG));
     wr(HPET_CONFIG, 0);
     wr(HPET_TCONF(0), 0xffffffff);
-    SNAP("t0_config", "%#x", rd(HPET_TCONF(0)));
+    uint32_t t0 = rd(HPET_TCONF(0));
+    SNAP("t0_config", "%#x", t0 & ~(0x1fu << 9));
+    /* the set value bit reads 0, and a route the timer lacks, 31 here, is
+       not taken: it reads back different, by the specification */
+    EXPECT_EQ(t0 & TN_SET_VALUE, 0u);
+    if (!(rd(HPET_TCONF(0) + 4) & (1u << 31)))
+        EXPECT_NE((t0 >> 9) & 0x1f, 0x1fu);
     wr(HPET_CAP, 0);
     SNAP("cap_written", "%#x", rd(HPET_CAP));
     SNAP("past_last_timer", "%#x", rd(HPET_TCONF(timers())));
@@ -315,7 +339,8 @@ TEST(hpet, unrouted)
         sCount = sCount + 1;
     }, nullptr, false));
     wr(HPET_TCONF(0), TN_INT_ENABLE | TN_ROUTE(pin));
-    SNAP("route_field", "%#x", (rd(HPET_TCONF(0)) >> 9) & 0x1f);
+    /* and is not taken, so it reads back different */
+    EXPECT_NE((rd(HPET_TCONF(0)) >> 9) & 0x1f, (uint32_t)pin);
     wr(HPET_CONFIG, CONF_ENABLE);
     set_comparator(0, counter() + 200 * ticks_per_us());
     arch_irq_enable();

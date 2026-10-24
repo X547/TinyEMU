@@ -1,5 +1,5 @@
 config 0x3
-t0_config 0x3f7e
+t0_config 0x13e
 cap_written 0x8086a201
 past_last_timer 0
 reserved_30 0

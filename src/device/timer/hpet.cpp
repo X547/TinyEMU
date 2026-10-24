@@ -74,11 +74,6 @@
    wraps, so the wait is capped rather than computed. */
 #define MAX_DELAY_US 1000000
 
-/* A 64 bit read reaches the device as its low half, then its high half. The
-   high half read this soon after a low half one belongs with it. */
-#define SPLIT_READ_US 10
-
-
 static uint64_t width_mask(bool narrow)
 {
     return narrow ? 0xffffffffULL : ~0ULL;
@@ -263,31 +258,28 @@ int64_t HPET::RunTimers()
 }
 
 
-uint32_t HPET::TimerRead(int index, uint32_t reg)
+uint64_t HPET::TimerRead(int index, uint32_t reg)
 {
     const Timer &t = fTimers[index];
-    uint64_t val;
 
-    switch (reg & ~7) {
+    switch (reg) {
     case TIMER_CONFIG:
-        val = t.config | TN_PERIODIC_CAP | TN_SIZE_CAP |
+        /* the set value bit is spent by the comparator write it is for, and
+           reads as 0 */
+        return (t.config & ~TN_SET_VALUE) | TN_PERIODIC_CAP | TN_SIZE_CAP |
             ((uint64_t)fRouteMask << 32);
-        break;
     case TIMER_COMPARATOR:
-        val = t.comparator;
-        break;
+        return t.comparator;
     default:
-        val = 0;
-        break;
+        return 0;
     }
-    return val >> ((reg & 4) * 8);
 }
 
 
 /* In periodic mode a comparator write sets the period, and also the
    comparator when the set value bit asks for it. That bit is spent by the
-   write, but a 64 bit write arrives as two halves, so it carries over to the
-   high half that follows. */
+   write, but a 64 bit write may arrive as two halves, so it carries over to
+   the high half that follows. */
 void HPET::TimerWrite(int index, uint32_t reg, uint32_t val, uint64_t now)
 {
     Timer &t = fTimers[index];
@@ -295,8 +287,16 @@ void HPET::TimerWrite(int index, uint32_t reg, uint32_t val, uint64_t now)
     bool set_value;
 
     switch (reg) {
-    case TIMER_CONFIG:
+    case TIMER_CONFIG: {
+        uint64_t route = get_bits(val, TN_ROUTE_POS, TN_ROUTE_LEN);
+        uint64_t old = t.config;
         t.config = val & TN_WRITABLE;
+        /* a route the timer does not have is not taken, so that it reads
+           back differently */
+        if (!get_bit(fRouteMask, route)) {
+            t.config = set_bits(t.config, TN_ROUTE_POS, TN_ROUTE_LEN,
+                                get_bits(old, TN_ROUTE_POS, TN_ROUTE_LEN));
+        }
         if (!(t.config & TN_LEVEL))
             fStatus &= ~bit_at<uint64_t>(index);
         if (t.config & TN_32BIT) {
@@ -305,6 +305,7 @@ void HPET::TimerWrite(int index, uint32_t reg, uint32_t val, uint64_t now)
         }
         UpdateLevel(index);
         break;
+    }
     case TIMER_COMPARATOR:
         set_value = t.config & TN_SET_VALUE;
         if (!periodic || set_value)
@@ -331,88 +332,115 @@ void HPET::TimerWrite(int index, uint32_t reg, uint32_t val, uint64_t now)
 }
 
 
-uint32_t HPET::DeviceRead(uint32_t offset, int size_log2)
+/* A register by its 8 byte aligned offset. */
+uint64_t HPET::Read(uint32_t reg, uint64_t now)
 {
-    uint64_t now = host_monotonic_us();
-    uint64_t val;
-
-    Process(now);
-    if (offset >= HPET_TIMER_BASE) {
-        int index = (offset - HPET_TIMER_BASE) / HPET_TIMER_STRIDE;
+    if (reg >= HPET_TIMER_BASE) {
+        int index = (reg - HPET_TIMER_BASE) / HPET_TIMER_STRIDE;
         if (index >= HPET_TIMERS)
             return 0;
-        return TimerRead(index, (offset - HPET_TIMER_BASE) % HPET_TIMER_STRIDE);
+        return TimerRead(index, (reg - HPET_TIMER_BASE) % HPET_TIMER_STRIDE);
     }
-
-    switch (offset & ~7) {
+    switch (reg) {
     case HPET_CAP:
-        val = BlockId() | ((uint64_t)COUNTER_PERIOD_FS << 32);
-        break;
+        return BlockId() | ((uint64_t)COUNTER_PERIOD_FS << 32);
     case HPET_CONFIG:
-        val = fConfig;
-        break;
+        return fConfig;
     case HPET_STATUS:
-        val = fStatus;
-        break;
+        return fStatus;
     case HPET_COUNTER:
-        /* the halves of one read agree, even across a carry */
-        if (!(offset & 4)) {
-            fLowRead = Counter(now);
-            fLowReadUs = now;
-            val = fLowRead;
-        } else if (now - fLowReadUs < SPLIT_READ_US) {
-            val = fLowRead;
-        } else {
-            val = Counter(now);
-        }
-        break;
+        return Counter(now);
     default:
-        val = 0;
-        break;
+        return 0;
     }
-    return val >> ((offset & 4) * 8);
 }
 
 
-void HPET::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
+void HPET::Write(uint32_t offset, uint32_t val, uint64_t now)
 {
-    uint64_t now = host_monotonic_us();
     uint64_t counter;
 
-    Process(now);
     if (offset >= HPET_TIMER_BASE) {
         int index = (offset - HPET_TIMER_BASE) / HPET_TIMER_STRIDE;
         if (index < HPET_TIMERS) {
             TimerWrite(index, (offset - HPET_TIMER_BASE) % HPET_TIMER_STRIDE,
                        val, now);
         }
-    } else {
-        switch (offset) {
-        case HPET_CONFIG: {
-            /* halting keeps the count, and starting again goes on from it */
-            counter = Counter(now);
-            uint64_t old = fConfig;
-            fConfig = val & (CONFIG_ENABLE | CONFIG_LEGACY);
-            if ((old ^ fConfig) & CONFIG_ENABLE)
-                SetCounter(counter, now);
-            for (int i = 0; i < HPET_TIMERS; i++)
-                UpdateLevel(i);
-            break;
-        }
-        case HPET_STATUS:
-            fStatus &= ~(uint64_t)val;
-            for (int i = 0; i < HPET_TIMERS; i++)
-                UpdateLevel(i);
-            break;
-        case HPET_COUNTER:
-            SetCounter(set_bits(Counter(now), 0, 32, val), now);
-            break;
-        case HPET_COUNTER + 4:
-            SetCounter(set_bits(Counter(now), 32, 32, val), now);
-            break;
-        }
+        return;
     }
+    switch (offset) {
+    case HPET_CONFIG: {
+        /* halting keeps the count, and starting again goes on from it */
+        counter = Counter(now);
+        uint64_t old = fConfig;
+        fConfig = val & (CONFIG_ENABLE | CONFIG_LEGACY);
+        if ((old ^ fConfig) & CONFIG_ENABLE)
+            SetCounter(counter, now);
+        for (int i = 0; i < HPET_TIMERS; i++)
+            UpdateLevel(i);
+        break;
+    }
+    case HPET_STATUS:
+        fStatus &= ~(uint64_t)val;
+        for (int i = 0; i < HPET_TIMERS; i++)
+            UpdateLevel(i);
+        break;
+    case HPET_COUNTER:
+        SetCounter(set_bits(Counter(now), 0, 32, val), now);
+        break;
+    case HPET_COUNTER + 4:
+        SetCounter(set_bits(Counter(now), 32, 32, val), now);
+        break;
+    }
+}
+
+
+uint32_t HPET::DeviceRead(uint32_t offset, int size_log2)
+{
+    uint64_t now = host_monotonic_us();
+
+    (void)size_log2;
+    Process(now);
+    return Read(offset & ~7u, now) >> ((offset & 4) * 8);
+}
+
+
+void HPET::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
+{
+    uint64_t now = host_monotonic_us();
+
+    (void)size_log2;
+    Process(now);
+    Write(offset, val, now);
     /* the next deadline may have moved */
+    fMachine->Kick();
+}
+
+
+/* The main counter and the comparators are read and written whole by an 8
+   byte access, as the specification has them. */
+uint64_t HPET::DeviceRead64(uint32_t offset)
+{
+    uint64_t now = host_monotonic_us();
+
+    Process(now);
+    return Read(offset & ~7u, now);
+}
+
+
+void HPET::DeviceWrite64(uint32_t offset, uint64_t val)
+{
+    uint64_t now = host_monotonic_us();
+
+    offset &= ~7u;
+    Process(now);
+    if (offset == HPET_COUNTER) {
+        SetCounter(val, now);
+    } else {
+        /* the halves at one instant; the set value bit carries over */
+        Write(offset, get_bits(val, 0, 32), now);
+        Write(offset + 4, get_bits(val, 32, 32), now);
+    }
     fMachine->Kick();
 }
 
@@ -446,7 +474,7 @@ public:
         SystemBus *sys = static_cast<SystemBus *>(ParentBus());
 
         sys->MemMap()->RegisterDevice(fRegs->base, fRegs->size, &fHpet,
-                                      DEVIO_SIZE32);
+                                      DEVIO_SIZE32 | DEVIO_SIZE64);
         return true;
     }
 
