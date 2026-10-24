@@ -39,6 +39,7 @@
 #include "host_memory.h"
 #include "host_x86_hypervisor.h"
 #include "hypervisor_memory_map.h"
+#include "x86_cpuid_topology.h"
 
 
 #define CPUID_APIC bit_at(9)
@@ -212,6 +213,8 @@ private:
     int fCpuCount;
     int fPhysAddressBits;
     std::vector<X86CpuidLeaf> fCpuid;
+    /* the vendor the guest sees is AMD, whose topology leaves it reads */
+    bool fAmd = false;
     /* the IA32_PAT processors start with, 0 for the hypervisor's */
     uint64_t fPat;
     WHV_PARTITION_HANDLE fPartition = nullptr;
@@ -329,8 +332,15 @@ bool WhpX86Hypervisor::Init()
         if (FAILED(hr))
             whp_fail("setting the MSR exit bitmap", hr);
     }
-    std::vector<UINT32> cpuid_leaves = {1, 0x80000001, 0x80000008};
+    std::vector<UINT32> cpuid_leaves = {
+        1, 4, 0xb, 0x1f, 0x80000001, 0x80000008, 0x8000001e,
+    };
+    unsigned int a, b, c, d;
+    __cpuid(0, a, b, c, d);
+    fAmd = x86_cpuid_is_amd(b);
     for (const X86CpuidLeaf &ent: fCpuid) {
+        if (ent.leaf == 0)
+            fAmd = x86_cpuid_is_amd((b & ent.host_mask[1]) | ent.value[1]);
         if (std::find(cpuid_leaves.begin(), cpuid_leaves.end(), ent.leaf) ==
             cpuid_leaves.end()) {
             cpuid_leaves.push_back(ent.leaf);
@@ -776,6 +786,14 @@ void WhpX86Vcpu::ExitCpuid(const WHV_RUN_VP_EXIT_CONTEXT &ctx)
                 ent.value[i];
         }
     }
+    /* the hypervisor makes each processor a package of its own */
+    uint32_t regs[4];
+    for (int i = 0; i < 4; i++)
+        regs[i] = values[1 + i].Reg64;
+    x86_cpuid_topology(c.Rax, c.Rcx, fOwner.fCpuCount, fIndex, fOwner.fAmd,
+                       regs);
+    for (int i = 0; i < 4; i++)
+        values[1 + i].Reg64 = regs[i];
     /* remove the APIC (unless the machine has one) & ACPI to be in sync
        with the emulator */
     if (c.Rax == 1 || c.Rax == 0x80000001) {
@@ -783,10 +801,8 @@ void WhpX86Vcpu::ExitCpuid(const WHV_RUN_VP_EXIT_CONTEXT &ctx)
         if (!fOwner.fLocalApic)
             values[4].Reg64 &= ~(uint64_t)CPUID_APIC;
     }
-    /* the machine's local APIC: xAPIC only, with the processor's index as
-       its ID */
+    /* the machine's local APIC: xAPIC only */
     if (c.Rax == 1 && fOwner.fLocalApic && !fOwner.fApicEmulation) {
-        values[2].Reg64 = set_bits((uint32_t)values[2].Reg64, 24, 8, fIndex);
         values[3].Reg64 &= ~(uint64_t)(CPUID_X2APIC | CPUID_TSC_DEADLINE);
         values[4].Reg64 |= CPUID_APIC;
     }

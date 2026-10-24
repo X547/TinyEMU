@@ -67,10 +67,12 @@ else
 endif
 if platform_os == 'linux' and host_machine.cpu_family() in ['x86', 'x86_64']
   platform_sources += files('linux/kvm_x86.cpp',
-                            'common/hypervisor_memory_map.cpp')
+                            'common/hypervisor_memory_map.cpp',
+                            'common/x86_cpuid_topology.cpp')
 elif whp_enabled
   platform_sources += files('win32/whp_x86.cpp',
-                            'common/hypervisor_memory_map.cpp')
+                            'common/hypervisor_memory_map.cpp',
+                            'common/x86_cpuid_topology.cpp')
 elif nvmm_enabled
   platform_sources += files('haiku/nvmm_x86.cpp',
                             'common/hypervisor_memory_map.cpp')

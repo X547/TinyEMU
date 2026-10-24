@@ -46,6 +46,7 @@
 #include "host_memory.h"
 #include "host_x86_hypervisor.h"
 #include "hypervisor_memory_map.h"
+#include "x86_cpuid_topology.h"
 
 
 #define CPUID_APIC bit_at(9)
@@ -476,6 +477,11 @@ void KvmX86Vcpu::SetCpuid(int index)
         std::copy(ents.begin(), ents.end(), kvm_cpuid->entries);
         kvm_cpuid->nent = ents.size();
     }
+    bool amd = false;
+    for (i = 0; i < kvm_cpuid->nent; i++) {
+        if (kvm_cpuid->entries[i].function == 0)
+            amd = x86_cpuid_is_amd(kvm_cpuid->entries[i].ebx);
+    }
     for(i = 0; i < kvm_cpuid->nent; i++) {
         ent = &kvm_cpuid->entries[i];
         /* remove the APIC (unless the machine has one) & ACPI to be in
@@ -499,19 +505,16 @@ void KvmX86Vcpu::SetCpuid(int index)
                           bit_at(KVM_FEATURE_ASYNC_PF_INT) |
                           bit_at(KVM_FEATURE_MSI_EXT_DEST_ID));
         }
-        /* The table is the host's; the APIC ID it reports is the vcpu's,
-           which is its index. */
+        /* The table is the host's; the topology is the guest's, one package
+           whose APIC IDs are the vcpus' indices. */
+        uint32_t regs[4] = {ent->eax, ent->ebx, ent->ecx, ent->edx};
+        x86_cpuid_topology(ent->function, ent->index, fOwner.fCpuCount,
+                           index, amd, regs);
+        ent->eax = regs[0];
+        ent->ebx = regs[1];
+        ent->ecx = regs[2];
+        ent->edx = regs[3];
         switch (ent->function) {
-        case 1:
-            ent->ebx = set_bits(ent->ebx, 24, 8, (uint32_t)index);
-            break;
-        case 0xb:
-        case 0x1f:
-            ent->edx = index;
-            break;
-        case 0x8000001e:
-            ent->eax = index;
-            break;
         case 0x80000008:
             /* the physical address width, with no separate guest width */
             ent->eax = (ent->eax & ~0x00ff00ffu) | fOwner.fPhysAddressBits;
