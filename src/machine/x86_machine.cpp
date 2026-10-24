@@ -504,7 +504,11 @@ void PCMachine::MmioWrite(uint64_t paddr, const uint8_t *data, int len)
         }
         break;
     default:
-        abort();
+        /* What a hypervisor decoded from a wider instruction, an SSE move
+           say: in quadwords where it divides into them, else bytes. */
+        for (int i = 0, step = len % 8 == 0 ? 8 : 1; i < len; i += step)
+            MmioWrite(paddr + i, data + i, step);
+        break;
     }
 }
 
@@ -546,7 +550,9 @@ void PCMachine::MmioRead(uint64_t paddr, uint8_t *data, int len)
         *(uint32_t *)(data + 4) = pr->io->DeviceRead(addr + 4, 2);
         break;
     default:
-        abort();
+        for (int i = 0, step = len % 8 == 0 ? 8 : 1; i < len; i += step)
+            MmioRead(paddr + i, data + i, step);
+        break;
     }
     return;
  no_dev:
