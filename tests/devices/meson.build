@@ -110,6 +110,7 @@ sources = files(
   'tests/pci/pci.cpp',
   'tests/pci/plda.cpp',
   'tests/power/syscon.cpp',
+  'tests/scsi/buslogic.cpp',
   'tests/scsi/cd.cpp',
   'tests/scsi/disk.cpp',
   'tests/platform/acpi.cpp',

@@ -63,8 +63,9 @@ public:
     virtual ~ScsiInitiator() = default;
 
     virtual const char *Name() const = 0;
-    /* The targets it can address. */
+    /* The targets it can address, and the longest CDB it carries. */
     virtual int TargetCount() const = 0;
+    virtual int MaxCdb() const = 0;
     virtual bool Command(int target, int lun, const uint8_t *cdb, int cdb_len,
                          ScsiDir dir, void *buf, uint32_t len,
                          ScsiResult *res) = 0;

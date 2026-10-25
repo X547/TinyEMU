@@ -5,4 +5,4 @@ elcr0 0
 irr1 0
 isr1 0
 imr1 0
-elcr1 0
+elcr1 0xc

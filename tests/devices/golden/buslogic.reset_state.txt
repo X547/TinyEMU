@@ -1,0 +1,5 @@
+status 0x80
+intr 0
+geometry 0
+after_hard_reset 0x80
+bars io 4 mem 32

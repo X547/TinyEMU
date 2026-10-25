@@ -1,0 +1,1 @@
+intr_after_bus_reset 0

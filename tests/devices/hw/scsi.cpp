@@ -56,6 +56,7 @@ private:
 public:
     const char *Name() const override {return "virtio-scsi";}
     int TargetCount() const override {return 16;}
+    int MaxCdb() const override {return VSCSI_CDB_SIZE;}
 
     bool SetUp()
     {
@@ -140,17 +141,170 @@ public:
 
 VirtioScsi sVirtioScsi;
 
+
+/* The BusLogic BT-958 as its Linux and BeOS drivers drive it: 32 bit
+   mailboxes and CCBs, polled. */
+#define BL_PCI_VENDOR 0x104b
+#define BL_PCI_DEVICE 0x1040
+
+#define BL_CONTROL 0
+#define BL_STATUS  0
+#define BL_COMMAND 1
+#define BL_DATA    1
+#define BL_INTR    2
+
+#define BL_RHARD 0x80
+#define BL_RINT  0x20
+#define BL_HARDY 0x10
+#define BL_INREQ 0x20
+#define BL_DACT  0x80
+#define BL_CMDC  0x04
+
+#define BL_MAILBOXES 4
+#define BL_CCB_SIZE  40
+
+class BusLogic final: public ScsiInitiator {
+private:
+    PciFunc *fFn = nullptr;
+    int fBar = 0;
+    bool fReady = false;
+    uint8_t *fMailboxes = nullptr; /* out, then in */
+    uint8_t *fCcb = nullptr;
+    uint8_t *fSense = nullptr;
+    int fOut = 0;
+    int fIn = 0;
+
+    uint8_t Rd(int reg) {return pci_bar_read(fFn, fBar, reg, 0);}
+    void Wr(int reg, uint8_t v) {pci_bar_write(fFn, fBar, reg, v, 0);}
+
+    bool WaitStatus(uint8_t mask, uint8_t want)
+    {
+        return t_wait_until([&] {return (Rd(BL_STATUS) & mask) == want;},
+                            1000000);
+    }
+
+    /* A host adapter command with its parameters, waited for to
+       complete. */
+    bool AdapterCommand(uint8_t cmd, const uint8_t *params, int n)
+    {
+        Wr(BL_COMMAND, cmd);
+        for (int i = 0; i < n; i++)
+            Wr(BL_COMMAND, params[i]);
+        bool ok = t_wait_until([&] {return (Rd(BL_INTR) & BL_CMDC) != 0;},
+                               1000000);
+        Wr(BL_CONTROL, BL_RINT);
+        return ok;
+    }
+
+public:
+    const char *Name() const override {return "buslogic";}
+    int TargetCount() const override {return 16;}
+    int MaxCdb() const override {return 12;}
+
+    bool SetUp()
+    {
+        if (fReady)
+            return true;
+        pci_enumerate();
+        fFn = pci_find(BL_PCI_VENDOR, BL_PCI_DEVICE);
+        if (fFn == nullptr)
+            return false;
+        /* the registers are in both BARs; the I/O one where it is reached */
+        fBar = fFn->bars[0].size && pci_reachable(fFn->host, fFn->bars[0].addr,
+                                                  4, true) ? 0 : 1;
+        fMailboxes = (uint8_t *)heap_alloc(2 * BL_MAILBOXES * 8, 16,
+                                           0x100000000ull);
+        fCcb = (uint8_t *)heap_alloc(BL_CCB_SIZE, 16, 0x100000000ull);
+        fSense = (uint8_t *)heap_alloc(32, 16, 0x100000000ull);
+        if (!fMailboxes || !fCcb || !fSense)
+            return false;
+        memset(fMailboxes, 0, 2 * BL_MAILBOXES * 8);
+        Wr(BL_CONTROL, BL_RHARD);
+        if (!WaitStatus(BL_DACT | BL_HARDY | BL_INREQ, BL_HARDY | BL_INREQ))
+            return false;
+        uint8_t init[5] = {BL_MAILBOXES};
+        put_le32(init + 1, (uint32_t)(uintptr_t)fMailboxes);
+        if (!AdapterCommand(0x81, init, 5) ||
+            (Rd(BL_STATUS) & BL_INREQ) != 0)
+            return false;
+        fOut = fIn = 0;
+        t_on_cleanup(scsi_reset);
+        fReady = true;
+        return true;
+    }
+
+    void Reset()
+    {
+        if (!fReady)
+            return;
+        Wr(BL_CONTROL, BL_RHARD);
+        WaitStatus(BL_DACT | BL_HARDY, BL_HARDY);
+        pci_restore_all();
+        fReady = false;
+    }
+
+    bool Command(int target, int lun, const uint8_t *cdb, int cdb_len,
+                 ScsiDir dir, void *buf, uint32_t len,
+                 ScsiResult *res) override
+    {
+        *res = ScsiResult {};
+        if ((uintptr_t)buf + len > 0x100000000ull)
+            return false;
+        memset(fCcb, 0, BL_CCB_SIZE);
+        fCcb[0] = 0x03; /* initiate, with the residual returned */
+        fCcb[1] = dir == SCSI_IN ? 0x08 : dir == SCSI_OUT ? 0x10 : 0x18;
+        fCcb[2] = cdb_len;
+        fCcb[3] = 32;
+        put_le32(fCcb + 4, dir == SCSI_NONE ? 0 : len);
+        put_le32(fCcb + 8, (uint32_t)(uintptr_t)buf);
+        fCcb[16] = target;
+        fCcb[17] = lun;
+        memcpy(fCcb + 18, cdb, cdb_len);
+        put_le32(fCcb + 36, (uint32_t)(uintptr_t)fSense);
+        memset(fSense, 0, 32);
+
+        uint8_t *mbo = fMailboxes + fOut * 8;
+        put_le32(mbo, (uint32_t)(uintptr_t)fCcb);
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        mbo[7] = 0x01; /* start */
+        fOut = (fOut + 1) % BL_MAILBOXES;
+        Wr(BL_COMMAND, 0x02);
+
+        uint8_t *mbi = fMailboxes + (BL_MAILBOXES + fIn) * 8;
+        if (!t_wait_until([mbi] {
+                return *(volatile uint8_t *)(mbi + 7) != 0;
+            }, 5000000))
+            return false;
+        res->adapter = mbi[4];
+        res->delivered = mbi[4] == 0;
+        res->status = mbi[5];
+        res->residual = dir == SCSI_NONE ? 0 : le32(fCcb + 4);
+        if (res->status == SCSI_CHECK_CONDITION) {
+            res->sense_len = 18;
+            memcpy(res->sense, fSense, 18);
+        }
+        mbi[7] = 0;
+        fIn = (fIn + 1) % BL_MAILBOXES;
+        Wr(BL_CONTROL, BL_RINT);
+        return true;
+    }
+};
+
+BusLogic sBusLogic;
+
 ScsiInitiator *initiator(int i)
 {
     switch (i) {
     case 0:
         return sVirtioScsi.SetUp() ? &sVirtioScsi : nullptr;
+    case 1:
+        return sBusLogic.SetUp() ? &sBusLogic : nullptr;
     default:
         return nullptr;
     }
 }
 
-const int kInitiators = 1;
+const int kInitiators = 2;
 
 }
 
@@ -158,13 +312,15 @@ const int kInitiators = 1;
 void scsi_reset()
 {
     sVirtioScsi.Reset();
+    sBusLogic.Reset();
 }
 
 
 bool scsi_find_unit(uint8_t type, int index, ScsiUnit *unit)
 {
-    uint8_t *inq = (uint8_t *)heap_alloc(36, 16);
-    uint8_t *cap = (uint8_t *)heap_alloc(8, 16);
+    /* where an adapter that addresses 32 bits reaches */
+    uint8_t *inq = (uint8_t *)heap_alloc(36, 16, 0x100000000ull);
+    uint8_t *cap = (uint8_t *)heap_alloc(8, 16, 0x100000000ull);
     if (inq == nullptr || cap == nullptr)
         return false;
     for (int i = 0; i < kInitiators; i++) {

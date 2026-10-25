@@ -1,0 +1,7 @@
+board_id AA50
+firmware 7B
+model 958  
+config 00 04 07
+ext_setup 45 00 2000 00 40 07B 09
+pci_info 06 03 00
+setup 00 000000

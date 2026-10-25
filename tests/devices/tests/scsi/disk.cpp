@@ -169,6 +169,8 @@ TEST(scsi_disk, allocation_length)
     EXPECT_EQ(r.residual, 92u);
     EXPECT_EQ(buf[4], 0xee);
 
+    if (sUnit.init->MaxCdb() < 16)
+        return;
     memset(buf, 0xee, 96);
     uint8_t cap16[16] = {0x9e, 0x10};
     cap16[13] = 12;
@@ -245,15 +247,17 @@ TEST(scsi_disk, read_capacity)
     EXPECT_GOOD(r);
     EXPECT_EQ(be32(buf + 4), (uint32_t)BLOCK);
     EXPECT_EQ(be32(buf), (uint32_t)(sectors - 1));
-    uint8_t c16[16] = {0x9e, 0x10};
-    put_be32(c16 + 10, 32);
-    r = cmd(c16, 16, SCSI_IN, buf, 32);
-    EXPECT_GOOD(r);
-    EXPECT_EQ(((uint64_t)be32(buf) << 32) | be32(buf + 4),
-              sectors - 1);
-    EXPECT_EQ(be32(buf + 8), (uint32_t)BLOCK);
-    SNAP("cap16_rest", "%02x %02x %02x %02x", buf[12], buf[13], buf[14],
-         buf[15]);
+    if (sUnit.init->MaxCdb() >= 16) {
+        uint8_t c16[16] = {0x9e, 0x10};
+        put_be32(c16 + 10, 32);
+        r = cmd(c16, 16, SCSI_IN, buf, 32);
+        EXPECT_GOOD(r);
+        EXPECT_EQ(((uint64_t)be32(buf) << 32) | be32(buf + 4),
+                  sectors - 1);
+        EXPECT_EQ(be32(buf + 8), (uint32_t)BLOCK);
+        SNAP("cap16_rest", "%02x %02x %02x %02x", buf[12], buf[13],
+             buf[14], buf[15]);
+    }
     put_be32(c10 + 2, 5);
     EXPECT_SENSE(cmd(c10, 10, SCSI_IN, buf, 8), SCSI_KEY_ILLEGAL_REQUEST,
                  0x2400);
@@ -287,6 +291,8 @@ TEST(scsi_disk, read)
     EXPECT_GOOD(cmd(r12, 12, SCSI_IN, buf, 2 * BLOCK));
     EXPECT_EQ(pattern_errors(buf, 500, 2), 0u);
 
+    if (sUnit.init->MaxCdb() < 16)
+        return;
     uint8_t r16[16] = {0x88};
     put_be32(r16 + 6, (uint32_t)(sUnit.blocks - 1));
     put_be32(r16 + 10, 1);
@@ -307,10 +313,10 @@ TEST(scsi_disk, write)
     EXPECT_GOOD(cmd(c, 10, SCSI_OUT, w, 2 * BLOCK));
     uint8_t w6[6] = {0x0a, 0, 0, 42, 1, 0};
     EXPECT_GOOD(cmd(w6, 6, SCSI_OUT, w + 2 * BLOCK, BLOCK));
-    uint8_t w16[16] = {0x8a};
-    put_be32(w16 + 6, 43);
-    put_be32(w16 + 10, 1);
-    EXPECT_GOOD(cmd(w16, 16, SCSI_OUT, w + 3 * BLOCK, BLOCK));
+    uint8_t w12[12] = {0xaa};
+    put_be32(w12 + 2, 43);
+    put_be32(w12 + 6, 1);
+    EXPECT_GOOD(cmd(w12, 12, SCSI_OUT, w + 3 * BLOCK, BLOCK));
     rw10(c, 0x28, 40, 4);
     EXPECT_GOOD(cmd(c, 10, SCSI_IN, r, 4 * BLOCK));
     EXPECT_EQ(memcmp(r, w, 4 * BLOCK), 0);
@@ -339,6 +345,8 @@ TEST(scsi_disk, out_of_range)
     rw10(c, 0x2a, sUnit.blocks, 1);
     EXPECT_SENSE(cmd(c, 10, SCSI_OUT, buf, BLOCK), SCSI_KEY_ILLEGAL_REQUEST,
                  0x2100);
+    if (sUnit.init->MaxCdb() < 16)
+        return;
     uint8_t r16[16] = {0x88};
     put_be32(r16 + 2, 1);
     put_be32(r16 + 10, 1);

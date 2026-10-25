@@ -1,0 +1,5 @@
+disabled ffffffff ffff ff
+host_bridge 12378086
+device_word 1237
+class 06000002
+subsystem 11001af4
