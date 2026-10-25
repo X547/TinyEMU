@@ -73,6 +73,44 @@ uint32_t scsi_reply(SCSIRequest *req, const uint8_t *data, uint32_t len)
 }
 
 
+uint32_t scsi_reply_alloc(SCSIRequest *req, const uint8_t *data, uint32_t len,
+                          uint32_t alloc)
+{
+    return scsi_reply(req, data, len < alloc ? len : alloc);
+}
+
+
+void scsi_request_sense(SCSIRequest *req, const uint8_t *fixed)
+{
+    uint8_t desc[8];
+    const uint8_t *data = fixed;
+    uint32_t len = SCSI_SENSE_LEN;
+
+    if (req->cdb[1] & 0x01) {
+        /* descriptor format: the key and code, and no descriptors */
+        memset(desc, 0, sizeof(desc));
+        desc[0] = 0x72;
+        desc[1] = get_bits(fixed[2], 0, 4);
+        desc[2] = fixed[12];
+        desc[3] = fixed[13];
+        data = desc;
+        len = sizeof(desc);
+    }
+    scsi_set_good(req, scsi_reply_alloc(req, data, len, req->cdb[4]));
+}
+
+
+bool scsi_inquiry_cdb_ok(SCSIRequest *req)
+{
+    if ((req->cdb[1] & 0x01) == 0 && req->cdb[2] != 0) {
+        scsi_set_sense(req, SCSI_SENSE_ILLEGAL_REQUEST,
+                       SCSI_ASC_INVALID_FIELD_IN_CDB);
+        return false;
+    }
+    return true;
+}
+
+
 void scsi_no_unit(SCSIRequest *req)
 {
     uint8_t buf[36];

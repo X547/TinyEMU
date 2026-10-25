@@ -78,6 +78,7 @@ private:
     bool ModeSense(SCSIRequest *req, bool is_10);
     bool ReadCapacity10(SCSIRequest *req);
     bool ReadCapacity16(SCSIRequest *req);
+    bool InRange(SCSIRequest *req, uint64_t lba, uint32_t blocks);
     bool ReadWrite(SCSIRequest *req, uint64_t lba, uint32_t blocks,
                    bool is_write);
 
@@ -143,8 +144,13 @@ bool SCSIDisk::Inquiry(SCSIRequest *req)
 {
     uint8_t buf[96];
     uint32_t len;
+    uint32_t alloc = get_be16(req->cdb + 3);
 
     memset(buf, 0, sizeof(buf));
+    if (!scsi_inquiry_cdb_ok(req)) {
+        memcpy(fSense, req->sense, SCSI_SENSE_LEN);
+        return true;
+    }
 
     if ((req->cdb[1] & 0x01) != 0) {
         /* Vital product data. */
@@ -189,7 +195,7 @@ bool SCSIDisk::Inquiry(SCSIRequest *req)
                  SCSI_ASC_INVALID_FIELD_IN_CDB);
             return true;
         }
-        Good(req, scsi_reply(req, buf, len));
+        Good(req, scsi_reply_alloc(req, buf, len, alloc));
         return true;
     }
 
@@ -203,20 +209,34 @@ bool SCSIDisk::Inquiry(SCSIRequest *req)
     memcpy(buf + 16, SCSI_DISK_PRODUCT, 16);
     memcpy(buf + 32, SCSI_DISK_REVISION, 4);
 
-    Good(req, scsi_reply(req, buf, 36));
+    Good(req, scsi_reply_alloc(req, buf, 36, alloc));
     return true;
 }
 
 
+/* Nothing can be changed or saved: the changeable values are all zeros,
+   and there are no saved ones. */
 bool SCSIDisk::ModeSense(SCSIRequest *req, bool is_10)
 {
     uint8_t buf[64];
+    uint8_t control = req->cdb[2] >> 6;
     uint8_t page = req->cdb[2] & 0x3f;
+    uint8_t subpage = req->cdb[3];
+    uint32_t alloc = is_10 ? get_be16(req->cdb + 7) : req->cdb[4];
     int header_len = is_10 ? 8 : 4;
     int len = header_len;
 
     memset(buf, 0, sizeof(buf));
 
+    if (control == 3) {
+        Fail(req, SCSI_SENSE_ILLEGAL_REQUEST, SCSI_ASC_SAVING_NOT_SUPPORTED);
+        return true;
+    }
+    /* no page has subpages; 0xff with every page asks for all of them */
+    if (subpage != 0 && !(page == 0x3f && subpage == 0xff)) {
+        Fail(req, SCSI_SENSE_ILLEGAL_REQUEST, SCSI_ASC_INVALID_FIELD_IN_CDB);
+        return true;
+    }
     if (page == 0x08 || page == 0x3f) {
         /* Caching mode page. The write cache is reported disabled because
            writes here really do reach the back end before the command is
@@ -240,7 +260,7 @@ bool SCSIDisk::ModeSense(SCSIRequest *req, bool is_10)
         buf[is_10 ? 3 : 2] = 0x80;
     }
 
-    Good(req, scsi_reply(req, buf, len));
+    Good(req, scsi_reply_alloc(req, buf, len, alloc));
     return true;
 }
 
@@ -249,6 +269,12 @@ bool SCSIDisk::ReadCapacity10(SCSIRequest *req)
 {
     uint8_t buf[8];
     uint64_t last_lba = BlockCount() - 1;
+
+    /* without PMI the address is 0 */
+    if ((req->cdb[8] & 0x01) == 0 && get_be32(req->cdb + 2) != 0) {
+        Fail(req, SCSI_SENSE_ILLEGAL_REQUEST, SCSI_ASC_INVALID_FIELD_IN_CDB);
+        return true;
+    }
 
     /* A disk too large for the ten byte form reports all ones, which is how
        the host is told to ask again with READ CAPACITY (16). */
@@ -270,7 +296,22 @@ bool SCSIDisk::ReadCapacity16(SCSIRequest *req)
     put_be32(buf + 4, last_lba & 0xffffffff);
     put_be32(buf + 8, SCSI_DISK_BLOCK_SIZE);
 
-    Good(req, scsi_reply(req, buf, sizeof(buf)));
+    Good(req, scsi_reply_alloc(req, buf, sizeof(buf),
+                               get_be32(req->cdb + 10)));
+    return true;
+}
+
+
+/* SYNCHRONIZE CACHE and VERIFY name blocks that must be on the disk; a
+   length of 0 names none, or for SYNCHRONIZE CACHE all from 'lba' on. */
+bool SCSIDisk::InRange(SCSIRequest *req, uint64_t lba, uint32_t blocks)
+{
+    uint64_t count = BlockCount();
+
+    if (lba > count || blocks > count - lba) {
+        Fail(req, SCSI_SENSE_ILLEGAL_REQUEST, SCSI_ASC_LBA_OUT_OF_RANGE);
+        return false;
+    }
     return true;
 }
 
@@ -375,15 +416,10 @@ bool SCSIDisk::Submit(SCSIRequest *req)
 
     case SCSI_REQUEST_SENSE:
         /* Reporting sense clears it, so the next command starts clean. */
-        {
-            uint32_t len = scsi_reply(req, fSense, SCSI_SENSE_LEN);
-            memset(fSense, 0, sizeof(fSense));
-            fSense[0] = 0x70;
-            fSense[7] = SCSI_SENSE_LEN - 8;
-            req->status = SCSI_STATUS_GOOD;
-            req->sense_len = 0;
-            req->actual_length = len;
-        }
+        scsi_request_sense(req, fSense);
+        memset(fSense, 0, sizeof(fSense));
+        fSense[0] = 0x70;
+        fSense[7] = SCSI_SENSE_LEN - 8;
         return true;
 
     case SCSI_INQUIRY:
@@ -408,18 +444,41 @@ bool SCSIDisk::Submit(SCSIRequest *req)
         Good(req, 0);
         return true;
 
+    /* Writes are already through to the back end when their command is
+       answered, so there is nothing to flush. */
     case SCSI_SYNCHRONIZE_CACHE_10:
+        if (InRange(req, get_be32(cdb + 2), get_be16(cdb + 7)))
+            Good(req, 0);
+        return true;
     case SCSI_SYNCHRONIZE_CACHE_16:
-        /* Writes are already through to the back end when their command is
-           answered, so there is nothing to flush. */
-        Good(req, 0);
+        if (InRange(req, ((uint64_t)get_be32(cdb + 2) << 32) |
+                         get_be32(cdb + 6), get_be32(cdb + 10)))
+            Good(req, 0);
         return true;
 
+    /* The medium has no errors to find. Comparing the data the initiator
+       sends (BYTCHK) is not done, and so refused. */
     case SCSI_VERIFY_10:
     case SCSI_VERIFY_12:
-    case SCSI_VERIFY_16:
-        Good(req, 0);
+    case SCSI_VERIFY_16: {
+        uint64_t lba;
+        uint32_t blocks;
+        if (cdb[0] == SCSI_VERIFY_16) {
+            lba = ((uint64_t)get_be32(cdb + 2) << 32) | get_be32(cdb + 6);
+            blocks = get_be32(cdb + 10);
+        } else {
+            lba = get_be32(cdb + 2);
+            blocks = cdb[0] == SCSI_VERIFY_10 ? get_be16(cdb + 7)
+                                              : get_be32(cdb + 6);
+        }
+        if ((cdb[1] & 0x02) != 0) {
+            Fail(req, SCSI_SENSE_ILLEGAL_REQUEST,
+                 SCSI_ASC_INVALID_FIELD_IN_CDB);
+        } else if (InRange(req, lba, blocks)) {
+            Good(req, 0);
+        }
         return true;
+    }
 
     case SCSI_READ_CAPACITY_10:
         return ReadCapacity10(req);

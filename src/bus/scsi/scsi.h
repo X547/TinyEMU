@@ -276,6 +276,18 @@ void scsi_set_phase_error(SCSIRequest *req);
    of it. */
 uint32_t scsi_reply(SCSIRequest *req, const uint8_t *data, uint32_t len);
 
+/* The same, cut as well to the allocation length the CDB gave. */
+uint32_t scsi_reply_alloc(SCSIRequest *req, const uint8_t *data, uint32_t len,
+                          uint32_t alloc);
+
+/* Answer REQUEST SENSE with 'fixed', fixed format sense data, in the format
+   the CDB asks for and cut to its allocation length. */
+void scsi_request_sense(SCSIRequest *req, const uint8_t *fixed);
+
+/* Whether INQUIRY's CDB asks for standard data or a page that exists:
+   with EVPD clear the page code must be 0. Fails 'req' if not. */
+bool scsi_inquiry_cdb_ok(SCSIRequest *req);
+
 /* Answer a command to a unit number nothing is attached to, on a target that
    exists. INQUIRY has to succeed and say so, which is how an initiator
    scanning the target learns the unit is absent. */
