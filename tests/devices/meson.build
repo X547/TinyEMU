@@ -116,6 +116,7 @@ sources = files(
   'tests/timer/hpet.cpp',
   'tests/timer/i8254.cpp',
   'tests/timer/mc146818.cpp',
+  'tests/virtio/block.cpp',
   'tests/virtio/console.cpp',
   'tests/virtio/virtio.cpp',
 )

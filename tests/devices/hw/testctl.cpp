@@ -72,3 +72,48 @@ void tc_irq_lower(int i)
 {
     tc_irq_set_levels(tc_irq_levels() & ~(1u << i));
 }
+
+
+int tc_block_find(uint64_t sectors)
+{
+    uint64_t b = base();
+    if (b == 0)
+        return -1;
+    int n = mmio_read32(b + TEST_CONTROL_BLOCK_COUNT);
+    for (int i = 0; i < n; i++) {
+        mmio_write32(b + TEST_CONTROL_BLOCK_SELECT, i);
+        if (mmio_read32(b + TEST_CONTROL_BLOCK_SECTORS) == sectors)
+            return i;
+    }
+    return -1;
+}
+
+
+uint32_t tc_block_read(uint32_t reg)
+{
+    uint64_t b = base();
+    return b ? mmio_read32(b + reg) : 0;
+}
+
+
+void tc_block_write(uint32_t reg, uint32_t value)
+{
+    uint64_t b = base();
+    if (b)
+        mmio_write32(b + reg, value);
+}
+
+
+void tc_block_reset_all()
+{
+    uint64_t b = base();
+    if (b == 0)
+        return;
+    int n = mmio_read32(b + TEST_CONTROL_BLOCK_COUNT);
+    for (int i = 0; i < n; i++) {
+        mmio_write32(b + TEST_CONTROL_BLOCK_SELECT, i);
+        mmio_write32(b + TEST_CONTROL_BLOCK_MODE, TEST_BLOCK_MODE_SYNC);
+        mmio_write32(b + TEST_CONTROL_BLOCK_FAIL, 0);
+        mmio_write32(b + TEST_CONTROL_BLOCK_RELEASE, 0x7fffffff);
+    }
+}

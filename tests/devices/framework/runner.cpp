@@ -310,6 +310,7 @@ static void quiesce()
         sCleanups[i]();
     sCleanupCount = 0;
     tc_irq_set_levels(0);
+    tc_block_reset_all();
     intc_reset_all();
 }
 

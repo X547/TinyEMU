@@ -97,6 +97,13 @@ The fixtures, in temu's `src/device/test`:
 * `pci-test`: a PCI function with BARs of every kind (32 and 64 bit
   memory, I/O, an expansion ROM), an INTx pin, MSI and MSI-X it sends on
   request, and DMA to RAM, for testing the buses and host bridges.
+* The `test` block driver: `{type: "virtio-block", driver: "test",
+  sectors: 4096}` gives any disk device an in-memory disk holding
+  `TEST_BLOCK_PATTERN`. Through test-control it finishes requests at once,
+  from the event loop, or when the guest lets them go, in either order,
+  and fails the next ones on request. A machine gives each disk a size of
+  its own, by which `tc_block_find()` tells them apart; the runner puts
+  every disk back between tests.
 
 ## Writing tests
 

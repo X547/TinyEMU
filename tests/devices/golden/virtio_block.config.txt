@@ -1,0 +1,3 @@
+features 0x30000006
+size_max 1048576
+seg_max 30

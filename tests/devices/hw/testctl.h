@@ -31,3 +31,13 @@ uint32_t tc_irq_levels();
 void tc_irq_set_levels(uint32_t mask);
 void tc_irq_raise(int i);
 void tc_irq_lower(int i);
+
+/* The disks of temu's "test" block driver. A machine gives each a size of
+   its own, by which a test finds the one behind the device it drives:
+   tc_block_find() selects it for the block registers, or gives -1. */
+int tc_block_find(uint64_t sectors);
+uint32_t tc_block_read(uint32_t reg);
+void tc_block_write(uint32_t reg, uint32_t value);
+/* Between tests: every disk finishes requests at once again, none is to
+   fail, and what was held is let go. */
+void tc_block_reset_all();
