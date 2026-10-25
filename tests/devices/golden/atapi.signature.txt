@@ -1,0 +1,1 @@
+status_after_reset 0x50

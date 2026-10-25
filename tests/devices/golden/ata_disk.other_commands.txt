@@ -1,0 +1,2 @@
+write_cache_on 0x50
+accepted 10:50 70:50 91:50 e0:50 e1:50 e2:50 e3:50 41:50 

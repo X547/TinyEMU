@@ -104,6 +104,12 @@ inline uint64_t le64(const void *p)
 {
     return le32(p) | (uint64_t)le32((const uint8_t *)p + 4) << 32;
 }
+inline void put_le16(void *p, uint16_t v)
+{
+    uint8_t *b = (uint8_t *)p;
+    b[0] = v;
+    b[1] = v >> 8;
+}
 inline void put_le32(void *p, uint32_t v)
 {
     uint8_t *b = (uint8_t *)p;

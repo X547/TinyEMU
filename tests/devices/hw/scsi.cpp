@@ -21,6 +21,7 @@
  */
 #include "scsi.h"
 
+#include "ata.h"
 #include "heap.h"
 #include "test.h"
 #include "virtio.h"
@@ -292,6 +293,139 @@ public:
 
 BusLogic sBusLogic;
 
+
+/* The packet devices on the PCI IDE channels (ATA/ATAPI-6, the PACKET
+   command), target n being unit n % 2 of channel n / 2, by PIO and polled.
+   ATAPI reports no sense data with a failure, so it is fetched with
+   REQUEST SENSE. */
+#define ATAPI_TARGETS 4
+
+class Atapi final: public ScsiInitiator {
+private:
+    bool fReady = false;
+    AtaChannel fCh[ATAPI_TARGETS / 2] {};
+    bool fPacket[ATAPI_TARGETS] {};
+
+    bool Transfer(const AtaChannel &ch, int unit, const uint8_t *cdb,
+                  int cdb_len, ScsiDir dir, uint8_t *buf, uint32_t len,
+                  uint32_t *moved, uint8_t *error)
+    {
+        *moved = 0;
+        *error = 0;
+        ch.Write(ATA_DEVICE, 0xa0 | unit << 4);
+        if (ch.WaitNotBusy() == 0xff)
+            return false;
+        ch.Write(ATA_FEATURE, 0);
+        ch.Write(ATA_LBAM, 0xfe);
+        ch.Write(ATA_LBAH, 0xff);
+        ch.Write(ATA_COMMAND, 0xa0);
+        uint8_t st = ch.WaitNotBusy();
+        if (st == 0xff || !(st & ATA_ST_DRQ))
+            return false;
+        uint8_t packet[12] = {};
+        memcpy(packet, cdb, cdb_len);
+        for (int i = 0; i < 12; i += 2)
+            ch.WriteData(packet[i] | packet[i + 1] << 8);
+        for (;;) {
+            st = ch.WaitNotBusy(5000000);
+            if (st == 0xff)
+                return false;
+            if (!(st & ATA_ST_DRQ))
+                break;
+            uint32_t count = ch.Read(ATA_LBAM) | ch.Read(ATA_LBAH) << 8;
+            bool in = (ch.Read(ATA_NSECT) & 0x02) != 0;
+            for (uint32_t i = 0; i < count; i += 2) {
+                uint32_t at = *moved + i;
+                if (in) {
+                    uint16_t w = ch.ReadData();
+                    if (dir == SCSI_IN && at < len)
+                        buf[at] = w;
+                    if (dir == SCSI_IN && at + 1 < len)
+                        buf[at + 1] = w >> 8;
+                } else {
+                    uint16_t w = 0;
+                    if (dir == SCSI_OUT && at < len)
+                        w = buf[at];
+                    if (dir == SCSI_OUT && at + 1 < len)
+                        w |= buf[at + 1] << 8;
+                    ch.WriteData(w);
+                }
+            }
+            *moved += count;
+        }
+        if (st & ATA_ST_ERR)
+            *error = ch.Read(ATA_ERROR);
+        ch.Read(ATA_STATUS);
+        return true;
+    }
+
+public:
+    const char *Name() const override {return "atapi";}
+    int TargetCount() const override {return ATAPI_TARGETS;}
+    int MaxCdb() const override {return 12;}
+
+    bool SetUp()
+    {
+        if (fReady)
+            return true;
+        bool any = false;
+        for (int c = 0; c < ATAPI_TARGETS / 2; c++) {
+            if (!ata_channel(c, &fCh[c]))
+                break;
+            for (int u = 0; u < 2; u++) {
+                fPacket[c * 2 + u] = ata_probe(fCh[c], u) == ATA_PACKET;
+                any |= fPacket[c * 2 + u];
+            }
+            /* polled */
+            fCh[c].Control(ATA_CTL_NIEN);
+        }
+        if (!any)
+            return false;
+        t_on_cleanup(scsi_reset);
+        fReady = true;
+        return true;
+    }
+
+    void Reset()
+    {
+        if (!fReady)
+            return;
+        ata_cleanup();
+        fReady = false;
+    }
+
+    bool Command(int target, int lun, const uint8_t *cdb, int cdb_len,
+                 ScsiDir dir, void *buf, uint32_t len,
+                 ScsiResult *res) override
+    {
+        *res = ScsiResult {};
+        if (target >= ATAPI_TARGETS || !fPacket[target] || lun != 0 ||
+            cdb_len > 12)
+            return false;
+        const AtaChannel &ch = fCh[target / 2];
+        int unit = target % 2;
+        uint32_t moved;
+        uint8_t error;
+        if (!Transfer(ch, unit, cdb, cdb_len, dir, (uint8_t *)buf, len,
+                      &moved, &error))
+            return false;
+        res->delivered = true;
+        res->residual = moved < len ? len - moved : 0;
+        if (error == 0)
+            return true;
+        res->status = SCSI_CHECK_CONDITION;
+        uint8_t rs[6] = {0x03, 0, 0, 0, 18, 0};
+        uint32_t got;
+        uint8_t e2;
+        if (Transfer(ch, unit, rs, 6, SCSI_IN, res->sense, 18, &got, &e2) &&
+            e2 == 0)
+            res->sense_len = got < 18 ? got : 18;
+        return true;
+    }
+};
+
+Atapi sAtapi;
+
 ScsiInitiator *initiator(int i)
 {
     switch (i) {
@@ -299,12 +433,14 @@ ScsiInitiator *initiator(int i)
         return sVirtioScsi.SetUp() ? &sVirtioScsi : nullptr;
     case 1:
         return sBusLogic.SetUp() ? &sBusLogic : nullptr;
+    case 2:
+        return sAtapi.SetUp() ? &sAtapi : nullptr;
     default:
         return nullptr;
     }
 }
 
-const int kInitiators = 2;
+const int kInitiators = 3;
 
 }
 
@@ -313,6 +449,7 @@ void scsi_reset()
 {
     sVirtioScsi.Reset();
     sBusLogic.Reset();
+    sAtapi.Reset();
 }
 
 

@@ -1,1 +1,2 @@
 caps0:00.0 status 0010 list 10@40 ext 0003.v1@100 type 0
+caps0:01.0 status 0010 list 00@40 00@80 ext 0003.v1@100 type -1

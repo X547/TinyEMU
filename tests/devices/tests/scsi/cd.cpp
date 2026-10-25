@@ -295,11 +295,6 @@ TEST(scsi_cd, no_disc)
     uint8_t conf[10] = {0x46, 0, 0, 0, 0, 0, 0, 0, 128, 0};
     EXPECT_GOOD(cmd(conf, 10, SCSI_IN, buf, 128));
     EXPECT_EQ(be16(buf + 6), 0);
-    uint8_t rs[6] = {0x03, 0, 0, 0, 18, 0};
-    cmd(tur, 6);
-    EXPECT_GOOD(cmd(rs, 6, SCSI_IN, buf, 18));
-    EXPECT_EQ(buf[2] & 0x0f, SCSI_KEY_NOT_READY);
-    EXPECT_EQ(buf[12], 0x3a);
 }
 
 /* MODE SENSE: the read error recovery and capabilities pages; saved

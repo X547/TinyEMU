@@ -1,1 +1,2 @@
 fn0:00.0 104b:1040 class 010000 rev 08 header 00 pin 1
+fn0:01.0 8086:7010 class 01018f rev 00 header 00 pin 1
