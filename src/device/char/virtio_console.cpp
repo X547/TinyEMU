@@ -127,7 +127,7 @@ std::unique_ptr<VIRTIODevice> virtio_console_init(VIRTIOBusDef *bus,
                                                   HostConsole *cs)
 {
     auto s = std::make_unique<VIRTIOConsoleDevice>();
-    virtio_init(s.get(), bus, 3, 4);
+    virtio_init(s.get(), bus, 3, 4, 2);
     s->device_features = (1 << 0); /* VIRTIO_CONSOLE_F_SIZE */
     s->queue[0].manual_recv = true;
     

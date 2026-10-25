@@ -688,7 +688,8 @@ std::unique_ptr<VIRTIODevice> virtio_gpu_init(VIRTIOBusDef *bus, int width,
                                               int height)
 {
     auto s = std::make_unique<VIRTIOGPUDevice>();
-    virtio_init(s.get(), bus, VIRTIO_GPU_DEVICE_ID, VIRTIO_GPU_CONFIG_SIZE);
+    virtio_init(s.get(), bus, VIRTIO_GPU_DEVICE_ID, VIRTIO_GPU_CONFIG_SIZE,
+                2);
     s->device_features = 0;
     s->display_width = width;
     s->display_height = height;

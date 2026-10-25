@@ -1077,7 +1077,7 @@ std::unique_ptr<VIRTIODevice> virtio_9p_init(VIRTIOBusDef *bus, HostFileSystem *
 
     len = strlen(mount_tag);
     auto s = std::make_unique<VIRTIO9PDevice>();
-    virtio_init(s.get(), bus, 9, 2 + len);
+    virtio_init(s.get(), bus, 9, 2 + len, 1);
     s->device_features = 1 << 0;
 
     /* set the mount tag */

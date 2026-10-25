@@ -81,7 +81,10 @@ struct VIRTIODevice: public PCIBarTarget {
     /* what the driver accepted, 32 bits at a time */
     uint32_t driver_features_sel = 0;
     uint64_t driver_features = 0;
-    uint32_t queue_sel = 0; /* currently selected queue */
+    /* the queue the driver selected, which may be one the device lacks */
+    uint32_t queue_sel = 0;
+    /* the queues the device has, the first ones of 'queue' */
+    uint32_t num_queues = 0;
     QueueState queue[MAX_QUEUE] {};
 
     /* MSI-X, offered only on a bus whose bridge has somewhere to deliver a
@@ -121,7 +124,7 @@ struct VIRTIODevice: public PCIBarTarget {
 
 /* Implemented in virtio.cpp and shared with the per-device sources. */
 void virtio_init(VIRTIODevice *s, VIRTIOBusDef *bus, uint32_t device_id,
-                 int config_space_size);
+                 int config_space_size, int num_queues);
 
 uint16_t virtio_read16(VIRTIODevice *s, virtio_phys_addr_t addr);
 uint16_t virtio_avail_idx(VIRTIODevice *s, int queue_idx);

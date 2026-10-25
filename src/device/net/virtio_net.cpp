@@ -152,7 +152,7 @@ std::unique_ptr<VIRTIODevice> virtio_net_init(VIRTIOBusDef *bus,
                                               HostEthernet *es)
 {
     auto s = std::make_unique<VIRTIONetDevice>();
-    virtio_init(s.get(), bus, 1, 6 + 2);
+    virtio_init(s.get(), bus, 1, 6 + 2, 2);
     /* VIRTIO_NET_F_MAC, VIRTIO_NET_F_STATUS */
     s->device_features = (1 << 5) /* | (1 << 16) */;
     s->queue[0].manual_recv = true;

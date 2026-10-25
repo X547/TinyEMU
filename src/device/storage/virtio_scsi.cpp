@@ -640,7 +640,8 @@ bool VIRTIOSCSIDevice::AttachDevice(SCSIDevice *dev, uint32_t target,
 std::unique_ptr<VIRTIODevice> virtio_scsi_init(VIRTIOBusDef *bus)
 {
     auto s = std::make_unique<VIRTIOSCSIDevice>();
-    virtio_init(s.get(), bus, VIRTIO_SCSI_DEVICE_ID, VSCSI_CFG_SIZE);
+    virtio_init(s.get(), bus, VIRTIO_SCSI_DEVICE_ID, VSCSI_CFG_SIZE,
+                VSCSI_QUEUE_REQUEST + 1);
     /* Nothing is ever reported on the event queue, since neither hotplug nor
        notification is offered, so its buffers are only held. */
     s->queue[VSCSI_QUEUE_EVENT].manual_recv = true;

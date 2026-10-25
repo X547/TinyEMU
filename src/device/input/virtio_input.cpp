@@ -308,7 +308,7 @@ std::unique_ptr<VIRTIODevice> virtio_input_init(VIRTIOBusDef *bus,
                                                 VirtioInputTypeEnum type)
 {
     auto s = std::make_unique<VIRTIOInputDevice>();
-    virtio_init(s.get(), bus, 18, 256);
+    virtio_init(s.get(), bus, 18, 256, 2);
     s->queue[0].manual_recv = true;
     s->device_features = 0;
     s->type = type;

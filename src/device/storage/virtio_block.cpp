@@ -244,7 +244,7 @@ std::unique_ptr<VIRTIODevice> virtio_block_init(VIRTIOBusDef *bus,
     uint64_t nb_sectors;
 
     auto s = std::make_unique<VIRTIOBlockDevice>();
-    virtio_init(s.get(), bus, 2, VIRTIO_BLK_CFG_SIZE);
+    virtio_init(s.get(), bus, 2, VIRTIO_BLK_CFG_SIZE, 1);
     s->bs = bs;
     s->read_only = read_only;
     s->device_features = VIRTIO_BLK_F_SIZE_MAX | VIRTIO_BLK_F_SEG_MAX;

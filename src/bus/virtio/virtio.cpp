@@ -238,8 +238,9 @@ static void virtio_add_pci_capability(VIRTIODevice *s, int cfg_type,
 }
 
 void virtio_init(VIRTIODevice *s, VIRTIOBusDef *bus,
-                        uint32_t device_id, int config_space_size)
+                 uint32_t device_id, int config_space_size, int num_queues)
 {
+    assert(num_queues <= MAX_QUEUE);
     if (bus->pci_bus) {
         uint16_t pci_device_id, class_id;
         char name[32];
@@ -320,6 +321,7 @@ void virtio_init(VIRTIODevice *s, VIRTIOBusDef *bus,
     s->device_id = device_id;
     s->vendor_id = 0xffff;
     s->config_space_size = config_space_size;
+    s->num_queues = num_queues;
     virtio_reset(s);
 }
 
@@ -642,6 +644,13 @@ static void virtio_config_write(VIRTIODevice *s, uint32_t offset,
     }
 }
 
+/* The queue the driver selected, or nullptr when the device has no such
+   queue: its registers then read 0 and ignore writes. */
+static QueueState *virtio_selected_queue(VIRTIODevice *s)
+{
+    return s->queue_sel < s->num_queues ? &s->queue[s->queue_sel] : nullptr;
+}
+
 uint32_t VIRTIOMMIOTransport::DeviceRead(uint32_t offset, int size_log2)
 {
     VIRTIODevice *s = &fDev;
@@ -652,6 +661,7 @@ uint32_t VIRTIOMMIOTransport::DeviceRead(uint32_t offset, int size_log2)
     }
 
     if (size_log2 == 2) {
+        QueueState *qs = virtio_selected_queue(s);
         switch(offset) {
         case VIRTIO_MMIO_MAGIC_VALUE:
             val = 0x74726976;
@@ -685,33 +695,33 @@ uint32_t VIRTIOMMIOTransport::DeviceRead(uint32_t offset, int size_log2)
             val = s->queue_sel;
             break;
         case VIRTIO_MMIO_QUEUE_NUM_MAX:
-            val = MAX_QUEUE_NUM;
+            val = qs ? MAX_QUEUE_NUM : 0;
             break;
         case VIRTIO_MMIO_QUEUE_NUM:
-            val = s->queue[s->queue_sel].num;
+            val = qs ? qs->num : 0;
             break;
         case VIRTIO_MMIO_QUEUE_DESC_LOW:
-            val = s->queue[s->queue_sel].desc_addr;
+            val = qs ? qs->desc_addr : 0;
             break;
         case VIRTIO_MMIO_QUEUE_AVAIL_LOW:
-            val = s->queue[s->queue_sel].avail_addr;
+            val = qs ? qs->avail_addr : 0;
             break;
         case VIRTIO_MMIO_QUEUE_USED_LOW:
-            val = s->queue[s->queue_sel].used_addr;
+            val = qs ? qs->used_addr : 0;
             break;
 #if VIRTIO_ADDR_BITS == 64
         case VIRTIO_MMIO_QUEUE_DESC_HIGH:
-            val = s->queue[s->queue_sel].desc_addr >> 32;
+            val = qs ? qs->desc_addr >> 32 : 0;
             break;
         case VIRTIO_MMIO_QUEUE_AVAIL_HIGH:
-            val = s->queue[s->queue_sel].avail_addr >> 32;
+            val = qs ? qs->avail_addr >> 32 : 0;
             break;
         case VIRTIO_MMIO_QUEUE_USED_HIGH:
-            val = s->queue[s->queue_sel].used_addr >> 32;
+            val = qs ? qs->used_addr >> 32 : 0;
             break;
 #endif
         case VIRTIO_MMIO_QUEUE_READY:
-            val = s->queue[s->queue_sel].ready;
+            val = qs ? qs->ready : 0;
             break;
         case VIRTIO_MMIO_INTERRUPT_STATUS:
             val = s->int_status;
@@ -755,6 +765,15 @@ static void set_low32(virtio_phys_addr_t *paddr, uint32_t val)
 }
 #endif
 
+/* A split virtqueue's size is a power of 2, at most what the device
+   offers. */
+static void virtio_set_queue_num(QueueState *qs, uint32_t val)
+{
+    if (qs != nullptr && val > 0 && val <= MAX_QUEUE_NUM &&
+        (val & (val - 1)) == 0)
+        qs->num = val;
+}
+
 void VIRTIOMMIOTransport::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
 {
     VIRTIODevice *s = &fDev;
@@ -772,6 +791,7 @@ void VIRTIOMMIOTransport::DeviceWrite(uint32_t offset, uint32_t val, int size_lo
     }
 
     if (size_log2 == 2) {
+        QueueState *qs = virtio_selected_queue(s);
         switch(offset) {
         case VIRTIO_MMIO_DEVICE_FEATURES_SEL:
             s->device_features_sel = val;
@@ -783,32 +803,35 @@ void VIRTIOMMIOTransport::DeviceWrite(uint32_t offset, uint32_t val, int size_lo
             virtio_write_driver_features(s, val);
             break;
         case VIRTIO_MMIO_QUEUE_SEL:
-            if (val < MAX_QUEUE)
-                s->queue_sel = val;
+            s->queue_sel = val;
             break;
         case VIRTIO_MMIO_QUEUE_NUM:
-            if ((val & (val - 1)) == 0 && val > 0) {
-                s->queue[s->queue_sel].num = val;
-            }
+            virtio_set_queue_num(qs, val);
             break;
         case VIRTIO_MMIO_QUEUE_DESC_LOW:
-            set_low32(&s->queue[s->queue_sel].desc_addr, val);
+            if (qs)
+                set_low32(&qs->desc_addr, val);
             break;
         case VIRTIO_MMIO_QUEUE_AVAIL_LOW:
-            set_low32(&s->queue[s->queue_sel].avail_addr, val);
+            if (qs)
+                set_low32(&qs->avail_addr, val);
             break;
         case VIRTIO_MMIO_QUEUE_USED_LOW:
-            set_low32(&s->queue[s->queue_sel].used_addr, val);
+            if (qs)
+                set_low32(&qs->used_addr, val);
             break;
 #if VIRTIO_ADDR_BITS == 64
         case VIRTIO_MMIO_QUEUE_DESC_HIGH:
-            set_high32(&s->queue[s->queue_sel].desc_addr, val);
+            if (qs)
+                set_high32(&qs->desc_addr, val);
             break;
         case VIRTIO_MMIO_QUEUE_AVAIL_HIGH:
-            set_high32(&s->queue[s->queue_sel].avail_addr, val);
+            if (qs)
+                set_high32(&qs->avail_addr, val);
             break;
         case VIRTIO_MMIO_QUEUE_USED_HIGH:
-            set_high32(&s->queue[s->queue_sel].used_addr, val);
+            if (qs)
+                set_high32(&qs->used_addr, val);
             break;
 #endif
         case VIRTIO_MMIO_STATUS:
@@ -821,10 +844,11 @@ void VIRTIOMMIOTransport::DeviceWrite(uint32_t offset, uint32_t val, int size_lo
             }
             break;
         case VIRTIO_MMIO_QUEUE_READY:
-            s->queue[s->queue_sel].ready = val & 1;
+            if (qs)
+                qs->ready = val & 1;
             break;
         case VIRTIO_MMIO_QUEUE_NOTIFY:
-            if (val < MAX_QUEUE)
+            if (val < s->num_queues)
                 queue_notify(s, val);
             break;
         case VIRTIO_MMIO_INTERRUPT_ACK:
@@ -844,6 +868,7 @@ uint32_t VIRTIOPCITransport::DeviceRead(uint32_t offset1, int size_log2)
     uint32_t val = 0;
 
     offset = get_bits(offset1, 0, 12);
+    QueueState *qs = virtio_selected_queue(s);
     switch(offset1 >> 12) {
     case VIRTIO_PCI_CFG_OFFSET >> 12:
         if (size_log2 == 2) {
@@ -873,39 +898,40 @@ uint32_t VIRTIOPCITransport::DeviceRead(uint32_t offset1, int size_log2)
                                (32 * s->driver_features_sel)) : 0;
                 break;
             case VIRTIO_PCI_QUEUE_DESC_LOW:
-                val = s->queue[s->queue_sel].desc_addr;
+                val = qs ? qs->desc_addr : 0;
                 break;
             case VIRTIO_PCI_QUEUE_AVAIL_LOW:
-                val = s->queue[s->queue_sel].avail_addr;
+                val = qs ? qs->avail_addr : 0;
                 break;
             case VIRTIO_PCI_QUEUE_USED_LOW:
-                val = s->queue[s->queue_sel].used_addr;
+                val = qs ? qs->used_addr : 0;
                 break;
 #if VIRTIO_ADDR_BITS == 64
             case VIRTIO_PCI_QUEUE_DESC_HIGH:
-                val = s->queue[s->queue_sel].desc_addr >> 32;
+                val = qs ? qs->desc_addr >> 32 : 0;
                 break;
             case VIRTIO_PCI_QUEUE_AVAIL_HIGH:
-                val = s->queue[s->queue_sel].avail_addr >> 32;
+                val = qs ? qs->avail_addr >> 32 : 0;
                 break;
             case VIRTIO_PCI_QUEUE_USED_HIGH:
-                val = s->queue[s->queue_sel].used_addr >> 32;
+                val = qs ? qs->used_addr >> 32 : 0;
                 break;
 #endif
             }
         } else if (size_log2 == 1) {
             switch(offset) {
             case VIRTIO_PCI_NUM_QUEUES:
-                val = MAX_QUEUE_NUM;
+                val = s->num_queues;
                 break;
             case VIRTIO_PCI_QUEUE_SEL:
                 val = s->queue_sel;
                 break;
             case VIRTIO_PCI_QUEUE_SIZE:
-                val = s->queue[s->queue_sel].num;
+                /* 0 for a queue the device does not have */
+                val = qs ? qs->num : 0;
                 break;
             case VIRTIO_PCI_QUEUE_ENABLE:
-                val = s->queue[s->queue_sel].ready;
+                val = qs ? qs->ready : 0;
                 break;
             case VIRTIO_PCI_QUEUE_NOTIFY_OFF:
                 val = 0;
@@ -914,7 +940,7 @@ uint32_t VIRTIOPCITransport::DeviceRead(uint32_t offset1, int size_log2)
                 val = s->config_msix_vector;
                 break;
             case VIRTIO_PCI_QUEUE_MSIX_VECTOR:
-                val = s->queue[s->queue_sel].msix_vector;
+                val = qs ? qs->msix_vector : PCI_MSIX_NO_VECTOR;
                 break;
             }
         } else if (size_log2 == 0) {
@@ -963,6 +989,7 @@ void VIRTIOPCITransport::DeviceWrite(uint32_t offset1, uint32_t val, int size_lo
     }
 #endif
     offset = get_bits(offset1, 0, 12);
+    QueueState *qs = virtio_selected_queue(s);
     switch(offset1 >> 12) {
     case VIRTIO_PCI_CFG_OFFSET >> 12:
         if (size_log2 == 2) {
@@ -977,45 +1004,50 @@ void VIRTIOPCITransport::DeviceWrite(uint32_t offset1, uint32_t val, int size_lo
                 virtio_write_driver_features(s, val);
                 break;
             case VIRTIO_PCI_QUEUE_DESC_LOW:
-                set_low32(&s->queue[s->queue_sel].desc_addr, val);
+                if (qs)
+                    set_low32(&qs->desc_addr, val);
                 break;
             case VIRTIO_PCI_QUEUE_AVAIL_LOW:
-                set_low32(&s->queue[s->queue_sel].avail_addr, val);
+                if (qs)
+                    set_low32(&qs->avail_addr, val);
                 break;
             case VIRTIO_PCI_QUEUE_USED_LOW:
-                set_low32(&s->queue[s->queue_sel].used_addr, val);
+                if (qs)
+                    set_low32(&qs->used_addr, val);
                 break;
 #if VIRTIO_ADDR_BITS == 64
             case VIRTIO_PCI_QUEUE_DESC_HIGH:
-                set_high32(&s->queue[s->queue_sel].desc_addr, val);
+                if (qs)
+                    set_high32(&qs->desc_addr, val);
                 break;
             case VIRTIO_PCI_QUEUE_AVAIL_HIGH:
-                set_high32(&s->queue[s->queue_sel].avail_addr, val);
+                if (qs)
+                    set_high32(&qs->avail_addr, val);
                 break;
             case VIRTIO_PCI_QUEUE_USED_HIGH:
-                set_high32(&s->queue[s->queue_sel].used_addr, val);
+                if (qs)
+                    set_high32(&qs->used_addr, val);
                 break;
 #endif
             }
         } else if (size_log2 == 1) {
             switch(offset) {
             case VIRTIO_PCI_QUEUE_SEL:
-                if (val < MAX_QUEUE)
-                    s->queue_sel = val;
+                s->queue_sel = val;
                 break;
             case VIRTIO_PCI_QUEUE_SIZE:
-                if ((val & (val - 1)) == 0 && val > 0) {
-                    s->queue[s->queue_sel].num = val;
-                }
+                virtio_set_queue_num(qs, val);
                 break;
             case VIRTIO_PCI_QUEUE_ENABLE:
-                s->queue[s->queue_sel].ready = val & 1;
+                if (qs)
+                    qs->ready = val & 1;
                 break;
             case VIRTIO_PCI_MSIX_CONFIG:
                 s->config_msix_vector = s->msix.AcceptVector(val);
                 break;
             case VIRTIO_PCI_QUEUE_MSIX_VECTOR:
-                s->queue[s->queue_sel].msix_vector = s->msix.AcceptVector(val);
+                if (qs)
+                    qs->msix_vector = s->msix.AcceptVector(val);
                 break;
             }
         } else if (size_log2 == 0) {
@@ -1039,7 +1071,7 @@ void VIRTIOPCITransport::DeviceWrite(uint32_t offset1, uint32_t val, int size_lo
         s->msix.TableWrite(offset, val, size_log2);
         break;
     case VIRTIO_PCI_NOTIFY_OFFSET >> 12:
-        if (val < MAX_QUEUE)
+        if (val < s->num_queues)
             queue_notify(s, val);
         break;
     }
