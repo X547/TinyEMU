@@ -24,8 +24,10 @@
 #include <string.h>
 
 #include <algorithm>
+#include <array>
 #include <deque>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 #include "config_props.h"
@@ -37,8 +39,9 @@
 
 #define SECTOR_SIZE 512
 
-/* the largest disk, which lives in memory */
-#define TEST_BLOCK_MAX_SECTORS (256 * 1024)
+/* The largest disk: 8 GB, which is past where SD and eMMC switch to sector
+   addressing. Only the sectors written are kept in memory. */
+#define TEST_BLOCK_MAX_SECTORS (16 * 1024 * 1024)
 
 namespace {
 
@@ -47,7 +50,7 @@ class TestBlockDevice;
 std::vector<TestBlockDevice *> sDisks;
 
 
-/* An in-memory disk with the pattern of TEST_BLOCK_PATTERN, which finishes
+/* A disk with the pattern of TEST_BLOCK_PATTERN, which finishes
    its requests the way the test-control device says. A held or delayed
    request moves data when it finishes, as a real disk's DMA would. */
 class TestBlockDevice final: public HostBlockDevice, public TestBlockControl,
@@ -62,7 +65,8 @@ private:
         BlockCompletion *completion;
     };
 
-    std::vector<uint8_t> fData;
+    /* what was written; every other sector holds the pattern */
+    std::unordered_map<uint32_t, std::array<uint8_t, SECTOR_SIZE>> fWritten;
     uint32_t fSectors;
     bool fReadOnly;
     std::unique_ptr<HostTimer> fTimer;
@@ -77,12 +81,21 @@ private:
 
     void Move(const Request &req)
     {
-        uint8_t *disk = fData.data() + req.sector_num * SECTOR_SIZE;
-        size_t len = (size_t)req.n * SECTOR_SIZE;
-        if (req.is_write)
-            memcpy(disk, req.buf, len);
-        else
-            memcpy(req.buf, disk, len);
+        for (int k = 0; k < req.n; k++) {
+            uint32_t s = (uint32_t)req.sector_num + k;
+            uint8_t *buf = req.buf + (size_t)k * SECTOR_SIZE;
+            if (req.is_write) {
+                memcpy(fWritten[s].data(), buf, SECTOR_SIZE);
+                continue;
+            }
+            auto it = fWritten.find(s);
+            if (it != fWritten.end()) {
+                memcpy(buf, it->second.data(), SECTOR_SIZE);
+                continue;
+            }
+            for (uint32_t i = 0; i < SECTOR_SIZE; i++)
+                buf[i] = TEST_BLOCK_PATTERN(s, i);
+        }
     }
 
     int Start(bool is_write, uint64_t sector_num, uint8_t *buf, int n,
@@ -119,15 +132,10 @@ private:
 public:
     TestBlockDevice(uint32_t sectors, bool read_only,
                     std::unique_ptr<HostTimer> timer):
-        fData((size_t)sectors * SECTOR_SIZE),
         fSectors(sectors),
         fReadOnly(read_only),
         fTimer(std::move(timer))
     {
-        for (uint32_t s = 0; s < sectors; s++) {
-            for (uint32_t i = 0; i < SECTOR_SIZE; i++)
-                fData[(size_t)s * SECTOR_SIZE + i] = TEST_BLOCK_PATTERN(s, i);
-        }
         fTimer->target = this;
         sDisks.push_back(this);
     }
