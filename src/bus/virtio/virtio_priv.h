@@ -33,6 +33,10 @@
 
 /* Offered by every device: the transports only have the virtio 1.0 layout. */
 #define VIRTIO_F_VERSION_1 (1ULL << 32)
+#define VIRTIO_F_INDIRECT_DESC (1ULL << 28)
+
+/* the most descriptors an indirect table may hold */
+#define VIRTIO_MAX_INDIRECT 1024
 
 /* device status bits */
 #define VIRTIO_STATUS_ACKNOWLEDGE 0x01

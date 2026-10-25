@@ -126,7 +126,7 @@ typedef struct {
    and the rings. */
 static uint64_t virtio_offered_features(VIRTIODevice *s)
 {
-    return s->device_features | VIRTIO_F_VERSION_1;
+    return s->device_features | VIRTIO_F_INDIRECT_DESC | VIRTIO_F_VERSION_1;
 }
 
 
@@ -456,13 +456,14 @@ static int virtio_memcpy_to_ram(VIRTIODevice *s, virtio_phys_addr_t addr,
     return 0;
 }
 
-/* A walk along one descriptor chain. A chain that leaves its table, or
-   visits more descriptors than the table holds and so loops, is
-   malformed. */
+/* A walk along one descriptor chain, which may end in an indirect table.
+   A chain that leaves its table, or visits more descriptors than the
+   table holds and so loops, is malformed. */
 struct DescWalk {
     virtio_phys_addr_t table;
     uint32_t table_size;
     uint32_t steps;
+    bool indirect;
     VIRTIODesc desc;
 };
 
@@ -470,9 +471,25 @@ static int desc_walk_read(VIRTIODevice *s, DescWalk *w, uint32_t idx)
 {
     if (idx >= w->table_size || ++w->steps > w->table_size)
         return -1;
-    return virtio_memcpy_from_ram(s, reinterpret_cast<uint8_t *>(&w->desc),
-                                  w->table + idx * sizeof(VIRTIODesc),
-                                  sizeof(VIRTIODesc));
+    if (virtio_memcpy_from_ram(s, reinterpret_cast<uint8_t *>(&w->desc),
+                               w->table + idx * sizeof(VIRTIODesc),
+                               sizeof(VIRTIODesc)) < 0)
+        return -1;
+    if (!(w->desc.flags & VRING_DESC_F_INDIRECT))
+        return 0;
+    /* The rest of the chain is in a table of its own, which neither nests
+       nor continues past the descriptor naming it, whose write flag means
+       nothing. */
+    if (w->indirect || (w->desc.flags & VRING_DESC_F_NEXT) ||
+        !(s->driver_features & VIRTIO_F_INDIRECT_DESC) ||
+        w->desc.len == 0 || w->desc.len % sizeof(VIRTIODesc) != 0 ||
+        w->desc.len / sizeof(VIRTIODesc) > VIRTIO_MAX_INDIRECT)
+        return -1;
+    w->indirect = true;
+    w->table = w->desc.addr;
+    w->table_size = w->desc.len / sizeof(VIRTIODesc);
+    w->steps = 0;
+    return desc_walk_read(s, w, 0);
 }
 
 /* The head of the chain, or -1 when it is malformed. */
@@ -484,6 +501,7 @@ static int desc_walk_start(VIRTIODevice *s, DescWalk *w, int queue_idx,
     w->table = qs->desc_addr;
     w->table_size = qs->num;
     w->steps = 0;
+    w->indirect = false;
     return desc_walk_read(s, w, desc_idx);
 }
 
