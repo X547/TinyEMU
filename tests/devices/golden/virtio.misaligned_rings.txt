@@ -1,0 +1,2 @@
+avail_odd 0 0xf
+used_odd 000000000000 0xf

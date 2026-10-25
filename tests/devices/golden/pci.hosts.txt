@@ -1,2 +1,1 @@
-host0 designware buses 0-15 io yes mem yes mem64 yes msi dw-msi
-host1 plda buses 0-15 io no mem yes mem64 yes (prefetchable) msi plda
+host0 ecam buses 0-15 io no mem yes mem64 yes msi imsic

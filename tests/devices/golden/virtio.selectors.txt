@@ -1,0 +1,4 @@
+write_only 0x1 0x1 0
+unknown 0
+narrow 0 0
+narrow_write 0

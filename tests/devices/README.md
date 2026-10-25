@@ -155,6 +155,12 @@ tables say. A test that changes configuration space puts it back with
 `pci_restore_all()`. Where a read may find nothing, `pci_space_probe()`
 survives the fault an unclaimed address raises on RISC-V.
 
+A virtio device is found by `virtio_require(id, &dev)`, on MMIO from the
+tables or on PCI by its IDs and capabilities, and reached the same way on
+either transport. `virtio_negotiate()` takes it through feature
+negotiation, and `virtq_setup()` gives it a split virtqueue whose
+descriptors a test fills in itself.
+
 `smp_run(cpu, fn, ctx)` runs a function on another processor, which is
 started the first time: by INIT and STARTUP on x86, by its software
 interrupt in M-mode and by the SBI in S-mode. `t_require_other_cpu()` gives

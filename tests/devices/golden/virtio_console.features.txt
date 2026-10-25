@@ -1,0 +1,2 @@
+emerg_write 0
+size 0x0

@@ -1,0 +1,7 @@
+transport pci
+subsystem 1af4:1100
+class 078000
+common bar 4 off 0 len 0x1000
+notify bar 4 off 0x3000 len 0x1000 mult 0
+isr bar 4 off 0x1000 len 0x1000
+device bar 4 off 0x2000 len 0x1000

@@ -1,0 +1,1 @@
+fn0:00.0 1af4:1043 class 078000 rev 01 header 00 pin 1

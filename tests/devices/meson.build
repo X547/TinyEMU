@@ -88,11 +88,14 @@ sources = files(
   'hw/power.cpp',
   'hw/registry.cpp',
   'hw/testctl.cpp',
+  'hw/virtio.cpp',
   'lib/cxxrt.cpp',
   'lib/divmod.cpp',
   'lib/format.cpp',
   'lib/heap.cpp',
   'lib/klib.cpp',
+  'tests/char/htif.cpp',
+  'tests/char/uart.cpp',
   'tests/framework/meta.cpp',
   'tests/intc/aplic.cpp',
   'tests/intc/i8259.cpp',
@@ -105,6 +108,7 @@ sources = files(
   'tests/pci/msi.cpp',
   'tests/pci/pci.cpp',
   'tests/pci/plda.cpp',
+  'tests/power/syscon.cpp',
   'tests/platform/acpi.cpp',
   'tests/platform/platform.cpp',
   'tests/platform/smp.cpp',
@@ -112,6 +116,8 @@ sources = files(
   'tests/timer/hpet.cpp',
   'tests/timer/i8254.cpp',
   'tests/timer/mc146818.cpp',
+  'tests/virtio/console.cpp',
+  'tests/virtio/virtio.cpp',
 )
 
 # The linker is run directly rather than through the compiler driver, which

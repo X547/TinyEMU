@@ -1,0 +1,1 @@
+caps0:00.0 status 0010 list 11@d4 09@c0 09@ac 09@9c 09@8c 09@7c 10@40 ext 0003.v1@100 type 0
