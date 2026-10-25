@@ -315,14 +315,10 @@ bool SCSICD::RequestSense(SCSIRequest *req)
         Fail(req, SCSI_SENSE_UNIT_ATTENTION, SCSI_ASC_MEDIUM_CHANGED);
     }
     /* Reporting sense clears it, so the next command starts clean. */
-    uint32_t len = scsi_reply(req, fSense,
-                              std::min<uint32_t>(SCSI_SENSE_LEN, req->cdb[4]));
+    scsi_request_sense(req, fSense);
     memset(fSense, 0, sizeof(fSense));
     fSense[0] = 0x70;
     fSense[7] = SCSI_SENSE_LEN - 8;
-    req->status = SCSI_STATUS_GOOD;
-    req->sense_len = 0;
-    req->actual_length = len;
     return true;
 }
 
@@ -334,6 +330,10 @@ bool SCSICD::Inquiry(SCSIRequest *req)
     uint32_t alloc = get_be16(req->cdb + 3);
 
     memset(buf, 0, sizeof(buf));
+    if (!scsi_inquiry_cdb_ok(req)) {
+        memcpy(fSense, req->sense, SCSI_SENSE_LEN);
+        return true;
+    }
 
     if ((req->cdb[1] & 0x01) != 0) {
         /* Vital product data. */
@@ -456,6 +456,11 @@ bool SCSICD::ReadCapacity(SCSIRequest *req)
     uint8_t buf[8];
 
     if (!NeedMedium(req)) {
+        return true;
+    }
+    /* without PMI the address is 0 */
+    if ((req->cdb[8] & 0x01) == 0 && get_be32(req->cdb + 2) != 0) {
+        Fail(req, SCSI_SENSE_ILLEGAL_REQUEST, SCSI_ASC_INVALID_FIELD_IN_CDB);
         return true;
     }
     put_be32(buf, (uint32_t)(fImageBlocks - 1));
@@ -1059,7 +1064,8 @@ bool SCSICD::Submit(SCSIRequest *req)
         return true;
 
     case SCSI_PREVENT_ALLOW_REMOVAL:
-        fLocked = (cdb[4] & 0x01) != 0;        Good(req, 0);
+        fLocked = (cdb[4] & 0x01) != 0;
+        Good(req, 0);
         return true;
 
     case SCSI_START_STOP_UNIT:
