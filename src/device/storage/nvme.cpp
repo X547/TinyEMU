@@ -128,12 +128,25 @@
 #define NVME_CNS_NS_DESC    0x03
 
 /* Feature identifiers. */
+#define NVME_FEAT_ARBITRATION 0x01
+#define NVME_FEAT_POWER_MGMT  0x02
+#define NVME_FEAT_TEMP_THRESH 0x04
+#define NVME_FEAT_ERROR_RECOV 0x05
 #define NVME_FEAT_NUM_QUEUES  0x07
+#define NVME_FEAT_IRQ_COALESCE 0x08
+#define NVME_FEAT_IRQ_CONFIG  0x09
+#define NVME_FEAT_WRITE_ATOMIC 0x0a
 #define NVME_FEAT_ASYNC_EVENT 0x0b
+
+/* Log pages every controller has. */
+#define NVME_LOG_ERROR    0x01
+#define NVME_LOG_HEALTH   0x02
+#define NVME_LOG_FIRMWARE 0x03
 
 /* Status code types. */
 #define NVME_SCT_GENERIC  0
 #define NVME_SCT_SPECIFIC 1
+#define NVME_SCT_MEDIA    2
 
 /* Generic status codes. */
 #define NVME_SC_SUCCESS         0x00
@@ -144,6 +157,7 @@
 #define NVME_SC_ABORT_REQUESTED 0x07
 #define NVME_SC_ABORT_SQ_DELETE 0x08
 #define NVME_SC_INVALID_NS      0x0b
+#define NVME_SC_PRP_OFFSET      0x13
 #define NVME_SC_NS_WRITE_PROT   0x20
 #define NVME_SC_LBA_RANGE       0x80
 
@@ -152,8 +166,14 @@
 #define NVME_SC_QID_INVALID     0x01
 #define NVME_SC_QSIZE_INVALID   0x02
 #define NVME_SC_AER_LIMIT       0x05
+#define NVME_SC_INVALID_LOG     0x09
+#define NVME_SC_NOT_SAVEABLE    0x0d
 #define NVME_SC_INVALID_VECTOR  0x08
 #define NVME_SC_QUEUE_DELETION  0x0c
+
+/* Media and data integrity errors. */
+#define NVME_SC_WRITE_FAULT     0x80
+#define NVME_SC_UNRECOVERED_READ 0x81
 
 /* How many Async Event Requests are held outstanding before the limit is
    reported. They are never completed: no event is ever generated here, which
@@ -356,6 +376,12 @@ private:
     int fAerCount = 0;
     uint32_t fNumSqAllocated = NVME_MAX_IO_QUEUES;
     uint32_t fNumCqAllocated = NVME_MAX_IO_QUEUES;
+    /* The features every controller has, which change nothing here but
+       read back what was set: by identifier, and the temperature
+       thresholds and interrupt vector settings by what selects them. */
+    uint32_t fFeatures[NVME_FEAT_ASYNC_EVENT + 1] {};
+    uint16_t fTempThresh[64] {};
+    bool fCoalesceDisable[NVME_IRQ_VECTORS] {};
 
     /* The I/O commands with the back ends; an I/O queue is only read while
        one of these is free. They finish in whatever order the back ends
@@ -827,14 +853,21 @@ int NVMeDevice::CmdCreateCq(const NVMeCommand &cmd)
     uint32_t size = get_bits(cmd.cdw10, 16, 16) + 1;
     bool contiguous = (cmd.cdw11 & 1) != 0;
 
-    if (qid == 0 || qid >= NVME_MAX_QUEUES) {
+    /* An identifier past what Number of Queues allocated, or one in use,
+       is not one that can be created. */
+    bool loose = (fQuirks & NVME_QUIRK_LOOSE_QUEUE_CREATE) != 0;
+    if (qid == 0 || qid >= NVME_MAX_QUEUES || qid > fNumCqAllocated ||
+        (fCq[qid].enabled && !loose)) {
         return (NVME_SCT_SPECIFIC << 8) | NVME_SC_QID_INVALID;
     }
     if (size < 2 || size > NVME_MAX_QUEUE_ENTRIES) {
         return (NVME_SCT_SPECIFIC << 8) | NVME_SC_QSIZE_INVALID;
     }
-    if (!contiguous && (fQuirks & NVME_QUIRK_LOOSE_QUEUE_CREATE) == 0) {
+    if (!contiguous && !loose) {
         return (NVME_SCT_GENERIC << 8) | NVME_SC_INVALID_FIELD;
+    }
+    if ((cmd.prp1 & (PageSize() - 1)) != 0) {
+        return (NVME_SCT_GENERIC << 8) | NVME_SC_PRP_OFFSET;
     }
     uint16_t vector = get_bits(cmd.cdw11, 16, 16);
     if (fMsgIrq.Present() && vector >= fMsgIrq.VectorCount()) {
@@ -861,16 +894,21 @@ int NVMeDevice::CmdCreateSq(const NVMeCommand &cmd)
     bool contiguous = (cmd.cdw11 & 1) != 0;
     uint16_t cqid = get_bits(cmd.cdw11, 16, 16);
 
-    if (qid == 0 || qid >= NVME_MAX_QUEUES) {
+    bool loose = (fQuirks & NVME_QUIRK_LOOSE_QUEUE_CREATE) != 0;
+    if (qid == 0 || qid >= NVME_MAX_QUEUES || qid > fNumSqAllocated ||
+        (fSq[qid].enabled && !loose)) {
         return (NVME_SCT_SPECIFIC << 8) | NVME_SC_QID_INVALID;
     }
     if (size < 2 || size > NVME_MAX_QUEUE_ENTRIES) {
         return (NVME_SCT_SPECIFIC << 8) | NVME_SC_QSIZE_INVALID;
     }
-    if (!contiguous && (fQuirks & NVME_QUIRK_LOOSE_QUEUE_CREATE) == 0) {
+    if (!contiguous && !loose) {
         return (NVME_SCT_GENERIC << 8) | NVME_SC_INVALID_FIELD;
     }
-    if (cqid == 0 && (fQuirks & NVME_QUIRK_LOOSE_QUEUE_CREATE) != 0) {
+    if ((cmd.prp1 & (PageSize() - 1)) != 0) {
+        return (NVME_SCT_GENERIC << 8) | NVME_SC_PRP_OFFSET;
+    }
+    if (cqid == 0 && loose) {
         /* A driver that creates its submission queue before the completion
            queue it will use leaves this field zero. Pairing the two by
            identifier is what it means, and is what a conformant driver asks
@@ -880,7 +918,7 @@ int NVMeDevice::CmdCreateSq(const NVMeCommand &cmd)
     if (cqid == 0 || cqid >= NVME_MAX_QUEUES || !fCq[cqid].enabled) {
         /* The completion queue must already exist, unless the same leniency
            lets it be created afterwards. */
-        if ((fQuirks & NVME_QUIRK_LOOSE_QUEUE_CREATE) == 0) {
+        if (!loose) {
             return (NVME_SCT_SPECIFIC << 8) | NVME_SC_CQ_INVALID;
         }
     }
@@ -915,6 +953,7 @@ void NVMeDevice::IdentifyController(uint8_t *buf)
     buf[77] = NVME_MDTS;    /* maximum data transfer size */
     put_le16(buf + 78, 1);  /* controller id */
     put_le32(buf + 80, 0x00010400); /* version 1.4.0 */
+    buf[111] = 1;           /* an I/O controller */
 
     put_le16(buf + 256, 0);  /* OACS: no optional admin commands */
     buf[258] = 3;            /* abort command limit */
@@ -979,7 +1018,7 @@ int NVMeDevice::CmdIdentify(const NVMeCommand &cmd)
         if (nsid == 0 && (fQuirks & NVME_QUIRK_NSID_ZERO) != 0) {
             nsid = 1;
         }
-        if (nsid < 1 || nsid > NVME_MAX_NAMESPACES) {
+        if (nsid < 1 || nsid > fMaxNsid) {
             return (NVME_SCT_GENERIC << 8) | NVME_SC_INVALID_NS;
         }
         if (fNamespaces[nsid] == nullptr) {
@@ -994,7 +1033,11 @@ int NVMeDevice::CmdIdentify(const NVMeCommand &cmd)
     }
 
     case NVME_CNS_NS_LIST: {
-        /* Every namespace with an id above the one asked for, in order. */
+        /* Every namespace with an id above the one asked for, in order;
+           there is none above the two largest ids. */
+        if (cmd.nsid >= 0xfffffffe) {
+            return (NVME_SCT_GENERIC << 8) | NVME_SC_INVALID_NS;
+        }
         memset(buf, 0, sizeof(buf));
         int count = 0;
         for (uint32_t i = cmd.nsid + 1; i <= NVME_MAX_NAMESPACES; i++) {
@@ -1033,8 +1076,17 @@ int NVMeDevice::CmdIdentify(const NVMeCommand &cmd)
 
 int NVMeDevice::CmdGetLogPage(const NVMeCommand &cmd)
 {
-    /* No log page here has anything to report, but a driver that asks for one
-       during probe must get the bytes it asked for rather than an error. */
+    /* The logs every controller has, none of which has anything to report
+       here, but a driver that asks for one during probe must get the bytes
+       it asked for rather than an error. */
+    switch (get_bits(cmd.cdw10, 0, 8)) {
+    case NVME_LOG_ERROR:
+    case NVME_LOG_HEALTH:
+    case NVME_LOG_FIRMWARE:
+        break;
+    default:
+        return (NVME_SCT_SPECIFIC << 8) | NVME_SC_INVALID_LOG;
+    }
     uint32_t dwords = get_bits(cmd.cdw10, 16, 16) + 1;
     uint32_t len = dwords * 4;
 
@@ -1056,6 +1108,10 @@ int NVMeDevice::CmdSetFeatures(const NVMeCommand &cmd, uint32_t *dw0)
 {
     uint8_t fid = get_bits(cmd.cdw10, 0, 8);
 
+    /* Nothing is kept across a power cycle, so nothing can be saved. */
+    if (get_bit(cmd.cdw10, 31)) {
+        return (NVME_SCT_SPECIFIC << 8) | NVME_SC_NOT_SAVEABLE;
+    }
     switch (fid) {
     case NVME_FEAT_NUM_QUEUES: {
         /* Both fields are zero based. A controller may allocate fewer than
@@ -1075,10 +1131,36 @@ int NVMeDevice::CmdSetFeatures(const NVMeCommand &cmd, uint32_t *dw0)
         return 0;
     }
 
+    case NVME_FEAT_POWER_MGMT:
+        /* power state 0 is the only one there is */
+        if (get_bits(cmd.cdw11, 0, 5) != 0) {
+            return (NVME_SCT_GENERIC << 8) | NVME_SC_INVALID_FIELD;
+        }
+        fFeatures[fid] = cmd.cdw11;
+        return 0;
+
+    case NVME_FEAT_TEMP_THRESH:
+        fTempThresh[get_bits(cmd.cdw11, 16, 6)] = get_bits(cmd.cdw11, 0, 16);
+        return 0;
+
+    case NVME_FEAT_IRQ_CONFIG: {
+        uint16_t vector = get_bits(cmd.cdw11, 0, 16);
+        if (vector >= NVME_IRQ_VECTORS) {
+            return (NVME_SCT_GENERIC << 8) | NVME_SC_INVALID_FIELD;
+        }
+        fCoalesceDisable[vector] = get_bit(cmd.cdw11, 16);
+        return 0;
+    }
+
+    case NVME_FEAT_ARBITRATION:
+    case NVME_FEAT_ERROR_RECOV:
+    case NVME_FEAT_IRQ_COALESCE:
+    case NVME_FEAT_WRITE_ATOMIC:
     case NVME_FEAT_ASYNC_EVENT:
-        /* Nothing here ever raises an event, but refusing to configure them
-           makes a driver complain about a controller with no AER support. */
-        *dw0 = cmd.cdw11;
+        /* Nothing here is arbitrated, recovered, coalesced or ever raises an
+           event, but each is a feature every controller has, and reads back
+           what was set. */
+        fFeatures[fid] = cmd.cdw11;
         return 0;
 
     default:
@@ -1089,20 +1171,54 @@ int NVMeDevice::CmdSetFeatures(const NVMeCommand &cmd, uint32_t *dw0)
 }
 
 
+/* The current value, or with SEL the default, the saved one, which is
+   the default as nothing is saved, or what can be done with it:
+   changed, and not saved or set per namespace. */
 int NVMeDevice::CmdGetFeatures(const NVMeCommand &cmd, uint32_t *dw0)
 {
     uint8_t fid = get_bits(cmd.cdw10, 0, 8);
+    uint32_t sel = get_bits(cmd.cdw10, 8, 3);
+    bool current = sel == 0;
 
     switch (fid) {
     case NVME_FEAT_NUM_QUEUES:
         /* A driver may read this before it sets it, so the answer has to be
            the count that would be allocated. */
-        *dw0 = (fNumSqAllocated - 1) | ((fNumCqAllocated - 1) << 16);
-        return 0;
+        *dw0 = current ? (fNumSqAllocated - 1) | ((fNumCqAllocated - 1) << 16)
+                       : (NVME_MAX_IO_QUEUES - 1) |
+                         ((NVME_MAX_IO_QUEUES - 1) << 16);
+        break;
+
+    case NVME_FEAT_TEMP_THRESH:
+        *dw0 = current ? fTempThresh[get_bits(cmd.cdw11, 16, 6)] : 0;
+        break;
+
+    case NVME_FEAT_IRQ_CONFIG: {
+        uint16_t vector = get_bits(cmd.cdw11, 0, 16);
+        if (vector >= NVME_IRQ_VECTORS) {
+            return (NVME_SCT_GENERIC << 8) | NVME_SC_INVALID_FIELD;
+        }
+        *dw0 = vector | ((current && fCoalesceDisable[vector]) ? 1u << 16
+                                                                 : 0);
+        break;
+    }
+
+    case NVME_FEAT_ARBITRATION:
+    case NVME_FEAT_POWER_MGMT:
+    case NVME_FEAT_ERROR_RECOV:
+    case NVME_FEAT_IRQ_COALESCE:
+    case NVME_FEAT_WRITE_ATOMIC:
+    case NVME_FEAT_ASYNC_EVENT:
+        *dw0 = current ? fFeatures[fid] : 0;
+        break;
 
     default:
         return (NVME_SCT_GENERIC << 8) | NVME_SC_INVALID_FIELD;
     }
+    if (sel == 3) {
+        *dw0 = 1u << 2;
+    }
+    return 0;
 }
 
 
@@ -1319,7 +1435,8 @@ void NVMeDevice::ExecuteIo(int sqid, const NVMeCommand &cmd)
             return;
         }
         if (ret < 0) {
-            status = (NVME_SCT_GENERIC << 8) | NVME_SC_DATA_XFER_ERROR;
+            status = (NVME_SCT_MEDIA << 8) |
+                     (is_read ? NVME_SC_UNRECOVERED_READ : NVME_SC_WRITE_FAULT);
             break;
         }
         if (is_read &&
@@ -1368,7 +1485,8 @@ void NVMeDevice::BlockDone(NVMeIoCommand *io, int ret)
 
     int status = 0;
     if (ret < 0) {
-        status = (NVME_SCT_GENERIC << 8) | NVME_SC_DATA_XFER_ERROR;
+        status = (NVME_SCT_MEDIA << 8) |
+                 (io->is_read ? NVME_SC_UNRECOVERED_READ : NVME_SC_WRITE_FAULT);
     } else if (io->is_read &&
                !PrpTransfer(io->prp1, io->prp2, io->buf.get(), io->length,
                             true)) {
@@ -1418,6 +1536,11 @@ void NVMeDevice::ControllerDisable()
         fCq[i] = NVMeCompQueue();
     }
     fAerCount = 0;
+    fNumSqAllocated = NVME_MAX_IO_QUEUES;
+    fNumCqAllocated = NVME_MAX_IO_QUEUES;
+    memset(fFeatures, 0, sizeof(fFeatures));
+    memset(fTempThresh, 0, sizeof(fTempThresh));
+    memset(fCoalesceDisable, 0, sizeof(fCoalesceDisable));
     for (auto &io : fIo) {
         if (io->busy) {
             io->backend->Cancel(io.get());
