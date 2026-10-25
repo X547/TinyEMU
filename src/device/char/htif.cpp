@@ -93,18 +93,18 @@ void HTIF::HandleCommand()
         buf[0] = get_bits(fToHost, 0, 8);
         if (fConsole != nullptr)
             fConsole->WriteData(buf, 1);
-        fToHost = 0;
         fFromHost = set_bits(concat_bits<uint64_t>(device, 0, 56),
                              48, 8, cmd);
     } else if (device == 1 && cmd == 0) {
-        /* request keyboard interrupt */
-        fToHost = 0;
+        /* a read, answered when a key is typed, which never happens here */
     } else if (device == 2 && cmd == 0) {
         /* calendar time, in microseconds since the Unix epoch */
         fFromHost = host_real_time_us();
     } else {
         printf("HTIF: unsupported tohost=0x%016" PRIx64 "\n", fToHost);
     }
+    /* taken, as the front end tells the guest by clearing the register */
+    fToHost = 0;
 }
 
 void HTIF::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
