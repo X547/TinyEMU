@@ -27,6 +27,7 @@
 #include <inttypes.h>
 #include <assert.h>
 #include <stdarg.h>
+#include <limits.h>
 #include <atomic>
 
 #include "config_props.h"
@@ -455,37 +456,65 @@ static int virtio_memcpy_to_ram(VIRTIODevice *s, virtio_phys_addr_t addr,
     return 0;
 }
 
-static int get_desc(VIRTIODevice *s, VIRTIODesc *desc,  
-                    int queue_idx, int desc_idx)
+/* A walk along one descriptor chain. A chain that leaves its table, or
+   visits more descriptors than the table holds and so loops, is
+   malformed. */
+struct DescWalk {
+    virtio_phys_addr_t table;
+    uint32_t table_size;
+    uint32_t steps;
+    VIRTIODesc desc;
+};
+
+static int desc_walk_read(VIRTIODevice *s, DescWalk *w, uint32_t idx)
+{
+    if (idx >= w->table_size || ++w->steps > w->table_size)
+        return -1;
+    return virtio_memcpy_from_ram(s, reinterpret_cast<uint8_t *>(&w->desc),
+                                  w->table + idx * sizeof(VIRTIODesc),
+                                  sizeof(VIRTIODesc));
+}
+
+/* The head of the chain, or -1 when it is malformed. */
+static int desc_walk_start(VIRTIODevice *s, DescWalk *w, int queue_idx,
+                           int desc_idx)
 {
     QueueState *qs = &s->queue[queue_idx];
-    return virtio_memcpy_from_ram(s, reinterpret_cast<uint8_t *>(desc), qs->desc_addr +
-                                  desc_idx * sizeof(VIRTIODesc),
-                                  sizeof(VIRTIODesc));
+
+    w->table = qs->desc_addr;
+    w->table_size = qs->num;
+    w->steps = 0;
+    return desc_walk_read(s, w, desc_idx);
+}
+
+/* 1 with the next descriptor of the chain, 0 at its end, -1 when it is
+   malformed. */
+static int desc_walk_next(VIRTIODevice *s, DescWalk *w)
+{
+    if (!(w->desc.flags & VRING_DESC_F_NEXT))
+        return 0;
+    return desc_walk_read(s, w, w->desc.next) < 0 ? -1 : 1;
 }
 
 static int memcpy_to_from_queue(VIRTIODevice *s, uint8_t *buf,
                                 int queue_idx, int desc_idx,
                                 int offset, int count, bool to_queue)
 {
-    VIRTIODesc desc;
-    int l, f_write_flag;
+    DescWalk w;
+    int l, f_write_flag, ret;
 
     if (count == 0)
         return 0;
 
-    get_desc(s, &desc, queue_idx, desc_idx);
+    if (desc_walk_start(s, &w, queue_idx, desc_idx) < 0)
+        return -1;
 
     if (to_queue) {
         f_write_flag = VRING_DESC_F_WRITE;
         /* find the first write descriptor */
-        for(;;) {
-            if ((desc.flags & VRING_DESC_F_WRITE) == f_write_flag)
-                break;
-            if (!(desc.flags & VRING_DESC_F_NEXT))
+        while ((w.desc.flags & VRING_DESC_F_WRITE) != f_write_flag) {
+            if (desc_walk_next(s, &w) <= 0)
                 return -1;
-            desc_idx = desc.next;
-            get_desc(s, &desc, queue_idx, desc_idx);
         }
     } else {
         f_write_flag = 0;
@@ -493,34 +522,32 @@ static int memcpy_to_from_queue(VIRTIODevice *s, uint8_t *buf,
 
     /* find the descriptor at offset */
     for(;;) {
-        if ((desc.flags & VRING_DESC_F_WRITE) != f_write_flag)
+        if ((w.desc.flags & VRING_DESC_F_WRITE) != f_write_flag)
             return -1;
-        if (offset < desc.len)
+        if ((uint32_t)offset < w.desc.len)
             break;
-        if (!(desc.flags & VRING_DESC_F_NEXT))
+        offset -= w.desc.len;
+        if (desc_walk_next(s, &w) <= 0)
             return -1;
-        desc_idx = desc.next;
-        offset -= desc.len;
-        get_desc(s, &desc, queue_idx, desc_idx);
     }
 
     for(;;) {
-        l = min_int(count, desc.len - offset);
+        l = min_int(count, w.desc.len - offset);
         if (to_queue)
-            virtio_memcpy_to_ram(s, desc.addr + offset, buf, l);
+            ret = virtio_memcpy_to_ram(s, w.desc.addr + offset, buf, l);
         else
-            virtio_memcpy_from_ram(s, buf, desc.addr + offset, l);
+            ret = virtio_memcpy_from_ram(s, buf, w.desc.addr + offset, l);
+        if (ret < 0)
+            return -1;
         count -= l;
         if (count == 0)
             break;
         offset += l;
         buf += l;
-        if (offset == desc.len) {
-            if (!(desc.flags & VRING_DESC_F_NEXT))
+        if ((uint32_t)offset == w.desc.len) {
+            if (desc_walk_next(s, &w) <= 0)
                 return -1;
-            desc_idx = desc.next;
-            get_desc(s, &desc, queue_idx, desc_idx);
-            if ((desc.flags & VRING_DESC_F_WRITE) != f_write_flag)
+            if ((w.desc.flags & VRING_DESC_F_WRITE) != f_write_flag)
                 return -1;
             offset = 0;
         }
@@ -568,51 +595,54 @@ void virtio_consume_desc(VIRTIODevice *s,
     virtio_raise_irq(s, VIRTIO_INT_USED_RING, qs->msix_vector);
 }
 
+/* The readable descriptors come first, then the writable ones, and each
+   part fits in an int. */
 int get_desc_rw_size(VIRTIODevice *s,
                              int *pread_size, int *pwrite_size,
                              int queue_idx, int desc_idx)
 {
-    VIRTIODesc desc;
-    int read_size, write_size;
+    DescWalk w;
+    uint64_t size[2] = {0, 0};
+    bool writing = false;
+    int ret;
 
-    read_size = 0;
-    write_size = 0;
-    get_desc(s, &desc, queue_idx, desc_idx);
-
-    for(;;) {
-        if (desc.flags & VRING_DESC_F_WRITE)
-            break;
-        read_size += desc.len;
-        if (!(desc.flags & VRING_DESC_F_NEXT))
-            goto done;
-        desc_idx = desc.next;
-        get_desc(s, &desc, queue_idx, desc_idx);
-    }
-    
-    for(;;) {
-        if (!(desc.flags & VRING_DESC_F_WRITE))
+    if (desc_walk_start(s, &w, queue_idx, desc_idx) < 0)
+        return -1;
+    do {
+        if (w.desc.flags & VRING_DESC_F_WRITE)
+            writing = true;
+        else if (writing)
             return -1;
-        write_size += desc.len;
-        if (!(desc.flags & VRING_DESC_F_NEXT))
-            break;
-        desc_idx = desc.next;
-        get_desc(s, &desc, queue_idx, desc_idx);
-    }
-
- done:
-    *pread_size = read_size;
-    *pwrite_size = write_size;
+        size[writing] += w.desc.len;
+        if (size[writing] > INT_MAX)
+            return -1;
+    } while ((ret = desc_walk_next(s, &w)) > 0);
+    if (ret < 0)
+        return -1;
+    *pread_size = size[0];
+    *pwrite_size = size[1];
     return 0;
+}
+
+/* Stop using the queues until the driver resets the device, and tell it,
+   as a device that met a malformed chain should. */
+static void virtio_set_needs_reset(VIRTIODevice *s)
+{
+    if (s->status & VIRTIO_STATUS_NEEDS_RESET)
+        return;
+    s->status |= VIRTIO_STATUS_NEEDS_RESET;
+    virtio_config_change_notify(s);
 }
 
 /* The driver notified the queue, or set DRIVER_OK with buffers in it.
    Nothing is taken from a queue before both it and the driver are
-   ready. */
+   ready, or once the device needs a reset. */
 static void queue_notify_any(VIRTIODevice *s, int queue_idx)
 {
     QueueState *qs = &s->queue[queue_idx];
 
-    if (!(s->status & VIRTIO_STATUS_DRIVER_OK) || !qs->ready)
+    if (!(s->status & VIRTIO_STATUS_DRIVER_OK) ||
+        (s->status & VIRTIO_STATUS_NEEDS_RESET) || !qs->ready)
         return;
     if (qs->manual_recv)
         s->ManualQueueNotify(queue_idx);
@@ -628,19 +658,22 @@ void queue_notify(VIRTIODevice *s, int queue_idx)
 
     avail_idx = virtio_avail_idx(s, queue_idx);
     while (qs->last_avail_idx != avail_idx) {
-        desc_idx = virtio_read16(s, qs->avail_addr + 4 + 
+        desc_idx = virtio_read16(s, qs->avail_addr + 4 +
                                  (qs->last_avail_idx & (qs->num - 1)) * 2);
-        if (!get_desc_rw_size(s, &read_size, &write_size, queue_idx, desc_idx)) {
-#ifdef DEBUG_VIRTIO
-            if (s->debug & VIRTIO_DEBUG_IO) {
-                printf("queue_notify: idx=%d read_size=%d write_size=%d\n",
-                       queue_idx, read_size, write_size);
-            }
-#endif
-            if (s->RecvRequest(queue_idx, desc_idx,
-                               read_size, write_size) < 0)
-                break;
+        if (get_desc_rw_size(s, &read_size, &write_size, queue_idx,
+                             desc_idx) < 0) {
+            virtio_set_needs_reset(s);
+            break;
         }
+#ifdef DEBUG_VIRTIO
+        if (s->debug & VIRTIO_DEBUG_IO) {
+            printf("queue_notify: idx=%d read_size=%d write_size=%d\n",
+                   queue_idx, read_size, write_size);
+        }
+#endif
+        if (s->RecvRequest(queue_idx, desc_idx,
+                           read_size, write_size) < 0)
+            break;
         qs->last_avail_idx++;
     }
 }
