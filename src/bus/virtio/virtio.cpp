@@ -119,11 +119,30 @@ typedef struct {
 } VIRTIODesc;
 
 
+/* What the device offers: its own features, and those of the transport
+   and the rings. */
+static uint64_t virtio_offered_features(VIRTIODevice *s)
+{
+    return s->device_features | VIRTIO_F_VERSION_1;
+}
+
+
+/* The half of the offered features that the select register names. */
+static uint32_t virtio_read_device_features(VIRTIODevice *s)
+{
+    if (s->device_features_sel >= 2)
+        return 0;
+    return virtio_offered_features(s) >> (32 * s->device_features_sel);
+}
+
+
 /* The half of the accepted features that the select register names. A
    device reads them to tell a driver that knows virtio 1.0 from one that
-   does not. */
+   does not. They are settled once the driver sets FEATURES_OK. */
 static void virtio_write_driver_features(VIRTIODevice *s, uint32_t val)
 {
+    if (s->status & VIRTIO_STATUS_FEATURES_OK)
+        return;
     if (s->driver_features_sel == 0) {
         s->driver_features = (s->driver_features & ~0xffffffffULL) | val;
     } else if (s->driver_features_sel == 1) {
@@ -156,6 +175,34 @@ static void virtio_reset(VIRTIODevice *s)
     }
     /* The MSI-X table itself survives a device reset: it belongs to the PCI
        function, not to the virtio protocol running on top of it. */
+}
+
+
+static void queue_notify_any(VIRTIODevice *s, int queue_idx);
+
+/* Writing 0 resets the device. FEATURES_OK holds only when the driver
+   accepted nothing that was not offered, and the queues start with
+   DRIVER_OK: buffers a driver added before are taken then. */
+static void virtio_write_status(VIRTIODevice *s, uint32_t val)
+{
+    uint32_t old = s->status;
+
+    if (val == 0) {
+        s->status = 0;
+        s->irq->Set(0);
+        virtio_reset(s);
+        s->Reset();
+        return;
+    }
+    if ((val & VIRTIO_STATUS_FEATURES_OK) &&
+        !(old & VIRTIO_STATUS_FEATURES_OK) &&
+        (s->driver_features & ~virtio_offered_features(s)))
+        val &= ~VIRTIO_STATUS_FEATURES_OK;
+    s->status = val;
+    if ((val & VIRTIO_STATUS_DRIVER_OK) && !(old & VIRTIO_STATUS_DRIVER_OK)) {
+        for (uint32_t i = 0; i < s->num_queues; i++)
+            queue_notify_any(s, i);
+    }
 }
 
 
@@ -556,17 +603,26 @@ int get_desc_rw_size(VIRTIODevice *s,
     return 0;
 }
 
-/* XXX: test if the queue is ready ? */
+/* The driver notified the queue, or set DRIVER_OK with buffers in it.
+   Nothing is taken from a queue before both it and the driver are
+   ready. */
+static void queue_notify_any(VIRTIODevice *s, int queue_idx)
+{
+    QueueState *qs = &s->queue[queue_idx];
+
+    if (!(s->status & VIRTIO_STATUS_DRIVER_OK) || !qs->ready)
+        return;
+    if (qs->manual_recv)
+        s->ManualQueueNotify(queue_idx);
+    else
+        queue_notify(s, queue_idx);
+}
+
 void queue_notify(VIRTIODevice *s, int queue_idx)
 {
     QueueState *qs = &s->queue[queue_idx];
     uint16_t avail_idx;
     int desc_idx, read_size, write_size;
-
-    if (qs->manual_recv) {
-        s->ManualQueueNotify(queue_idx);
-        return;
-    }
 
     avail_idx = virtio_avail_idx(s, queue_idx);
     while (qs->last_avail_idx != avail_idx) {
@@ -676,17 +732,7 @@ uint32_t VIRTIOMMIOTransport::DeviceRead(uint32_t offset, int size_log2)
             val = s->vendor_id;
             break;
         case VIRTIO_MMIO_DEVICE_FEATURES:
-            switch(s->device_features_sel) {
-            case 0:
-                val = s->device_features;
-                break;
-            case 1:
-                val = 1; /* version 1 */
-                break;
-            default:
-                val = 0;
-                break;
-            }
+            val = virtio_read_device_features(s);
             break;
         case VIRTIO_MMIO_DEVICE_FEATURES_SEL:
             val = s->device_features_sel;
@@ -835,13 +881,7 @@ void VIRTIOMMIOTransport::DeviceWrite(uint32_t offset, uint32_t val, int size_lo
             break;
 #endif
         case VIRTIO_MMIO_STATUS:
-            s->status = val;
-            if (val == 0) {
-                /* reset */
-                s->irq->Set(0);
-                virtio_reset(s);
-                s->Reset();
-            }
+            virtio_write_status(s, val);
             break;
         case VIRTIO_MMIO_QUEUE_READY:
             if (qs)
@@ -849,7 +889,7 @@ void VIRTIOMMIOTransport::DeviceWrite(uint32_t offset, uint32_t val, int size_lo
             break;
         case VIRTIO_MMIO_QUEUE_NOTIFY:
             if (val < s->num_queues)
-                queue_notify(s, val);
+                queue_notify_any(s, val);
             break;
         case VIRTIO_MMIO_INTERRUPT_ACK:
             s->int_status &= ~val;
@@ -874,17 +914,7 @@ uint32_t VIRTIOPCITransport::DeviceRead(uint32_t offset1, int size_log2)
         if (size_log2 == 2) {
             switch(offset) {
             case VIRTIO_PCI_DEVICE_FEATURE:
-                switch(s->device_features_sel) {
-                case 0:
-                    val = s->device_features;
-                    break;
-                case 1:
-                    val = 1; /* version 1 */
-                    break;
-                default:
-                    val = 0;
-                    break;
-                }
+                val = virtio_read_device_features(s);
                 break;
             case VIRTIO_PCI_DEVICE_FEATURE_SEL:
                 val = s->device_features_sel;
@@ -1053,13 +1083,7 @@ void VIRTIOPCITransport::DeviceWrite(uint32_t offset1, uint32_t val, int size_lo
         } else if (size_log2 == 0) {
             switch(offset) {
             case VIRTIO_PCI_DEVICE_STATUS:
-                s->status = val;
-                if (val == 0) {
-                    /* reset */
-                    s->irq->Set(0);
-                    virtio_reset(s);
-                    s->Reset();
-                }
+                virtio_write_status(s, val);
                 break;
             }
         }
@@ -1072,7 +1096,7 @@ void VIRTIOPCITransport::DeviceWrite(uint32_t offset1, uint32_t val, int size_lo
         break;
     case VIRTIO_PCI_NOTIFY_OFFSET >> 12:
         if (val < s->num_queues)
-            queue_notify(s, val);
+            queue_notify_any(s, val);
         break;
     }
 }
@@ -1084,7 +1108,8 @@ void virtio_set_debug(VIRTIODevice *s, int debug)
 
 void virtio_config_change_notify(VIRTIODevice *s)
 {
-    virtio_raise_irq(s, VIRTIO_INT_CONFIG, s->config_msix_vector);
+    if (s->status & VIRTIO_STATUS_DRIVER_OK)
+        virtio_raise_irq(s, VIRTIO_INT_CONFIG, s->config_msix_vector);
 }
 
 

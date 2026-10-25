@@ -34,6 +34,14 @@
 /* Offered by every device: the transports only have the virtio 1.0 layout. */
 #define VIRTIO_F_VERSION_1 (1ULL << 32)
 
+/* device status bits */
+#define VIRTIO_STATUS_ACKNOWLEDGE 0x01
+#define VIRTIO_STATUS_DRIVER      0x02
+#define VIRTIO_STATUS_DRIVER_OK   0x04
+#define VIRTIO_STATUS_FEATURES_OK 0x08
+#define VIRTIO_STATUS_NEEDS_RESET 0x40
+#define VIRTIO_STATUS_FAILED      0x80
+
 /* Enough for one vector per queue plus the configuration change. */
 #define VIRTIO_MSIX_VECTOR_COUNT 16
 
