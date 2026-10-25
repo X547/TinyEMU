@@ -1,0 +1,2 @@
+model TinyEMU NVMe Controller                 
+limits mdts 5 acl 3 aerl 3 nn 2 oncs 0 vwc 0

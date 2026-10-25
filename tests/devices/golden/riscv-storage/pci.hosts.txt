@@ -1,1 +1,1 @@
-host0 ecam buses 0-15 io yes mem yes mem64 yes msi none
+host0 ecam buses 0-15 io yes mem yes mem64 yes msi imsic

@@ -151,6 +151,26 @@ TEST(i8259, level_follows_line)
     EXPECT_FALSE(s.pic->Irr(pic_of(l)) & bit(l));
 }
 
+/* An input made level triggered requests while it is high and not
+   otherwise: an edge it latched before no longer counts. */
+TEST(i8259, elcr_change)
+{
+    Setup s = need_pic(1);
+    uint32_t l = s.line[0];
+    if (!((0xdef8 >> l) & 1))
+        t_skip("line %u cannot be level triggered", l);
+    tc_irq_raise(s.index[0]);
+    tc_irq_lower(s.index[0]);
+    EXPECT_TRUE(s.pic->Irr(pic_of(l)) & bit(l));
+    s.pic->SetElcr(pic_of(l), bit(l));
+    EXPECT_FALSE(s.pic->Irr(pic_of(l)) & bit(l));
+    tc_irq_raise(s.index[0]);
+    s.pic->SetElcr(pic_of(l), 0);
+    s.pic->SetElcr(pic_of(l), bit(l));
+    EXPECT_TRUE(s.pic->Irr(pic_of(l)) & bit(l));
+    tc_irq_lower(s.index[0]);
+}
+
 TEST(i8259, interrupt)
 {
     Setup s = need_pic(1);

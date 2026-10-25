@@ -1,0 +1,3 @@
+cap mqes 1023 cqr 1 to 20 dstrd 0 mps 0-4
+vs 0x10400
+doorbell_read 0

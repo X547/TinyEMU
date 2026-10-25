@@ -107,6 +107,7 @@ sources = files(
   'tests/intc/ioapic.cpp',
   'tests/intc/lapic.cpp',
   'tests/intc/plic.cpp',
+  'tests/nvme/nvme.cpp',
   'tests/pci/designware.cpp',
   'tests/pci/i440fx.cpp',
   'tests/pci/msi.cpp',

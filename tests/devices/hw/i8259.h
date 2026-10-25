@@ -56,6 +56,7 @@ public:
 private:
     I8259(uint16_t master, uint16_t slave);
     static void Dispatch(void *slot);
+    static void Spurious(void *slot);
 
     uint16_t fPort[2];
     bool fReady = false; /* initialized by Reset() */

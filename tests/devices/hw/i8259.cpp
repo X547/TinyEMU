@@ -144,6 +144,20 @@ void I8259::Dispatch(void *p)
 }
 
 
+/* IRQ 7 or 15 with nothing in service there: a request that went away
+   before the processor took it, as a level line that drops leaves. It
+   gets no EOI of its own; the slave's is the master's cascade input. */
+void I8259::Spurious(void *p)
+{
+    Slot *s = (Slot *)p;
+    int pic = s->line >= 8;
+    outb(s->pic->CommandPort(pic), 0x0b);
+    bool in_service = inb(s->pic->CommandPort(pic)) & 0x80;
+    if (in_service || pic)
+        s->pic->Eoi(in_service ? s->line : 0);
+}
+
+
 bool I8259::Route(uint32_t line, IrqHandler fn, void *ctx, bool level)
 {
     if (line >= 16 || line == 2)
@@ -158,6 +172,15 @@ bool I8259::Route(uint32_t line, IrqHandler fn, void *ctx, bool level)
     SetElcr(pic, level ? elcr | bit : elcr & ~bit);
     arch_set_irq_handler((pic ? VEC_PIC_SLAVE : VEC_PIC_MASTER) + (line & 7),
                          Dispatch, &fRoutes[line]);
+    static const uint32_t kSpurious[2] = {7, 15};
+    for (uint32_t spurious : kSpurious) {
+        if (fRoutes[spurious].fn == nullptr) {
+            fRoutes[spurious] = {this, spurious, nullptr, nullptr};
+            arch_set_irq_handler((spurious >= 8 ? VEC_PIC_SLAVE
+                                                : VEC_PIC_MASTER) + 7,
+                                 Spurious, &fRoutes[spurious]);
+        }
+    }
     if (pic)
         SetMasked(2, false);
     SetMasked(line, false);
