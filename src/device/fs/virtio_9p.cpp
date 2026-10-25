@@ -40,6 +40,8 @@
 /* What a read or write message holds besides its data, which the I/O unit
    reported to the guest leaves room for. */
 #define P9_IOHDRSZ 24
+/* A write message's header: size, type, tag, fid, offset and count. */
+#define P9_TWRITE_HDRSZ 23
 /* The smallest message size taken: one that holds a page of data. */
 #define P9_MIN_MSIZE 4096
 
@@ -1023,7 +1025,8 @@ int VIRTIO9PDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
             f = fid_find(s, fid);
             if (!f)
                 goto fid_not_found;
-            if (count > s->msize - P9_IOHDRSZ) {
+            /* a write may fill the message, past the I/O unit */
+            if (count > s->msize - P9_TWRITE_HDRSZ) {
                 err = -P9_EINVAL;
                 goto error;
             }
