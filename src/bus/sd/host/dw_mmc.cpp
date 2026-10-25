@@ -558,6 +558,16 @@ void DWMMCDevice::WriteReg(uint32_t offset, uint32_t val)
             StartCommand();
         }
         break;
+    case DW_MMC_PWREN:
+        /* Taking the power away is the only thing that resets a card,
+           inactive or not. */
+        if ((Reg(DW_MMC_PWREN) & 1) != 0 && (val & 1) == 0 &&
+            fCard != nullptr) {
+            TransferStop();
+            fCard->Reset();
+        }
+        Reg(DW_MMC_PWREN) = val;
+        break;
     case DW_MMC_INTMASK:
         Reg(DW_MMC_INTMASK) = val;
         UpdateIrq();
@@ -642,8 +652,8 @@ void DWMMCDevice::SendAutoStop()
 
     cmd.index = SD_CMD_STOP_TRANSMISSION;
     cmd.arg = 0;
-    int len = fCard->Command(cmd, resp);
-    if (len < 0) {
+    int len = (Reg(DW_MMC_PWREN) & 1) != 0 ? fCard->Command(cmd, resp) : 0;
+    if (len == 0) {
         RaiseInt(DW_MMC_INT_RTO);
         return;
     }
@@ -670,9 +680,12 @@ void DWMMCDevice::StartCommand()
     cmd.index = get_bits(cmdr, 0, DW_MMC_CMD_INDEX_BITS);
     cmd.arg = Reg(DW_MMC_CMDARG);
 
-    int len = fCard != nullptr ? fCard->Command(cmd, resp) : -1;
+    /* An empty slot, or a card without power, answers nothing. */
+    bool powered = fCard != nullptr && (Reg(DW_MMC_PWREN) & 1) != 0;
+    int len = powered ? fCard->Command(cmd, resp) : 0;
     bool want_resp = (cmdr & DW_MMC_CMD_RESP_EXP) != 0;
-    if (len < 0 || (want_resp && len == 0)) {
+    /* Silence is a timeout only for a command that expects an answer. */
+    if (want_resp && len == 0) {
         RaiseInt(DW_MMC_INT_RTO | DW_MMC_INT_CMD_DONE);
         return;
     }

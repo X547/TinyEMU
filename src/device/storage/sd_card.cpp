@@ -88,9 +88,6 @@ private:
     int NormalCommand(const SDCommand &cmd, uint8_t *response);
     int AppCommand(const SDCommand &cmd, uint8_t *response);
 
-    /* The R1 an addressed command answers with, together with the state
-       check every one of them makes. */
-    int Illegal();
     int ReadWrite(const SDCommand &cmd, uint8_t *response, bool is_write,
                   bool multiple);
 
@@ -308,15 +305,6 @@ void SDCard::BuildSwitchStatus(uint32_t arg, bool set)
 
 //#pragma mark - commands
 
-int SDCard::Illegal()
-{
-    /* A card does not answer a command it may not take; the next response
-       reports it. */
-    Fail(SD_STATUS_ILLEGAL_COMMAND);
-    return -1;
-}
-
-
 int SDCard::ReadWrite(const SDCommand &cmd, uint8_t *response, bool is_write,
                       bool multiple)
 {
@@ -348,6 +336,12 @@ int SDCard::ReadWrite(const SDCommand &cmd, uint8_t *response, bool is_write,
 
 int SDCard::Command(const SDCommand &cmd, uint8_t *response)
 {
+    /* An inactive card answers nothing, not even GO_IDLE_STATE, until it is
+       powered down. */
+    if (fState == SD_STATE_INA) {
+        return 0;
+    }
+    BeginCommand();
     if (fAppCmd) {
         int len = AppCommand(cmd, response);
         fAppCmd = false;
@@ -362,17 +356,18 @@ int SDCard::Command(const SDCommand &cmd, uint8_t *response)
 }
 
 
+/* The states each command may be taken in follow the Physical Layer
+   Simplified Specification 3.01, Table 4-29; a command outside them is
+   illegal. A command naming another card's address is not this card's to
+   answer, which is not an error either. */
 int SDCard::NormalCommand(const SDCommand &cmd, uint8_t *response)
 {
+    bool addressed = cmd.arg >> 16 == fRca;
+
     switch (cmd.index) {
     case SD_CMD_GO_IDLE_STATE:
         Reset();
         return 0; /* answered by silence */
-
-    case MMC_CMD_SEND_OP_COND:
-        /* An MMC command. An SD card must not answer it, which is exactly
-           how a host tells the two apart. */
-        return -1;
 
     case SD_CMD_ALL_SEND_CID:
         if (fState != SD_STATE_READY) {
@@ -403,12 +398,10 @@ int SDCard::NormalCommand(const SDCommand &cmd, uint8_t *response)
     }
 
     case SD_CMD_SET_DSR:
+        if (fState != SD_STATE_STBY) {
+            return Illegal();
+        }
         return 0;
-
-    case SDIO_CMD_SEND_OP_COND:
-        /* A memory card has no I/O functions, and says so by not answering
-           at all. */
-        return -1;
 
     case SD_CMD_SWITCH_FUNC:
         if (fState != SD_STATE_TRAN) {
@@ -419,66 +412,80 @@ int SDCard::NormalCommand(const SDCommand &cmd, uint8_t *response)
         BuildR1(response);
         return SD_RESPONSE_SHORT;
 
-    case SD_CMD_SELECT_CARD: {
-        uint32_t rca = cmd.arg >> 16;
-        if (rca == fRca && rca != 0) {
-            if (fState == SD_STATE_STBY) {
-                fState = SD_STATE_TRAN;
-            }
-        } else if (fState == SD_STATE_TRAN || fState == SD_STATE_DATA) {
-            /* Addressing another card deselects this one. */
-            EndDataTransfer();
-            fState = SD_STATE_STBY;
+    case SD_CMD_SELECT_CARD:
+        if (fState != SD_STATE_STBY && fState != SD_STATE_TRAN &&
+            fState != SD_STATE_DATA) {
+            return Illegal();
         }
-        BuildR1(response);
-        return SD_RESPONSE_SHORT;
-    }
+        if (addressed && fRca != 0) {
+            if (fState != SD_STATE_STBY) {
+                return Illegal();
+            }
+            fState = SD_STATE_TRAN;
+            BuildR1(response);
+            return SD_RESPONSE_SHORT;
+        }
+        /* Addressing another card, or none, deselects this one, which only
+           the selected card answers. */
+        HaltDataTransfer();
+        fState = SD_STATE_STBY;
+        return 0;
 
     case SD_CMD_SEND_IF_COND:
+        if (fState != SD_STATE_IDLE) {
+            return Illegal();
+        }
         /* The host names the voltage it can supply and a pattern to echo;
            a card that cannot work at that voltage answers nothing. */
         if (get_bits(cmd.arg, 8, 4) != 1) {
-            return -1;
+            return 0;
         }
         fIfCondSeen = true;
         BuildShort(response, (1u << 8) | (cmd.arg & 0xff));
         return SD_RESPONSE_SHORT;
 
     case SD_CMD_SEND_CSD:
-        if (cmd.arg >> 16 != fRca) {
-            return -1;
-        }
-        BuildLong(response, fCsd);
-        return SD_RESPONSE_LONG;
-
     case SD_CMD_SEND_CID:
-        if (cmd.arg >> 16 != fRca) {
-            return -1;
+        if (fState != SD_STATE_STBY) {
+            return Illegal();
         }
-        BuildLong(response, fCid);
+        if (!addressed) {
+            return 0;
+        }
+        BuildLong(response, cmd.index == SD_CMD_SEND_CSD ? fCsd : fCid);
         return SD_RESPONSE_LONG;
 
     case SD_CMD_STOP_TRANSMISSION:
-        StopTransfer();
+        if (!StopCommand()) {
+            return Illegal();
+        }
         BuildR1(response);
         return SD_RESPONSE_SHORT;
 
     case SD_CMD_SEND_STATUS:
-        if (cmd.arg >> 16 != fRca) {
-            return -1;
+        if (fState < SD_STATE_STBY) {
+            return Illegal();
+        }
+        if (!addressed) {
+            return 0;
         }
         BuildR1(response);
         return SD_RESPONSE_SHORT;
 
     case SD_CMD_GO_INACTIVE_STATE:
-        if (cmd.arg >> 16 == fRca) {
+        if (fState < SD_STATE_STBY) {
+            return Illegal();
+        }
+        if (addressed) {
             StopTransfer();
-            fState = SD_STATE_IDLE;
-            fRca = 0;
+            fState = SD_STATE_INA;
         }
         return 0;
 
     case SD_CMD_SET_BLOCKLEN:
+        if (fState != SD_STATE_TRAN) {
+            return Illegal();
+        }
         /* The CSD says the block length is 512 bytes and that partial blocks
            are not offered, so that is the only length the card takes. */
         if (cmd.arg != SD_BLOCK_SIZE) {
@@ -499,19 +506,29 @@ int SDCard::NormalCommand(const SDCommand &cmd, uint8_t *response)
         return ReadWrite(cmd, response, true, true);
 
     case SD_CMD_SET_BLOCK_COUNT:
-        fNextBlockCount = cmd.arg & 0xffff;
+        if (fState != SD_STATE_TRAN) {
+            return Illegal();
+        }
+        /* All 32 bits are the count on SD; the reliable write flag in the
+           top bit is an MMC invention. */
+        fNextBlockCount = cmd.arg;
         BuildR1(response);
         return SD_RESPONSE_SHORT;
 
     case SD_CMD_APP_CMD:
-        if (cmd.arg >> 16 != fRca) {
+        if (fState == SD_STATE_READY || fState == SD_STATE_IDENT) {
             return Illegal();
+        }
+        if (!addressed) {
+            return 0;
         }
         fAppCmd = true;
         BuildR1(response);
         return SD_RESPONSE_SHORT;
 
     default:
+        /* MMC's SEND_OP_COND and the SDIO commands among them: a card that
+           does not answer them is how a host tells the kinds apart. */
         return Illegal();
     }
 }
@@ -521,6 +538,9 @@ int SDCard::AppCommand(const SDCommand &cmd, uint8_t *response)
 {
     switch (cmd.index) {
     case SD_ACMD_SET_BUS_WIDTH:
+        if (fState != SD_STATE_TRAN) {
+            return Illegal();
+        }
         fBusWidth = (cmd.arg & 3) == 2 ? 4 : 1;
         BuildR1(response);
         return SD_RESPONSE_SHORT;
@@ -538,31 +558,40 @@ int SDCard::AppCommand(const SDCommand &cmd, uint8_t *response)
         if (fState != SD_STATE_TRAN) {
             return Illegal();
         }
-        /* Nothing here ever fails a block part way through, so every block
-           of the last write was programmed. */
-        memset(fRegData, 0, 4);
+        /* The blocks of the last write that were programmed. */
+        BuildShort(fRegData, fWrittenBlocks);
         StartRegisterRead(4);
         BuildR1(response);
         return SD_RESPONSE_SHORT;
 
     case SD_ACMD_SET_WR_BLK_ERASE_COUNT:
     case SD_ACMD_SET_CLR_CARD_DETECT:
+        if (fState != SD_STATE_TRAN) {
+            return Illegal();
+        }
         BuildR1(response);
         return SD_RESPONSE_SHORT;
 
     case SD_ACMD_SD_SEND_OP_COND: {
-        uint32_t ocr = SD_OCR_VOLTAGE_WINDOW;
-        /* A high capacity card only says so to a host that introduced itself
-           with SEND_IF_COND; one that did not is a version 1 host, which
-           could not address the card anyway. */
-        if (fHighCapacity && fIfCondSeen) {
-            ocr |= SD_OCR_CCS;
+        if (fState != SD_STATE_IDLE) {
+            return Illegal();
         }
-        /* There is nothing to power up, so the card is never busy. */
-        ocr |= SD_OCR_POWER_UP_DONE;
-        if ((cmd.arg & SD_OCR_VOLTAGE_WINDOW) != 0 &&
-            fState == SD_STATE_IDLE) {
+        if (!CheckVoltage(cmd.arg)) {
+            return 0;
+        }
+        uint32_t ocr = SD_OCR_VOLTAGE_WINDOW;
+        bool query = get_bits(cmd.arg, 0, 24) == 0;
+        /* A high capacity card works only for a host that introduced itself
+           with SEND_IF_COND and says it supports one; for any other host it
+           stays busy for ever. */
+        bool host_hc = fIfCondSeen && (cmd.arg & SD_OCR_CCS) != 0;
+        if (!query && (!fHighCapacity || host_hc)) {
+            /* There is nothing to power up, so the card is ready at once. */
             fState = SD_STATE_READY;
+            ocr |= SD_OCR_POWER_UP_DONE;
+            if (fHighCapacity) {
+                ocr |= SD_OCR_CCS;
+            }
         }
         BuildShort(response, ocr);
         return SD_RESPONSE_SHORT;

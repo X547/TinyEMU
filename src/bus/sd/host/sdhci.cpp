@@ -887,7 +887,7 @@ bool SDHCIDevice::SendAutoCmd23()
        features cannot be used together. */
     cmd.index = SD_CMD_SET_BLOCK_COUNT;
     cmd.arg = fSdmaAddr;
-    if (fCard->Command(cmd, resp) < 0) {
+    if (fCard->Command(cmd, resp) != SD_RESPONSE_SHORT) {
         fAutoCmdErrStatus |= SDHCI_AUTOCMD_TIMEOUT;
         RaiseError(SDHCI_ERR_AUTO_CMD);
         return false;
@@ -904,7 +904,7 @@ void SDHCIDevice::SendAutoCmd12()
     cmd.index = SD_CMD_STOP_TRANSMISSION;
     cmd.arg = 0;
     int len = fCard->Command(cmd, resp);
-    if (len < 0) {
+    if (len == 0) {
         fAutoCmdErrStatus |= SDHCI_AUTOCMD_TIMEOUT;
         RaiseError(SDHCI_ERR_AUTO_CMD);
         return;
@@ -923,34 +923,36 @@ void SDHCIDevice::SendCommand()
     uint8_t resp[SD_RESPONSE_LONG];
 
     uint8_t index = get_bits(fCommand, SDHCI_CMD_INDEX_SHIFT, 6);
+    uint32_t resp_type = fCommand & SDHCI_CMD_RESP_MASK;
     bool data_present = (fCommand & SDHCI_CMD_DATA) != 0;
     bool is_abort = (fCommand & SDHCI_CMD_TYPE_MASK) == SDHCI_CMD_TYPE_ABORT ||
                     index == SD_CMD_STOP_TRANSMISSION;
 
     fAutoCmdErrStatus = 0;
 
-    if (fCard == nullptr) {
-        /* An empty slot answers nothing, which is exactly what a driver
-           probing for a card is waiting to find out. */
-        RaiseError(SDHCI_ERR_CMD_TIMEOUT);
-        return;
+    /* An empty slot answers nothing, which is exactly what a driver probing
+       for a card is waiting to find out. */
+    int len = 0;
+    if (fCard != nullptr) {
+        if (data_present && (fTransferMode & SDHCI_TRNS_AUTO_MASK) ==
+                                SDHCI_TRNS_AUTO_CMD23) {
+            if (!SendAutoCmd23()) {
+                return;
+            }
+        }
+        cmd.index = index;
+        cmd.arg = fArgument;
+        len = fCard->Command(cmd, resp);
     }
 
-    if (data_present && (fTransferMode & SDHCI_TRNS_AUTO_MASK) ==
-                            SDHCI_TRNS_AUTO_CMD23) {
-        if (!SendAutoCmd23()) {
+    /* Silence is a timeout only for a command that expects an answer. */
+    if (resp_type != SDHCI_CMD_RESP_NONE) {
+        if (len == 0) {
+            RaiseError(SDHCI_ERR_CMD_TIMEOUT);
             return;
         }
+        StoreResponse(resp, len);
     }
-
-    cmd.index = index;
-    cmd.arg = fArgument;
-    int len = fCard->Command(cmd, resp);
-    if (len < 0) {
-        RaiseError(SDHCI_ERR_CMD_TIMEOUT);
-        return;
-    }
-    StoreResponse(resp, len);
     RaiseNormal(SDHCI_INT_CMD_COMPLETE);
 
     if (is_abort) {
@@ -958,10 +960,15 @@ void SDHCIDevice::SendCommand()
         return;
     }
     if (data_present) {
-        TransferStart();
+        /* A card that sent nothing back sends no data either. */
+        if (len == 0) {
+            RaiseError(SDHCI_ERR_DATA_TIMEOUT);
+        } else {
+            TransferStart();
+        }
         return;
     }
-    if ((fCommand & SDHCI_CMD_RESP_MASK) == SDHCI_CMD_RESP_BUSY) {
+    if (resp_type == SDHCI_CMD_RESP_BUSY) {
         /* Nothing here holds the data line down, so the busy the response
            promised is over before the driver can look. */
         RaiseNormal(SDHCI_INT_XFER_COMPLETE);

@@ -54,13 +54,15 @@
 /* Extended CSD byte offsets, as the specification numbers them. Everything
    from 192 up is read only; below that is the modes segment, which SWITCH
    writes one byte of at a time. */
-#define MMC_EXT_CSD_MODES_END        192
+#define MMC_EXT_CSD_CACHE_CTRL       33
+#define MMC_EXT_CSD_POWER_OFF_NOTIFY 34
 #define MMC_EXT_CSD_PARTITION_SUPPORT 160
 #define MMC_EXT_CSD_ERASE_GROUP_DEF  175
 #define MMC_EXT_CSD_PART_CONFIG      179
 #define MMC_EXT_CSD_ERASED_MEM_CONT  181
 #define MMC_EXT_CSD_BUS_WIDTH        183
 #define MMC_EXT_CSD_HS_TIMING        185
+#define MMC_EXT_CSD_POWER_CLASS      187
 #define MMC_EXT_CSD_REV              192
 #define MMC_EXT_CSD_STRUCTURE        194
 #define MMC_EXT_CSD_CARD_TYPE        196
@@ -103,7 +105,6 @@ private:
     void BuildCsd();
     void BuildExtCsd();
 
-    int Illegal();
     int Switch(const SDCommand &cmd, uint8_t *response);
     int ReadWrite(const SDCommand &cmd, uint8_t *response, bool is_write,
                   bool multiple);
@@ -258,12 +259,34 @@ void MMCCard::BuildExtCsd()
 
 //#pragma mark - commands
 
-int MMCCard::Illegal()
+/* Whether 'value' is one the device takes in the modes segment byte 'index'.
+   Only the fields a device without boot partitions, cache, DDR or HS200
+   has are writable, and each only with the values its capabilities in the
+   extended CSD allow; anything else is a SWITCH_ERROR. */
+static bool mmc_switch_value_ok(uint32_t index, uint8_t value)
 {
-    /* A device does not answer a command it may not take; the next response
-       reports it. */
-    Fail(SD_STATUS_ILLEGAL_COMMAND);
-    return -1;
+    switch (index) {
+    case MMC_EXT_CSD_CACHE_CTRL:
+        return value == 0; /* CACHE_SIZE is 0 */
+    case MMC_EXT_CSD_POWER_OFF_NOTIFY:
+        return value <= 3;
+    case MMC_EXT_CSD_ERASE_GROUP_DEF:
+        return value <= 1;
+    case MMC_EXT_CSD_PART_CONFIG: {
+        /* Only the user area can be accessed or booted from. */
+        uint32_t boot = get_bits(value, 3, 3);
+        return get_bits(value, 0, 3) == 0 && (boot == 0 || boot == 7) &&
+               get_bit(value, 7) == 0;
+    }
+    case MMC_EXT_CSD_BUS_WIDTH:
+        return value <= 2; /* 1, 4 or 8 bits, single data rate */
+    case MMC_EXT_CSD_HS_TIMING:
+        return value <= 1; /* backward compatible or high speed */
+    case MMC_EXT_CSD_POWER_CLASS:
+        return value <= 15;
+    default:
+        return false;
+    }
 }
 
 
@@ -276,38 +299,42 @@ int MMCCard::Switch(const SDCommand &cmd, uint8_t *response)
     if (fState != SD_STATE_TRAN) {
         return Illegal();
     }
+
+    /* The response goes out before the switch is carried out, so a switch
+       that fails says so in the response to the next command, which is the
+       SEND_STATUS a driver polls with. */
+    BuildR1(response);
+
     if (access == MMC_SWITCH_CMD_SET) {
-        /* Only the standard command set exists here, and selecting it is a
-           request to change nothing. */
-        BuildR1(response);
-        return SD_RESPONSE_SHORT;
-    }
-    if (index >= MMC_EXT_CSD_MODES_END) {
-        /* Everything from there up is read only, and a device tells a driver
-           that it refused the switch rather than pretending. */
-        Fail(MMC_STATUS_SWITCH_ERROR);
-        BuildR1(response);
+        /* Only the standard command set exists here. */
+        if (get_bits(cmd.arg, 0, 3) != 0) {
+            Fail(MMC_STATUS_SWITCH_ERROR);
+        }
         return SD_RESPONSE_SHORT;
     }
 
+    uint8_t old = fExtCsd[index];
     switch (access) {
     case MMC_SWITCH_SET_BITS:
-        fExtCsd[index] |= value;
+        value = old | value;
         break;
     case MMC_SWITCH_CLEAR_BITS:
-        fExtCsd[index] &= (uint8_t)~value;
+        value = old & (uint8_t)~value;
         break;
     default:
-        fExtCsd[index] = value;
         break;
     }
+    if (!mmc_switch_value_ok(index, value)) {
+        Fail(MMC_STATUS_SWITCH_ERROR);
+        return SD_RESPONSE_SHORT;
+    }
+    fExtCsd[index] = value;
 
     if (index == MMC_EXT_CSD_HS_TIMING) {
         /* The CSD reports the rate the device now runs at. */
-        fHighSpeed = fExtCsd[index] != 0;
+        fHighSpeed = value != 0;
         BuildCsd();
     }
-    BuildR1(response);
     return SD_RESPONSE_SHORT;
 }
 
@@ -339,14 +366,37 @@ int MMCCard::ReadWrite(const SDCommand &cmd, uint8_t *response, bool is_write,
 }
 
 
+/* The states each command may be taken in follow the device state
+   transitions of JESD84-B451; a command outside them is illegal, and one
+   naming another device's address is not this one's to answer. */
 int MMCCard::Command(const SDCommand &cmd, uint8_t *response)
 {
+    bool addressed = cmd.arg >> 16 == fRca;
+
+    if (fState == SD_STATE_INA) {
+        return 0;
+    }
+    BeginCommand();
+
+    /* Asleep, the device takes nothing but a reset and the command that
+       wakes it. */
+    if (fState == MMC_STATE_SLP && cmd.index != SD_CMD_GO_IDLE_STATE &&
+        cmd.index != SDIO_CMD_SEND_OP_COND) {
+        return Illegal();
+    }
+
     switch (cmd.index) {
     case SD_CMD_GO_IDLE_STATE:
         Reset();
         return 0; /* answered by silence */
 
     case MMC_CMD_SEND_OP_COND: {
+        if (fState != SD_STATE_IDLE) {
+            return Illegal();
+        }
+        if (!CheckVoltage(cmd.arg)) {
+            return 0;
+        }
         uint32_t ocr = SD_OCR_VOLTAGE_WINDOW;
         if (fHighCapacity) {
             ocr |= MMC_OCR_SECTOR_MODE;
@@ -354,11 +404,8 @@ int MMCCard::Command(const SDCommand &cmd, uint8_t *response)
         /* An argument of zero is the host asking what the device wants
            rather than offering it; only an offer moves the state on, and
            until then the device reports itself still powering up. */
-        if ((cmd.arg & SD_OCR_VOLTAGE_WINDOW) != 0 &&
-            fState == SD_STATE_IDLE) {
+        if (get_bits(cmd.arg, 0, 24) != 0) {
             fState = SD_STATE_READY;
-        }
-        if (fState != SD_STATE_IDLE) {
             ocr |= SD_OCR_POWER_UP_DONE;
         }
         BuildShort(response, ocr);
@@ -385,37 +432,45 @@ int MMCCard::Command(const SDCommand &cmd, uint8_t *response)
         return SD_RESPONSE_SHORT;
 
     case SD_CMD_SET_DSR:
+        if (fState != SD_STATE_STBY) {
+            return Illegal();
+        }
         return 0;
 
-    case SDIO_CMD_SEND_OP_COND:
-        /* On this bus that number is SLEEP_AWAKE, which only means anything
-           to a device that has been given an address. Answering nothing
-           otherwise is what makes a host probing for an SDIO card find
-           none. */
-        if (fState != SD_STATE_STBY || cmd.arg >> 16 != fRca) {
-            return -1;
+    case SDIO_CMD_SEND_OP_COND: {
+        /* On this bus that number is SLEEP_AWAKE: bit 15 sends an addressed
+           device in standby to sleep, and clear wakes it again. */
+        bool sleep = get_bit(cmd.arg, 15) != 0;
+        if (fState != (sleep ? SD_STATE_STBY : MMC_STATE_SLP)) {
+            return Illegal();
         }
-        /* There is nothing to power down, so it is accepted and does
-           nothing. */
+        if (!addressed) {
+            return 0;
+        }
         BuildR1(response);
+        fState = sleep ? MMC_STATE_SLP : SD_STATE_STBY;
         return SD_RESPONSE_SHORT;
+    }
 
     case SD_CMD_SWITCH_FUNC:
         return Switch(cmd, response);
 
-    case SD_CMD_SELECT_CARD: {
-        uint32_t rca = cmd.arg >> 16;
-        if (rca == fRca && rca != 0) {
-            if (fState == SD_STATE_STBY) {
-                fState = SD_STATE_TRAN;
-            }
-        } else if (fState == SD_STATE_TRAN || fState == SD_STATE_DATA) {
-            EndDataTransfer();
-            fState = SD_STATE_STBY;
+    case SD_CMD_SELECT_CARD:
+        if (fState != SD_STATE_STBY && fState != SD_STATE_TRAN &&
+            fState != SD_STATE_DATA) {
+            return Illegal();
         }
-        BuildR1(response);
-        return SD_RESPONSE_SHORT;
-    }
+        if (addressed && fRca != 0) {
+            if (fState != SD_STATE_STBY) {
+                return Illegal();
+            }
+            fState = SD_STATE_TRAN;
+            BuildR1(response);
+            return SD_RESPONSE_SHORT;
+        }
+        HaltDataTransfer();
+        fState = SD_STATE_STBY;
+        return 0;
 
     case SD_CMD_SEND_IF_COND:
         /* On this bus that number is SEND_EXT_CSD, which hands the register
@@ -429,40 +484,47 @@ int MMCCard::Command(const SDCommand &cmd, uint8_t *response)
         return SD_RESPONSE_SHORT;
 
     case SD_CMD_SEND_CSD:
-        if (cmd.arg >> 16 != fRca) {
-            return -1;
-        }
-        BuildLong(response, fCsd);
-        return SD_RESPONSE_LONG;
-
     case SD_CMD_SEND_CID:
-        if (cmd.arg >> 16 != fRca) {
-            return -1;
+        if (fState != SD_STATE_STBY) {
+            return Illegal();
         }
-        BuildLong(response, fCid);
+        if (!addressed) {
+            return 0;
+        }
+        BuildLong(response, cmd.index == SD_CMD_SEND_CSD ? fCsd : fCid);
         return SD_RESPONSE_LONG;
 
     case SD_CMD_STOP_TRANSMISSION:
-        StopTransfer();
+        if (!StopCommand()) {
+            return Illegal();
+        }
         BuildR1(response);
         return SD_RESPONSE_SHORT;
 
     case SD_CMD_SEND_STATUS:
-        if (cmd.arg >> 16 != fRca) {
-            return -1;
+        if (fState < SD_STATE_STBY) {
+            return Illegal();
+        }
+        if (!addressed) {
+            return 0;
         }
         BuildR1(response);
         return SD_RESPONSE_SHORT;
 
     case SD_CMD_GO_INACTIVE_STATE:
-        if (cmd.arg >> 16 == fRca) {
+        if (fState < SD_STATE_STBY) {
+            return Illegal();
+        }
+        if (addressed) {
             StopTransfer();
-            fState = SD_STATE_IDLE;
-            fRca = 0;
+            fState = SD_STATE_INA;
         }
         return 0;
 
     case SD_CMD_SET_BLOCKLEN:
+        if (fState != SD_STATE_TRAN) {
+            return Illegal();
+        }
         if (cmd.arg != SD_BLOCK_SIZE) {
             Fail(SD_STATUS_BLOCK_LEN_ERROR);
         } else {
@@ -481,6 +543,11 @@ int MMCCard::Command(const SDCommand &cmd, uint8_t *response)
         return ReadWrite(cmd, response, true, true);
 
     case SD_CMD_SET_BLOCK_COUNT:
+        if (fState != SD_STATE_TRAN) {
+            return Illegal();
+        }
+        /* The count is the low sixteen bits; above them are the reliable
+           write and packed command flags, which change nothing here. */
         fNextBlockCount = cmd.arg & 0xffff;
         BuildR1(response);
         return SD_RESPONSE_SHORT;

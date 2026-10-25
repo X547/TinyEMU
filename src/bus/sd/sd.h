@@ -156,7 +156,8 @@ class BlockCompletion;
 
 /* The card state machine, as the current state field of a response reports
    it. A memory card here never reaches disconnect, which only a card that was
-   deselected mid-program can be in. */
+   deselected mid-program can be in. Inactive is never reported, because a
+   card in it answers nothing until it is powered down. */
 typedef enum {
     SD_STATE_IDLE = 0,
     SD_STATE_READY = 1,
@@ -167,6 +168,8 @@ typedef enum {
     SD_STATE_RCV = 6,
     SD_STATE_PRG = 7,
     SD_STATE_DIS = 8,
+    MMC_STATE_SLP = 10,
+    SD_STATE_INA = 15,
 } SDCardStateEnum;
 
 
@@ -275,10 +278,10 @@ public:
 
     /* Execute one command. Writes the response bytes, most significant
        first, into 'response' and returns SD_RESPONSE_SHORT or
-       SD_RESPONSE_LONG; 0 for a command that is answered by silence, and -1
-       when the card does not answer at all, which is what a host reads as a
-       command timeout and is how it discovers that a card is not there or
-       does not speak this protocol. */
+       SD_RESPONSE_LONG, or 0 when the card does not answer. Whether silence
+       is a timeout is the host's business: it is one when the host was told
+       to expect a response, which is how it discovers that a card is not
+       there or does not speak this protocol. */
     virtual int Command(const SDCommand &cmd, uint8_t *response) = 0;
 
     virtual SDDataDirEnum DataDir() const = 0;
@@ -292,9 +295,10 @@ public:
     virtual SDXferStatusEnum WriteBlock(const uint8_t *buf, uint32_t len,
                                         SDDataCompletion *completion) = 0;
 
-    /* Abandon a transfer in progress: the host sent CMD12, or reset the data
-       line. A block already with the block back end cannot be recalled, so
-       the card disowns it instead. */
+    /* The host gave up the transfer on its side: it reset its data line or
+       hit an error. A block already with the block back end cannot be
+       recalled, so the card disowns it instead. The card stays in the data
+       or receive state until STOP_TRANSMISSION, as a real one does. */
     virtual void StopTransfer() = 0;
 };
 
@@ -323,6 +327,10 @@ private:
 
 protected:
     SDCardStateEnum fState = SD_STATE_IDLE;
+    /* The state the card was in when the command now running arrived, which
+       is what its response reports; a change it causes shows in the response
+       to the next one. */
+    SDCardStateEnum fRxState = SD_STATE_IDLE;
     uint32_t fRca = 0;
     /* The sticky error bits a failed command left behind, reported with the
        next response and cleared by it. */
@@ -344,6 +352,8 @@ protected:
     /* Blocks left of a length the host fixed with CMD23, or 0 when the
        transfer runs until it is stopped. */
     uint32_t fDataBlocksLeft = 0;
+    /* Blocks the last write programmed, which SD's ACMD22 reports. */
+    uint32_t fWrittenBlocks = 0;
 
     /* A reply the card produces from a register rather than from the medium:
        the switch status, the SD status, the SCR, the extended CSD. It travels
@@ -382,6 +392,26 @@ protected:
     /* Give up whatever transfer is running and go back to the transfer
        state, as the end of a transfer and STOP_TRANSMISSION both do. */
     void EndDataTransfer();
+    /* Stop moving data but stay in the data or receive state, as a card
+       that hit an error does until the host sends STOP_TRANSMISSION. */
+    void HaltDataTransfer();
+    /* STOP_TRANSMISSION, legal only while data is moving. Returns false
+       for a card in any other state. */
+    bool StopCommand();
+
+    /* Record the state a command arrived in; every Command() starts so. */
+    void BeginCommand() {fRxState = fState;}
+    /* A command the card may not take in this state: unanswered, and
+       reported by the next response. */
+    int Illegal()
+    {
+        Fail(SD_STATUS_ILLEGAL_COMMAND);
+        return 0;
+    }
+    /* The voltage check SEND_OP_COND makes. Returns false and leaves the
+       card inactive for an offer that does not overlap its window; a zero
+       window is a query and passes. */
+    bool CheckVoltage(uint32_t arg);
 
     /* Account for one block having been moved, ending the transfer when the
        count the host fixed runs out or the medium does. */

@@ -101,6 +101,7 @@ void SDMemoryCard::Reset()
     fBlockDev->Cancel(fCompletion.get());
     fPendingCompletion = nullptr;
     fState = SD_STATE_IDLE;
+    fRxState = SD_STATE_IDLE;
     fRca = 0;
     fStatus = 0;
     fAppCmd = false;
@@ -109,6 +110,7 @@ void SDMemoryCard::Reset()
     fDataSector = 0;
     fDataMultiple = false;
     fDataBlocksLeft = 0;
+    fWrittenBlocks = 0;
     fRegDataLen = 0;
 }
 
@@ -138,7 +140,7 @@ uint32_t SDMemoryCard::CurrentStatus() const
 {
     uint32_t status = fStatus;
 
-    status |= (uint32_t)fState << SD_STATUS_CURRENT_STATE_SHIFT;
+    status |= (uint32_t)fRxState << SD_STATUS_CURRENT_STATE_SHIFT;
     /* Nothing here ever needs the host to wait for a program cycle, so the
        card is always ready for the next block. */
     status |= SD_STATUS_READY_FOR_DATA;
@@ -172,6 +174,9 @@ void SDMemoryCard::StartDataTransfer(SDDataDirEnum dir, uint64_t sector,
     fDataSector = sector;
     fDataMultiple = multiple;
     fRegDataLen = 0;
+    if (dir == SD_DATA_WRITE) {
+        fWrittenBlocks = 0;
+    }
     fState = dir == SD_DATA_READ ? SD_STATE_DATA : SD_STATE_RCV;
 }
 
@@ -202,23 +207,50 @@ void SDMemoryCard::EndDataTransfer()
 }
 
 
+void SDMemoryCard::HaltDataTransfer()
+{
+    fDataDir = SD_DATA_NONE;
+    fDataMultiple = false;
+    fDataBlocksLeft = 0;
+    fRegDataLen = 0;
+}
+
+
+bool SDMemoryCard::StopCommand()
+{
+    if (fState != SD_STATE_DATA && fState != SD_STATE_RCV) {
+        return false;
+    }
+    fBlockDev->Cancel(fCompletion.get());
+    fPendingCompletion = nullptr;
+    EndDataTransfer();
+    return true;
+}
+
+
+bool SDMemoryCard::CheckVoltage(uint32_t arg)
+{
+    if (get_bits(arg, 0, 24) != 0 && (arg & SD_OCR_VOLTAGE_WINDOW) == 0) {
+        fState = SD_STATE_INA;
+        return false;
+    }
+    return true;
+}
+
+
 void SDMemoryCard::AdvanceBlock()
 {
+    if (fDataDir == SD_DATA_WRITE) {
+        fWrittenBlocks++;
+    }
     fDataSector++;
     if (!fDataMultiple) {
         EndDataTransfer();
         return;
     }
     /* A count the host fixed with SET_BLOCK_COUNT ends the transfer by
-       itself; without one it runs until STOP_TRANSMISSION, or until it walks
-       off the end of the medium, which is an error the next response
-       reports. */
+       itself; without one it runs until STOP_TRANSMISSION. */
     if (fDataBlocksLeft > 0 && --fDataBlocksLeft == 0) {
-        EndDataTransfer();
-        return;
-    }
-    if (fDataSector >= fBlockCount) {
-        Fail(SD_STATUS_OUT_OF_RANGE);
         EndDataTransfer();
     }
 }
@@ -273,7 +305,15 @@ SDXferStatusEnum SDMemoryCard::ReadBlock(uint8_t *buf, uint32_t len,
 
     if (len != SD_BLOCK_SIZE) {
         Fail(SD_STATUS_BLOCK_LEN_ERROR);
-        EndDataTransfer();
+        HaltDataTransfer();
+        return SD_XFER_ERROR;
+    }
+    if (fDataSector >= fBlockCount) {
+        /* An open ended transfer that walks off the end of the medium. The
+           card stops sending and waits for STOP_TRANSMISSION, whose response
+           reports it. */
+        Fail(SD_STATUS_OUT_OF_RANGE);
+        HaltDataTransfer();
         return SD_XFER_ERROR;
     }
 
@@ -286,7 +326,7 @@ SDXferStatusEnum SDMemoryCard::ReadBlock(uint8_t *buf, uint32_t len,
     fPendingCompletion = nullptr;
     if (ret < 0) {
         Fail(SD_STATUS_CARD_ECC_FAILED);
-        EndDataTransfer();
+        HaltDataTransfer();
         return SD_XFER_ERROR;
     }
     AdvanceBlock();
@@ -302,12 +342,17 @@ SDXferStatusEnum SDMemoryCard::WriteBlock(const uint8_t *buf, uint32_t len,
     }
     if (fReadOnly) {
         Fail(SD_STATUS_WP_VIOLATION);
-        EndDataTransfer();
+        HaltDataTransfer();
         return SD_XFER_ERROR;
     }
     if (len != SD_BLOCK_SIZE) {
         Fail(SD_STATUS_BLOCK_LEN_ERROR);
-        EndDataTransfer();
+        HaltDataTransfer();
+        return SD_XFER_ERROR;
+    }
+    if (fDataSector >= fBlockCount) {
+        Fail(SD_STATUS_OUT_OF_RANGE);
+        HaltDataTransfer();
         return SD_XFER_ERROR;
     }
 
@@ -320,7 +365,7 @@ SDXferStatusEnum SDMemoryCard::WriteBlock(const uint8_t *buf, uint32_t len,
     fPendingCompletion = nullptr;
     if (ret < 0) {
         Fail(SD_STATUS_CC_ERROR);
-        EndDataTransfer();
+        HaltDataTransfer();
         return SD_XFER_ERROR;
     }
     AdvanceBlock();
@@ -336,7 +381,7 @@ void SDMemoryCard::BlockDone(int ret)
 
     if (ret < 0) {
         Fail(fPendingIsRead ? SD_STATUS_CARD_ECC_FAILED : SD_STATUS_CC_ERROR);
-        EndDataTransfer();
+        HaltDataTransfer();
     } else {
         AdvanceBlock();
     }
@@ -348,7 +393,7 @@ void SDMemoryCard::StopTransfer()
 {
     fBlockDev->Cancel(fCompletion.get());
     fPendingCompletion = nullptr;
-    EndDataTransfer();
+    HaltDataTransfer();
 }
 
 
