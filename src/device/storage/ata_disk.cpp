@@ -227,7 +227,7 @@ void ATADiskDevice::BlockDone(int ret)
         DmaReadStaged(ret);
         break;
     case InFlight::DmaWrite:
-        DmaEnd(ret >= 0, ATA_ERR_ECC);
+        DmaEnd(ret >= 0, ATA_ERR_ABRT);
         break;
     case InFlight::None:
         break;
@@ -391,7 +391,10 @@ void ATADiskDevice::PioReadFilled(int ret)
     int n = fIoSectors;
 
     if (ret < 0) {
-        AbortCommand();
+        /* the data could not be had: uncorrectable */
+        fStatus = ATA_STAT_READY | ATA_STAT_ERR;
+        fError = ATA_ERR_ECC;
+        fOnEnd = OnBufferEnd::Stop;
         RaiseIrq();
         return;
     }
@@ -465,8 +468,9 @@ void ATADiskDevice::PioWriteFlushed(int ret)
     int n = fIoSectors;
 
     if (ret < 0) {
+        /* no bit but ABRT is defined for a write that failed */
         fStatus = ATA_STAT_READY | ATA_STAT_ERR;
-        fError = ATA_ERR_ECC;
+        fError = ATA_ERR_ABRT;
         fOnEnd = OnBufferEnd::Stop;
         RaiseIrq();
         return;
@@ -548,7 +552,7 @@ bool ATADiskDevice::DmaStart(bool to_memory)
 void ATADiskDevice::DmaReadStaged(int ret)
 {
     if (ret < 0) {
-        DmaEnd(false, ATA_ERR_ABRT);
+        DmaEnd(false, ATA_ERR_ECC);
         return;
     }
     fStatus = ATA_STAT_READY | ATA_STAT_SEEK | ATA_STAT_DRQ | ATA_STAT_BUSY;
