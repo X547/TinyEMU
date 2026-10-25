@@ -30,8 +30,29 @@
 #include "host_ethernet.h"
 #include "host_fs.h"
 
+/* A disk a configuration names by "driver" instead of a "file", which the
+   class opens from the device's other properties. */
+class BlockDriverClass {
+private:
+    const char *fName;
+    const BlockDriverClass *fNext = nullptr;
+
+public:
+    explicit BlockDriverClass(const char *name);
+    virtual ~BlockDriverClass() = default;
+
+    const char *Name() const {return fName;}
+    static const BlockDriverClass *Find(const char *name);
+
+    /* Reports and returns nullptr on failure. */
+    virtual std::unique_ptr<HostBlockDevice> Open(const DeviceConfig &cfg,
+                                                  DeviceContext *ctx,
+                                                  bool read_only) const = 0;
+};
+
 /* The device's "file", relative to the configuration file, opened as a disk
-   image. Reports and returns nullptr on failure. */
+   image, or the disk its "driver" names. Reports and returns nullptr on
+   failure. */
 std::unique_ptr<HostBlockDevice> config_open_block(const DeviceConfig &cfg,
                                                    DeviceContext *ctx,
                                                    bool read_only = false);

@@ -1142,9 +1142,11 @@ public:
             !cfg.GetInt("lun", &lun, -1)) {
             return nullptr;
         }
-        /* Without a file the drive is there with no disc in it. */
+        /* Without a file or a driver the drive is there with no disc in
+           it. */
         std::unique_ptr<HostBlockDevice> bs;
-        if (!json_is_undefined(cfg.Get("file"))) {
+        if (!json_is_undefined(cfg.Get("file")) ||
+            !json_is_undefined(cfg.Get("driver"))) {
             bs = config_open_block(cfg, ctx, true);
             if (bs == nullptr) {
                 return nullptr;

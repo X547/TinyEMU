@@ -30,16 +30,50 @@
 #include "machine.h"
 
 
+static const BlockDriverClass *&block_drivers()
+{
+    static const BlockDriverClass *sFirst = nullptr;
+    return sFirst;
+}
+
+
+BlockDriverClass::BlockDriverClass(const char *name):
+    fName(name)
+{
+    fNext = block_drivers();
+    block_drivers() = this;
+}
+
+
+const BlockDriverClass *BlockDriverClass::Find(const char *name)
+{
+    for (const BlockDriverClass *cls = block_drivers(); cls != nullptr;
+         cls = cls->fNext) {
+        if (strcmp(cls->Name(), name) == 0)
+            return cls;
+    }
+    return nullptr;
+}
+
+
 std::unique_ptr<HostBlockDevice> config_open_block(const DeviceConfig &cfg,
                                                    DeviceContext *ctx,
                                                    bool read_only)
 {
     std::unique_ptr<HostBlockDevice> bs;
-    const char *file;
+    const char *file, *driver;
     char *fname;
 
-    if (!cfg.GetStrOpt("file", &file)) {
+    if (!cfg.GetStrOpt("file", &file) || !cfg.GetStrOpt("driver", &driver)) {
         return nullptr;
+    }
+    if (driver != nullptr) {
+        const BlockDriverClass *cls = BlockDriverClass::Find(driver);
+        if (cls == nullptr) {
+            vm_error("%s: no block driver '%s'\n", cfg.Type(), driver);
+            return nullptr;
+        }
+        return cls->Open(cfg, ctx, read_only);
     }
     if (file == nullptr) {
         vm_error("%s: expecting a 'file' property\n", cfg.Type());
