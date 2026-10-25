@@ -52,19 +52,21 @@ struct VIRTIOConsoleDevice: public VIRTIODevice, public ConsoleTarget {
 int VIRTIOConsoleDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
                                      int write_size)
 {
-    VIRTIODevice *s = this;
-    VIRTIOConsoleDevice *s1 = (VIRTIOConsoleDevice *)s;
-    HostConsole *cs = s1->cs;
-    uint8_t *buf;
+    (void)write_size;
 
     if (queue_idx == 1) {
-        /* send to console */
-        buf = static_cast<uint8_t *>(malloc(read_size));
-        memcpy_from_queue(s, buf, queue_idx, desc_idx, 0, read_size);
-        if (cs != nullptr)
-            cs->WriteData(buf, read_size);
-        free(buf);
-        virtio_consume_desc(s, queue_idx, desc_idx, 0);
+        /* to the console, a piece at a time however long the buffer is */
+        uint8_t buf[4096];
+        int len;
+        for (int pos = 0; pos < read_size; pos += len) {
+            len = min_int(read_size - pos, sizeof(buf));
+            if (memcpy_from_queue(this, buf, queue_idx, desc_idx, pos,
+                                  len) < 0)
+                break;
+            if (cs != nullptr)
+                cs->WriteData(buf, len);
+        }
+        virtio_consume_desc(this, queue_idx, desc_idx, 0);
     }
     return 0;
 }
