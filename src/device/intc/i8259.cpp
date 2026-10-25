@@ -324,10 +324,20 @@ uint32_t PICState::Read(uint32_t offset, int size_log2)
     return ret;
 }
 
+/* An input made level triggered asks for an interrupt while it is high,
+   whatever edge it latched before. */
+static void pic_set_elcr(PICState *s, uint8_t elcr)
+{
+    uint8_t level = elcr & s->elcr_mask;
+    s->irr = (s->irr & ~level) | (s->last_irr & level);
+    s->elcr = level;
+}
+
 void PICState::ElcrWrite(uint32_t offset, uint32_t val, int size_log2)
 {
     PICState *s = this;
-    s->elcr = val & s->elcr_mask;
+    pic_set_elcr(s, val);
+    s->update_target->Update();
 }
 
 uint32_t PICState::ElcrRead(uint32_t offset, int size_log2)
@@ -354,8 +364,9 @@ void I8259Pair::SetElcr(const uint8_t *elcr)
 {
     int i;
     for(i = 0; i < 2; i++) {
-        fPics[i]->elcr = elcr[i] & fPics[i]->elcr_mask;
+        pic_set_elcr(fPics[i].get(), elcr[i]);
     }
+    Update();
 }
 
 /* raise irq to CPU if necessary. must be called every time the active
