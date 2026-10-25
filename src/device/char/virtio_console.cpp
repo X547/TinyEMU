@@ -28,12 +28,20 @@
 #include <assert.h>
 
 #include "cutils.h"
+#include "devices.h"
 #include "virtio.h"
-#include "virtio_priv.h"
 
 
-struct VIRTIOConsoleDevice: public VIRTIODevice, public ConsoleTarget {
+#define VIRTIO_CONSOLE_DEVICE_ID 3
+
+struct VIRTIOConsoleDevice final: public VIRTIODevice, public ConsoleTarget {
+    DeviceContext *ctx;
+    /* null discards the output */
     HostConsole *cs = nullptr;
+
+    VIRTIOConsoleDevice(DeviceContext *ctx);
+
+    bool Realize() override;
 
     int RecvRequest(int queue_idx, int desc_idx, int read_size,
                     int write_size) override;
@@ -108,19 +116,36 @@ void VIRTIOConsoleDevice::Resize(int width, int height)
     virtio_config_change_notify(s);
 }
 
-std::unique_ptr<VIRTIODevice> virtio_console_init(VIRTIOBusDef *bus,
-                                                  HostConsole *cs)
+VIRTIOConsoleDevice::VIRTIOConsoleDevice(DeviceContext *ctx):
+    VIRTIODevice("virtio-console", VIRTIO_CONSOLE_DEVICE_ID,
+                 0x0780 /* communication */, 4, 2),
+    ctx(ctx)
 {
-    auto s = std::make_unique<VIRTIOConsoleDevice>();
-    virtio_init(s.get(), bus, 3, 4, 2);
-    s->device_features = (1 << 0); /* VIRTIO_CONSOLE_F_SIZE */
-    s->queue[0].manual_recv = true;
-    
-    s->cs = cs;
-    return s;
+    device_features = (1 << 0); /* VIRTIO_CONSOLE_F_SIZE */
+    queue[0].manual_recv = true;
 }
 
-ConsoleTarget *virtio_console_target(VIRTIODevice *s)
+bool VIRTIOConsoleDevice::Realize()
 {
-    return static_cast<VIRTIOConsoleDevice *>(s);
+    if (!VIRTIODevice::Realize())
+        return false;
+    cs = ctx->platform->Console();
+    ctx->console_input = this;
+    return true;
 }
+
+
+//#pragma mark - class
+
+class VirtioConsoleClass final: public DeviceClass {
+public:
+    VirtioConsoleClass(): DeviceClass("virtio-console") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        (void)cfg;
+        return new VIRTIOConsoleDevice(ctx);
+    }
+};
+
+static const VirtioConsoleClass sVirtioConsoleClass;

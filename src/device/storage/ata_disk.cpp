@@ -29,7 +29,6 @@
 #include "ata.h"
 #include "config_props.h"
 #include "cutils.h"
-#include "virtio.h"
 
 //#define DEBUG_ATA
 

@@ -30,7 +30,6 @@
 #include "cutils.h"
 #include "machine.h"
 #include "scsi.h"
-#include "virtio.h"
 
 /* The backing HostBlockDevice counts in 512 byte sectors, so that is also the
    logical block size this reports. */

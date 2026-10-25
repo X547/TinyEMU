@@ -34,7 +34,6 @@
 #include "cutils.h"
 #include "device_lock.h"
 #include "iomem.h"
-#include "virtio.h"
 #include "machine.h"
 #include "host_platform.h"
 #include "run_control.h"

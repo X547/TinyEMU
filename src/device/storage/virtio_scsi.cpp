@@ -26,8 +26,8 @@
 #include "cutils.h"
 #include "machine.h"
 #include "scsi.h"
+#include "device_class.h"
 #include "virtio.h"
-#include "virtio_priv.h"
 
 #define VIRTIO_SCSI_DEVICE_ID 8
 
@@ -131,6 +131,9 @@ private:
        ahead of it. */
     std::vector<std::unique_ptr<VSCSICommand>> fInFlight;
 
+    /* declared last, so that the units go before the host */
+    SCSIBus fBus {this, this};
+
     SCSIDevice *Unit(int target, uint32_t lun);
     bool HasTarget(int target);
 
@@ -149,7 +152,10 @@ private:
     uint8_t TaskManagement(uint32_t subtype, const uint8_t *lun, uint64_t id);
 
 public:
-    VIRTIOSCSIDevice() {WriteConfig();}
+    VIRTIOSCSIDevice();
+
+    /* Units attach from their own Realize(), which runs after the host's. */
+    Bus *ChildBus() override {return &fBus;}
 
     int RecvRequest(int queue_idx, int desc_idx, int read_size,
                     int write_size) override;
@@ -635,21 +641,31 @@ bool VIRTIOSCSIDevice::AttachDevice(SCSIDevice *dev, uint32_t target,
 }
 
 
-//#pragma mark - factory
-
-std::unique_ptr<VIRTIODevice> virtio_scsi_init(VIRTIOBusDef *bus)
+VIRTIOSCSIDevice::VIRTIOSCSIDevice():
+    VIRTIODevice("virtio-scsi", VIRTIO_SCSI_DEVICE_ID,
+                 0x0100 /* SCSI host */, VSCSI_CFG_SIZE,
+                 VSCSI_QUEUE_REQUEST + 1)
 {
-    auto s = std::make_unique<VIRTIOSCSIDevice>();
-    virtio_init(s.get(), bus, VIRTIO_SCSI_DEVICE_ID, VSCSI_CFG_SIZE,
-                VSCSI_QUEUE_REQUEST + 1);
     /* Nothing is ever reported on the event queue, since neither hotplug nor
        notification is offered, so its buffers are only held. */
-    s->queue[VSCSI_QUEUE_EVENT].manual_recv = true;
-    return s;
+    queue[VSCSI_QUEUE_EVENT].manual_recv = true;
+    WriteConfig();
 }
 
 
-SCSIBusTarget *virtio_scsi_bus_target(VIRTIODevice *s)
-{
-    return static_cast<VIRTIOSCSIDevice *>(s);
-}
+//#pragma mark - class
+
+/* Provides a SCSI bus for the units declared inside it. */
+class VirtioSCSIClass final: public DeviceClass {
+public:
+    VirtioSCSIClass(): DeviceClass("virtio-scsi") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        (void)cfg;
+        (void)ctx;
+        return new VIRTIOSCSIDevice();
+    }
+};
+
+static const VirtioSCSIClass sVirtioSCSIClass;

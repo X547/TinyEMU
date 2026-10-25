@@ -32,7 +32,6 @@
 #include "cutils.h"
 #include "machine.h"
 #include "pci.h"
-#include "virtio.h"
 
 //#define DEBUG_NVME
 

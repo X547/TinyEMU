@@ -28,7 +28,6 @@
 #include "cutils.h"
 #include "machine.h"
 #include "scsi.h"
-#include "virtio.h"
 
 /* The image is a plain ISO: the 2048 byte user data of one data track, block
    after block, and so four of the back end's 512 byte sectors per block. */

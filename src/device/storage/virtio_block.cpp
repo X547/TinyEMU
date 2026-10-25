@@ -29,10 +29,13 @@
 #include <algorithm>
 #include <vector>
 
+#include "config_props.h"
 #include "cutils.h"
+#include "host_block.h"
 #include "virtio.h"
-#include "virtio_priv.h"
 
+
+#define VIRTIO_BLOCK_DEVICE_ID 2
 
 struct VIRTIOBlockDevice;
 
@@ -51,13 +54,17 @@ struct BlockRequest final: public BlockCompletion {
     void Complete(int ret) override;
 };
 
-struct VIRTIOBlockDevice: public VIRTIODevice {
-    HostBlockDevice *bs = nullptr; /* owned by the node that created the device */
+struct VIRTIOBlockDevice final: public VIRTIODevice {
+    /* declared first, so that the requests go before the back end */
+    std::unique_ptr<HostBlockDevice> bs;
     bool read_only = false;
 
     /* The requests with the back end. They finish in whatever order it
        answers, which virtio allows. */
     std::vector<std::unique_ptr<BlockRequest>> in_flight;
+
+    /* 'read_only' offers the disk to the guest as read only. */
+    VIRTIOBlockDevice(std::unique_ptr<HostBlockDevice> bs, bool read_only);
 
     int RecvRequest(int queue_idx, int desc_idx, int read_size,
                     int write_size) override;
@@ -249,25 +256,45 @@ int VIRTIOBlockDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
     return 0;
 }
 
-std::unique_ptr<VIRTIODevice> virtio_block_init(VIRTIOBusDef *bus,
-                                                HostBlockDevice *bs,
-                                                bool read_only)
+VIRTIOBlockDevice::VIRTIOBlockDevice(std::unique_ptr<HostBlockDevice> bs,
+                                     bool read_only):
+    VIRTIODevice("virtio-block", VIRTIO_BLOCK_DEVICE_ID,
+                 0x0100 /* mass storage */, VIRTIO_BLK_CFG_SIZE, 1),
+    bs(std::move(bs)),
+    read_only(read_only)
 {
     uint64_t nb_sectors;
 
-    auto s = std::make_unique<VIRTIOBlockDevice>();
-    virtio_init(s.get(), bus, 2, VIRTIO_BLK_CFG_SIZE, 1);
-    s->bs = bs;
-    s->read_only = read_only;
-    s->device_features = VIRTIO_BLK_F_SIZE_MAX | VIRTIO_BLK_F_SEG_MAX;
+    device_features = VIRTIO_BLK_F_SIZE_MAX | VIRTIO_BLK_F_SEG_MAX;
     if (read_only)
-        s->device_features |= VIRTIO_BLK_F_RO;
+        device_features |= VIRTIO_BLK_F_RO;
 
-    nb_sectors = bs->SectorCount();
-    put_le32(s->config_space + VIRTIO_BLK_CFG_CAPACITY, nb_sectors);
-    put_le32(s->config_space + VIRTIO_BLK_CFG_CAPACITY + 4, nb_sectors >> 32);
-    put_le32(s->config_space + VIRTIO_BLK_CFG_SIZE_MAX, VIRTIO_BLK_SIZE_MAX);
-    put_le32(s->config_space + VIRTIO_BLK_CFG_SEG_MAX, VIRTIO_BLK_SEG_MAX);
-
-    return s;
+    nb_sectors = this->bs->SectorCount();
+    put_le32(config_space + VIRTIO_BLK_CFG_CAPACITY, nb_sectors);
+    put_le32(config_space + VIRTIO_BLK_CFG_CAPACITY + 4, nb_sectors >> 32);
+    put_le32(config_space + VIRTIO_BLK_CFG_SIZE_MAX, VIRTIO_BLK_SIZE_MAX);
+    put_le32(config_space + VIRTIO_BLK_CFG_SEG_MAX, VIRTIO_BLK_SEG_MAX);
 }
+
+
+//#pragma mark - class
+
+class VirtioBlockClass final: public DeviceClass {
+public:
+    VirtioBlockClass(): DeviceClass("virtio-block") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int read_only;
+        if (!cfg.GetInt("read_only", &read_only, 0)) {
+            return nullptr;
+        }
+        auto bs = config_open_block(cfg, ctx);
+        if (bs == nullptr) {
+            return nullptr;
+        }
+        return new VIRTIOBlockDevice(std::move(bs), read_only != 0);
+    }
+};
+
+static const VirtioBlockClass sVirtioBlockClass;

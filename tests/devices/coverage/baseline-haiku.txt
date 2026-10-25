@@ -52,7 +52,6 @@ src/bus/usb/usb_desc.h 0.0
 src/bus/usb/usb_hub.cpp 0.3
 src/bus/virtio/virtio.cpp 84.7
 src/bus/virtio/virtio.h 100.0
-src/bus/virtio/virtio_priv.h 100.0
 src/core/acpi.cpp 71.1
 src/core/device.cpp 71.3
 src/core/device_class.cpp 74.1

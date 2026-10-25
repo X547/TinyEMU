@@ -32,10 +32,15 @@
 #include <map>
 #include <vector>
 
+#include "config_props.h"
 #include "cutils.h"
 #include "host_fs.h"
+#include "machine.h"
 #include "virtio.h"
-#include "virtio_priv.h"
+
+#define VIRTIO_9P_DEVICE_ID 9
+
+#define VIRTIO_DEBUG_9P bit_at(1)
 
 /* What a read or write message holds besides its data, which the I/O unit
    reported to the guest leaves room for. */
@@ -46,13 +51,15 @@
 #define P9_MIN_MSIZE 4096
 
 
-struct VIRTIO9PDevice: public VIRTIODevice {
-    /* the back end must outlive the device, which closes its fids with it */
-    HostFileSystem *fs = nullptr;
+struct VIRTIO9PDevice final: public VIRTIODevice {
+    /* declared first: the device closes its fids with it */
+    std::unique_ptr<HostFileSystem> fs;
     int msize = 0; /* maximum message size */
     std::map<uint32_t, FSFile *> fids;
     bool req_in_progress = false;
 
+    /* 'mount_tag' is the name the guest mounts the directory by. */
+    VIRTIO9PDevice(std::unique_ptr<HostFileSystem> fs, const char *mount_tag);
     ~VIRTIO9PDevice() override;
 
     int RecvRequest(int queue_idx, int desc_idx, int read_size,
@@ -449,7 +456,7 @@ int VIRTIO9PDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
     uint16_t tag;
     uint8_t buf[1024];
     int buf_len, err;
-    HostFileSystem *fs = s->fs;
+    HostFileSystem *fs = s->fs.get();
 
     if (queue_idx != 0)
         return 0;
@@ -1071,26 +1078,53 @@ int VIRTIO9PDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
     goto error;
 }
 
-std::unique_ptr<VIRTIODevice> virtio_9p_init(VIRTIOBusDef *bus, HostFileSystem *fs,
-                                             const char *mount_tag)
-
+VIRTIO9PDevice::VIRTIO9PDevice(std::unique_ptr<HostFileSystem> fs,
+                               const char *mount_tag):
+    VIRTIODevice("virtio-9p", VIRTIO_9P_DEVICE_ID, 0x0002 /* unclassified */,
+                 2 + strlen(mount_tag), 1),
+    fs(std::move(fs))
 {
     int len;
     uint8_t *cfg;
 
     len = strlen(mount_tag);
-    auto s = std::make_unique<VIRTIO9PDevice>();
-    virtio_init(s.get(), bus, 9, 2 + len, 1);
-    s->device_features = 1 << 0;
+    device_features = 1 << 0;
 
     /* set the mount tag */
-    cfg = s->config_space;
+    cfg = config_space;
     cfg[0] = len;
     cfg[1] = len >> 8;
     memcpy(cfg + 2, mount_tag, len);
 
-    s->fs = fs;
-    s->msize = 8192;
-
-    return s;
+    msize = 8192;
 }
+
+
+//#pragma mark - class
+
+/* "tag" is the name the guest mounts the directory by. */
+class Virtio9PClass final: public DeviceClass {
+public:
+    Virtio9PClass(): DeviceClass("virtio-9p") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        const char *tag;
+        if (!cfg.GetStr("tag", &tag)) {
+            return nullptr;
+        }
+        /* the length and the tag fill the configuration space */
+        if (strlen(tag) > MAX_CONFIG_SPACE_SIZE - 2) {
+            vm_error("virtio-9p: 'tag' is longer than %d bytes\n",
+                     MAX_CONFIG_SPACE_SIZE - 2);
+            return nullptr;
+        }
+        auto fs = config_open_fs(cfg, ctx);
+        if (fs == nullptr) {
+            return nullptr;
+        }
+        return new VIRTIO9PDevice(std::move(fs), tag);
+    }
+};
+
+static const Virtio9PClass sVirtio9PClass;

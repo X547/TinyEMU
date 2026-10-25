@@ -26,8 +26,8 @@
 #include <string.h>
 
 #include "bits.h"
+#include "host_block.h"
 #include "machine.h"
-#include "virtio.h"
 
 
 //#pragma mark - CRC

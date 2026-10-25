@@ -35,8 +35,8 @@
 #include "devices.h"
 #include "iomem.h"
 #include "simplefb.h"
-#include "virtio.h"
 #include "machine.h"
+#include "pci.h"
 
 //#define DEBUG_VBE
 

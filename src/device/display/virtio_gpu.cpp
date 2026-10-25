@@ -30,12 +30,16 @@
 #include <vector>
 
 #include "cutils.h"
+#include "devices.h"
 #include "virtio.h"
-#include "virtio_priv.h"
 
 //#define DEBUG_VIRTIO_GPU
 
 #define VIRTIO_GPU_DEVICE_ID 16
+
+/* the range of display sizes offered to the guest */
+#define VIRTIO_GPU_MIN_SIZE 64
+#define VIRTIO_GPU_MAX_SIZE 8192
 
 /* control queue */
 #define VIRTIO_GPU_CMD_GET_DISPLAY_INFO         0x0100
@@ -197,6 +201,7 @@ static void convert_pixels(uint8_t *p, uint32_t count, uint32_t format)
 
 
 struct VIRTIOGPUDevice final: public VIRTIODevice, public ScreenSource {
+    DeviceContext *ctx;
     HostScreen *screen = nullptr;
     /* the display size offered to the guest */
     int display_width = 0;
@@ -209,6 +214,11 @@ struct VIRTIOGPUDevice final: public VIRTIODevice, public ScreenSource {
     uint32_t scanout_resource = 0;
     GPURect scanout_rect {};
 
+    /* 'width' x 'height' is the display size first offered to the guest. */
+    VIRTIOGPUDevice(DeviceContext *ctx, int width, int height);
+
+    bool Realize() override;
+
     int RecvRequest(int queue_idx, int desc_idx, int read_size,
                     int write_size) override;
     void ConfigWrite() override;
@@ -220,7 +230,7 @@ struct VIRTIOGPUDevice final: public VIRTIODevice, public ScreenSource {
     void ScreenResized(int width, int height) override;
 
     void UpdateConfig();
-    GPUResource *FindResource(uint32_t id);
+    GPUResource *GetResource(uint32_t id);
     void DisableScanout();
     bool CopyFromRam(uint64_t addr, uint8_t *dst, uint64_t len);
     bool CopyFromBacking(const GPUResource *res, uint64_t offset,
@@ -289,7 +299,7 @@ void VIRTIOGPUDevice::ScreenResized(int width, int height)
 }
 
 
-GPUResource *VIRTIOGPUDevice::FindResource(uint32_t id)
+GPUResource *VIRTIOGPUDevice::GetResource(uint32_t id)
 {
     auto it = resources.find(id);
     return it != resources.end() ? it->second.get() : nullptr;
@@ -373,7 +383,7 @@ uint32_t VIRTIOGPUDevice::ResourceCreate2D(const uint8_t *cmd)
     res->width = get_le32(cmd + 32);
     res->height = get_le32(cmd + 36);
 
-    if (id == 0 || FindResource(id) != nullptr)
+    if (id == 0 || GetResource(id) != nullptr)
         return VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
     if (!format_supported(res->format) ||
         res->width == 0 || res->width > MAX_RESOURCE_SIZE ||
@@ -394,7 +404,7 @@ uint32_t VIRTIOGPUDevice::ResourceCreate2D(const uint8_t *cmd)
 uint32_t VIRTIOGPUDevice::ResourceUnref(const uint8_t *cmd)
 {
     uint32_t id = get_le32(cmd + 24);
-    GPUResource *res = FindResource(id);
+    GPUResource *res = GetResource(id);
 
     if (res == nullptr)
         return VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
@@ -418,7 +428,7 @@ uint32_t VIRTIOGPUDevice::SetScanout(const uint8_t *cmd)
         DisableScanout();
         return VIRTIO_GPU_RESP_OK_NODATA;
     }
-    GPUResource *res = FindResource(id);
+    GPUResource *res = GetResource(id);
     if (res == nullptr)
         return VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
     if (r.width == 0 || r.height == 0 || !res->Contains(r))
@@ -439,7 +449,7 @@ uint32_t VIRTIOGPUDevice::ResourceFlush(const uint8_t *cmd)
     GPURect r = get_rect(cmd + 24);
     uint32_t id = get_le32(cmd + 40);
 
-    if (FindResource(id) == nullptr)
+    if (GetResource(id) == nullptr)
         return VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
     if (id != scanout_resource || screen == nullptr)
         return VIRTIO_GPU_RESP_OK_NODATA;
@@ -463,7 +473,7 @@ uint32_t VIRTIOGPUDevice::TransferToHost2D(const uint8_t *cmd)
     GPURect r = get_rect(cmd + 24);
     uint64_t offset = get_le64(cmd + 40);
     uint32_t id = get_le32(cmd + 48);
-    GPUResource *res = FindResource(id);
+    GPUResource *res = GetResource(id);
 
     if (res == nullptr)
         return VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
@@ -498,7 +508,7 @@ uint32_t VIRTIOGPUDevice::AttachBacking(const uint8_t *cmd, int queue_idx,
 {
     uint32_t id = get_le32(cmd + 24);
     uint32_t count = get_le32(cmd + 28);
-    GPUResource *res = FindResource(id);
+    GPUResource *res = GetResource(id);
 
     if (res == nullptr)
         return VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
@@ -532,7 +542,7 @@ uint32_t VIRTIOGPUDevice::AttachBacking(const uint8_t *cmd, int queue_idx,
 
 uint32_t VIRTIOGPUDevice::DetachBacking(const uint8_t *cmd)
 {
-    GPUResource *res = FindResource(get_le32(cmd + 24));
+    GPUResource *res = GetResource(get_le32(cmd + 24));
 
     if (res == nullptr)
         return VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
@@ -560,7 +570,7 @@ uint32_t VIRTIOGPUDevice::UpdateCursor(const uint8_t *cmd, bool move_only)
         if (id == 0) {
             screen->SetCursor(nullptr, 0, 0, 0, 0);
         } else {
-            GPUResource *res = FindResource(id);
+            GPUResource *res = GetResource(id);
             if (res == nullptr)
                 return VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
             if (res->width > MAX_CURSOR_SIZE || res->height > MAX_CURSOR_SIZE)
@@ -684,21 +694,52 @@ int VIRTIOGPUDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
 }
 
 
-std::unique_ptr<VIRTIODevice> virtio_gpu_init(VIRTIOBusDef *bus, int width,
-                                              int height)
+VIRTIOGPUDevice::VIRTIOGPUDevice(DeviceContext *ctx, int width, int height):
+    VIRTIODevice("virtio-gpu", VIRTIO_GPU_DEVICE_ID, 0x0380 /* display */,
+                 VIRTIO_GPU_CONFIG_SIZE, 2),
+    ctx(ctx),
+    display_width(width),
+    display_height(height)
 {
-    auto s = std::make_unique<VIRTIOGPUDevice>();
-    virtio_init(s.get(), bus, VIRTIO_GPU_DEVICE_ID, VIRTIO_GPU_CONFIG_SIZE,
-                2);
-    s->device_features = 0;
-    s->display_width = width;
-    s->display_height = height;
-    s->UpdateConfig();
-    return s;
+    device_features = 0;
+    UpdateConfig();
 }
 
 
-ScreenSource *virtio_gpu_screen_source(VIRTIODevice *s)
+bool VIRTIOGPUDevice::Realize()
 {
-    return static_cast<VIRTIOGPUDevice *>(s);
+    if (!VIRTIODevice::Realize())
+        return false;
+    ctx->screen = this;
+    ctx->screen_width = display_width;
+    ctx->screen_height = display_height;
+    return true;
 }
+
+
+//#pragma mark - class
+
+/* "width" x "height" is the display size first offered to the guest. */
+class VirtioGPUClass final: public DeviceClass {
+public:
+    VirtioGPUClass(): DeviceClass("virtio-gpu") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        int width, height;
+
+        if (!cfg.GetInt("width", &width, 1024) ||
+            !cfg.GetInt("height", &height, 768)) {
+            return nullptr;
+        }
+        if (width < VIRTIO_GPU_MIN_SIZE || width > VIRTIO_GPU_MAX_SIZE ||
+            height < VIRTIO_GPU_MIN_SIZE || height > VIRTIO_GPU_MAX_SIZE) {
+            vm_error("virtio-gpu: 'width' and 'height' must be between %d "
+                     "and %d\n", VIRTIO_GPU_MIN_SIZE, VIRTIO_GPU_MAX_SIZE);
+            return nullptr;
+        }
+        return new VIRTIOGPUDevice(ctx, width, height);
+    }
+};
+
+static const VirtioGPUClass sVirtioGPUClass;

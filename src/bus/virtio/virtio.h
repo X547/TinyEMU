@@ -1,6 +1,6 @@
 /*
  * VIRTIO driver
- * 
+ *
  * Copyright (c) 2016 Fabrice Bellard
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -24,11 +24,7 @@
 #ifndef VIRTIO_H
 #define VIRTIO_H
 
-#include "host_block.h"
-#include "host_console.h"
-#include "host_ethernet.h"
-#include "host_fs.h"
-#include "host_screen.h"
+#include "device.h"
 #include "iomem.h"
 #include "pci.h"
 
@@ -42,81 +38,172 @@ typedef uint64_t virtio_phys_addr_t;
 typedef uint32_t virtio_phys_addr_t;
 #endif
 
-typedef struct {
-    /* PCI only: */
-    PCIBus *pci_bus;
-    /* MMIO only: */
-    PhysMemoryMap *mem_map;
-    uint64_t addr;
-    IRQSignal *irq;
-} VIRTIOBusDef;
-
-typedef struct VIRTIODevice VIRTIODevice; 
-
+/* The other bits are for the device types to define. */
 #define VIRTIO_DEBUG_IO bit_at(0)
-#define VIRTIO_DEBUG_9P bit_at(1)
+
+#define MAX_QUEUE_NUM 32
+
+#define MAX_QUEUE 8
+#define MAX_CONFIG_SPACE_SIZE 256
+
+/* Offered by every device: the transports only have the virtio 1.0 layout. */
+#define VIRTIO_F_VERSION_1 (1ULL << 32)
+#define VIRTIO_F_INDIRECT_DESC (1ULL << 28)
+#define VIRTIO_F_EVENT_IDX     (1ULL << 29)
+
+#define VRING_AVAIL_F_NO_INTERRUPT 1
+
+/* the most descriptors an indirect table may hold */
+#define VIRTIO_MAX_INDIRECT 1024
+
+/* device status bits */
+#define VIRTIO_STATUS_ACKNOWLEDGE 0x01
+#define VIRTIO_STATUS_DRIVER      0x02
+#define VIRTIO_STATUS_DRIVER_OK   0x04
+#define VIRTIO_STATUS_FEATURES_OK 0x08
+#define VIRTIO_STATUS_NEEDS_RESET 0x40
+#define VIRTIO_STATUS_FAILED      0x80
+
+/* Enough for one vector per queue plus the configuration change. */
+#define VIRTIO_MSIX_VECTOR_COUNT 16
+
+typedef struct {
+    uint32_t ready; /* 0 or 1 */
+    uint32_t num;
+    uint16_t last_avail_idx;
+    uint16_t msix_vector;
+    virtio_phys_addr_t desc_addr;
+    virtio_phys_addr_t avail_addr;
+    virtio_phys_addr_t used_addr;
+    bool manual_recv; /* if true, the device_recv() callback is not called */
+} QueueState;
+
+
+struct VIRTIODevice;
+
+/* PCI and MMIO differ both in their register layout and in how the device
+   reaches guest RAM, so one transport object supplies both. */
+class VIRTIOTransport: public DeviceIO {
+protected:
+    VIRTIODevice &fDev;
+
+public:
+    VIRTIOTransport(VIRTIODevice &dev): fDev(dev) {}
+
+    virtual uint8_t *GetRamPtr(virtio_phys_addr_t paddr, bool is_rw) = 0;
+};
+
+
+/* The transport and the rings of a virtio device, on either bus. Which
+   resources it takes is decided by the bus it is attached to: on MMIO a
+   register page and an interrupt line, on PCI neither, because the guest
+   places the BAR and the bridge routes INTx. A device type derives from it
+   and handles its queues and configuration space. */
+struct VIRTIODevice: public Device, public PCIBarTarget,
+                     public PCIConfigTarget {
+    PhysMemoryMap *mem_map = nullptr;
+    PhysMemoryRange *mem_range = nullptr;
+    /* PCI only */
+    PCIDevice *pci_dev = nullptr;
+    /* MMIO only */
+    IRQSignal *irq = nullptr;
+    /* owns the register layout and the DMA path for this bus */
+    std::unique_ptr<VIRTIOTransport> transport;
+    int debug = 0;
+
+    uint32_t int_status = 0;
+    uint32_t status = 0;
+    uint32_t device_features_sel = 0;
+    /* what the driver accepted, 32 bits at a time */
+    uint32_t driver_features_sel = 0;
+    uint64_t driver_features = 0;
+    /* the queue the driver selected, which may be one the device lacks */
+    uint32_t queue_sel = 0;
+    /* the queues the device has, the first ones of 'queue' */
+    uint32_t num_queues = 0;
+    QueueState queue[MAX_QUEUE] {};
+
+    /* MSI-X, offered only on a bus whose bridge has somewhere to deliver a
+       message. When the capability is absent the state reports itself so, and
+       that is how the rest of the code knows to stay on the INTx path. */
+    PCIMsixState msix {};
+    uint16_t config_msix_vector = PCI_MSIX_NO_VECTOR;
+    /* the configuration access capability */
+    uint16_t pci_cfg_cap = 0;
+
+    /* device specific */
+    uint32_t device_id = 0;
+    uint32_t vendor_id = 0;
+    uint32_t device_features = 0;
+    uint32_t config_space_size = 0; /* in bytes */
+    uint8_t config_space[MAX_CONFIG_SPACE_SIZE] {};
+    /* changes with every configuration change the device signals */
+    uint32_t config_generation = 0;
+
+    /* 'pci_class' is the class code the device has on PCI. */
+    VIRTIODevice(const char *name, uint32_t device_id, uint16_t pci_class,
+                 int config_space_size, int num_queues);
+
+    /* Device. A device type that has more to do once the transport is in
+       place overrides Realize() and calls this one first. */
+    bool Prepare() override;
+    bool Realize() override;
+    void BuildFDT(FDTContext &ctx) override;
+
+    /* return < 0 to stop the notification (it must be manually restarted
+       later), 0 if OK */
+    virtual int RecvRequest(int queue_idx, int desc_idx, int read_size,
+                            int write_size) = 0;
+    /* The driver notified a manual_recv queue, which it does after adding
+       buffers to it. */
+    virtual void ManualQueueNotify(int queue_idx) {(void)queue_idx;}
+    /* called after the config is written */
+    virtual void ConfigWrite() {}
+    /* The driver reset the device. */
+    virtual void Reset() {}
+
+    /* return nullptr if no RAM at this address. The mapping is valid for
+       one page */
+    uint8_t *GetRamPtr(virtio_phys_addr_t paddr, bool is_rw);
+
+    void SetBar(int bar_num, uint64_t addr, bool enabled) override;
+
+    /* PCIConfigTarget, for the configuration access capability */
+    void ConfigRead(uint32_t addr, int size_log2) override;
+    void ConfigWritten(uint32_t addr, int size_log2) override;
+
+private:
+    uint16_t fPciClass;
+    Resource *fMmio = nullptr;
+    Resource *fIrq = nullptr;
+
+    bool PciCfgAccess(int *size_log2, uint32_t *offset);
+    void RealizePCI(PCIBus *bus);
+};
+
 
 void virtio_set_debug(VIRTIODevice *s, int debug_flags);
 
-/* block device; 'read_only' offers it to the guest as read only */
-
-std::unique_ptr<VIRTIODevice> virtio_block_init(VIRTIOBusDef *bus,
-                                                HostBlockDevice *bs,
-                                                bool read_only);
-
-/* SCSI host device */
-
-class SCSIBusTarget;
-
-std::unique_ptr<VIRTIODevice> virtio_scsi_init(VIRTIOBusDef *bus);
-/* Where the units on the host's SCSI bus attach. */
-SCSIBusTarget *virtio_scsi_bus_target(VIRTIODevice *s);
-
-/* network device */
-
-std::unique_ptr<VIRTIODevice> virtio_net_init(VIRTIOBusDef *bus,
-                                              HostEthernet *es);
-
-/* console device */
-
-/* 'cs' may be null, which discards the output. */
-std::unique_ptr<VIRTIODevice> virtio_console_init(VIRTIOBusDef *bus,
-                                                  HostConsole *cs);
-/* Where host input for a console device goes. */
-ConsoleTarget *virtio_console_target(VIRTIODevice *s);
-
-/* input device */
-
-typedef enum {
-    VIRTIO_INPUT_TYPE_KEYBOARD,
-    VIRTIO_INPUT_TYPE_MOUSE,
-    VIRTIO_INPUT_TYPE_TABLET,
-} VirtioInputTypeEnum;
-
-#define VIRTIO_INPUT_ABS_SCALE 32768
-
-int virtio_input_send_key_event(VIRTIODevice *s, bool is_down,
-                                uint16_t key_code);
-int virtio_input_send_mouse_event(VIRTIODevice *s, int dx, int dy, int dz,
-                                  unsigned int buttons);
-
-std::unique_ptr<VIRTIODevice> virtio_input_init(VIRTIOBusDef *bus,
-                                                VirtioInputTypeEnum type);
-
-/* 9p filesystem device */
-
-std::unique_ptr<VIRTIODevice> virtio_9p_init(VIRTIOBusDef *bus, HostFileSystem *fs,
-                                             const char *mount_tag);
-
-/* GPU device, 2D only */
-
-/* the range of display sizes offered to the guest */
-#define VIRTIO_GPU_MIN_SIZE 64
-#define VIRTIO_GPU_MAX_SIZE 8192
-
-/* 'width' x 'height' is the display size first offered to the guest. */
-std::unique_ptr<VIRTIODevice> virtio_gpu_init(VIRTIOBusDef *bus, int width,
-                                              int height);
-ScreenSource *virtio_gpu_screen_source(VIRTIODevice *s);
+uint16_t virtio_read16(VIRTIODevice *s, virtio_phys_addr_t addr);
+int memcpy_to_queue(VIRTIODevice *s, int queue_idx, int desc_idx, int offset,
+                    const void *buf, int count);
+int memcpy_from_queue(VIRTIODevice *s, void *buf, int queue_idx, int desc_idx,
+                      int offset, int count);
+int get_desc_rw_size(VIRTIODevice *s, int *pread_size, int *pwrite_size,
+                     int queue_idx, int desc_idx);
+void virtio_consume_desc(VIRTIODevice *s, int queue_idx, int desc_idx,
+                         int desc_len);
+void queue_notify(VIRTIODevice *s, int queue_idx);
+void virtio_config_change_notify(VIRTIODevice *s);
+/* The head of the next buffer the driver made available, false when there
+   is none or the queue cannot be used yet. A device that takes buffers
+   itself rather than in RecvRequest() looks with this, so that the driver
+   tells it when there are more, and takes the buffer with
+   virtio_queue_pop(). */
+bool virtio_queue_peek(VIRTIODevice *s, int queue_idx, int *desc_idx);
+void virtio_queue_pop(VIRTIODevice *s, int queue_idx);
+/* Stop using the queues until the driver resets the device, and tell it,
+   as a device that met a malformed chain should. */
+void virtio_set_needs_reset(VIRTIODevice *s);
 
 #endif /* VIRTIO_H */

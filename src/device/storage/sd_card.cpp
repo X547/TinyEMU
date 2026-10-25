@@ -27,7 +27,6 @@
 #include "config_props.h"
 #include "machine.h"
 #include "sd.h"
-#include "virtio.h"
 
 /* The identity the guest reads out of the card registers. */
 #define SD_CARD_MANFID   0x74   /* not an assigned identifier */

@@ -41,7 +41,6 @@
 #include "riscv_sbi_defs.h"
 #include "riscv_vcpu.h"
 #include "uart.h"
-#include "virtio.h"
 #include "machine.h"
 #include "device.h"
 #include "devices.h"

@@ -36,7 +36,6 @@
 
 #include "cutils.h"
 #include "event_loop.h"
-#include "virtio.h"
 #include "fs_wget.h"
 #include "list.h"
 #include "fbuf.h"

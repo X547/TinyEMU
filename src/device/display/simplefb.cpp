@@ -35,7 +35,6 @@
 #include "devices.h"
 #include "fdt.h"
 #include "iomem.h"
-#include "virtio.h"
 #include "machine.h"
 
 //#define DEBUG_VBE

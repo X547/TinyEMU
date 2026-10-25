@@ -30,14 +30,10 @@
 #include <limits.h>
 #include <atomic>
 
-#include "config_props.h"
 #include "cutils.h"
-#include "devices.h"
 #include "fdt.h"
-#include "list.h"
-#include "scsi.h"
+#include "machine.h"
 #include "virtio.h"
-#include "virtio_priv.h"
 
 //#define DEBUG_VIRTIO
 
@@ -344,100 +340,117 @@ void VIRTIODevice::ConfigWritten(uint32_t addr, int size_log2)
     transport->DeviceWrite(offset, get_bits(val, 0, 8 << len_log2),
                            len_log2);}
 
-void virtio_init(VIRTIODevice *s, VIRTIOBusDef *bus,
-                 uint32_t device_id, int config_space_size, int num_queues)
+VIRTIODevice::VIRTIODevice(const char *name, uint32_t device_id,
+                           uint16_t pci_class, int config_space_size,
+                           int num_queues):
+    Device(name),
+    num_queues(num_queues),
+    device_id(device_id),
+    vendor_id(0xffff),
+    config_space_size(config_space_size),
+    fPciClass(pci_class)
 {
     assert(num_queues <= MAX_QUEUE);
-    if (bus->pci_bus) {
-        uint16_t pci_device_id, class_id;
-        char name[32];
-        int bar_num;
-        
-        switch(device_id) {
-        case 1:
-            class_id = 0x0200; /* net */
-            break;
-        case 2:
-            class_id = 0x0100; /* block. XXX: check it */
-            break;
-        case 3:
-            class_id = 0x0780; /* console */
-            break;
-        case 8:
-            class_id = 0x0100; /* SCSI host */
-            break;
-        case 9:
-            class_id = 0x2;
-            break;
-        case 16:
-            class_id = 0x0380; /* display */
-            break;
-        case 18:
-            class_id = 0x0980;
-            break;
-        default:
-            abort();
-        }
-        /* Only the virtio 1.0 layout is implemented, so the identifier and
-           revision have to be non-transitional ones: a guest picks the layout
-           from them, and a transitional device promises a port window that is
-           not here. */
-        pci_device_id = 0x1040 + device_id;
-        snprintf(name, sizeof(name), "virtio_%04x", pci_device_id);
-        s->pci_dev = pci_register_device(bus->pci_bus, name, -1,
-                                         0x1af4, pci_device_id, 0x01,
-                                         class_id);
-        pci_device_set_config16(s->pci_dev, 0x2c, 0x1af4);
-        /* The type is in the identifier. A non-transitional device should
-           have a subsystem of 0x40 or above, and some drivers insist. */
-        pci_device_set_config16(s->pci_dev, 0x2e, 0x1100);
-        pci_device_set_config8(s->pci_dev, PCI_INTERRUPT_PIN, 1);
+    assert(config_space_size <= MAX_CONFIG_SPACE_SIZE);
+    virtio_reset(this);
+}
 
-        bar_num = VIRTIO_PCI_BAR;
-        virtio_add_pci_capability(s, VIRTIO_PCI_CAP_COMMON, bar_num,
-                                  VIRTIO_PCI_CFG_OFFSET, 0x1000, 0);
-        virtio_add_pci_capability(s, VIRTIO_PCI_CAP_ISR, bar_num,
-                                  VIRTIO_PCI_ISR_OFFSET, 0x1000, 0);
-        virtio_add_pci_capability(s, VIRTIO_PCI_CAP_DEVICE, bar_num,
-                                  VIRTIO_PCI_CONFIG_OFFSET, 0x1000, 0);
-        virtio_add_pci_capability(s, VIRTIO_PCI_CAP_NOTIFY, bar_num,
-                                  VIRTIO_PCI_NOTIFY_OFFSET, 0x1000, 0);
-        /* the driver chooses the BAR, offset and length, and moves data */
-        s->pci_cfg_cap = virtio_add_pci_capability(s, VIRTIO_PCI_CAP_PCI,
-                                                   0, 0, 0, 0);
-        pci_device_set_wmask(s->pci_dev, s->pci_cfg_cap + 4, 0xff, 1);
-        pci_device_set_wmask(s->pci_dev, s->pci_cfg_cap + 8, 0xffffffff, 4);
-        pci_device_set_wmask(s->pci_dev, s->pci_cfg_cap + 12, 0xffffffff, 4);
-        pci_device_set_wmask(s->pci_dev, s->pci_cfg_cap + 16, 0xffffffff, 4);
-        pci_device_set_config_target(s->pci_dev, s->pci_cfg_cap + 16, 4, s);
+bool VIRTIODevice::Prepare()
+{
+    if (ParentBus()->AsPCIBus() != nullptr)
+        return true;
+    fMmio = AddResource(RES_MMIO, VIRTIO_PAGE_SIZE, VIRTIO_PAGE_SIZE);
+    fIrq = AddResource(RES_IRQ, 1);
+    return fMmio != nullptr && fIrq != nullptr;
+}
 
-        /* Declines by itself on a bus whose bridge has no MSI receiver. */
-        s->msix.Init(s->pci_dev, bar_num, VIRTIO_MSIX_VECTOR_COUNT,
-                     VIRTIO_PCI_MSIX_TABLE_OFFSET, VIRTIO_PCI_MSIX_PBA_OFFSET);
+void VIRTIODevice::RealizePCI(PCIBus *bus)
+{
+    VIRTIODevice *s = this;
+    uint16_t pci_device_id;
+    char name[32];
+    int bar_num;
 
-        s->transport = std::make_unique<VIRTIOPCITransport>(*s);
-        s->irq = pci_device_get_irq(s->pci_dev, 0);
-        s->mem_map = pci_device_get_mem_map(s->pci_dev);
-        s->mem_range = s->mem_map->RegisterDevice(0, VIRTIO_PCI_BAR_SIZE,
-                                                  s->transport.get(),
-                                                  DEVIO_SIZE8 | DEVIO_SIZE16 | DEVIO_SIZE32 | DEVIO_DISABLED);
-        pci_register_bar(s->pci_dev, bar_num, VIRTIO_PCI_BAR_SIZE,
-                         PCI_ADDRESS_SPACE_MEM, s);
-    } else {
-        /* MMIO case */
-        s->mem_map = bus->mem_map;
-        s->irq = bus->irq;
-        s->transport = std::make_unique<VIRTIOMMIOTransport>(*s);
-        s->mem_range = s->mem_map->RegisterDevice(bus->addr, VIRTIO_PAGE_SIZE,
-                                                  s->transport.get(),
-                                                  DEVIO_SIZE8 | DEVIO_SIZE16 | DEVIO_SIZE32);
+    /* Only the virtio 1.0 layout is implemented, so the identifier and
+       revision have to be non-transitional ones: a guest picks the layout
+       from them, and a transitional device promises a port window that is
+       not here. */
+    pci_device_id = 0x1040 + device_id;
+    snprintf(name, sizeof(name), "virtio_%04x", pci_device_id);
+    s->pci_dev = pci_register_device(bus, name, -1,
+                                     0x1af4, pci_device_id, 0x01,
+                                     fPciClass);
+    pci_device_set_config16(s->pci_dev, 0x2c, 0x1af4);
+    /* The type is in the identifier. A non-transitional device should
+       have a subsystem of 0x40 or above, and some drivers insist. */
+    pci_device_set_config16(s->pci_dev, 0x2e, 0x1100);
+    pci_device_set_config8(s->pci_dev, PCI_INTERRUPT_PIN, 1);
+
+    bar_num = VIRTIO_PCI_BAR;
+    virtio_add_pci_capability(s, VIRTIO_PCI_CAP_COMMON, bar_num,
+                              VIRTIO_PCI_CFG_OFFSET, 0x1000, 0);
+    virtio_add_pci_capability(s, VIRTIO_PCI_CAP_ISR, bar_num,
+                              VIRTIO_PCI_ISR_OFFSET, 0x1000, 0);
+    virtio_add_pci_capability(s, VIRTIO_PCI_CAP_DEVICE, bar_num,
+                              VIRTIO_PCI_CONFIG_OFFSET, 0x1000, 0);
+    virtio_add_pci_capability(s, VIRTIO_PCI_CAP_NOTIFY, bar_num,
+                              VIRTIO_PCI_NOTIFY_OFFSET, 0x1000, 0);
+    /* the driver chooses the BAR, offset and length, and moves data */
+    s->pci_cfg_cap = virtio_add_pci_capability(s, VIRTIO_PCI_CAP_PCI,
+                                               0, 0, 0, 0);
+    pci_device_set_wmask(s->pci_dev, s->pci_cfg_cap + 4, 0xff, 1);
+    pci_device_set_wmask(s->pci_dev, s->pci_cfg_cap + 8, 0xffffffff, 4);
+    pci_device_set_wmask(s->pci_dev, s->pci_cfg_cap + 12, 0xffffffff, 4);
+    pci_device_set_wmask(s->pci_dev, s->pci_cfg_cap + 16, 0xffffffff, 4);
+    pci_device_set_config_target(s->pci_dev, s->pci_cfg_cap + 16, 4, s);
+
+    /* Declines by itself on a bus whose bridge has no MSI receiver. */
+    s->msix.Init(s->pci_dev, bar_num, VIRTIO_MSIX_VECTOR_COUNT,
+                 VIRTIO_PCI_MSIX_TABLE_OFFSET, VIRTIO_PCI_MSIX_PBA_OFFSET);
+
+    s->transport = std::make_unique<VIRTIOPCITransport>(*s);
+    s->irq = pci_device_get_irq(s->pci_dev, 0);
+    s->mem_map = pci_device_get_mem_map(s->pci_dev);
+    s->mem_range = s->mem_map->RegisterDevice(0, VIRTIO_PCI_BAR_SIZE,
+                                              s->transport.get(),
+                                              DEVIO_SIZE8 | DEVIO_SIZE16 | DEVIO_SIZE32 | DEVIO_DISABLED);
+    pci_register_bar(s->pci_dev, bar_num, VIRTIO_PCI_BAR_SIZE,
+                     PCI_ADDRESS_SPACE_MEM, s);
+}
+
+bool VIRTIODevice::Realize()
+{
+    PCIBus *pci_bus = ParentBus()->AsPCIBus();
+
+    if (pci_bus != nullptr) {
+        RealizePCI(pci_bus);
+        return true;
     }
+    SystemBus *sys = static_cast<SystemBus *>(ParentBus());
+    irq = sys->IrqSignalFor(fIrq->base);
+    if (irq == nullptr) {
+        vm_error("%s: bad interrupt line %d\n", Name(), (int)fIrq->base);
+        return false;
+    }
+    mem_map = sys->MemMap();
+    transport = std::make_unique<VIRTIOMMIOTransport>(*this);
+    mem_range = mem_map->RegisterDevice(fMmio->base, VIRTIO_PAGE_SIZE,
+                                        transport.get(),
+                                        DEVIO_SIZE8 | DEVIO_SIZE16 | DEVIO_SIZE32);
+    return true;
+}
 
-    s->device_id = device_id;
-    s->vendor_id = 0xffff;
-    s->config_space_size = config_space_size;
-    s->num_queues = num_queues;
-    virtio_reset(s);
+void VIRTIODevice::BuildFDT(FDTContext &ctx)
+{
+    /* On PCI the guest finds the device by enumerating configuration
+       space, so it must not also appear as a node. */
+    if (fMmio == nullptr)
+        return;
+    ctx.fdt->BeginNodeNum("virtio", fMmio->base);
+    ctx.fdt->PropStr("compatible", "virtio,mmio");
+    ctx.fdt->PropU64Range("reg", fMmio->base, fMmio->size);
+    fdt_prop_irq(ctx, fIrq->base);
+    ctx.fdt->EndNode();
 }
 
 uint16_t virtio_read16(VIRTIODevice *s, virtio_phys_addr_t addr)
@@ -1253,374 +1266,3 @@ void virtio_config_change_notify(VIRTIODevice *s)
     if (s->status & VIRTIO_STATUS_DRIVER_OK)
         virtio_raise_irq(s, VIRTIO_INT_CONFIG, s->config_msix_vector);
 }
-
-
-//#pragma mark - VirtioDevice
-
-/* A virtio input device as a machine input target. */
-class VirtioInputTarget final: public KeyboardTarget, public PointerTarget {
-private:
-    VIRTIODevice *fDev;
-    bool fAbsolute;
-
-public:
-    VirtioInputTarget(VIRTIODevice *dev, bool absolute):
-        fDev(dev), fAbsolute(absolute) {}
-
-    void SendKeyEvent(bool is_down, uint16_t key_code) override
-        {virtio_input_send_key_event(fDev, is_down, key_code);}
-
-    void SendMouseEvent(int dx, int dy, int dz,
-                        unsigned int buttons) override
-        {virtio_input_send_mouse_event(fDev, dx, dy, dz, buttons);}
-
-    bool MouseIsAbsolute() override {return fAbsolute;}
-};
-
-
-/* The SCSI bus is declared, and its units attached to it, before the device
-   they reach exists, so the bus names this instead of the device. Units attach
-   from their own Realize(), which runs after the host's. */
-class VirtioSCSIBusTarget final: public SCSIBusTarget {
-private:
-    std::unique_ptr<VIRTIODevice> &fDev;
-
-public:
-    VirtioSCSIBusTarget(std::unique_ptr<VIRTIODevice> &dev): fDev(dev) {}
-
-    bool FindFreeAddress(int *target, int *lun) override
-        {return virtio_scsi_bus_target(fDev.get())->FindFreeAddress(target,
-                                                                    lun);}
-
-    bool AttachDevice(SCSIDevice *dev, uint32_t target, uint32_t lun) override
-        {return virtio_scsi_bus_target(fDev.get())->AttachDevice(dev, target,
-                                                                 lun);}
-};
-
-
-typedef enum {
-    VIRTIO_KIND_BLOCK,
-    VIRTIO_KIND_SCSI,
-    VIRTIO_KIND_NET,
-    VIRTIO_KIND_CONSOLE,
-    VIRTIO_KIND_9P,
-    VIRTIO_KIND_INPUT,
-    VIRTIO_KIND_GPU,
-} VirtioKindEnum;
-
-
-/* One wrapper for every virtio device, on either transport. Which resources
-   it needs is decided by the bus it was attached to: on MMIO it takes a
-   register page and an interrupt line, on PCI it takes neither because the
-   guest places the BARs and the bridge routes INTx. */
-class VirtioDevice final: public Device {
-private:
-    VirtioKindEnum fKind;
-    DeviceContext *fCtx;
-    VirtioInputTypeEnum fInputType = VIRTIO_INPUT_TYPE_KEYBOARD;
-    const char *fTag = nullptr;
-    int fWidth = 0;
-    int fHeight = 0;
-    bool fReadOnly = false;
-    Resource *fMmio = nullptr;
-    Resource *fIrq = nullptr;
-    /* declared first, so that fDev goes before the back end it uses */
-    std::unique_ptr<HostBlockDevice> fBlockDev;
-    std::unique_ptr<HostFileSystem> fFsDev;
-    std::unique_ptr<HostEthernet> fNet;
-    std::unique_ptr<VIRTIODevice> fDev;
-    std::unique_ptr<VirtioInputTarget> fInputTarget;
-    /* declared after fDev, so that the units go before the host */
-    std::unique_ptr<VirtioSCSIBusTarget> fSCSITarget;
-    std::unique_ptr<Bus> fChildBus;
-
-public:
-    VirtioDevice(const char *name, VirtioKindEnum kind, DeviceContext *ctx):
-        Device(name), fKind(kind), fCtx(ctx)
-    {
-        if (kind == VIRTIO_KIND_SCSI) {
-            fSCSITarget = std::make_unique<VirtioSCSIBusTarget>(fDev);
-            fChildBus = std::make_unique<SCSIBus>(this, fSCSITarget.get());
-        }
-    }
-
-    Bus *ChildBus() override {return fChildBus.get();}
-
-    void SetInputType(VirtioInputTypeEnum type) {fInputType = type;}
-    void SetBlockDevice(std::unique_ptr<HostBlockDevice> bs, bool read_only)
-        {fBlockDev = std::move(bs); fReadOnly = read_only;}
-    void SetEthernet(std::unique_ptr<HostEthernet> net)
-        {fNet = std::move(net);}
-    void SetFileSystem(std::unique_ptr<HostFileSystem> fs)
-        {fFsDev = std::move(fs);}
-    void SetTag(const char *tag) {fTag = tag;}
-    void SetSize(int width, int height) {fWidth = width; fHeight = height;}
-
-    bool Prepare() override
-    {
-        if (ParentBus()->AsPCIBus() != nullptr) {
-            return true;
-        }
-        fMmio = AddResource(RES_MMIO, VIRTIO_PAGE_SIZE, VIRTIO_PAGE_SIZE);
-        fIrq = AddResource(RES_IRQ, 1);
-        return fMmio != nullptr && fIrq != nullptr;
-    }
-
-    bool Realize() override
-    {
-        VIRTIOBusDef vbus = {};
-        PCIBus *pci_bus = ParentBus()->AsPCIBus();
-
-        if (pci_bus != nullptr) {
-            vbus.pci_bus = pci_bus;
-        } else {
-            SystemBus *sys = static_cast<SystemBus *>(ParentBus());
-            vbus.mem_map = sys->MemMap();
-            vbus.addr = fMmio->base;
-            vbus.irq = sys->IrqSignalFor(fIrq->base);
-            if (vbus.irq == nullptr) {
-                vm_error("%s: bad interrupt line %d\n", Name(),
-                         (int)fIrq->base);
-                return false;
-            }
-        }
-
-        switch (fKind) {
-        case VIRTIO_KIND_BLOCK:
-            if (fBlockDev == nullptr) {
-                vm_error("%s: no block back end\n", Name());
-                return false;
-            }
-            fDev = virtio_block_init(&vbus, fBlockDev.get(), fReadOnly);
-            break;
-        case VIRTIO_KIND_SCSI:
-            fDev = virtio_scsi_init(&vbus);
-            break;
-        case VIRTIO_KIND_NET:
-            if (fNet == nullptr) {
-                vm_error("%s: no network back end\n", Name());
-                return false;
-            }
-            fDev = virtio_net_init(&vbus, fNet.get());
-            fCtx->ethernet.push_back(fNet.get());
-            break;
-        case VIRTIO_KIND_CONSOLE:
-            fDev = virtio_console_init(&vbus, fCtx->platform->Console());
-            fCtx->console_input = virtio_console_target(fDev.get());
-            break;
-        case VIRTIO_KIND_9P:
-            if (fFsDev == nullptr) {
-                vm_error("%s: no filesystem back end\n", Name());
-                return false;
-            }
-            fDev = virtio_9p_init(&vbus, fFsDev.get(), fTag);
-            break;
-        case VIRTIO_KIND_INPUT:
-            fDev = virtio_input_init(&vbus, fInputType);
-            if (fDev == nullptr) {
-                break;
-            }
-            fInputTarget = std::make_unique<VirtioInputTarget>(
-                fDev.get(), fInputType == VIRTIO_INPUT_TYPE_TABLET);
-            if (fInputType == VIRTIO_INPUT_TYPE_KEYBOARD) {
-                fCtx->keyboard = fInputTarget.get();
-            } else {
-                fCtx->mouse = fInputTarget.get();
-            }
-            break;
-        case VIRTIO_KIND_GPU:
-            fDev = virtio_gpu_init(&vbus, fWidth, fHeight);
-            fCtx->screen = virtio_gpu_screen_source(fDev.get());
-            fCtx->screen_width = fWidth;
-            fCtx->screen_height = fHeight;
-            break;
-        }
-        return fDev != nullptr;
-    }
-
-    void BuildFDT(FDTContext &ctx) override
-    {
-        /* On PCI the guest finds the device by enumerating configuration
-           space, so it must not also appear as a node. */
-        if (fMmio == nullptr) {
-            return;
-        }
-        ctx.fdt->BeginNodeNum("virtio", fMmio->base);
-        ctx.fdt->PropStr("compatible", "virtio,mmio");
-        ctx.fdt->PropU64Range("reg", fMmio->base, fMmio->size);
-        fdt_prop_irq(ctx, fIrq->base);
-        ctx.fdt->EndNode();
-    }
-};
-
-
-//#pragma mark - classes
-
-/* One wrapper serves every virtio device on either transport: which resources
-   it takes is decided by the bus it is attached to, so the same device works
-   on an MMIO machine and behind a PCI bridge. */
-
-class VirtioBlockClass final: public DeviceClass {
-public:
-    VirtioBlockClass(): DeviceClass("virtio-block") {}
-
-    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
-    {
-        int read_only;
-        if (!cfg.GetInt("read_only", &read_only, 0)) {
-            return nullptr;
-        }
-        auto bs = config_open_block(cfg, ctx);
-        if (bs == nullptr) {
-            return nullptr;
-        }
-        VirtioDevice *dev = new VirtioDevice("virtio-block",
-                                             VIRTIO_KIND_BLOCK, ctx);
-        dev->SetBlockDevice(std::move(bs), read_only != 0);
-        return dev;
-    }
-};
-
-static const VirtioBlockClass sVirtioBlockClass;
-
-
-/* Provides a SCSI bus for the units declared inside it. */
-class VirtioSCSIClass final: public DeviceClass {
-public:
-    VirtioSCSIClass(): DeviceClass("virtio-scsi") {}
-
-    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
-    {
-        (void)cfg;
-        return new VirtioDevice("virtio-scsi", VIRTIO_KIND_SCSI, ctx);
-    }
-};
-
-static const VirtioSCSIClass sVirtioSCSIClass;
-
-
-class VirtioNetClass final: public DeviceClass {
-public:
-    VirtioNetClass(): DeviceClass("virtio-net") {}
-
-    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
-    {
-        auto net = config_open_ethernet(cfg, ctx);
-        if (net == nullptr) {
-            return nullptr;
-        }
-        VirtioDevice *dev = new VirtioDevice("virtio-net", VIRTIO_KIND_NET,
-                                             ctx);
-        dev->SetEthernet(std::move(net));
-        return dev;
-    }
-};
-
-static const VirtioNetClass sVirtioNetClass;
-
-
-class VirtioConsoleClass final: public DeviceClass {
-public:
-    VirtioConsoleClass(): DeviceClass("virtio-console") {}
-
-    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
-    {
-        (void)cfg;
-        return new VirtioDevice("virtio-console", VIRTIO_KIND_CONSOLE, ctx);
-    }
-};
-
-static const VirtioConsoleClass sVirtioConsoleClass;
-
-
-/* "tag" is the name the guest mounts the directory by. */
-class Virtio9PClass final: public DeviceClass {
-public:
-    Virtio9PClass(): DeviceClass("virtio-9p") {}
-
-    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
-    {
-        const char *tag;
-        if (!cfg.GetStr("tag", &tag)) {
-            return nullptr;
-        }
-        /* the length and the tag fill the configuration space */
-        if (strlen(tag) > MAX_CONFIG_SPACE_SIZE - 2) {
-            vm_error("virtio-9p: 'tag' is longer than %d bytes\n",
-                     MAX_CONFIG_SPACE_SIZE - 2);
-            return nullptr;
-        }
-        auto fs = config_open_fs(cfg, ctx);
-        if (fs == nullptr) {
-            return nullptr;
-        }
-        VirtioDevice *dev = new VirtioDevice("virtio-9p", VIRTIO_KIND_9P,
-                                             ctx);
-        dev->SetFileSystem(std::move(fs));
-        dev->SetTag(tag);
-        return dev;
-    }
-};
-
-static const Virtio9PClass sVirtio9PClass;
-
-
-class VirtioInputClass final: public DeviceClass {
-public:
-    VirtioInputClass(): DeviceClass("virtio-input") {}
-
-    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
-    {
-        const char *kind;
-        VirtioInputTypeEnum input_type;
-
-        if (!cfg.GetStr("kind", &kind)) {
-            return nullptr;
-        }
-        if (strcmp(kind, "keyboard") == 0) {
-            input_type = VIRTIO_INPUT_TYPE_KEYBOARD;
-        } else if (strcmp(kind, "mouse") == 0) {
-            input_type = VIRTIO_INPUT_TYPE_MOUSE;
-        } else if (strcmp(kind, "tablet") == 0) {
-            input_type = VIRTIO_INPUT_TYPE_TABLET;
-        } else {
-            vm_error("virtio-input: unsupported kind '%s'\n", kind);
-            return nullptr;
-        }
-        VirtioDevice *dev = new VirtioDevice("virtio-input",
-                                             VIRTIO_KIND_INPUT, ctx);
-        dev->SetInputType(input_type);
-        return dev;
-    }
-};
-
-static const VirtioInputClass sVirtioInputClass;
-
-
-/* "width" x "height" is the display size first offered to the guest. */
-class VirtioGPUClass final: public DeviceClass {
-public:
-    VirtioGPUClass(): DeviceClass("virtio-gpu") {}
-
-    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
-    {
-        int width, height;
-
-        if (!cfg.GetInt("width", &width, 1024) ||
-            !cfg.GetInt("height", &height, 768)) {
-            return nullptr;
-        }
-        if (width < VIRTIO_GPU_MIN_SIZE || width > VIRTIO_GPU_MAX_SIZE ||
-            height < VIRTIO_GPU_MIN_SIZE || height > VIRTIO_GPU_MAX_SIZE) {
-            vm_error("virtio-gpu: 'width' and 'height' must be between %d "
-                     "and %d\n", VIRTIO_GPU_MIN_SIZE, VIRTIO_GPU_MAX_SIZE);
-            return nullptr;
-        }
-        VirtioDevice *dev = new VirtioDevice("virtio-gpu", VIRTIO_KIND_GPU,
-                                             ctx);
-        dev->SetSize(width, height);
-        return dev;
-    }
-};
-
-static const VirtioGPUClass sVirtioGPUClass;

@@ -29,9 +29,19 @@
 
 #include "bits.h"
 #include "cutils.h"
+#include "devices.h"
 #include "virtio.h"
-#include "virtio_priv.h"
 
+
+#define VIRTIO_INPUT_DEVICE_ID 18
+
+typedef enum {
+    VIRTIO_INPUT_TYPE_KEYBOARD,
+    VIRTIO_INPUT_TYPE_MOUSE,
+    VIRTIO_INPUT_TYPE_TABLET,
+} VirtioInputTypeEnum;
+
+#define VIRTIO_INPUT_ABS_SCALE 32768
 
 enum {
     VIRTIO_INPUT_CFG_UNSET      = 0x00,
@@ -64,13 +74,27 @@ enum {
 #define ABS_Y 0x01
 #define ABS_Z 0x02
 
-struct VIRTIOInputDevice: public VIRTIODevice {
-    VirtioInputTypeEnum type {};
+struct VIRTIOInputDevice final: public VIRTIODevice, public KeyboardTarget,
+                                public PointerTarget {
+    DeviceContext *ctx;
+    VirtioInputTypeEnum type;
     uint32_t buttons_state = 0;
+
+    VIRTIOInputDevice(DeviceContext *ctx, VirtioInputTypeEnum type);
+
+    bool Realize() override;
 
     int RecvRequest(int queue_idx, int desc_idx, int read_size,
                     int write_size) override;
     void ConfigWrite() override;
+
+    /* KeyboardTarget */
+    void SendKeyEvent(bool is_down, uint16_t key_code) override;
+
+    /* PointerTarget */
+    void SendMouseEvent(int dx, int dy, int dz,
+                        unsigned int buttons) override;
+    bool MouseIsAbsolute() override {return type == VIRTIO_INPUT_TYPE_TABLET;}
 };
 
 static const uint16_t buttons_list[] = {
@@ -112,13 +136,12 @@ static int virtio_input_queue_event(VIRTIODevice *s,
     return 0;
 }
 
-int virtio_input_send_key_event(VIRTIODevice *s, bool is_down,
-                                uint16_t key_code)
+static int virtio_input_send_key_event(VIRTIOInputDevice *s, bool is_down,
+                                       uint16_t key_code)
 {
-    VIRTIOInputDevice *s1 = (VIRTIOInputDevice *)s;
     int ret;
-    
-    if (s1->type != VIRTIO_INPUT_TYPE_KEYBOARD)
+
+    if (s->type != VIRTIO_INPUT_TYPE_KEYBOARD)
         return -1;
     ret = virtio_input_queue_event(s, VIRTIO_INPUT_EV_KEY, key_code, is_down);
     if (ret)
@@ -127,16 +150,15 @@ int virtio_input_send_key_event(VIRTIODevice *s, bool is_down,
 }
 
 /* also used for the tablet */
-int virtio_input_send_mouse_event(VIRTIODevice *s, int dx, int dy, int dz,
-                                  unsigned int buttons)
+static int virtio_input_send_mouse_event(VIRTIOInputDevice *s, int dx, int dy,
+                                         int dz, unsigned int buttons)
 {
-    VIRTIOInputDevice *s1 = (VIRTIOInputDevice *)s;
     int ret, i, b, last_b;
 
-    if (s1->type != VIRTIO_INPUT_TYPE_MOUSE &&
-        s1->type != VIRTIO_INPUT_TYPE_TABLET)
+    if (s->type != VIRTIO_INPUT_TYPE_MOUSE &&
+        s->type != VIRTIO_INPUT_TYPE_TABLET)
         return -1;
-    if (s1->type == VIRTIO_INPUT_TYPE_MOUSE) {
+    if (s->type == VIRTIO_INPUT_TYPE_MOUSE) {
         ret = virtio_input_queue_event(s, VIRTIO_INPUT_EV_REL, REL_X, dx);
         if (ret != 0)
             return ret;
@@ -157,10 +179,10 @@ int virtio_input_send_mouse_event(VIRTIODevice *s, int dx, int dy, int dz,
             return ret;
     }
 
-    if (buttons != s1->buttons_state) {
+    if (buttons != s->buttons_state) {
         for(i = 0; i < countof(buttons_list); i++) {
             b = get_bit(buttons, i);
-            last_b = get_bit(s1->buttons_state, i);
+            last_b = get_bit(s->buttons_state, i);
             if (b != last_b) {
                 ret = virtio_input_queue_event(s, VIRTIO_INPUT_EV_KEY,
                                                buttons_list[i], b);
@@ -168,10 +190,21 @@ int virtio_input_send_mouse_event(VIRTIODevice *s, int dx, int dy, int dz,
                     return ret;
             }
         }
-        s1->buttons_state = buttons;
+        s->buttons_state = buttons;
     }
 
     return virtio_input_queue_event(s, VIRTIO_INPUT_EV_SYN, 0, 0);
+}
+
+void VIRTIOInputDevice::SendKeyEvent(bool is_down, uint16_t key_code)
+{
+    virtio_input_send_key_event(this, is_down, key_code);
+}
+
+void VIRTIOInputDevice::SendMouseEvent(int dx, int dy, int dz,
+                                       unsigned int buttons)
+{
+    virtio_input_send_mouse_event(this, dx, dy, dz, buttons);
 }
 
 static void bitmap_set(uint8_t *tab, int k)
@@ -296,13 +329,56 @@ void VIRTIOInputDevice::ConfigWrite()
     }
 }
 
-std::unique_ptr<VIRTIODevice> virtio_input_init(VIRTIOBusDef *bus,
-                                                VirtioInputTypeEnum type)
+VIRTIOInputDevice::VIRTIOInputDevice(DeviceContext *ctx,
+                                     VirtioInputTypeEnum type):
+    VIRTIODevice("virtio-input", VIRTIO_INPUT_DEVICE_ID,
+                 0x0980 /* other input */, 256, 2),
+    ctx(ctx),
+    type(type)
 {
-    auto s = std::make_unique<VIRTIOInputDevice>();
-    virtio_init(s.get(), bus, 18, 256, 2);
-    s->queue[0].manual_recv = true;
-    s->device_features = 0;
-    s->type = type;
-    return s;
+    queue[0].manual_recv = true;
+    device_features = 0;
 }
+
+bool VIRTIOInputDevice::Realize()
+{
+    if (!VIRTIODevice::Realize())
+        return false;
+    if (type == VIRTIO_INPUT_TYPE_KEYBOARD) {
+        ctx->keyboard = this;
+    } else {
+        ctx->mouse = this;
+    }
+    return true;
+}
+
+
+//#pragma mark - class
+
+class VirtioInputClass final: public DeviceClass {
+public:
+    VirtioInputClass(): DeviceClass("virtio-input") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        const char *kind;
+        VirtioInputTypeEnum input_type;
+
+        if (!cfg.GetStr("kind", &kind)) {
+            return nullptr;
+        }
+        if (strcmp(kind, "keyboard") == 0) {
+            input_type = VIRTIO_INPUT_TYPE_KEYBOARD;
+        } else if (strcmp(kind, "mouse") == 0) {
+            input_type = VIRTIO_INPUT_TYPE_MOUSE;
+        } else if (strcmp(kind, "tablet") == 0) {
+            input_type = VIRTIO_INPUT_TYPE_TABLET;
+        } else {
+            vm_error("virtio-input: unsupported kind '%s'\n", kind);
+            return nullptr;
+        }
+        return new VIRTIOInputDevice(ctx, input_type);
+    }
+};
+
+static const VirtioInputClass sVirtioInputClass;

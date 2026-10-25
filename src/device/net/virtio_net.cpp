@@ -28,15 +28,23 @@
 #include <inttypes.h>
 #include <assert.h>
 
+#include "config_props.h"
 #include "cutils.h"
+#include "devices.h"
 #include "virtio.h"
-#include "virtio_priv.h"
 
+
+#define VIRTIO_NET_DEVICE_ID 1
 
 #define VIRTIO_NET_F_MRG_RXBUF (1ULL << 15)
 
-struct VIRTIONetDevice: public VIRTIODevice, public EthernetTarget {
-    HostEthernet *es = nullptr;
+struct VIRTIONetDevice final: public VIRTIODevice, public EthernetTarget {
+    DeviceContext *ctx;
+    std::unique_ptr<HostEthernet> es;
+
+    VIRTIONetDevice(DeviceContext *ctx, std::unique_ptr<HostEthernet> es);
+
+    bool Realize() override;
 
     int HeaderSize() const;
     int RecvRequest(int queue_idx, int desc_idx, int read_size,
@@ -76,8 +84,6 @@ int VIRTIONetDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
                                  int write_size)
 {
     VIRTIODevice *s = this;
-    VIRTIONetDevice *s1 = (VIRTIONetDevice *)s;
-    HostEthernet *es = s1->es;
     VIRTIONetHeader h;
     int header_size = HeaderSize();
     uint8_t *buf;
@@ -138,20 +144,46 @@ void VIRTIONetDevice::SetCarrier(bool carrier_state)
     (void)carrier_state;
 }
 
-std::unique_ptr<VIRTIODevice> virtio_net_init(VIRTIOBusDef *bus,
-                                              HostEthernet *es)
+VIRTIONetDevice::VIRTIONetDevice(DeviceContext *ctx,
+                                 std::unique_ptr<HostEthernet> es):
+    VIRTIODevice("virtio-net", VIRTIO_NET_DEVICE_ID, 0x0200 /* Ethernet */,
+                 6 + 2, 2),
+    ctx(ctx),
+    es(std::move(es))
 {
-    auto s = std::make_unique<VIRTIONetDevice>();
-    virtio_init(s.get(), bus, 1, 6 + 2, 2);
     /* VIRTIO_NET_F_MAC, VIRTIO_NET_F_STATUS */
-    s->device_features = (1 << 5) /* | (1 << 16) */;
-    s->queue[0].manual_recv = true;
-    s->es = es;
-    memcpy(s->config_space, es->mac_addr, 6);
+    device_features = (1 << 5) /* | (1 << 16) */;
+    queue[0].manual_recv = true;
+    memcpy(config_space, this->es->mac_addr, 6);
     /* status */
-    s->config_space[6] = 0;
-    s->config_space[7] = 0;
-
-    es->target = s.get();
-    return s;
+    config_space[6] = 0;
+    config_space[7] = 0;
 }
+
+bool VIRTIONetDevice::Realize()
+{
+    if (!VIRTIODevice::Realize())
+        return false;
+    es->target = this;
+    ctx->ethernet.push_back(es.get());
+    return true;
+}
+
+
+//#pragma mark - class
+
+class VirtioNetClass final: public DeviceClass {
+public:
+    VirtioNetClass(): DeviceClass("virtio-net") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        auto net = config_open_ethernet(cfg, ctx);
+        if (net == nullptr) {
+            return nullptr;
+        }
+        return new VIRTIONetDevice(ctx, std::move(net));
+    }
+};
+
+static const VirtioNetClass sVirtioNetClass;

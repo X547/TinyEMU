@@ -41,7 +41,6 @@
 #include "devices.h"
 #include "hpet.h"
 #include "simplefb.h"
-#include "virtio.h"
 #include "uart.h"
 #include "x86_cpu.h"
 #include "machine.h"

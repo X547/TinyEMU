@@ -34,7 +34,6 @@
 #include "host_time.h"
 #include "iomem.h"
 #include "run_control.h"
-#include "virtio.h"
 #include "machine.h"
 #ifdef CONFIG_FS_NET
 #include "fs_utils.h"

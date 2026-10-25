@@ -35,7 +35,7 @@
 #include "json.h"
 
 /* This header is included both by the machines, which have already pulled in
-   iomem.h/virtio.h, and by the bus and resource code, which has not. */
+   iomem.h, and by the bus and resource code, which has not. */
 class DeviceLock;
 class PhysMemoryMap;
 class Platform;
