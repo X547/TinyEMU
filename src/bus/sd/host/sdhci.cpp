@@ -124,10 +124,26 @@
 #define  SDHCI_CTRL_ADMA32      0x10
 #define  SDHCI_CTRL_ADMA64      0x18
 #define SDHCI_CTRL_8BIT         bit_at(5)
+#define SDHCI_CTRL_CD_TEST_LEVEL bit_at(6)
+#define SDHCI_CTRL_CD_TEST      bit_at(7)
 
-/* Clock control. */
+/* Power control. Only 3.3 V is offered, and a controller may refuse to
+   power the bus at any other voltage, which this one does. */
+#define SDHCI_POWER_ON          bit_at(0)
+#define SDHCI_POWER_VDD_MASK    0x0e
+#define  SDHCI_POWER_330        0x0e
+
+/* Block gap control. Stopping at a block gap is not modelled, so Continue
+   Request has nothing to restart and clears at once. */
+#define SDHCI_GAP_STOP          bit_at(0)
+#define SDHCI_GAP_CONTINUE      bit_at(1)
+
+/* Clock control. The clock generator select and the reserved bits read
+   zero: there is no programmable clock. */
 #define SDHCI_CLOCK_INT_EN      bit_at(0)
 #define SDHCI_CLOCK_INT_STABLE  bit_at(1)
+#define SDHCI_CLOCK_CARD_EN     bit_at(2)
+#define SDHCI_CLOCK_WMASK       0xffc5
 
 /* Software reset. */
 #define SDHCI_RESET_ALL         bit_at(0)
@@ -158,9 +174,20 @@
 #define SDHCI_ERR_AUTO_CMD      bit_at(8)
 #define SDHCI_ERR_ADMA          bit_at(9)
 
-/* Auto CMD error status. */
+/* Auto CMD error status. Any of the low five raises the Auto CMD Error
+   interrupt; bit 7 only qualifies them. */
 #define SDHCI_AUTOCMD_NOT_EXECUTED bit_at(0)
 #define SDHCI_AUTOCMD_TIMEOUT      bit_at(1)
+#define SDHCI_AUTOCMD_ERRORS       0x1f
+#define SDHCI_AUTOCMD_MASK         0x9f
+
+/* The bits of each register a write reaches; the rest are reserved, read
+   only or, for the enables, fixed to zero. */
+#define SDHCI_BLOCK_SIZE_WMASK  0x7fff
+#define SDHCI_TRNS_WMASK        0x003f
+#define SDHCI_CMD_WMASK         0x3ffb
+#define SDHCI_NORMAL_INT_MASK   0x1fff
+#define SDHCI_ERROR_INT_MASK    0xf7ff
 
 /* Capabilities. */
 #define SDHCI_CAN_8BIT_EMBEDDED bit_at(18)
@@ -177,10 +204,11 @@
    specification 3.00 in the low one. */
 #define SDHCI_SPEC_300          0x0002
 
-/* Host control 2. Version 4 mode is a 4.00 feature, and reporting 3.00 above
-   is what makes it unavailable; the bit is masked off so that a driver
-   reading it back is told so. */
-#define SDHCI_CTRL2_V4_MODE     bit_at(12)
+/* Host control 2. Bits 13 to 8 are reserved in 3.00, which is what keeps a
+   driver from turning on the version 4 mode bit 12 later became. Sampling
+   Clock Select is set only by a successful tuning, and there is no tuning
+   circuit, so Execute Tuning ends at once with it still clear. */
+#define SDHCI_CTRL2_WMASK       0xc03f
 
 /* An ADMA2 descriptor's attribute word. */
 #define SDHCI_ADMA_VALID        bit_at(0)
@@ -192,8 +220,11 @@
 #define  SDHCI_ADMA_ACT_LINK    3
 
 /* ADMA error status: the state the engine was in when it failed, plus the
-   bit that says the length in the descriptor was wrong. */
-#define SDHCI_ADMA_ERR_STATE_ST_FDS 0
+   bit that says the descriptors and the block count disagree on the length.
+   Stopped in ST_FDS the ADMA address points at the descriptor that failed,
+   anywhere else at the one after it. */
+#define SDHCI_ADMA_ERR_STATE_ST_STOP 0
+#define SDHCI_ADMA_ERR_STATE_ST_FDS 1
 #define SDHCI_ADMA_ERR_STATE_ST_TFR 3
 #define SDHCI_ADMA_ERR_LENGTH   bit_at(2)
 
@@ -318,6 +349,9 @@ private:
     /* The interrupt an SDIO card raises on DAT[1], which is a level rather
        than an event and so is not held in the status register. */
     bool fCardIrq = false;
+    /* Card Inserted as last reported, so that a change raises the insertion
+       or removal interrupt. */
+    bool fCardInserted = false;
 
     /* The block buffer and the engine that moves it. One block is in flight
        at a time: the buffer is filled from the card and drained to the guest,
@@ -342,6 +376,9 @@ private:
     uint64_t fAdmaBufAddr = 0;
     uint32_t fAdmaBufLen = 0;
     bool fAdmaEnd = false;
+    /* The descriptor being consumed asked for a DMA interrupt once its data
+       has moved. */
+    bool fAdmaIntPending = false;
 
     /* guest memory, through whichever transport this is on */
     uint8_t *GuestPtr(uint64_t addr, bool is_rw);
@@ -349,8 +386,12 @@ private:
 
     /* register file */
     uint32_t ReadReg(uint32_t offset);
-    void WriteReg(uint32_t offset, uint32_t val);
+    void WriteReg(uint32_t offset, uint32_t val, bool top_byte = true);
     uint32_t PresentState() const;
+    bool CardInserted() const;
+    bool CardPowered() const;
+    void UpdateCardDetect();
+    void SetPowerControl(uint8_t val);
     uint32_t Capabilities() const;
     uint16_t NormalIntStatus() const;
     uint32_t BufferRead(uint32_t size);
@@ -371,8 +412,8 @@ private:
     /* the data engine */
     void TransferStart();
     void TransferFinish();
-    void TransferError();
-    void TransferAbort(bool complete);
+    void TransferError(uint16_t error = SDHCI_ERR_DATA_CRC);
+    void TransferAbort();
     void CountBlock();
     bool ReadNextBlock();
     void ReadBlockArrived();
@@ -386,6 +427,8 @@ private:
     uint32_t DmaMove(uint8_t *buf, uint32_t len, bool to_guest);
     bool AdmaFetch();
     void AdmaError(uint8_t state);
+    bool AdmaTableDone() const;
+    bool AdmaCheckLength();
 
 public:
     SDHCIDevice(const char *name, const char *compatible, uint32_t clock_hz):
@@ -539,8 +582,11 @@ uint32_t SDHCIDevice::PresentState() const
                                      : SDHCI_PRESENT_BUF_WR_ENABLE;
         }
     }
+    if (CardInserted()) {
+        state |= SDHCI_PRESENT_CARD_INSERTED;
+    }
     if (fCard != nullptr) {
-        state |= SDHCI_PRESENT_CARD_INSERTED | SDHCI_PRESENT_CARD_DETECT;
+        state |= SDHCI_PRESENT_CARD_DETECT;
         state |= SDHCI_PRESENT_DAT_LEVEL | SDHCI_PRESENT_CMD_LEVEL;
         /* The bit is the level of the write protect pin, and a card that is
            not write protected leaves it high. */
@@ -666,52 +712,66 @@ uint32_t SDHCIDevice::ReadReg(uint32_t offset)
 }
 
 
-void SDHCIDevice::WriteReg(uint32_t offset, uint32_t val)
+void SDHCIDevice::WriteReg(uint32_t offset, uint32_t val, bool top_byte)
 {
     switch (offset) {
     case SDHCI_DMA_ADDRESS:
         fSdmaAddr = val;
-        /* Programming the next address is what resumes a transfer that
-           stopped at an SDMA buffer boundary. */
-        if (fDmaPaused) {
+        /* Writing the top byte is what resumes a transfer that stopped at an
+           SDMA buffer boundary. */
+        if (fDmaPaused && top_byte) {
             fDmaPaused = false;
             fSdmaAtBoundary = false;
             DmaRun();
         }
         break;
+    /* The registers that describe a transfer are protected while one runs. */
     case SDHCI_BLOCK_SIZE:
-        fBlockSize = val;
+        if (!fTransferActive) {
+            fBlockSize = val & SDHCI_BLOCK_SIZE_WMASK;
+        }
         break;
     case SDHCI_BLOCK_COUNT:
-        fBlockCount = val;
+        if (!fTransferActive) {
+            fBlockCount = val;
+        }
         break;
     case SDHCI_ARGUMENT:
         fArgument = val;
         break;
     case SDHCI_TRANSFER_MODE:
-        fTransferMode = val;
+        if (!fTransferActive) {
+            fTransferMode = val & SDHCI_TRNS_WMASK;
+        }
         break;
     case SDHCI_COMMAND:
-        fCommand = val;
-        SendCommand();
+        /* Only a write that reaches the upper byte issues the command. */
+        fCommand = val & SDHCI_CMD_WMASK;
+        if (top_byte) {
+            SendCommand();
+        }
         break;
     case SDHCI_HOST_CONTROL:
         fHostControl = val;
+        UpdateCardDetect();
         break;
     case SDHCI_POWER_CONTROL:
-        fPowerControl = val;
+        SetPowerControl(val);
         break;
     case SDHCI_BLOCK_GAP_CONTROL:
-        fBlockGapControl = val;
+        fBlockGapControl = val & 0x0f & ~SDHCI_GAP_CONTINUE;
         break;
     case SDHCI_WAKEUP_CONTROL:
-        fWakeupControl = val;
+        fWakeupControl = val & 0x07;
         break;
     case SDHCI_CLOCK_CONTROL:
-        fClockControl = val;
+        fClockControl = val & SDHCI_CLOCK_WMASK;
+        if (!CardInserted()) {
+            fClockControl &= ~(uint16_t)SDHCI_CLOCK_CARD_EN;
+        }
         break;
     case SDHCI_TIMEOUT_CONTROL:
-        fTimeoutControl = val;
+        fTimeoutControl = val & 0x0f;
         break;
     case SDHCI_SOFTWARE_RESET:
         SoftReset(val);
@@ -728,28 +788,25 @@ void SDHCIDevice::WriteReg(uint32_t offset, uint32_t val)
         UpdateIrq();
         break;
     case SDHCI_INT_ENABLE:
-        fNormalIntEnable = val;
+        fNormalIntEnable = val & SDHCI_NORMAL_INT_MASK;
         fNormalIntStatus &= fNormalIntEnable;
         UpdateIrq();
         break;
     case SDHCI_ERR_INT_ENABLE:
-        fErrorIntEnable = val;
+        fErrorIntEnable = val & SDHCI_ERROR_INT_MASK;
         fErrorIntStatus &= fErrorIntEnable;
         UpdateIrq();
         break;
     case SDHCI_SIGNAL_ENABLE:
-        fNormalSignalEnable = val;
+        fNormalSignalEnable = val & SDHCI_NORMAL_INT_MASK;
         UpdateIrq();
         break;
     case SDHCI_ERR_SIGNAL_ENABLE:
-        fErrorSignalEnable = val;
+        fErrorSignalEnable = val & SDHCI_ERROR_INT_MASK;
         UpdateIrq();
         break;
     case SDHCI_HOST_CONTROL2:
-        fHostControl2 = val & ~(uint16_t)SDHCI_CTRL2_V4_MODE;
-        break;
-    case SDHCI_ADMA_ERROR:
-        fAdmaErrStatus = val;
+        fHostControl2 = val & SDHCI_CTRL2_WMASK;
         break;
     case SDHCI_ADMA_ADDRESS:
         fAdmaAddr = (fAdmaAddr & ~(uint64_t)0xffffffffu) | val;
@@ -758,15 +815,74 @@ void SDHCIDevice::WriteReg(uint32_t offset, uint32_t val)
         fAdmaAddr = (fAdmaAddr & 0xffffffffu) | ((uint64_t)val << 32);
         break;
     case SDHCI_FORCE_AUTO_CMD:
+        val &= SDHCI_AUTOCMD_MASK;
         fAutoCmdErrStatus |= val;
+        if ((val & SDHCI_AUTOCMD_ERRORS) != 0) {
+            RaiseError(SDHCI_ERR_AUTO_CMD);
+        }
         break;
     case SDHCI_FORCE_ERR_INT:
-        RaiseError(val);
+        RaiseError(val & SDHCI_ERROR_INT_MASK);
         break;
     default:
-        /* The response registers, the present state and the capabilities are
-           read only, and a write to one of them is simply lost. */
+        /* The response registers, the present state, the capabilities and
+           the ADMA error status are read only, and a write to one of them is
+           simply lost. */
         break;
+    }
+}
+
+
+bool SDHCIDevice::CardInserted() const
+{
+    /* The test bits stand in for the card detect pin when selected; they are
+       how a driver exercises insertion and removal without a hand at the
+       slot. */
+    if ((fHostControl & SDHCI_CTRL_CD_TEST) != 0) {
+        return (fHostControl & SDHCI_CTRL_CD_TEST_LEVEL) != 0;
+    }
+    return fCard != nullptr;
+}
+
+
+bool SDHCIDevice::CardPowered() const
+{
+    return fCard != nullptr && CardInserted() &&
+           (fPowerControl & SDHCI_POWER_ON) != 0;
+}
+
+
+void SDHCIDevice::UpdateCardDetect()
+{
+    bool inserted = CardInserted();
+
+    if (inserted == fCardInserted) {
+        return;
+    }
+    fCardInserted = inserted;
+    if (!inserted) {
+        /* A card that goes away takes the bus power and clock with it. */
+        SetPowerControl(fPowerControl & ~SDHCI_POWER_ON);
+        fClockControl &= ~(uint16_t)SDHCI_CLOCK_CARD_EN;
+    }
+    RaiseNormal(inserted ? SDHCI_INT_CARD_INSERT : SDHCI_INT_CARD_REMOVE);
+}
+
+
+void SDHCIDevice::SetPowerControl(uint8_t val)
+{
+    bool was_on = (fPowerControl & SDHCI_POWER_ON) != 0;
+
+    val &= SDHCI_POWER_ON | SDHCI_POWER_VDD_MASK;
+    if ((val & SDHCI_POWER_VDD_MASK) != SDHCI_POWER_330 || !CardInserted()) {
+        val &= ~SDHCI_POWER_ON;
+    }
+    fPowerControl = val;
+    if (was_on && (val & SDHCI_POWER_ON) == 0 && fCard != nullptr) {
+        /* Taking the power away is the only thing that resets a card,
+           inactive or not. */
+        TransferAbort();
+        fCard->Reset();
     }
 }
 
@@ -774,9 +890,10 @@ void SDHCIDevice::WriteReg(uint32_t offset, uint32_t val)
 void SDHCIDevice::SoftReset(uint32_t val)
 {
     if ((val & SDHCI_RESET_ALL) != 0) {
-        /* Everything the host programmed goes; the card does not, because it
-           is a device of its own and is reset by GO_IDLE_STATE. */
-        TransferAbort(false);
+        /* Everything the host programmed goes, the bus power with it, which
+           is what resets the card too. Card detection is not touched. */
+        TransferAbort();
+        SetPowerControl(0);
         fSdmaAddr = 0;
         fBlockSize = 0;
         fBlockCount = 0;
@@ -785,7 +902,6 @@ void SDHCIDevice::SoftReset(uint32_t val)
         fCommand = 0;
         memset(fResponse, 0, sizeof(fResponse));
         fHostControl = 0;
-        fPowerControl = 0;
         fBlockGapControl = 0;
         fWakeupControl = 0;
         fClockControl = 0;
@@ -800,6 +916,9 @@ void SDHCIDevice::SoftReset(uint32_t val)
         fHostControl2 = 0;
         fAdmaErrStatus = 0;
         fAdmaAddr = 0;
+        /* The test bits are gone, so the pin decides again; with every
+           status enable clear that raises nothing. */
+        UpdateCardDetect();
         UpdateIrq();
         return;
     }
@@ -812,7 +931,8 @@ void SDHCIDevice::SoftReset(uint32_t val)
         UpdateIrq();
     }
     if ((val & SDHCI_RESET_DATA) != 0) {
-        TransferAbort(false);
+        TransferAbort();
+        fBlockGapControl &= ~(uint8_t)(SDHCI_GAP_STOP | SDHCI_GAP_CONTINUE);
         fNormalIntStatus &= ~(uint16_t)(SDHCI_INT_XFER_COMPLETE |
                                         SDHCI_INT_DMA_END |
                                         SDHCI_INT_BUF_RD_READY |
@@ -892,6 +1012,8 @@ bool SDHCIDevice::SendAutoCmd23()
         RaiseError(SDHCI_ERR_AUTO_CMD);
         return false;
     }
+    /* Its response goes where an Auto CMD12 response would. */
+    fResponse[3] = get_be32(resp);
     return true;
 }
 
@@ -903,17 +1025,14 @@ void SDHCIDevice::SendAutoCmd12()
 
     cmd.index = SD_CMD_STOP_TRANSMISSION;
     cmd.arg = 0;
-    int len = fCard->Command(cmd, resp);
-    if (len == 0) {
+    if (!CardPowered() || fCard->Command(cmd, resp) != SD_RESPONSE_SHORT) {
         fAutoCmdErrStatus |= SDHCI_AUTOCMD_TIMEOUT;
         RaiseError(SDHCI_ERR_AUTO_CMD);
         return;
     }
     /* The response to a command the controller issued by itself goes in the
        last response register, which is where a driver looks for it. */
-    if (len == SD_RESPONSE_SHORT) {
-        fResponse[3] = get_be32(resp);
-    }
+    fResponse[3] = get_be32(resp);
 }
 
 
@@ -930,10 +1049,10 @@ void SDHCIDevice::SendCommand()
 
     fAutoCmdErrStatus = 0;
 
-    /* An empty slot answers nothing, which is exactly what a driver probing
-       for a card is waiting to find out. */
+    /* An empty slot, or a card without power, answers nothing, which is
+       exactly what a driver probing for a card is waiting to find out. */
     int len = 0;
-    if (fCard != nullptr) {
+    if (CardPowered()) {
         if (data_present && (fTransferMode & SDHCI_TRNS_AUTO_MASK) ==
                                 SDHCI_TRNS_AUTO_CMD23) {
             if (!SendAutoCmd23()) {
@@ -956,7 +1075,13 @@ void SDHCIDevice::SendCommand()
     RaiseNormal(SDHCI_INT_CMD_COMPLETE);
 
     if (is_abort) {
-        TransferAbort(true);
+        /* Transfer Complete ends the transfer it stopped, or the busy of an
+           abort that found none running. */
+        bool was_active = fTransferActive;
+        TransferAbort();
+        if (was_active || resp_type == SDHCI_CMD_RESP_BUSY) {
+            RaiseNormal(SDHCI_INT_XFER_COMPLETE);
+        }
         return;
     }
     if (data_present) {
@@ -982,7 +1107,13 @@ void SDHCIDevice::TransferStart()
 {
     uint32_t block_len = get_bits(fBlockSize, 0, 12);
 
-    if (block_len == 0 || block_len > SD_BLOCK_SIZE) {
+    if (block_len == 0) {
+        /* A block size of zero is no data transfer at all. */
+        fCard->StopTransfer();
+        RaiseNormal(SDHCI_INT_XFER_COMPLETE);
+        return;
+    }
+    if (block_len > SD_BLOCK_SIZE) {
         /* The capabilities say 512 bytes is the longest block, so anything
            else is a driver that did not read them. */
         RaiseError(SDHCI_ERR_DATA_CRC);
@@ -1004,6 +1135,7 @@ void SDHCIDevice::TransferStart()
     fDmaPaused = false;
     fSdmaAtBoundary = false;
     fAdmaEnd = false;
+    fAdmaIntPending = false;
     fAdmaBufLen = 0;
     fAdmaBufAddr = 0;
     fBufferPos = 0;
@@ -1145,6 +1277,10 @@ void SDHCIDevice::DataComplete(bool ok)
 
 void SDHCIDevice::TransferFinish()
 {
+    if (fTransferDma && AdmaSelected() && fBlockCountLimited &&
+        !AdmaCheckLength()) {
+        return;
+    }
     fTransferActive = false;
     fWaitingCard = false;
     fDmaPaused = false;
@@ -1161,7 +1297,7 @@ void SDHCIDevice::TransferFinish()
 }
 
 
-void SDHCIDevice::TransferError()
+void SDHCIDevice::TransferError(uint16_t error)
 {
     if (fCard != nullptr) {
         fCard->StopTransfer();
@@ -1171,11 +1307,11 @@ void SDHCIDevice::TransferError()
     fDmaPaused = false;
     fBufferPos = 0;
     fBufferLen = 0;
-    RaiseError(SDHCI_ERR_DATA_CRC);
+    RaiseError(error);
 }
 
 
-void SDHCIDevice::TransferAbort(bool complete)
+void SDHCIDevice::TransferAbort()
 {
     if (fCard != nullptr) {
         fCard->StopTransfer();
@@ -1188,9 +1324,6 @@ void SDHCIDevice::TransferAbort(bool complete)
     fDmaPaused = false;
     fBufferPos = 0;
     fBufferLen = 0;
-    if (complete) {
-        RaiseNormal(SDHCI_INT_XFER_COMPLETE);
-    }
 }
 
 
@@ -1215,8 +1348,7 @@ uint32_t SDHCIDevice::SdmaBoundary() const
 void SDHCIDevice::AdmaError(uint8_t state)
 {
     fAdmaErrStatus = state;
-    RaiseError(SDHCI_ERR_ADMA);
-    TransferError();
+    TransferError(SDHCI_ERR_ADMA);
 }
 
 
@@ -1227,8 +1359,8 @@ bool SDHCIDevice::AdmaFetch()
     uint8_t desc[12];
 
     if (fAdmaEnd) {
-        /* The list ran out before the data did. */
-        AdmaError(SDHCI_ADMA_ERR_STATE_ST_TFR);
+        /* The table ended before the data did. */
+        AdmaError(SDHCI_ADMA_ERR_STATE_ST_STOP | SDHCI_ADMA_ERR_LENGTH);
         return false;
     }
     if (!DmaCopy(fAdmaAddr, desc, desc_size, false)) {
@@ -1240,8 +1372,6 @@ bool SDHCIDevice::AdmaFetch()
     uint32_t length = get_le16(desc + 2);
     uint64_t addr = wide ? get_le64(desc + 4) : get_le32(desc + 4);
 
-    fAdmaAddr += desc_size;
-
     if ((attr & SDHCI_ADMA_VALID) == 0) {
         AdmaError(SDHCI_ADMA_ERR_STATE_ST_FDS);
         return false;
@@ -1251,26 +1381,61 @@ bool SDHCIDevice::AdmaFetch()
         length = 65536;
     }
 
+    bool link = false;
     switch (get_bits(attr, SDHCI_ADMA_ACT_SHIFT, 2)) {
-    case SDHCI_ADMA_ACT_NOP:
-        break;
     case SDHCI_ADMA_ACT_TRAN:
         fAdmaBufAddr = addr;
         fAdmaBufLen = length;
         break;
     case SDHCI_ADMA_ACT_LINK:
-        fAdmaAddr = addr;
+        link = true;
         break;
     default:
-        AdmaError(SDHCI_ADMA_ERR_STATE_ST_FDS | SDHCI_ADMA_ERR_LENGTH);
-        return false;
+        /* Nop, and the reserved action, which is the same. */
+        break;
     }
+    fAdmaAddr = link ? addr : fAdmaAddr + desc_size;
 
-    if ((attr & SDHCI_ADMA_INT) != 0) {
-        RaiseNormal(SDHCI_INT_DMA_END);
-    }
     if ((attr & SDHCI_ADMA_END) != 0) {
         fAdmaEnd = true;
+    }
+    /* The interrupt comes when the line's operation is over, which for a
+       transfer line is once its data has moved. */
+    if ((attr & SDHCI_ADMA_INT) != 0) {
+        if (fAdmaBufLen > 0) {
+            fAdmaIntPending = true;
+        } else {
+            RaiseNormal(SDHCI_INT_DMA_END);
+        }
+    }
+    return true;
+}
+
+
+bool SDHCIDevice::AdmaTableDone() const
+{
+    return fAdmaEnd && fAdmaBufLen == 0;
+}
+
+
+bool SDHCIDevice::AdmaCheckLength()
+{
+    /* The block count is used up: what is left of the table may be lines
+       that move nothing up to its end, but data still to move is a table
+       longer than the transfer. */
+    int fetches = 0;
+    while (fAdmaBufLen == 0 && !fAdmaEnd) {
+        if (++fetches > SDHCI_ADMA_MAX_FETCHES) {
+            AdmaError(SDHCI_ADMA_ERR_STATE_ST_FDS);
+            return false;
+        }
+        if (!AdmaFetch()) {
+            return false;
+        }
+    }
+    if (fAdmaBufLen != 0) {
+        AdmaError(SDHCI_ADMA_ERR_STATE_ST_TFR | SDHCI_ADMA_ERR_LENGTH);
+        return false;
     }
     return true;
 }
@@ -1296,6 +1461,10 @@ uint32_t SDHCIDevice::DmaMove(uint8_t *buf, uint32_t len, bool to_guest)
         }
         fAdmaBufAddr += n;
         fAdmaBufLen -= n;
+        if (fAdmaBufLen == 0 && fAdmaIntPending) {
+            fAdmaIntPending = false;
+            RaiseNormal(SDHCI_INT_DMA_END);
+        }
         return n;
     }
 
@@ -1314,7 +1483,6 @@ uint32_t SDHCIDevice::DmaMove(uint8_t *buf, uint32_t len, bool to_guest)
     uint32_t to_boundary = boundary - (fSdmaAddr & (boundary - 1));
     uint32_t n = len < to_boundary ? len : to_boundary;
     if (!DmaCopy(fSdmaAddr, buf, n, to_guest)) {
-        RaiseError(SDHCI_ERR_DATA_CRC);
         TransferError();
         return 0;
     }
@@ -1329,6 +1497,13 @@ uint32_t SDHCIDevice::DmaMove(uint8_t *buf, uint32_t len, bool to_guest)
 void SDHCIDevice::DmaRun()
 {
     while (fTransferActive && !fDmaPaused && !fWaitingCard) {
+        /* Without a block count, the end of the descriptor table is the end
+           of an ADMA transfer. */
+        if (AdmaSelected() && !fBlockCountLimited && AdmaTableDone() &&
+            (fTransferIsRead ? fBufferPos >= fBufferLen : fBufferPos == 0)) {
+            TransferFinish();
+            return;
+        }
         if (fBufferPos < fBufferLen) {
             /* A read drains the block buffer into guest memory, a write
                fills it from there. */
@@ -1427,7 +1602,12 @@ void SDHCIDevice::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
             uint32_t base = offset & ~(width - 1);
             uint32_t shift = (offset - base) * 8;
             uint32_t mask = sdhci_size_mask(size) << shift;
-            WriteReg(base, (ReadReg(base) & ~mask) | ((val << shift) & mask));
+            /* Except in a write one to clear register, where the bytes not
+               written must count as zeroes. */
+            uint32_t keep = base == SDHCI_INT_STATUS ||
+                            base == SDHCI_ERR_INT_STATUS ? 0 : ReadReg(base);
+            WriteReg(base, (keep & ~mask) | ((val << shift) & mask),
+                     offset + size == base + width);
             return;
         }
         WriteReg(offset, val & sdhci_size_mask(width));
@@ -1457,6 +1637,7 @@ bool SDHCIDevice::AttachDevice(SDDevice *dev)
         return false;
     }
     fCard = dev;
+    fCardInserted = true;
     dev->SetHost(this);
     dev->Reset();
     return true;
