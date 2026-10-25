@@ -66,6 +66,8 @@
 #define VIRTIO_MMIO_QUEUE_AVAIL_HIGH	0x094
 #define VIRTIO_MMIO_QUEUE_USED_LOW	0x0a0
 #define VIRTIO_MMIO_QUEUE_USED_HIGH	0x0a4
+#define VIRTIO_MMIO_SHM_LEN_LOW		0x0b0
+#define VIRTIO_MMIO_SHM_LEN_HIGH	0x0b4
 #define VIRTIO_MMIO_CONFIG_GENERATION	0x0fc
 #define VIRTIO_MMIO_CONFIG		0x100
 
@@ -643,61 +645,40 @@ void queue_notify(VIRTIODevice *s, int queue_idx)
     }
 }
 
+/* Past the end of the device's configuration space reads 0 and writes
+   are dropped. */
 static uint32_t virtio_config_read(VIRTIODevice *s, uint32_t offset,
                                    int size_log2)
 {
-    uint32_t val;
+    if (offset + (1u << size_log2) > s->config_space_size)
+        return 0;
     switch(size_log2) {
     case 0:
-        if (offset < s->config_space_size) {
-            val = s->config_space[offset];
-        } else {
-            val = 0;
-        }
-        break;
+        return s->config_space[offset];
     case 1:
-        if (offset < (s->config_space_size - 1)) {
-            val = get_le16(&s->config_space[offset]);
-        } else {
-            val = 0;
-        }
-        break;
-    case 2:
-        if (offset < (s->config_space_size - 3)) {
-            val = get_le32(s->config_space + offset);
-        } else {
-            val = 0;
-        }
-        break;
+        return get_le16(s->config_space + offset);
     default:
-        abort();
+        return get_le32(s->config_space + offset);
     }
-    return val;
 }
 
 static void virtio_config_write(VIRTIODevice *s, uint32_t offset,
                                 uint32_t val, int size_log2)
 {
+    if (offset + (1u << size_log2) > s->config_space_size)
+        return;
     switch(size_log2) {
     case 0:
-        if (offset < s->config_space_size) {
-            s->config_space[offset] = val;
-            s->ConfigWrite();
-        }
+        s->config_space[offset] = val;
         break;
     case 1:
-        if (offset < s->config_space_size - 1) {
-            put_le16(s->config_space + offset, val);
-            s->ConfigWrite();
-        }
+        put_le16(s->config_space + offset, val);
         break;
-    case 2:
-        if (offset < s->config_space_size - 3) {
-            put_le32(s->config_space + offset, val);
-            s->ConfigWrite();
-        }
+    default:
+        put_le32(s->config_space + offset, val);
         break;
     }
+    s->ConfigWrite();
 }
 
 /* The queue the driver selected, or nullptr when the device has no such
@@ -775,8 +756,13 @@ uint32_t VIRTIOMMIOTransport::DeviceRead(uint32_t offset, int size_log2)
         case VIRTIO_MMIO_STATUS:
             val = s->status;
             break;
+        case VIRTIO_MMIO_SHM_LEN_LOW:
+        case VIRTIO_MMIO_SHM_LEN_HIGH:
+            /* there are no shared memory regions */
+            val = 0xffffffff;
+            break;
         case VIRTIO_MMIO_CONFIG_GENERATION:
-            val = 0;
+            val = s->config_generation;
             break;
         default:
             val = 0;
@@ -978,6 +964,9 @@ uint32_t VIRTIOPCITransport::DeviceRead(uint32_t offset1, int size_log2)
             case VIRTIO_PCI_DEVICE_STATUS:
                 val = s->status;
                 break;
+            case VIRTIO_PCI_CONFIG_GENERATION:
+                val = s->config_generation & 0xff;
+                break;
             }
         }
         break;
@@ -1108,6 +1097,7 @@ void virtio_set_debug(VIRTIODevice *s, int debug)
 
 void virtio_config_change_notify(VIRTIODevice *s)
 {
+    s->config_generation++;
     if (s->status & VIRTIO_STATUS_DRIVER_OK)
         virtio_raise_irq(s, VIRTIO_INT_CONFIG, s->config_msix_vector);
 }
@@ -1400,6 +1390,12 @@ public:
     {
         const char *tag;
         if (!cfg.GetStr("tag", &tag)) {
+            return nullptr;
+        }
+        /* the length and the tag fill the configuration space */
+        if (strlen(tag) > MAX_CONFIG_SPACE_SIZE - 2) {
+            vm_error("virtio-9p: 'tag' is longer than %d bytes\n",
+                     MAX_CONFIG_SPACE_SIZE - 2);
             return nullptr;
         }
         auto fs = config_open_fs(cfg, ctx);

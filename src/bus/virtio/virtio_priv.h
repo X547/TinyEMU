@@ -105,8 +105,10 @@ struct VIRTIODevice: public PCIBarTarget {
     uint32_t device_id = 0;
     uint32_t vendor_id = 0;
     uint32_t device_features = 0;
-    uint32_t config_space_size = 0; /* in bytes, must be multiple of 4 */
+    uint32_t config_space_size = 0; /* in bytes */
     uint8_t config_space[MAX_CONFIG_SPACE_SIZE] {};
+    /* changes with every configuration change the device signals */
+    uint32_t config_generation = 0;
 
     virtual ~VIRTIODevice() = default;
 
