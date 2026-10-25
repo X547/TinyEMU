@@ -8,47 +8,201 @@
 #include "bits.h"
 #include "devices.h"
 #include "fdt.h"
+#include "host_time.h"
 
 
 SerialState::SerialState(PhysMemoryMap *port_map, int addr, IRQSignal *irq,
-                         HostConsole *output):
+                         HostConsole *output, uint32_t clock_hz,
+                         std::unique_ptr<HostTimer> timer):
+    fClockHz(clock_hz),
     fIrq(irq),
-    fOutput(output)
+    fOutput(output),
+    fTimer(std::move(timer))
 {
+    if (fTimer != nullptr)
+        fTimer->target = this;
     port_map->RegisterDevice(addr, 8, &fIo, DEVIO_SIZE8);
+}
+
+
+int SerialState::RxTrigger() const
+{
+    static const int levels[4] = {1, 4, 8, 14};
+    return levels[get_bits(fFcr, 6, 2)];
+}
+
+
+/* The error bits of the characters still in the FIFO, which LSR bit 7
+   reports. */
+uint8_t SerialState::RxErrorsInFifo() const
+{
+    uint8_t flags = 0;
+    for (int i = 0; i < fRxCount; i++)
+        flags |= fRxFlags[(fRxHead + i) % UART_FIFO_LENGTH];
+    return flags;
 }
 
 
 void SerialState::UpdateIRQ()
 {
-    if ((fLsr & UART_LSR_DR) && (fIer & UART_IER_RDI)) {
+    bool data = FifoEnabled() ? fRxCount >= RxTrigger() : fRxCount > 0;
+
+    if ((fLsrErrors & UART_LSR_ERRORS) && (fIer & UART_IER_RLSI)) {
+        fIir = UART_IIR_RLSI;
+    } else if (data && (fIer & UART_IER_RDI)) {
         fIir = UART_IIR_RDI;
+    } else if (fTimeoutPending && (fIer & UART_IER_RDI)) {
+        fIir = UART_IIR_CTI;
     } else if (fThrIpending && (fIer & UART_IER_THRI)) {
         fIir = UART_IIR_THRI;
+    } else if ((fMsr & UART_MSR_DELTAS) && (fIer & UART_IER_MSI)) {
+        fIir = UART_IIR_MSI;
     } else {
         fIir = UART_IIR_NO_INT;
     }
-    if (fIir != UART_IIR_NO_INT) {
-        fIrq->Set(1);
-    } else {
-        fIrq->Set(0);
+    fIrq->Set(fIir != UART_IIR_NO_INT);
+}
+
+
+/* Start, data, parity and stop bits, each sixteen clocks of the divided
+   input clock. */
+uint64_t SerialState::CharTimeUs() const
+{
+    int data_bits = 5 + get_bits(fLcr, 0, 2);
+    int half_bits = 2 * (1 + data_bits + ((fLcr & UART_LCR_PARITY) ? 1 : 0));
+    if (fLcr & UART_LCR_STOP)
+        half_bits += data_bits == 5 ? 3 : 4;
+    else
+        half_bits += 2;
+    uint64_t divisor = fDivider != 0 ? fDivider : 1;
+    return (uint64_t)half_bits * 16 * divisor * 1000000 / (2ull * fClockHz);
+}
+
+
+/* Four character times from now, the FIFO reports what is left in it. The
+   timer runs while characters wait, and starts again whenever one arrives
+   or is read. */
+void SerialState::RestartTimeout()
+{
+    fTimeoutPending = false;
+    if (fTimer == nullptr)
+        return;
+    if (FifoEnabled() && fRxCount > 0)
+        fTimer->Arm(host_monotonic_us() + 4 * CharTimeUs());
+    else
+        fTimer->Disarm();
+}
+
+
+void SerialState::TimerExpired()
+{
+    if (FifoEnabled() && fRxCount > 0) {
+        fTimeoutPending = true;
+        UpdateIRQ();
     }
 }
 
 
-void SerialState::ReceiveByte(uint8_t ch)
+/* A character the receiver assembled. With the FIFO full it is lost; with
+   the FIFOs off it replaces the one not yet read. Either way that is an
+   overrun. */
+void SerialState::RxPush(uint8_t ch, uint8_t flags)
 {
-    fRbr = ch;
-    fLsr |= UART_LSR_DR;
+    if (fRxCount == RxCapacity()) {
+        fLsrErrors |= UART_LSR_OE;
+        if (FifoEnabled()) {
+            UpdateIRQ();
+            return;
+        }
+        fRxCount = 0;
+    }
+    int tail = (fRxHead + fRxCount) % UART_FIFO_LENGTH;
+    fRxData[tail] = ch;
+    fRxFlags[tail] = flags;
+    fRxCount++;
+    if (fRxCount == 1)
+        fLsrErrors |= flags;
+    RestartTimeout();
     UpdateIRQ();
+}
+
+
+uint8_t SerialState::RxPop()
+{
+    if (fRxCount == 0)
+        return fRbr;
+    fRbr = fRxData[fRxHead];
+    fRxHead = (fRxHead + 1) % UART_FIFO_LENGTH;
+    fRxCount--;
+    if (fRxCount > 0)
+        fLsrErrors |= fRxFlags[fRxHead];
+    RestartTimeout();
+    UpdateIRQ();
+    return fRbr;
+}
+
+
+void SerialState::RxClear()
+{
+    fRxHead = 0;
+    fRxCount = 0;
+    RestartTimeout();
+}
+
+
+/* DCD, RI, DSR and CTS: the modem control outputs in loopback mode, and
+   otherwise the inputs, to which nothing is connected. */
+uint8_t SerialState::ModemLines() const
+{
+    if (!(fMcr & UART_MCR_LOOP))
+        return 0;
+    uint8_t lines = 0;
+    if (fMcr & UART_MCR_DTR)
+        lines |= UART_MSR_DSR;
+    if (fMcr & UART_MCR_RTS)
+        lines |= UART_MSR_CTS;
+    if (fMcr & UART_MCR_OUT1)
+        lines |= UART_MSR_RI;
+    if (fMcr & UART_MCR_OUT2)
+        lines |= UART_MSR_DCD;
+    return lines;
+}
+
+
+void SerialState::SetModemLines(uint8_t lines)
+{
+    uint8_t changed = (fMsr ^ lines) & 0xf0;
+    uint8_t deltas = 0;
+    if (changed & UART_MSR_CTS)
+        deltas |= UART_MSR_DCTS;
+    if (changed & UART_MSR_DSR)
+        deltas |= UART_MSR_DDSR;
+    if (changed & UART_MSR_DCD)
+        deltas |= UART_MSR_DDCD;
+    /* only the end of a ring counts */
+    if ((changed & UART_MSR_RI) && !(lines & UART_MSR_RI))
+        deltas |= UART_MSR_TERI;
+    fMsr = lines | (fMsr & UART_MSR_DELTAS) | deltas;
+    UpdateIRQ();
+}
+
+
+/* While the FIFOs are off a character overwrites the one not read, so the
+   host only offers one when the holding register is empty. In loopback
+   mode the receiver is disconnected from the line. */
+int SerialState::ReceiveRoom()
+{
+    if (fMcr & UART_MCR_LOOP)
+        return 0;
+    return RxCapacity() - fRxCount;
 }
 
 
 void SerialState::Receive(const uint8_t *buf, int len)
 {
-    if (len > 0) {
-        ReceiveByte(buf[0]);
-    }
+    len = min_int(len, ReceiveRoom());
+    for (int i = 0; i < len; i++)
+        RxPush(buf[i], 0);
 }
 
 
@@ -61,17 +215,15 @@ void SerialState::Write(uint32_t offset, uint32_t val, int size_log2)
             if (fLcr & UART_LCR_DLAB) {
                 fDivider = (fDivider & 0xff00) | val;
             } else {
-                uint8_t ch;
-                fLsr &= ~UART_LSR_THRE;
+                uint8_t ch = val;
                 fThrIpending = false;
                 UpdateIRQ();
 
-                /* write to the terminal */
-                ch = val;
-                if (fOutput != nullptr)
+                /* out at once, so the transmitter never stays busy */
+                if (fMcr & UART_MCR_LOOP)
+                    RxPush(ch, 0);
+                else if (fOutput != nullptr)
                     fOutput->WriteData(&ch, 1);
-                fLsr |= UART_LSR_THRE;
-                fLsr |= UART_LSR_TEMT;
                 fThrIpending = true;
                 UpdateIRQ();
             }
@@ -80,8 +232,9 @@ void SerialState::Write(uint32_t offset, uint32_t val, int size_log2)
             if (fLcr & UART_LCR_DLAB) {
                 fDivider = (fDivider & 0x00ff) | (val << 8);
             } else {
+                val &= 0x0f;
                 if (val & UART_IER_THRI) {
-                    if (!(fIer & UART_IER_THRI) && (fLsr & UART_LSR_THRE))
+                    if (!(fIer & UART_IER_THRI))
                         fThrIpending = true;
                 } else {
                     fThrIpending = false;
@@ -91,22 +244,37 @@ void SerialState::Write(uint32_t offset, uint32_t val, int size_log2)
             }
             break;
         case 2:
+            /* The other bits are only taken with FIFO enable set, and
+               turning the FIFOs on or off empties them. */
+            if (!(val & UART_FCR_FE)) {
+                if (FifoEnabled())
+                    RxClear();
+                fFcr = 0;
+            } else {
+                if (!FifoEnabled() || (val & UART_FCR_RFR))
+                    RxClear();
+                fFcr = val & (UART_FCR_TRIGGER | UART_FCR_DMA | UART_FCR_FE);
+            }
+            UpdateIRQ();
             break;
         case 3:
+            /* a break starting in loopback mode reaches the receiver as a
+               break character */
+            if ((val & UART_LCR_SBC) && !(fLcr & UART_LCR_SBC) &&
+                (fMcr & UART_MCR_LOOP))
+                RxPush(0, UART_LSR_BI);
             fLcr = val;
             break;
         case 4:
-            fMcr = val;
+            fMcr = val & UART_MCR_MASK;
+            SetModemLines(ModemLines());
             break;
         case 5:
-            break;
         case 6:
-            fMsr = val;
+            /* read only */
             break;
         case 7:
             fScr = val;
-            break;
-        default:
             break;
     }
 }
@@ -116,15 +284,13 @@ uint32_t SerialState::Read(uint32_t offset, int size_log2)
 {
     (void)size_log2;
 
-    int ret;
+    int ret = 0;
     switch (offset & 7) {
         case 0:
             if (fLcr & UART_LCR_DLAB) {
                 ret = fDivider & 0xff;
             } else {
-                ret = fRbr;
-                fLsr &= ~(UART_LSR_DR | UART_LSR_BI);
-                UpdateIRQ();
+                ret = RxPop();
                 if (fOutput != nullptr)
                     fOutput->TargetReady();
             }
@@ -138,7 +304,7 @@ uint32_t SerialState::Read(uint32_t offset, int size_log2)
             break;
         case 2:
             ret = fIir;
-            if (fFcr & UART_FCR_FE) {
+            if (FifoEnabled()) {
                 ret |= UART_IIR_FE;
             }
             if (fIir == UART_IIR_THRI) {
@@ -153,27 +319,24 @@ uint32_t SerialState::Read(uint32_t offset, int size_log2)
             ret = fMcr;
             break;
         case 5:
-            ret = fLsr;
+            ret = UART_LSR_TEMT | UART_LSR_THRE | fLsrErrors;
+            if (fRxCount > 0)
+                ret |= UART_LSR_DR;
+            if (FifoEnabled() && RxErrorsInFifo())
+                ret |= UART_LSR_FIFOE;
+            fLsrErrors = 0;
+            UpdateIRQ();
             break;
         case 6:
             ret = fMsr;
+            fMsr &= ~UART_MSR_DELTAS;
+            UpdateIRQ();
             break;
         case 7:
             ret = fScr;
             break;
-        default:
-            ret = 0;
-            break;
     }
     return ret;
-}
-
-
-void SerialState::SendBreak()
-{
-    fRbr = 0;
-    fLsr |= UART_LSR_BI | UART_LSR_DR;
-    UpdateIRQ();
 }
 
 
@@ -236,7 +399,10 @@ public:
             return false;
         }
         fSerial = new SerialState(sys->RegisterMap(), fRegs->base, irq,
-                                  fCtx->platform->Console());
+                                  fCtx->platform->Console(),
+                                  fRegs->type == RES_IO ? UART_PC_CLOCK_HZ
+                                                        : UART_FDT_CLOCK_HZ,
+                                  fCtx->platform->OpenTimer());
         fCtx->serial_input = fSerial;
         return true;
     }
@@ -249,7 +415,7 @@ public:
         ctx.fdt->BeginNodeNum("serial", fRegs->base);
         ctx.fdt->PropStr("compatible", "ns16550a");
         ctx.fdt->PropU64Range("reg", fRegs->base, fRegs->size);
-        ctx.fdt->PropU32("clock-frequency", 3686400);
+        ctx.fdt->PropU32("clock-frequency", UART_FDT_CLOCK_HZ);
         fdt_prop_irq(ctx, fIrq->base);
         ctx.fdt->EndNode();
 
