@@ -84,6 +84,8 @@ class TestResult:
         self.known = False
         self.golden = ''      # '', 'match', 'new', 'mismatch'
         self.golden_diff = []
+        self.expect_exit = None   # the status a test that stops temu expects
+        self.exit_code = None
 
     def to_json(self):
         return {k: v for k, v in self.__dict__.items()}
@@ -155,23 +157,40 @@ def write_config(template, target, image, cmdline, fixtures, out_dir):
 # running temu
 
 class Run:
-    """One temu process, read line by line."""
+    """One temu process, read line by line. The report comes on standard
+    error from the test-control device, apart from the consoles the tests
+    drive on standard output, unless it goes over a console itself."""
 
-    def __init__(self, temu, args, cfg, cwd, log, env):
+    def __init__(self, temu, args, cfg, cwd, log, env, report_on_stderr):
         self.proc = subprocess.Popen(
             [temu] + args + [os.path.basename(cfg)], cwd=cwd, env=env,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT)
+            stderr=subprocess.PIPE)
         self.lines = queue.Queue()
         self.log = log
-        threading.Thread(target=self._read, daemon=True).start()
+        self.log_lock = threading.Lock()
+        self.open = 2
+        for stream, report in ((self.proc.stdout, not report_on_stderr),
+                               (self.proc.stderr, report_on_stderr)):
+            threading.Thread(target=self._read, args=(stream, report),
+                             daemon=True).start()
 
-    def _read(self):
-        for raw in self.proc.stdout:
+    def _read(self, stream, report):
+        for raw in stream:
             line = raw.decode('utf-8', 'replace').rstrip('\r\n')
-            self.log.write(line + '\n')
-            self.lines.put(line)
+            with self.log_lock:
+                self.log.write(line + '\n')
+            if report:
+                self.lines.put(line)
         self.lines.put(None)
+
+    def write(self, data):
+        """Type on temu's console."""
+        try:
+            self.proc.stdin.write(data)
+            self.proc.stdin.flush()
+        except OSError:
+            pass
 
     def stop(self):
         """Close the console, which stops temu, then insist."""
@@ -206,7 +225,8 @@ def run_once(opts, entry, cfg_dir, cmdline, log):
     cfg = write_config(opts.machine_files[entry.machine], entry.target,
                        opts.images[entry.target.arch], cmdline,
                        opts.fixtures, cfg_dir)
-    run = Run(opts.temu, opts.temu_args, cfg, cfg_dir, log, opts.env)
+    run = Run(opts.temu, opts.temu_args, cfg, cfg_dir, log, opts.env,
+              opts.fixtures)
     current = None
     why = ''
     finished = False
@@ -218,7 +238,10 @@ def run_once(opts, entry, cfg_dir, cmdline, log):
                 why = 'timeout'
                 break
             if line is None:
-                break
+                run.open -= 1
+                if run.open == 0:
+                    break
+                continue
             word, args = parse_line(line)
             if word is None:
                 continue
@@ -241,6 +264,10 @@ def run_once(opts, entry, cfg_dir, cmdline, log):
                 current.snaps.append((key, value))
             elif word == 'CRASH' and current:
                 current.crash = args
+            elif word == 'INPUT':
+                run.write(bytes.fromhex(args.strip()))
+            elif word == 'EXIT' and current:
+                current.expect_exit = int(args)
             elif word == 'END' and current:
                 parts = args.split(' ', 3)
                 current.verdict = parts[1]
@@ -255,6 +282,8 @@ def run_once(opts, entry, cfg_dir, cmdline, log):
         code = run.stop()
     if not finished and not why:
         why = 'exit %s' % code
+        if current is not None:
+            current.exit_code = code
     return finished, current, why
 
 
@@ -333,6 +362,16 @@ def run_entry(opts, entry):
 
 
 def _killed(result, why):
+    """A test that stopped temu passes when it said it would, and temu
+    exited with the status it named."""
+    if result.expect_exit is not None and result.exit_code is not None:
+        if result.exit_code != result.expect_exit:
+            result.verdict = 'FAIL'
+            result.reason = 'exit status %d, expected %d' % (
+                result.exit_code, result.expect_exit)
+        else:
+            result.verdict = 'FAIL' if result.fails else 'PASS'
+        return
     result.verdict = 'TIMEOUT' if why == 'timeout' else 'CRASH'
     result.reason = why
 
@@ -573,6 +612,7 @@ SELFTEST_EXPECT = {
     'framework.e_crash': ('CRASH', 0),
     'framework.f_heap_release': ('PASS', 0),
     'framework.g_hang': ('TIMEOUT', 0),
+    'framework.h_exit_status': ('PASS', 0),
     'framework.h_power_off': ('CRASH', 0),
     'framework.i_last': ('PASS', 0),
 }
@@ -608,8 +648,8 @@ def selftest(opts, entries):
         r = e.results.get('framework.a_pass')
         if r and r.golden != 'match':
             problems.append('framework.a_pass: golden %s' % r.golden)
-        if e.restarts != 2:
-            problems.append('%d restarts, expected 2' % e.restarts)
+        if e.restarts != 3:
+            problems.append('%d restarts, expected 3' % e.restarts)
         print('%-22s selftest %s' % (e.key, 'ok' if not problems else
                                      'FAILED'))
         for p in problems:

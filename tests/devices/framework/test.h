@@ -76,6 +76,15 @@ void t_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void t_snap(const char *key, const char *fmt, ...)
     __attribute__((format(printf, 2, 3)));
 
+/* Have the runner type 'buf' on temu's console, which hands it to whichever
+   device takes console input. It arrives some time later, in pieces as the
+   device makes room. */
+void t_host_input(const void *buf, size_t len);
+
+/* The test is about to stop the machine, and passes if temu then exits
+   with 'status'. */
+void t_expect_exit(int status);
+
 /* The first device that is 'compat', or the test is skipped. */
 const HwDevice *t_require_device(const char *compat);
 

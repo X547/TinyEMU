@@ -73,6 +73,13 @@ META_TEST(framework, g_hang)
         arch_cpu_relax();
 }
 
+META_TEST(framework, h_exit_status)
+{
+    /* said so beforehand: a pass when the status is the one named */
+    t_expect_exit(5);
+    power_off(5);
+}
+
 META_TEST(framework, h_power_off)
 {
     /* the machine stops mid-test: a crash, then a restart after it */

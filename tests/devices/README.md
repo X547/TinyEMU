@@ -164,12 +164,18 @@ The x86 image quiets the PIT, which counts from reset, and sets up the
 8259s before the first test, as firmware would; the 8259s' reset state is
 kept for `i8259.reset_state`.
 
+A test that stops the machine on purpose calls `t_expect_exit(status)`
+first, and passes when temu exits with that status. `t_host_input(buf,
+len)` has the runner type the bytes on temu's console, which hands them
+to whichever device takes console input.
+
 `known-failures.txt` lists failures that should not fail a run.
 
 ## The protocol
 
 The image writes one line per event, `@@T ` first, to the test-control
-device, or else the console:
+device, which temu writes to its standard error apart from the consoles
+the tests drive, or else the console:
 
 ```
 HELLO 1 target=riscv64 mode=S out=test-control devices=9 ...
@@ -177,6 +183,8 @@ BEGIN uart.scratch_register
 FAIL uart.cpp:42 expected value == 0x55: 0x54, 0x55
 LOG ...
 SNAP lsr 0x60
+INPUT 68690a
+EXIT 3
 CRASH illegal instruction (cause 0x2) at pc ... addr ... error ...
 END uart.scratch_register FAIL 1234
 DONE pass=10 fail=1 skip=2 crash=0
@@ -186,7 +194,9 @@ The command line (`/chosen/bootargs`, or the PVH command line) selects:
 `tests=<globs>`, `skip=<globs>`, `after=<name>` (the tests after that one,
 which is how `run.py` resumes), `list=1`, and `meta=1` for the framework's
 own tests. A BEGIN without its END means the test stopped the machine or
-hung.
+hung; after an EXIT line the runner compares temu's exit status with the
+one named. INPUT is bytes, in hex, for the runner to write to temu's
+standard input.
 
 ## Layout
 

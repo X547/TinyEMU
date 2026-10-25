@@ -39,12 +39,16 @@ extern "C" TestCase __devtests_start[], __devtests_end[];
      LOG <message>
      SNAP <key> <value>
      CRASH <what>
+     INPUT <hex bytes>
+     EXIT <status>
      END <name> PASS|FAIL|SKIP|CRASH|RERUN <microseconds> [<reason>]
      DONE pass=N fail=N skip=N crash=N
 
    with "TEST <name>" lines instead when only listing. The runner treats a
-   BEGIN without its END as a test that killed the machine, and RERUN as a
-   test that needs a machine of its own. */
+   BEGIN without its END as a test that killed the machine, unless the test
+   said with EXIT that it would and temu exited with that status, and
+   RERUN as a test that needs a machine of its own. INPUT asks the runner
+   to write the bytes to temu's standard input. */
 
 namespace {
 
@@ -209,6 +213,31 @@ void t_snap(const char *key, const char *fmt, ...)
     vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
     report("SNAP %s %s", key, msg);
+}
+
+
+void t_host_input(const void *buf, size_t len)
+{
+    static const char digits[] = "0123456789abcdef";
+    char hex[2 * 96 + 1];
+    const uint8_t *p = (const uint8_t *)buf;
+    while (len > 0) {
+        size_t n = min(len, sizeof(hex) / 2);
+        for (size_t i = 0; i < n; i++) {
+            hex[2 * i] = digits[p[i] >> 4];
+            hex[2 * i + 1] = digits[p[i] & 15];
+        }
+        hex[2 * n] = '\0';
+        report("INPUT %s", hex);
+        p += n;
+        len -= n;
+    }
+}
+
+
+void t_expect_exit(int status)
+{
+    report("EXIT %d", status);
 }
 
 
