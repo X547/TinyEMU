@@ -29,6 +29,7 @@
 #include "devices.h"
 #include "fdt.h"
 #include "machine.h"
+#include "test_block.h"
 
 #define TEST_CONTROL_SIZE 0x1000
 #define TEST_CONTROL_DEFAULT_IRQS 4
@@ -46,12 +47,15 @@ private:
     Resource *fIrqRes[TEST_CONTROL_MAX_IRQS] {};
     IRQSignal *fIrq[TEST_CONTROL_MAX_IRQS] {};
     uint32_t fIrqLevel = 0;
+    /* the test disk the block registers act on */
+    uint32_t fBlockSelect = 0;
     /* the output file, or stderr when the configuration names none */
     FILE *fOutput = stderr;
     bool fOwnsOutput = false;
 
     uint32_t Read(uint32_t offset, int size_log2);
     void Write(uint32_t offset, uint32_t val, int size_log2);
+    void BlockWrite(TestBlockControl *disk, uint32_t offset, uint32_t val);
 
     DeviceIOAdapter<TestControlDevice, &TestControlDevice::Read,
                     &TestControlDevice::Write> fIo {*this};
@@ -173,6 +177,31 @@ uint32_t TestControlDevice::Read(uint32_t offset, int size_log2)
         return fIrqCount;
     case TEST_CONTROL_IRQ_LEVEL:
         return fIrqLevel;
+    case TEST_CONTROL_BLOCK_COUNT:
+        return test_block_count();
+    case TEST_CONTROL_BLOCK_SELECT:
+        return fBlockSelect;
+    default:
+        break;
+    }
+    TestBlockControl *disk = test_block_get(fBlockSelect);
+    if (disk == nullptr)
+        return 0;
+    switch (offset) {
+    case TEST_CONTROL_BLOCK_SECTORS:
+        return disk->Sectors();
+    case TEST_CONTROL_BLOCK_MODE:
+        return disk->Mode();
+    case TEST_CONTROL_BLOCK_FAIL:
+        return disk->FailCount();
+    case TEST_CONTROL_BLOCK_HELD:
+        return disk->Held();
+    case TEST_CONTROL_BLOCK_READS:
+        return disk->Reads();
+    case TEST_CONTROL_BLOCK_WRITES:
+        return disk->Writes();
+    case TEST_CONTROL_BLOCK_CANCELS:
+        return disk->Cancels();
     default:
         return 0;
     }
@@ -203,6 +232,31 @@ void TestControlDevice::Write(uint32_t offset, uint32_t val, int size_log2)
                 fIrq[i]->Set((val >> i) & 1);
         }
         fIrqLevel = val;
+        break;
+    case TEST_CONTROL_BLOCK_SELECT:
+        fBlockSelect = val;
+        break;
+    default:
+        if (TestBlockControl *disk = test_block_get(fBlockSelect))
+            BlockWrite(disk, offset, val);
+        break;
+    }
+}
+
+
+void TestControlDevice::BlockWrite(TestBlockControl *disk, uint32_t offset,
+                                   uint32_t val)
+{
+    switch (offset) {
+    case TEST_CONTROL_BLOCK_MODE:
+        disk->SetMode(val);
+        break;
+    case TEST_CONTROL_BLOCK_FAIL:
+        disk->SetFailCount(val);
+        break;
+    case TEST_CONTROL_BLOCK_RELEASE:
+        disk->Release(val & ~TEST_BLOCK_RELEASE_NEWEST,
+                      (val & TEST_BLOCK_RELEASE_NEWEST) != 0);
         break;
     default:
         break;

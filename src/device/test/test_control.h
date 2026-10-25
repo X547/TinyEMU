@@ -33,7 +33,35 @@
 #define TEST_CONTROL_IRQ_COUNT 0x10 /* RO: the interrupt lines it drives */
 #define TEST_CONTROL_IRQ_LEVEL 0x14 /* RW: bit n is the level of line n */
 
+/* The disks of the "test" block driver, in the order they were opened. The
+   registers after SELECT act on the disk it names. */
+#define TEST_CONTROL_BLOCK_COUNT   0x18 /* RO */
+#define TEST_CONTROL_BLOCK_SELECT  0x1c /* RW */
+#define TEST_CONTROL_BLOCK_SECTORS 0x20 /* RO: its size in 512 byte sectors */
+#define TEST_CONTROL_BLOCK_MODE    0x24 /* RW: TEST_BLOCK_MODE_* */
+#define TEST_CONTROL_BLOCK_FAIL    0x28 /* RW: the next requests that fail */
+#define TEST_CONTROL_BLOCK_HELD    0x2c /* RO: requests waiting for RELEASE */
+#define TEST_CONTROL_BLOCK_RELEASE 0x30 /* WO: finish this many held requests */
+#define TEST_CONTROL_BLOCK_READS   0x34 /* RO: read requests so far */
+#define TEST_CONTROL_BLOCK_WRITES  0x38 /* RO: write requests so far */
+#define TEST_CONTROL_BLOCK_CANCELS 0x3c /* RO: requests the device gave up */
+
 #define TEST_CONTROL_MAX_IRQS 8
 
 #define TEST_CONTROL_MAGIC    0x54455354 /* "TEST" */
-#define TEST_CONTROL_REVISION 1
+#define TEST_CONTROL_REVISION 2
+
+/* How a test disk finishes requests: in the call, soon after from the event
+   loop, or once RELEASE says so. A failing request returns an error in the
+   call, or finishes with one. */
+#define TEST_BLOCK_MODE_SYNC  0
+#define TEST_BLOCK_MODE_ASYNC 1
+#define TEST_BLOCK_MODE_HOLD  2
+
+/* RELEASE finishes the oldest held requests, or with this bit the newest
+   first. */
+#define TEST_BLOCK_RELEASE_NEWEST 0x80000000u
+
+/* What byte 'i' of sector 's' of a test disk holds until it is written. */
+#define TEST_BLOCK_PATTERN(s, i) \
+    ((uint8_t)(((s) ^ ((s) >> 8)) * 0x9d + (i) + ((i) >> 8) * 0x35))
