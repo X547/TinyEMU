@@ -258,9 +258,14 @@ TEST(lapic, illegal_vector)
     l->Write(LAPIC_LVT_TIMER, 5);
     l->Write(LAPIC_TIMER_DIVIDE, 0xb);
     l->Write(LAPIC_TIMER_INITIAL, 1000);
-    t_delay_us(1000);
-    l->Write(LAPIC_ESR, 0);
-    EXPECT_EQ(l->Read(LAPIC_ESR), 0x40u);
+    /* a write latches the errors since the last one */
+    uint32_t esr = 0;
+    t_wait_until([l, &esr] {
+        l->Write(LAPIC_ESR, 0);
+        esr = l->Read(LAPIC_ESR);
+        return esr != 0;
+    }, 1000000);
+    EXPECT_EQ(esr, 0x40u);
     /* the error LVT interrupts for a new error */
     sCount = 0;
     arch_set_irq_handler(VEC_TEST, count_and_eoi, nullptr);
