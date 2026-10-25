@@ -34,6 +34,9 @@
 /* Offered by every device: the transports only have the virtio 1.0 layout. */
 #define VIRTIO_F_VERSION_1 (1ULL << 32)
 #define VIRTIO_F_INDIRECT_DESC (1ULL << 28)
+#define VIRTIO_F_EVENT_IDX     (1ULL << 29)
+
+#define VRING_AVAIL_F_NO_INTERRUPT 1
 
 /* the most descriptors an indirect table may hold */
 #define VIRTIO_MAX_INDIRECT 1024
@@ -141,7 +144,6 @@ void virtio_init(VIRTIODevice *s, VIRTIOBusDef *bus, uint32_t device_id,
                  int config_space_size, int num_queues);
 
 uint16_t virtio_read16(VIRTIODevice *s, virtio_phys_addr_t addr);
-uint16_t virtio_avail_idx(VIRTIODevice *s, int queue_idx);
 int memcpy_to_queue(VIRTIODevice *s, int queue_idx, int desc_idx, int offset,
                     const void *buf, int count);
 int memcpy_from_queue(VIRTIODevice *s, void *buf, int queue_idx, int desc_idx,
@@ -152,3 +154,13 @@ void virtio_consume_desc(VIRTIODevice *s, int queue_idx, int desc_idx,
                          int desc_len);
 void queue_notify(VIRTIODevice *s, int queue_idx);
 void virtio_config_change_notify(VIRTIODevice *s);
+/* The head of the next buffer the driver made available, false when there
+   is none or the queue cannot be used yet. A device that takes buffers
+   itself rather than in RecvRequest() looks with this, so that the driver
+   tells it when there are more, and takes the buffer with
+   virtio_queue_pop(). */
+bool virtio_queue_peek(VIRTIODevice *s, int queue_idx, int *desc_idx);
+void virtio_queue_pop(VIRTIODevice *s, int queue_idx);
+/* Stop using the queues until the driver resets the device, and tell it,
+   as a device that met a malformed chain should. */
+void virtio_set_needs_reset(VIRTIODevice *s);

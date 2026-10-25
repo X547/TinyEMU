@@ -95,28 +95,20 @@ static int virtio_input_queue_event(VIRTIODevice *s,
                                     uint32_t value)
 {
     int queue_idx = 0;
-    QueueState *qs = &s->queue[queue_idx];
     int desc_idx, buf_len;
-    uint16_t avail_idx;
     uint8_t buf[8];
 
-    if (!qs->ready)
+    if (!virtio_queue_peek(s, queue_idx, &desc_idx))
         return -1;
 
     put_le16(buf, type);
     put_le16(buf + 2, code);
     put_le32(buf + 4, value);
     buf_len = 8;
-    
-    avail_idx = virtio_avail_idx(s, queue_idx);
-    if (qs->last_avail_idx == avail_idx)
-        return -1;
-    desc_idx = virtio_read16(s, qs->avail_addr + 4 + 
-                             (qs->last_avail_idx & (qs->num - 1)) * 2);
-    //    printf("send: queue_idx=%d desc_idx=%d\n", queue_idx, desc_idx);
+
     memcpy_to_queue(s, queue_idx, desc_idx, 0, buf, buf_len);
     virtio_consume_desc(s, queue_idx, desc_idx, buf_len);
-    qs->last_avail_idx++;
+    virtio_queue_pop(s, queue_idx);
     return 0;
 }
 

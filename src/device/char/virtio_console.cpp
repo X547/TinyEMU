@@ -72,43 +72,26 @@ int VIRTIOConsoleDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
 /* the size of the receive buffer the guest has queued, 0 if none */
 int VIRTIOConsoleDevice::ReceiveRoom()
 {
-    VIRTIODevice *s = this;
-    int queue_idx = 0;
-    QueueState *qs = &s->queue[queue_idx];
-    int desc_idx;
-    int read_size, write_size;
-    uint16_t avail_idx;
+    int desc_idx, read_size, write_size;
 
-    if (!qs->ready)
+    if (!virtio_queue_peek(this, 0, &desc_idx))
         return 0;
-    avail_idx = virtio_avail_idx(s, queue_idx);
-    if (qs->last_avail_idx == avail_idx)
+    if (get_desc_rw_size(this, &read_size, &write_size, 0, desc_idx) < 0) {
+        virtio_set_needs_reset(this);
         return 0;
-    desc_idx = virtio_read16(s, qs->avail_addr + 4 + 
-                             (qs->last_avail_idx & (qs->num - 1)) * 2);
-    if (get_desc_rw_size(s, &read_size, &write_size, queue_idx, desc_idx))
-        return 0;
+    }
     return write_size;
 }
 
 void VIRTIOConsoleDevice::Receive(const uint8_t *buf, int buf_len)
 {
-    VIRTIODevice *s = this;
-    int queue_idx = 0;
-    QueueState *qs = &s->queue[queue_idx];
     int desc_idx;
-    uint16_t avail_idx;
 
-    if (!qs->ready)
+    if (!virtio_queue_peek(this, 0, &desc_idx))
         return;
-    avail_idx = virtio_avail_idx(s, queue_idx);
-    if (qs->last_avail_idx == avail_idx)
-        return;
-    desc_idx = virtio_read16(s, qs->avail_addr + 4 +
-                             (qs->last_avail_idx & (qs->num - 1)) * 2);
-    memcpy_to_queue(s, queue_idx, desc_idx, 0, buf, buf_len);
-    virtio_consume_desc(s, queue_idx, desc_idx, buf_len);
-    qs->last_avail_idx++;
+    memcpy_to_queue(this, 0, desc_idx, 0, buf, buf_len);
+    virtio_consume_desc(this, 0, desc_idx, buf_len);
+    virtio_queue_pop(this, 0);
 }
 
 /* send a resize event */

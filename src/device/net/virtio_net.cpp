@@ -99,37 +99,27 @@ int VIRTIONetDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
 
 bool VIRTIONetDevice::CanWritePacket()
 {
-    VIRTIODevice *s = this;
-    QueueState *qs = &s->queue[0];
-    uint16_t avail_idx;
+    int desc_idx;
 
-    if (!qs->ready)
-        return false;
-    avail_idx = virtio_avail_idx(s, 0);
-    return qs->last_avail_idx != avail_idx;
+    return virtio_queue_peek(this, 0, &desc_idx);
 }
 
 void VIRTIONetDevice::WritePacket(const uint8_t *buf, int buf_len)
 {
     VIRTIODevice *s = this;
     int queue_idx = 0;
-    QueueState *qs = &s->queue[queue_idx];
     int desc_idx;
     VIRTIONetHeader h;
     int header_size = HeaderSize();
     int len, read_size, write_size;
-    uint16_t avail_idx;
 
-    if (!qs->ready)
+    if (!virtio_queue_peek(s, queue_idx, &desc_idx))
         return;
-    avail_idx = virtio_avail_idx(s, queue_idx);
-    if (qs->last_avail_idx == avail_idx)
+    if (get_desc_rw_size(s, &read_size, &write_size, queue_idx, desc_idx)) {
+        virtio_set_needs_reset(s);
         return;
-    desc_idx = virtio_read16(s, qs->avail_addr + 4 + 
-                             (qs->last_avail_idx & (qs->num - 1)) * 2);
-    if (get_desc_rw_size(s, &read_size, &write_size, queue_idx, desc_idx))
-        return;
-    len = header_size + buf_len; 
+    }
+    len = header_size + buf_len;
     if (len > write_size)
         return;
     memset(&h, 0, sizeof(h));
@@ -138,7 +128,7 @@ void VIRTIONetDevice::WritePacket(const uint8_t *buf, int buf_len)
     memcpy_to_queue(s, queue_idx, desc_idx, 0, &h, header_size);
     memcpy_to_queue(s, queue_idx, desc_idx, header_size, buf, buf_len);
     virtio_consume_desc(s, queue_idx, desc_idx, len);
-    qs->last_avail_idx++;
+    virtio_queue_pop(s, queue_idx);
 }
 
 void VIRTIONetDevice::SetCarrier(bool carrier_state)

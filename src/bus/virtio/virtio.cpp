@@ -126,7 +126,8 @@ typedef struct {
    and the rings. */
 static uint64_t virtio_offered_features(VIRTIODevice *s)
 {
-    return s->device_features | VIRTIO_F_INDIRECT_DESC | VIRTIO_F_VERSION_1;
+    return s->device_features | VIRTIO_F_INDIRECT_DESC | VIRTIO_F_EVENT_IDX |
+           VIRTIO_F_VERSION_1;
 }
 
 
@@ -387,7 +388,7 @@ uint16_t virtio_read16(VIRTIODevice *s, virtio_phys_addr_t addr)
 }
 
 /* The ring entries below the index are read only after it. */
-uint16_t virtio_avail_idx(VIRTIODevice *s, int queue_idx)
+static uint16_t virtio_avail_idx(VIRTIODevice *s, int queue_idx)
 {
     uint16_t idx = virtio_read16(s, s->queue[queue_idx].avail_addr + 2);
     std::atomic_thread_fence(std::memory_order_acquire);
@@ -591,6 +592,20 @@ int memcpy_to_queue(VIRTIODevice *s,
                                 count, true);
 }
 
+/* After the used index moved to 'new_idx': with the event index, whether
+   it passed the driver's used_event; without, whether the driver left the
+   interrupt on. */
+static bool virtio_used_notification_wanted(VIRTIODevice *s, QueueState *qs,
+                                            uint16_t new_idx)
+{
+    if (!(s->driver_features & VIRTIO_F_EVENT_IDX))
+        return !(virtio_read16(s, qs->avail_addr) & VRING_AVAIL_F_NO_INTERRUPT);
+    /* the index is out before used_event is read */
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    uint16_t used_event = virtio_read16(s, qs->avail_addr + 4 + qs->num * 2);
+    return (uint16_t)(new_idx - used_event - 1) < 1;
+}
+
 /* signal that the descriptor has been consumed */
 void virtio_consume_desc(VIRTIODevice *s,
                                 int queue_idx, int desc_idx, int desc_len)
@@ -610,7 +625,8 @@ void virtio_consume_desc(VIRTIODevice *s,
     std::atomic_thread_fence(std::memory_order_release);
     virtio_write16(s, qs->used_addr + 2, index + 1);
 
-    virtio_raise_irq(s, VIRTIO_INT_USED_RING, qs->msix_vector);
+    if (virtio_used_notification_wanted(s, qs, index + 1))
+        virtio_raise_irq(s, VIRTIO_INT_USED_RING, qs->msix_vector);
 }
 
 /* The readable descriptors come first, then the writable ones, and each
@@ -642,9 +658,7 @@ int get_desc_rw_size(VIRTIODevice *s,
     return 0;
 }
 
-/* Stop using the queues until the driver resets the device, and tell it,
-   as a device that met a malformed chain should. */
-static void virtio_set_needs_reset(VIRTIODevice *s)
+void virtio_set_needs_reset(VIRTIODevice *s)
 {
     if (s->status & VIRTIO_STATUS_NEEDS_RESET)
         return;
@@ -668,16 +682,39 @@ static void queue_notify_any(VIRTIODevice *s, int queue_idx)
         queue_notify(s, queue_idx);
 }
 
-void queue_notify(VIRTIODevice *s, int queue_idx)
+bool virtio_queue_peek(VIRTIODevice *s, int queue_idx, int *desc_idx)
 {
     QueueState *qs = &s->queue[queue_idx];
     uint16_t avail_idx;
+
+    if (!(s->status & VIRTIO_STATUS_DRIVER_OK) ||
+        (s->status & VIRTIO_STATUS_NEEDS_RESET) || !qs->ready)
+        return false;
+    avail_idx = virtio_avail_idx(s, queue_idx);
+    /* with the event index, the driver notifies once it adds past what
+       the device has seen */
+    if (s->driver_features & VIRTIO_F_EVENT_IDX) {
+        virtio_write16(s, qs->used_addr + 4 + qs->num * 8, avail_idx);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        avail_idx = virtio_avail_idx(s, queue_idx);
+    }
+    if (qs->last_avail_idx == avail_idx)
+        return false;
+    *desc_idx = virtio_read16(s, qs->avail_addr + 4 +
+                              (qs->last_avail_idx & (qs->num - 1)) * 2);
+    return true;
+}
+
+void virtio_queue_pop(VIRTIODevice *s, int queue_idx)
+{
+    s->queue[queue_idx].last_avail_idx++;
+}
+
+void queue_notify(VIRTIODevice *s, int queue_idx)
+{
     int desc_idx, read_size, write_size;
 
-    avail_idx = virtio_avail_idx(s, queue_idx);
-    while (qs->last_avail_idx != avail_idx) {
-        desc_idx = virtio_read16(s, qs->avail_addr + 4 +
-                                 (qs->last_avail_idx & (qs->num - 1)) * 2);
+    while (virtio_queue_peek(s, queue_idx, &desc_idx)) {
         if (get_desc_rw_size(s, &read_size, &write_size, queue_idx,
                              desc_idx) < 0) {
             virtio_set_needs_reset(s);
@@ -692,7 +729,7 @@ void queue_notify(VIRTIODevice *s, int queue_idx)
         if (s->RecvRequest(queue_idx, desc_idx,
                            read_size, write_size) < 0)
             break;
-        qs->last_avail_idx++;
+        virtio_queue_pop(s, queue_idx);
     }
 }
 
