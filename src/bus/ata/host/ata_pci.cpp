@@ -319,12 +319,15 @@ bool ATAPCIController::ReadPrd(uint64_t addr, uint8_t *buf)
 
 
 /* Move one scatter list entry's worth between the drive and guest memory,
-   a page at a time because that is as far as one host pointer reaches. */
+   a page at a time because that is as far as one host pointer reaches.
+   'drive_done' says the drive ran out of data before the entry did. */
 uint32_t ATAPCIController::MoveData(ATADevice *dev, uint64_t addr,
-                                    uint32_t len, bool to_memory)
+                                    uint32_t len, bool to_memory,
+                                    bool *drive_done)
 {
     uint32_t done = 0;
 
+    *drive_done = false;
     while (done < len) {
         uint64_t a = addr + done;
         uint32_t chunk = DEVRAM_PAGE_SIZE -
@@ -342,6 +345,7 @@ uint32_t ATAPCIController::MoveData(ATADevice *dev, uint64_t addr,
             /* The drive has no more to give or take, which is the ordinary
                way a transfer ends: the list may describe more than the
                command asked for. */
+            *drive_done = true;
             break;
         }
     }
@@ -375,6 +379,8 @@ void ATAPCIController::BusMasterRun(int index)
     c.bm_status &= ~ATA_BM_STAT_ERROR;
 
     bool ok = true;
+    /* the list ended with the transfer, rather than describing more */
+    bool exhausted = false;
     uint64_t prd = c.bm_prd;
     for (;;) {
         uint8_t entry[ATA_PRD_ENTRY_SIZE];
@@ -392,20 +398,28 @@ void ATAPCIController::BusMasterRun(int index)
         printf("ata: prd %08" PRIx64 " -> addr=%08" PRIx64 " count=%u%s\n",
                prd, addr, count, eot ? " eot" : "");
 #endif
-        uint32_t moved = MoveData(dev, addr, count, to_memory);
+        bool drive_done;
+        uint32_t moved = MoveData(dev, addr, count, to_memory, &drive_done);
         prd += ATA_PRD_ENTRY_SIZE;
+        if (drive_done) {
+            break;
+        }
         if (moved < count) {
-            /* Either the drive finished or guest memory gave out. Which of
-               the two is decided by whether the drive has sectors left,
-               which is what DmaComplete() looks at. */
+            /* guest memory gave out */
+            ok = false;
             break;
         }
         if (eot) {
+            exhausted = true;
             break;
         }
     }
 
-    c.bm_status &= ~ATA_BM_STAT_ACTIVE;
+    /* A list that describes more than the transfer leaves the engine
+       active, which with the interrupt is still a normal end. */
+    if (!ok || exhausted) {
+        c.bm_status &= ~ATA_BM_STAT_ACTIVE;
+    }
     if (!ok) {
         c.bm_status |= ATA_BM_STAT_ERROR;
     }

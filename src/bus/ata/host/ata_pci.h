@@ -166,7 +166,7 @@ private:
     uint8_t *GuestPtr(uint64_t addr, bool is_rw);
     bool ReadPrd(uint64_t addr, uint8_t *buf);
     uint32_t MoveData(ATADevice *dev, uint64_t addr, uint32_t len,
-                      bool to_memory);
+                      bool to_memory, bool *drive_done);
     void BusMasterRun(int index);
 
 public:
