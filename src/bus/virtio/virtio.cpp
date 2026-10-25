@@ -101,7 +101,15 @@
 #define VIRTIO_PCI_MSIX_PBA_OFFSET     0x5000
 
 /* The whole BAR, sized to hold everything above. */
+#define VIRTIO_PCI_BAR                 4
 #define VIRTIO_PCI_BAR_SIZE            0x8000
+
+/* the structures the capabilities point at */
+#define VIRTIO_PCI_CAP_COMMON 1
+#define VIRTIO_PCI_CAP_NOTIFY 2
+#define VIRTIO_PCI_CAP_ISR    3
+#define VIRTIO_PCI_CAP_DEVICE 4
+#define VIRTIO_PCI_CAP_PCI    5
 
 #define VIRTIO_PCI_CAP_LEN 16
 
@@ -266,13 +274,15 @@ void VIRTIODevice::SetBar(int bar_num, uint64_t addr, bool enabled)
     mem_range->SetAddr(addr, enabled);
 }
 
-static void virtio_add_pci_capability(VIRTIODevice *s, int cfg_type,
-                                      int bar, uint32_t offset, uint32_t len,
-                                      uint32_t mult)
+/* The notification capability adds the offset multiplier, and the
+   configuration access capability its data window. */
+static int virtio_add_pci_capability(VIRTIODevice *s, int cfg_type,
+                                     int bar, uint32_t offset, uint32_t len,
+                                     uint32_t mult)
 {
     uint8_t cap[20];
     int cap_len;
-    if (cfg_type == 2)
+    if (cfg_type == VIRTIO_PCI_CAP_NOTIFY || cfg_type == VIRTIO_PCI_CAP_PCI)
         cap_len = 20;
     else
         cap_len = 16;
@@ -283,10 +293,56 @@ static void virtio_add_pci_capability(VIRTIODevice *s, int cfg_type,
     cap[4] = bar;
     put_le32(cap + 8, offset);
     put_le32(cap + 12, len);
-    if (cfg_type == 2)
+    if (cfg_type == VIRTIO_PCI_CAP_NOTIFY)
         put_le32(cap + 16, mult);
-    pci_add_capability(s->pci_dev, cap, cap_len);
+    return pci_add_capability(s->pci_dev, cap, cap_len);
 }
+
+
+/* The configuration access capability: a read of its data window reads
+   'length' bytes of the BAR it names at 'offset', and a write writes
+   them. */
+bool VIRTIODevice::PciCfgAccess(int *size_log2, uint32_t *offset)
+{
+    uint32_t cap = pci_cfg_cap;
+    uint32_t bar = pci_device_get_config(pci_dev, cap + 4, 0);
+    uint32_t len = pci_device_get_config(pci_dev, cap + 12, 2);
+
+    *offset = pci_device_get_config(pci_dev, cap + 8, 2);
+    if (bar != VIRTIO_PCI_BAR || (len != 1 && len != 2 && len != 4) ||
+        *offset % len != 0 || *offset >= VIRTIO_PCI_BAR_SIZE)
+        return false;
+    *size_log2 = len == 1 ? 0 : len == 2 ? 1 : 2;
+    return true;
+}
+
+void VIRTIODevice::ConfigRead(uint32_t addr, int size_log2)
+{
+    int len_log2;
+    uint32_t offset;
+
+    (void)addr;
+    (void)size_log2;
+    if (!PciCfgAccess(&len_log2, &offset))
+        return;
+    uint32_t val = transport->DeviceRead(offset, len_log2);
+    for (int i = 0; i < (1 << len_log2); i++)
+        pci_device_set_config8(pci_dev, pci_cfg_cap + 16 + i,
+                               get_bits(val, 8 * i, 8));
+}
+
+void VIRTIODevice::ConfigWritten(uint32_t addr, int size_log2)
+{
+    int len_log2;
+    uint32_t offset;
+
+    (void)addr;
+    (void)size_log2;
+    if (!PciCfgAccess(&len_log2, &offset))
+        return;
+    uint32_t val = pci_device_get_config(pci_dev, pci_cfg_cap + 16, 2);
+    transport->DeviceWrite(offset, get_bits(val, 0, 8 << len_log2),
+                           len_log2);}
 
 void virtio_init(VIRTIODevice *s, VIRTIOBusDef *bus,
                  uint32_t device_id, int config_space_size, int num_queues)
@@ -337,15 +393,23 @@ void virtio_init(VIRTIODevice *s, VIRTIOBusDef *bus,
         pci_device_set_config16(s->pci_dev, 0x2e, 0x1100);
         pci_device_set_config8(s->pci_dev, PCI_INTERRUPT_PIN, 1);
 
-        bar_num = 4;
-        virtio_add_pci_capability(s, 1, bar_num,
-                              VIRTIO_PCI_CFG_OFFSET, 0x1000, 0); /* common */
-        virtio_add_pci_capability(s, 3, bar_num,
-                              VIRTIO_PCI_ISR_OFFSET, 0x1000, 0); /* isr */
-        virtio_add_pci_capability(s, 4, bar_num,
-                              VIRTIO_PCI_CONFIG_OFFSET, 0x1000, 0); /* config */
-        virtio_add_pci_capability(s, 2, bar_num,
-                              VIRTIO_PCI_NOTIFY_OFFSET, 0x1000, 0); /* notify */
+        bar_num = VIRTIO_PCI_BAR;
+        virtio_add_pci_capability(s, VIRTIO_PCI_CAP_COMMON, bar_num,
+                                  VIRTIO_PCI_CFG_OFFSET, 0x1000, 0);
+        virtio_add_pci_capability(s, VIRTIO_PCI_CAP_ISR, bar_num,
+                                  VIRTIO_PCI_ISR_OFFSET, 0x1000, 0);
+        virtio_add_pci_capability(s, VIRTIO_PCI_CAP_DEVICE, bar_num,
+                                  VIRTIO_PCI_CONFIG_OFFSET, 0x1000, 0);
+        virtio_add_pci_capability(s, VIRTIO_PCI_CAP_NOTIFY, bar_num,
+                                  VIRTIO_PCI_NOTIFY_OFFSET, 0x1000, 0);
+        /* the driver chooses the BAR, offset and length, and moves data */
+        s->pci_cfg_cap = virtio_add_pci_capability(s, VIRTIO_PCI_CAP_PCI,
+                                                   0, 0, 0, 0);
+        pci_device_set_wmask(s->pci_dev, s->pci_cfg_cap + 4, 0xff, 1);
+        pci_device_set_wmask(s->pci_dev, s->pci_cfg_cap + 8, 0xffffffff, 4);
+        pci_device_set_wmask(s->pci_dev, s->pci_cfg_cap + 12, 0xffffffff, 4);
+        pci_device_set_wmask(s->pci_dev, s->pci_cfg_cap + 16, 0xffffffff, 4);
+        pci_device_set_config_target(s->pci_dev, s->pci_cfg_cap + 16, 4, s);
 
         /* Declines by itself on a bus whose bridge has no MSI receiver. */
         s->msix.Init(s->pci_dev, bar_num, VIRTIO_MSIX_VECTOR_COUNT,

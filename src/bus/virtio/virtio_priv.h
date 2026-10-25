@@ -79,7 +79,7 @@ public:
 };
 
 
-struct VIRTIODevice: public PCIBarTarget {
+struct VIRTIODevice: public PCIBarTarget, public PCIConfigTarget {
     PhysMemoryMap *mem_map = nullptr;
     PhysMemoryRange *mem_range = nullptr;
     /* PCI only */
@@ -107,6 +107,8 @@ struct VIRTIODevice: public PCIBarTarget {
        that is how the rest of the code knows to stay on the INTx path. */
     PCIMsixState msix {};
     uint16_t config_msix_vector = PCI_MSIX_NO_VECTOR;
+    /* the configuration access capability */
+    uint16_t pci_cfg_cap = 0;
 
     /* device specific */
     uint32_t device_id = 0;
@@ -136,6 +138,13 @@ struct VIRTIODevice: public PCIBarTarget {
     uint8_t *GetRamPtr(virtio_phys_addr_t paddr, bool is_rw);
 
     void SetBar(int bar_num, uint64_t addr, bool enabled) override;
+
+    /* PCIConfigTarget, for the configuration access capability */
+    void ConfigRead(uint32_t addr, int size_log2) override;
+    void ConfigWritten(uint32_t addr, int size_log2) override;
+
+private:
+    bool PciCfgAccess(int *size_log2, uint32_t *offset);
 };
 
 
