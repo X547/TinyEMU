@@ -243,7 +243,7 @@ TEST(virtio_block, past_capacity)
     EXPECT_EQ(pattern_errors(buf, sCapacity - 1, 1), 0u);
 }
 
-/* A read only disk fails writes with IOERR and writes no data (5.2.6.1),
+/* A read only disk fails writes with IOERR and writes no data (5.2.6.2),
    and still reads. */
 TEST(virtio_block, read_only)
 {
@@ -390,7 +390,7 @@ TEST(virtio_block, segments)
     EXPECT_EQ(pattern_errors(all, 40, 3), 0u);
 }
 
-/* Requests a driver may not make (5.2.6.2): no status byte, a header
+/* Requests a driver may not make (5.2.6.1): no status byte, a header
    short of 16 bytes, data that is not whole sectors, or more than the
    size_max and seg_max the device offers. */
 TEST(virtio_block, malformed_requests)

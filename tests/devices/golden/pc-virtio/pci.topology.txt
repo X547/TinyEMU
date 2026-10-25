@@ -3,3 +3,4 @@ fn0:01.0 8086:7000 class 060100 rev 00 header 80 pin 0
 fn0:02.0 1af4:1043 class 078000 rev 01 header 00 pin 1
 fn0:03.0 1af4:1042 class 010000 rev 01 header 00 pin 1
 fn0:04.0 1af4:1042 class 010000 rev 01 header 00 pin 1
+fn0:05.0 1af4:1048 class 010000 rev 01 header 00 pin 1

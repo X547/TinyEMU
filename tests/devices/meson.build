@@ -87,6 +87,7 @@ sources = files(
   'hw/plic.cpp',
   'hw/power.cpp',
   'hw/registry.cpp',
+  'hw/scsi.cpp',
   'hw/testctl.cpp',
   'hw/virtio.cpp',
   'lib/cxxrt.cpp',
@@ -109,6 +110,8 @@ sources = files(
   'tests/pci/pci.cpp',
   'tests/pci/plda.cpp',
   'tests/power/syscon.cpp',
+  'tests/scsi/cd.cpp',
+  'tests/scsi/disk.cpp',
   'tests/platform/acpi.cpp',
   'tests/platform/platform.cpp',
   'tests/platform/smp.cpp',
@@ -118,6 +121,7 @@ sources = files(
   'tests/timer/mc146818.cpp',
   'tests/virtio/block.cpp',
   'tests/virtio/console.cpp',
+  'tests/virtio/scsi.cpp',
   'tests/virtio/virtio.cpp',
 )
 

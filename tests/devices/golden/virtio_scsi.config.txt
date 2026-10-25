@@ -1,0 +1,4 @@
+limits seg_max 30 max_sectors 2048 cmd_per_lun 32
+sizes event_info 16 sense 96 cdb 32
+addresses channel 0 target 15 lun 15
+features 0x30000000

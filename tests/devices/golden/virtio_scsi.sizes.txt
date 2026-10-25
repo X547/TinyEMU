@@ -1,0 +1,3 @@
+sense_clamped 256
+max_target_after_write 15
+after_reset 96 32

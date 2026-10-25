@@ -1,0 +1,2 @@
+version 0x5
+id TinyEMU SCSI Disk       1.0 

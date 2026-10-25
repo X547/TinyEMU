@@ -809,7 +809,8 @@ TEST(virtio, config_space)
     virtio_config_write(&sDev, 0x40, 0x12345678, 2);
     EXPECT_EQ(virtio_config_read(&sDev, 0, 2), size);
     SNAP("past_end", "%#x %#x %#x", virtio_config_read(&sDev, 0x40, 2),
-         virtio_config_read(&sDev, 0xfe, 1), virtio_config_read(&sDev, 0xff, 0));
+         virtio_config_read(&sDev, 0xfe, 1),
+         virtio_config_read(&sDev, 0xff, 0));
     if (!sDev.pci) {
         mmio_write32(sDev.base + VIRTIO_MMIO_SHM_SEL, 0);
         EXPECT_EQ(mmio_read32(sDev.base + 0xb0), 0xffffffffu);

@@ -56,7 +56,12 @@ bool glob_match(const char *pattern, const char *name);
    (all of them when len < 0). False when there are none or junk follows. */
 bool parse_u64(const char *s, int len, uint64_t *out);
 
-/* Big endian loads, for the device tree. */
+/* Big endian loads, for the device tree and SCSI. */
+inline uint16_t be16(const void *p)
+{
+    const uint8_t *b = (const uint8_t *)p;
+    return b[0] << 8 | b[1];
+}
 inline uint32_t be32(const void *p)
 {
     const uint8_t *b = (const uint8_t *)p;
@@ -66,6 +71,22 @@ inline uint32_t be32(const void *p)
 inline uint64_t be64(const void *p)
 {
     return (uint64_t)be32(p) << 32 | be32((const uint8_t *)p + 4);
+}
+
+/* And the stores. */
+inline void put_be16(void *p, uint16_t v)
+{
+    uint8_t *b = (uint8_t *)p;
+    b[0] = v >> 8;
+    b[1] = v;
+}
+inline void put_be32(void *p, uint32_t v)
+{
+    uint8_t *b = (uint8_t *)p;
+    b[0] = v >> 24;
+    b[1] = v >> 16;
+    b[2] = v >> 8;
+    b[3] = v;
 }
 
 /* Little endian loads of unaligned data, for ACPI tables. */
@@ -82,6 +103,14 @@ inline uint32_t le32(const void *p)
 inline uint64_t le64(const void *p)
 {
     return le32(p) | (uint64_t)le32((const uint8_t *)p + 4) << 32;
+}
+inline void put_le32(void *p, uint32_t v)
+{
+    uint8_t *b = (uint8_t *)p;
+    b[0] = v;
+    b[1] = v >> 8;
+    b[2] = v >> 16;
+    b[3] = v >> 24;
 }
 
 /* Stop for good: a state no test can be reported from. The message goes to
