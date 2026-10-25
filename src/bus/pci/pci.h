@@ -137,6 +137,18 @@ public:
     virtual void SetBar(int bar_num, uint64_t addr, bool enabled) = 0;
 };
 
+/* Implemented by a device that acts on accesses to a range of its
+   configuration space, as a register window there does. */
+class PCIConfigTarget {
+public:
+    virtual ~PCIConfigTarget() = default;
+
+    /* Before a read that touches the range, to update what it reads. */
+    virtual void ConfigRead(uint32_t addr, int size_log2) = 0;
+    /* After a write that touched it, with the bytes stored. */
+    virtual void ConfigWritten(uint32_t addr, int size_log2) = 0;
+};
+
 /* Implemented by a host bridge that contains an MSI receiver. A message
    signalled interrupt really is just a memory write by the device, so a bus
    without one of these delivers it as exactly that. */
@@ -453,9 +465,14 @@ void pci_device_set_wmask(PCIDevice *d, uint16_t addr, uint32_t mask,
                           int size);
 /* Read back a device's own configuration space. A device whose behaviour
    depends on a register the guest writes through the generic config path (the
-   MSI-X control word, say) reads it here rather than shadowing the write. */
+   MSI-X control word, say) reads it here rather than shadowing the write.
+   Its PCIConfigTarget is not told. */
 uint32_t pci_device_get_config(PCIDevice *d, uint16_t addr, int size_log2);
 int pci_device_get_devfn(PCIDevice *d);
+/* Tell 'target' of accesses to the 'size' bytes at 'addr'. One range per
+   device. */
+void pci_device_set_config_target(PCIDevice *d, uint16_t addr, uint16_t size,
+                                  PCIConfigTarget *target);
 
 /* Append to the conventional capability list, below 256 bytes. */
 int pci_add_capability(PCIDevice *d, const uint8_t *buf, int size);

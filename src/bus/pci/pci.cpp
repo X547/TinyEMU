@@ -57,6 +57,10 @@ struct PCIDevice: public IRQTarget {
     uint8_t wmask[PCI_CONFIG_SIZE];
     /* the MSI-X capability, told when its function mask is lifted */
     PCIMsixState *msix;
+    /* told of accesses to its range of configuration space */
+    PCIConfigTarget *config_target;
+    uint16_t config_target_addr;
+    uint16_t config_target_size;
     uint16_t next_cap_offset; /* offset of the next capability */
     uint16_t next_ext_cap_offset; /* offset of the next extended capability */
     std::string name; /* for debug only */
@@ -235,8 +239,17 @@ IRQSignal *pci_device_get_irq(PCIDevice *d, unsigned int irq_num)
     return &d->irq[irq_num];
 }
 
-static uint32_t pci_device_config_read(PCIDevice *d, uint32_t addr,
-                                       int size_log2)
+static bool pci_config_target_hit(const PCIDevice *d, uint32_t addr,
+                                  int size_log2)
+{
+    return d->config_target != nullptr &&
+           addr < (uint32_t)d->config_target_addr + d->config_target_size &&
+           addr + (1u << size_log2) > d->config_target_addr;
+}
+
+/* The bytes as they are, without telling the device. */
+static uint32_t pci_config_bytes(const PCIDevice *d, uint32_t addr,
+                                 int size_log2)
 {
     uint32_t val;
     switch(size_log2) {
@@ -261,6 +274,16 @@ static uint32_t pci_device_config_read(PCIDevice *d, uint32_t addr,
     default:
         abort();
     }
+    return val;
+}
+
+static uint32_t pci_device_config_read(PCIDevice *d, uint32_t addr,
+                                       int size_log2)
+{
+    uint32_t val;
+    if (pci_config_target_hit(d, addr, size_log2))
+        d->config_target->ConfigRead(addr, size_log2);
+    val = pci_config_bytes(d, addr, size_log2);
 #ifdef DEBUG_CONFIG
     printf("pci_config_read: dev=%s addr=0x%03x val=0x%x s=%d\n",
            d->name.c_str(), addr, val, 1 << size_log2);
@@ -654,6 +677,8 @@ static void pci_device_config_write(PCIDevice *d, uint32_t addr,
     }
     if (msix_masked && !d->msix->MaskedAll())
         d->msix->FunctionMaskLifted();
+    if (pci_config_target_hit(d, addr, size_log2))
+        d->config_target->ConfigWritten(addr, size_log2);
     if (PCI_COMMAND >= addr && PCI_COMMAND < addr + size) {
         pci_update_mappings(d);
     }
@@ -945,12 +970,20 @@ void pci_device_set_wmask(PCIDevice *d, uint16_t addr, uint32_t mask,
 uint32_t pci_device_get_config(PCIDevice *d, uint16_t addr, int size_log2)
 {
     assert(addr + (1 << size_log2) <= PCI_EXT_CONFIG_SIZE);
-    return pci_device_config_read(d, addr, size_log2);
+    return pci_config_bytes(d, addr, size_log2);
 }
 
 int pci_device_get_devfn(PCIDevice *d)
 {
     return d->devfn;
+}
+
+void pci_device_set_config_target(PCIDevice *d, uint16_t addr, uint16_t size,
+                                  PCIConfigTarget *target)
+{
+    d->config_target = target;
+    d->config_target_addr = addr;
+    d->config_target_size = size;
 }
 
 PCIDevice *pci_bus_get_device(PCIBus *b, int devfn)
