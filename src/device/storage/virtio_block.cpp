@@ -88,10 +88,11 @@ typedef struct {
 
 /* Without these a driver puts one segment in each request, which is one
    page of a buffer that is not physically contiguous. A request has to fit
-   the ring with its header and status, as no indirect descriptors are
-   offered. */
+   the ring with its header and status, for a driver that takes no indirect
+   descriptors. The device takes no request longer than they allow. */
 #define VIRTIO_BLK_SEG_MAX       (MAX_QUEUE_NUM - 2)
 #define VIRTIO_BLK_SIZE_MAX      (1 << 20)
+#define VIRTIO_BLK_MAX_DATA      (VIRTIO_BLK_SEG_MAX * VIRTIO_BLK_SIZE_MAX)
 
 /* length of the serial reported by VIRTIO_BLK_T_GET_ID */
 #define VIRTIO_BLK_ID_BYTES     20
@@ -109,8 +110,15 @@ static void virtio_block_req_end_buf(VIRTIODevice *s, BlockRequest *req,
 {
     uint8_t *buf = req->buf.get();
 
-    buf[req->write_size - 1] = status;
-    memcpy_to_queue(s, req->queue_idx, req->desc_idx, 0, buf, req->write_size);
+    /* a request that failed hands over nothing but its status */
+    if (status != VIRTIO_BLK_S_OK) {
+        memcpy_to_queue(s, req->queue_idx, req->desc_idx, req->write_size - 1,
+                        &status, 1);
+    } else {
+        buf[req->write_size - 1] = status;
+        memcpy_to_queue(s, req->queue_idx, req->desc_idx, 0, buf,
+                        req->write_size);
+    }
     virtio_consume_desc(s, req->queue_idx, req->desc_idx, req->write_size);
 }
 
@@ -184,18 +192,22 @@ int VIRTIOBlockDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
     req->desc_idx = desc_idx;
     switch(h.type) {
     case VIRTIO_BLK_T_IN:
-        /* not zeroed, the read fills it */
-        req->buf.reset(new uint8_t[write_size]);
         req->write_size = write_size;
+        if (write_size - 1 > VIRTIO_BLK_MAX_DATA) {
+            ret = -1;
+            break;
+        }
+        /* zeroed past the whole sectors the read fills */
+        req->buf = std::make_unique<uint8_t[]>(write_size);
         ret = bs->ReadAsync(h.sector_num, req->buf.get(),
                             (write_size - 1) / SECTOR_SIZE, req.get());
         break;
     case VIRTIO_BLK_T_OUT:
-        if (read_only) {
+        len = read_size - sizeof(h);
+        if (read_only || len > VIRTIO_BLK_MAX_DATA) {
             ret = -1;
             break;
         }
-        len = read_size - sizeof(h);
         /* kept until the write finishes */
         req->buf.reset(new uint8_t[len]);
         memcpy_from_queue(s, req->buf.get(), queue_idx, desc_idx,
