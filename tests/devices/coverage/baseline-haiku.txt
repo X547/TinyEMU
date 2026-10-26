@@ -22,7 +22,7 @@ src/bus/mdio/mdio.cpp 0.6
 src/bus/mdio/mdio.h 0.0
 src/bus/pci/host/pci_host_dw.cpp 91.6
 src/bus/pci/host/pci_host_dw.h 100.0
-src/bus/pci/host/pci_host_ecam.cpp 85.6
+src/bus/pci/host/pci_host_ecam.cpp 84.4
 src/bus/pci/host/pci_host_ecam.h 100.0
 src/bus/pci/host/pci_host_i440fx.cpp 93.3
 src/bus/pci/host/pci_host_plda.cpp 93.1
@@ -50,9 +50,9 @@ src/bus/usb/usb.h 0.0
 src/bus/usb/usb_desc.cpp 0.0
 src/bus/usb/usb_desc.h 0.0
 src/bus/usb/usb_hub.cpp 0.3
-src/bus/virtio/virtio.cpp 84.7
+src/bus/virtio/virtio.cpp 96.9
 src/bus/virtio/virtio.h 100.0
-src/core/acpi.cpp 71.1
+src/core/acpi.cpp 71.8
 src/core/device.cpp 71.3
 src/core/device_class.cpp 74.1
 src/core/fdt.cpp 96.5
@@ -67,7 +67,7 @@ src/device/char/htif.cpp 92.0
 src/device/char/htif.h 100.0
 src/device/char/uart.cpp 94.5
 src/device/char/uart.h 100.0
-src/device/char/virtio_console.cpp 98.2
+src/device/char/virtio_console.cpp 96.9
 src/device/common/config_props.cpp 16.0
 src/device/common/config_props.h 50.0
 src/device/display/banshee.cpp 0.1
@@ -75,15 +75,15 @@ src/device/display/banshee.h 100.0
 src/device/display/simplefb.cpp 1.7
 src/device/display/simplefb.h 0.0
 src/device/display/vga.cpp 0.1
-src/device/display/virtio_gpu.cpp 0.0
-src/device/fs/virtio_9p.cpp 0.0
+src/device/display/virtio_gpu.cpp 0.2
+src/device/fs/virtio_9p.cpp 0.1
 src/device/input/hid_keyboard.cpp 0.8
 src/device/input/hid_tablet.cpp 1.0
 src/device/input/i2c_hid.cpp 0.4
 src/device/input/ps2_keyboard.cpp 0.9
 src/device/input/ps2_mouse.cpp 0.5
 src/device/input/usb_hid.cpp 0.4
-src/device/input/virtio_input.cpp 0.0
+src/device/input/virtio_input.cpp 0.4
 src/device/intc/aplic.cpp 99.3
 src/device/intc/aplic.h 100.0
 src/device/intc/hart_irq.h 100.0
@@ -101,7 +101,7 @@ src/device/net/eepro100.cpp 0.1
 src/device/net/eepro100.h 100.0
 src/device/net/ne2000.cpp 0.2
 src/device/net/ne2000.h 100.0
-src/device/net/virtio_net.cpp 0.0
+src/device/net/virtio_net.cpp 1.2
 src/device/power/syscon_poweroff.cpp 90.9
 src/device/power/syscon_poweroff.h 100.0
 src/device/storage/ata_disk.cpp 95.4
@@ -115,8 +115,8 @@ src/device/storage/scsi_cd.cpp 73.4
 src/device/storage/scsi_disk.cpp 91.7
 src/device/storage/sd_card.cpp 87.9
 src/device/storage/usb_storage.cpp 0.3
-src/device/storage/virtio_block.cpp 98.4
-src/device/storage/virtio_scsi.cpp 83.8
+src/device/storage/virtio_block.cpp 95.6
+src/device/storage/virtio_scsi.cpp 83.9
 src/device/timer/clint.cpp 93.1
 src/device/timer/clint.h 100.0
 src/device/timer/hpet.cpp 94.0
@@ -129,4 +129,4 @@ src/machine/machine.h 50.0
 src/machine/pc_acpi.cpp 99.7
 src/machine/pc_acpi.h 100.0
 src/machine/riscv_machine.cpp 72.2
-src/machine/x86_machine.cpp 62.3
+src/machine/x86_machine.cpp 62.4

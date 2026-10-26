@@ -446,13 +446,33 @@ void crs_resource(void *ctx, const AcpiResource &r)
     }
 }
 
+/* The MCFG entry of a PCI Express root bridge's segment: the ECAM window
+   of its buses, from bus 0. */
+bool mcfg_window(const HwDevice *d, uint64_t *base)
+{
+    const uint8_t *t = acpi_table("MCFG");
+    if (t == nullptr || !hw_is(d, "PNP0A08"))
+        return false;
+    const AcpiNode *seg = acpi_child(d->acpi, "_SEG");
+    uint64_t segment = seg && seg->kind == ACPI_NAME ? seg->value.integer : 0;
+    for (uint32_t off = 44; off + 16 <= le32(t + 4); off += 16) {
+        if (le16(t + off + 8) == segment) {
+            *base = le64(t + off);
+            return true;
+        }
+    }
+    return false;
+}
+
 void add_acpi_hosts()
 {
     for (int i = 0; i < registry_count(); i++) {
         const HwDevice *d = registry_at(i);
         if (d->acpi == nullptr || !hw_is(d, "PNP0A03"))
             continue;
-        PciHost *h = add_host(PCI_HOST_CF8, d);
+        uint64_t ecam;
+        bool is_ecam = mcfg_window(d, &ecam);
+        PciHost *h = add_host(is_ecam ? PCI_HOST_ECAM : PCI_HOST_CF8, d);
         if (h == nullptr)
             return;
         h->io_ports = true;
@@ -460,6 +480,10 @@ void add_acpi_hosts()
         CrsScan scan = {h, 0};
         if (crs && crs->kind == ACPI_NAME)
             acpi_parse_resources(crs->value, crs_resource, &scan);
+        if (is_ecam) {
+            h->ext_config = true;
+            h->cfg = ecam + ((uint64_t)h->bus_first << 20);
+        }
 #if !defined(__riscv)
         if (Lapic *lapic = Lapic::Get())
             h->msi = make<LapicSink>(lapic);

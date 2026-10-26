@@ -1,0 +1,2 @@
+window_regs 0400 0420 0401 0421
+io_regs 11 11

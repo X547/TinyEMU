@@ -1,0 +1,4 @@
+3:00.0 pin 1 ioapic 19
+4:00.0 pin 4 ioapic 19
+0:03.0 pin 1 ioapic 18
+0:04.0 pin 2 ioapic 16
