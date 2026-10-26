@@ -34,6 +34,15 @@
 typedef std::vector<uint8_t> AmlBytes;
 
 
+/* An ECAM window as the MCFG lists it: the configuration space of buses 0
+   to 'bus_last' of PCI segment 'segment'. */
+struct AcpiEcam {
+    uint64_t base;
+    uint16_t segment;
+    uint8_t bus_last;
+};
+
+
 /* Carried down the tree while the DSDT is built, as FDTContext is while a
    device tree is. A device appends its Device() to 'aml'; one whose children
    are described too builds them in a context of its own, from Nested(). */
@@ -42,6 +51,7 @@ private:
     /* the full paths handed out so far, and the _UIDs by _HID */
     std::shared_ptr<std::set<std::string>> fNames;
     std::shared_ptr<std::map<std::string, int>> fUids;
+    std::shared_ptr<std::vector<AcpiEcam>> fEcams;
 
 public:
     AmlBytes *aml;
@@ -61,6 +71,11 @@ public:
        level triggered and active high. Kept in one place so that every
        device describes the line it got; on the PC a line is its GSI. */
     void AddInterrupt(AmlBytes &r, uint64_t line) const;
+
+    /* Have the MCFG list the ECAM window of 'bus_count' buses at 'base',
+       as a PCI segment of its own, whose number is returned. */
+    int AddEcam(uint64_t base, int bus_count);
+    const std::vector<AcpiEcam> &Ecams() const {return *fEcams;}
 
     /* The context of the devices inside device 'name' of this scope. */
     AcpiContext Nested(const std::string &name, AmlBytes *aml) const;

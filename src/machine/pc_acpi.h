@@ -68,6 +68,8 @@ struct PcAcpiConfig {
     /* an HPET, described by its capabilities' low half; 0 when there is
        none */
     uint32_t hpet_block_id = 0;
+    /* the ECAM windows of the host bridges, for an MCFG */
+    std::vector<AcpiEcam> ecams;
     /* what \_SB holds: the chipset and the devices */
     AmlBytes sb;
 };
@@ -85,6 +87,7 @@ void pc_acpi_chipset(AcpiContext &ctx);
 /* Declares the processors the MADT lists, which the UIDs tie together. */
 void pc_acpi_processors(AcpiContext &ctx, int cpu_count);
 
-/* Writes the RSDP, RSDT, XSDT, FACS, FADT, DSDT, with APICs the MADT and
-   with an HPET its table to 'mem', which the guest sees at PC_ACPI_ADDR. */
+/* Writes the RSDP, RSDT, XSDT, FACS, FADT, DSDT, with APICs the MADT, with
+   an HPET its table and with ECAM windows the MCFG to 'mem', which the guest
+   sees at PC_ACPI_ADDR. */
 void pc_acpi_build(uint8_t *mem, const PcAcpiConfig &config);

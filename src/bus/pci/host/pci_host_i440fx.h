@@ -23,6 +23,7 @@
  */
 #pragma once
 
+#include "acpi.h"
 #include "device.h"
 #include "pci.h"
 
@@ -36,6 +37,12 @@ struct PcPciApertures {
     uint64_t mmio64_base = 0;
     uint64_t mmio64_end = 0;
 };
+
+/* The I/O windows of a PC root bridge's _CRS: the ports no device claims,
+   which leaves out the ISA devices beside the bus in \_SB. Windows gives a
+   root bus its windows whole, and fails to start one that overlaps another
+   device. */
+void pc_pci_port_windows(AmlBytes &r, const RangeAllocator &io);
 
 enum I440FXVariant {
     I440FX_PC,

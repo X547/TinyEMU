@@ -1183,6 +1183,7 @@ static void pc_acpi_setup(PCMachine *s)
     pc_acpi_processors(ctx, s->fCpuCount);
     pc_acpi_chipset(ctx);
     s->bus->BuildAMLAll(ctx);
+    config.ecams = ctx.Ecams();
     assert(mem != NULL);
     memset(mem, 0, PC_ACPI_SIZE);
     pc_acpi_build(mem, config);

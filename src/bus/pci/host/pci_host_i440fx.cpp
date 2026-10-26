@@ -196,6 +196,20 @@ void I440FXState::WriteReset(uint32_t offset, uint32_t data, int size_log2)
         machine->RequestReset();
 }
 
+void pc_pci_port_windows(AmlBytes &r, const RangeAllocator &io)
+{
+    uint64_t next = 0;
+
+    for (int i = 0; i < io.Count(); i++) {
+        const AllocEntry &e = io.At(i);
+        if (e.base > next)
+            aml_res_word_space(r, 1, 3, next, e.base - 1);
+        next = std::max(next, e.base + e.size);
+    }
+    if (next < PC_IO_PORTS)
+        aml_res_word_space(r, 1, 3, next, PC_IO_PORTS - 1);
+}
+
 //#pragma mark - the configuration node
 
 /* The bus is built in Prepare() rather than Realize(), because the devices
@@ -334,21 +348,8 @@ public:
         aml_res_word_space(r, 2, 0, 0x00, 0xff);
         /* the configuration ports, which it consumes */
         aml_res_io(r, fAddrRes->base, 8);
-        /* The ports no fixed device claims, which leaves out the
-           configuration ports and the ISA devices beside the bus in \_SB:
-           Windows gives a root bus its windows whole, and fails to start one
-           that overlaps another device. */
         SystemBus *sys = static_cast<SystemBus *>(ParentBus());
-        const RangeAllocator &io = sys->IoAlloc();
-        uint64_t next = 0;
-        for (int i = 0; i < io.Count(); i++) {
-            const AllocEntry &e = io.At(i);
-            if (e.base > next)
-                aml_res_word_space(r, 1, 3, next, e.base - 1);
-            next = std::max(next, e.base + e.size);
-        }
-        if (next < PC_IO_PORTS)
-            aml_res_word_space(r, 1, 3, next, PC_IO_PORTS - 1);
+        pc_pci_port_windows(r, sys->IoAlloc());
         aml_res_dword_memory(r, 0xa0000, 0xbffff);
         aml_res_dword_memory(r, fMmioRes->base, fMmioRes->End() - 1);
         if (fMmio64Res != nullptr) {

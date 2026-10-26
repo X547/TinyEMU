@@ -296,6 +296,22 @@ static AmlBytes build_hpet(const PcAcpiConfig &config)
     return t;
 }
 
+static AmlBytes build_mcfg(const PcAcpiConfig &config)
+{
+    AmlBytes t = table_header("MCFG", 1);
+
+    aml_put64(t, 0); /* reserved */
+    for (const AcpiEcam &e : config.ecams) {
+        aml_put64(t, e.base);
+        aml_put16(t, e.segment);
+        aml_put8(t, 0); /* first bus */
+        aml_put8(t, e.bus_last);
+        aml_put32(t, 0); /* reserved */
+    }
+    table_finish(t);
+    return t;
+}
+
 static AmlBytes build_facs()
 {
     AmlBytes t;
@@ -435,6 +451,8 @@ void pc_acpi_build(uint8_t *mem, const PcAcpiConfig &config)
         tables.push_back(place(build_madt(config), 16));
     if (config.hpet_block_id != 0)
         tables.push_back(place(build_hpet(config), 16));
+    if (!config.ecams.empty())
+        tables.push_back(place(build_mcfg(config), 16));
     uint32_t rsdt = place(build_rsdt(tables), 16);
     uint32_t xsdt = place(build_xsdt(tables), 16);
 

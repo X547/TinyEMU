@@ -23,12 +23,15 @@
  */
 #include "pci_host_ecam.h"
 
+#include <assert.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "acpi.h"
 #include "cutils.h"
 #include "device_class.h"
+#include "devices.h"
 #include "fdt.h"
 #include "machine.h"
 
@@ -43,7 +46,8 @@
 
 PCIHostECAMDevice::PCIHostECAMDevice(const char *name, int bus_count,
                                      uint64_t mmio_size, uint64_t mmio64_size,
-                                     uint64_t io_size):
+                                     uint64_t io_size,
+                                     const PcPciApertures *pc_space):
     Device(name),
     fBusCount(bus_count),
     fMmioSize(mmio_size),
@@ -56,29 +60,44 @@ PCIHostECAMDevice::PCIHostECAMDevice(const char *name, int bus_count,
     if (fBusCount > 256) {
         fBusCount = 256;
     }
+    if (pc_space != nullptr) {
+        fPcSpace = std::make_unique<PcPciApertures>(*pc_space);
+    }
 }
 
 
-bool PCIHostECAMDevice::Prepare()
+/* A PC's apertures are the machine's, and its I/O BARs are ports anywhere
+   no other device is, as behind the i440FX. */
+bool PCIHostECAMDevice::PrepareApertures(SystemBus *sys)
 {
-    SystemBus *sys = static_cast<SystemBus *>(ParentBus());
-    if (sys == nullptr || ParentBus()->AsPCIBus() != nullptr) {
-        vm_error("%s: must be attached to a system bus\n", Name());
-        return false;
+    if (fPcSpace != nullptr) {
+        if (!sys->IsAcpi()) {
+            vm_error("%s: only the acpi bus describes it to the guest\n",
+                     Name());
+            return false;
+        }
+        fMmioRes = AddFixedResource(RES_MMIO, fPcSpace->mmio_base,
+                                    fPcSpace->mmio_end - fPcSpace->mmio_base);
+        if (fMmioRes == nullptr) {
+            return false;
+        }
+        if (fPcSpace->mmio64_end > fPcSpace->mmio64_base) {
+            fMmio64Res = AddFixedResource(RES_MMIO, fPcSpace->mmio64_base,
+                                          fPcSpace->mmio64_end -
+                                          fPcSpace->mmio64_base);
+            if (fMmio64Res == nullptr) {
+                return false;
+            }
+        }
+        return true;
     }
-
-    /* The ECAM window must be aligned to its own size so that the bus number
-       lands on bit 20 and up. */
-    uint64_t ecam_size = (uint64_t)fBusCount << PCIE_ECAM_BUS_SHIFT;
-    fEcamRes = AddResource(RES_MMIO, ecam_size, ecam_size);
 
     /* The aperture is reserved as one block: this is the range published in
        the FDT "ranges" property, so checking it against the static map is
        exactly what keeps the guest from being told to place BARs on top of
        RAM or another device. */
     fMmioRes = AddResource(RES_MMIO, fMmioSize, 0x1000000);
-
-    if (fEcamRes == nullptr || fMmioRes == nullptr) {
+    if (fMmioRes == nullptr) {
         return false;
     }
 
@@ -103,8 +122,27 @@ bool PCIHostECAMDevice::Prepare()
             return false;
         }
     }
+    return true;
+}
 
-    /* One PLIC line per INTx pin. */
+
+bool PCIHostECAMDevice::Prepare()
+{
+    SystemBus *sys = dynamic_cast<SystemBus *>(ParentBus());
+    if (sys == nullptr) {
+        vm_error("%s: must be attached to a system bus\n", Name());
+        return false;
+    }
+
+    /* The ECAM window must be aligned to its own size so that the bus number
+       lands on bit 20 and up. */
+    uint64_t ecam_size = (uint64_t)fBusCount << PCIE_ECAM_BUS_SHIFT;
+    fEcamRes = AddResource(RES_MMIO, ecam_size, ecam_size);
+    if (fEcamRes == nullptr || !PrepareApertures(sys)) {
+        return false;
+    }
+
+    /* One interrupt controller line per INTx pin. */
     for (int i = 0; i < 4; i++) {
         fIrqRes[i] = AddResource(RES_IRQ, 1);
         if (fIrqRes[i] == nullptr) {
@@ -115,8 +153,8 @@ bool PCIHostECAMDevice::Prepare()
     /* Devices may register I/O BARs only on a bridge that has somewhere to
        put them, so a bridge configured without an aperture keeps the port
        space it never reserved out of reach. */
-    fPciBus = pci_bus_init(sys->MemMap(),
-                           fIoRes != nullptr ? sys->PortMap() : nullptr);
+    bool ports = fIoRes != nullptr || fPcSpace != nullptr;
+    fPciBus = pci_bus_init(sys->MemMap(), ports ? sys->PortMap() : nullptr);
     pci_bus_set_pcie(fPciBus.get(), true);
     /* The bridge has no MSI receiver, but the machine may have an MSI
        controller the messages can be written to directly. */
@@ -250,6 +288,54 @@ void PCIHostECAMDevice::BuildFDT(FDTContext &ctx)
 }
 
 
+/* A PCI Express root bridge of a segment of its own, which the MCFG gives
+   the ECAM window of, and a motherboard resource holding that window, which
+   Linux takes an MCFG entry only with. */
+void PCIHostECAMDevice::BuildAML(AcpiContext &ctx)
+{
+    SystemBus *sys = static_cast<SystemBus *>(ParentBus());
+    int segment = ctx.AddEcam(fEcamRes->base, fBusCount);
+    AmlBytes r;
+
+    aml_res_word_space(r, 2, 0, 0, fBusCount - 1);
+    pc_pci_port_windows(r, sys->IoAlloc());
+    aml_res_dword_memory(r, 0xa0000, 0xbffff);
+    aml_res_dword_memory(r, fMmioRes->base, fMmioRes->End() - 1);
+    if (fMmio64Res != nullptr) {
+        aml_res_qword_memory(r, fMmio64Res->base, fMmio64Res->End() - 1);
+    }
+
+    /* Each pin of each slot, routed as pci_bus_map_irq() does. */
+    std::vector<AmlBytes> prt;
+    for (int slot = 0; slot < PCIE_ECAM_SLOT_COUNT; slot++) {
+        for (int pin = 0; pin < 4; pin++) {
+            int intx = pci_bus_map_irq(slot << 3, pin);
+            prt.push_back(aml_package({
+                aml_int((slot << 16) | 0xffff), aml_int(pin), aml_int(0),
+                aml_int(fIrqRes[intx]->base),
+            }));
+        }
+    }
+
+    AmlBytes dev = aml_name("_HID", aml_eisaid("PNP0A08"));
+    aml_append(dev, aml_name("_CID", aml_eisaid("PNP0A03")));
+    aml_append(dev, aml_name("_UID", aml_int(segment)));
+    aml_append(dev, aml_name("_SEG", aml_int(segment)));
+    aml_append(dev, aml_name("_BBN", aml_int(0)));
+    aml_append(dev, aml_name("_CRS", aml_resource_template(r)));
+    aml_append(dev, aml_name("_PRT", aml_package(prt)));
+    aml_append(*ctx.aml, aml_device(ctx.NewName("PCI").c_str(), dev));
+
+    assert(fEcamRes->End() <= 0x100000000ull);
+    r.clear();
+    aml_res_memory32_fixed(r, fEcamRes->base, fEcamRes->size);
+    dev = aml_name("_HID", aml_eisaid("PNP0C02"));
+    aml_append(dev, aml_name("_UID", aml_int(ctx.NewUid("PNP0C02"))));
+    aml_append(dev, aml_name("_CRS", aml_resource_template(r)));
+    aml_append(*ctx.aml, aml_device(ctx.NewName("ECM").c_str(), dev));
+}
+
+
 //#pragma mark - class
 
 bool pci_host_io_size(const char *type, int size_kb, uint64_t *out)
@@ -278,7 +364,16 @@ public:
         int bus_count, mmio_size_mb, mmio64_size_mb, io_size_kb;
         uint64_t io_size;
 
-        (void)ctx;
+        /* a PC's apertures are the machine's */
+        if (ctx->pc_pci_space != nullptr) {
+            for (const char *name : {"mmio_size", "mmio64_size", "io_size"}) {
+                if (!json_is_undefined(cfg.Get(name))) {
+                    vm_error("%s: '%s' is not for the pc machine\n",
+                             cfg.Type(), name);
+                    return nullptr;
+                }
+            }
+        }
         if (!cfg.GetInt("bus_count", &bus_count,
                         PCIE_ECAM_DEFAULT_BUS_COUNT) ||
             !cfg.GetInt("mmio_size", &mmio_size_mb,
@@ -292,7 +387,8 @@ public:
         }
         return new PCIHostECAMDevice(cfg.IdOr("pcie"), bus_count,
                                      (uint64_t)mmio_size_mb << 20,
-                                     (uint64_t)mmio64_size_mb << 20, io_size);
+                                     (uint64_t)mmio64_size_mb << 20, io_size,
+                                     ctx->pc_pci_space);
     }
 };
 

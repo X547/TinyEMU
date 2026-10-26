@@ -26,6 +26,7 @@
 #include "device.h"
 #include "pci.h"
 #include "pci_bridge.h"
+#include "pci_host_i440fx.h"
 
 /* One ECAM function window is 4 KB, so one bus is 256 * 4 KB = 1 MB. */
 #define PCIE_ECAM_BUS_SHIFT 20
@@ -54,7 +55,10 @@
    memory aperture, both taken from the parent bus's MMIO space so that they
    are checked against every other static mapping. The FDT "interrupt-map" is
    generated from pci_bus_map_irq(), the same function that routes INTx at run
-   time, so the table and the emulation cannot disagree. */
+   time, so the table and the emulation cannot disagree.
+
+   On a PC it decodes what the machine leaves for PCI, as the i440FX does,
+   and the DSDT and the MCFG describe it in place of a device tree. */
 class PCIHostECAMDevice final: public Device {
 private:
     PCIBusPtr fPciBus;
@@ -72,17 +76,22 @@ private:
     uint64_t fMmioSize;
     uint64_t fMmio64Size;
     uint64_t fIoSize;
+    /* a PC's apertures, or null on an FDT machine */
+    std::unique_ptr<PcPciApertures> fPcSpace;
 
+    bool PrepareApertures(SystemBus *sys);
     uint32_t EcamRead(uint32_t offset, int size_log2);
     void EcamWrite(uint32_t offset, uint32_t val, int size_log2);
 
 public:
     PCIHostECAMDevice(const char *name, int bus_count, uint64_t mmio_size,
-                      uint64_t mmio64_size, uint64_t io_size);
+                      uint64_t mmio64_size, uint64_t io_size,
+                      const PcPciApertures *pc_space = nullptr);
 
     bool Prepare() override;
     bool Realize() override;
     void BuildFDT(FDTContext &ctx) override;
+    void BuildAML(AcpiContext &ctx) override;
     Bus *ChildBus() override {return fChildBus.get();}
 
     DeviceIOAdapter<PCIHostECAMDevice, &PCIHostECAMDevice::EcamRead,

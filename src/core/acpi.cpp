@@ -30,6 +30,7 @@
 AcpiContext::AcpiContext(AmlBytes *aml, const char *scope):
     fNames(std::make_shared<std::set<std::string>>()),
     fUids(std::make_shared<std::map<std::string, int>>()),
+    fEcams(std::make_shared<std::vector<AcpiEcam>>()),
     aml(aml),
     scope(scope)
 {
@@ -68,6 +69,16 @@ int AcpiContext::NewUid(const char *hid)
 void AcpiContext::AddInterrupt(AmlBytes &r, uint64_t line) const
 {
     aml_res_interrupt(r, line, true, false);
+}
+
+
+int AcpiContext::AddEcam(uint64_t base, int bus_count)
+{
+    int segment = fEcams->size();
+
+    assert(bus_count >= 1 && bus_count <= 256);
+    fEcams->push_back({base, (uint16_t)segment, (uint8_t)(bus_count - 1)});
+    return segment;
 }
 
 

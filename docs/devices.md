@@ -117,7 +117,7 @@ FDT bus -> pci-host-ecam-generic -> PCI bus -> xhci -> USB bus
 | --- | --- | --- |
 | `fdt` | the RISC-V machine (root) | memory-mapped devices, PCI host bridges |
 | `pc` | the PC machine (root), for firmware | `ns16550a`, `i8042`, `hpet`, `ne2000`, `pci-host-i440fx`, `pci-host-cloudhv` |
-| `acpi` | the PC machine (root), for a kernel it loads | as `pc`, and `dw-i2c`; described in the DSDT |
+| `acpi` | the PC machine (root), for a kernel it loads | as `pc`, and `dw-i2c`, `pci-host-ecam-generic`; described in the DSDT |
 | `pci` | PCI host bridges, `pci-bridge` | PCI devices |
 | `ps2` | `i8042` | `ps2-keyboard`, `ps2-mouse` |
 | `ata` | `pci-ide` | `ata-disk`, `atapi` |
@@ -145,7 +145,8 @@ The PC machine places nothing. Its devices sit at the fixed addresses a PC
 has always used, and the machine only checks that two devices do not
 overlap. Only `ns16550a`, `i8042`, `hpet` and the ISA form of `ne2000` go
 straight on the root bus. Everything else is a PCI device and goes inside
-`pci-host-i440fx` or `pci-host-cloudhv`.
+`pci-host-i440fx` or `pci-host-cloudhv`, or on the `acpi` root bus
+`pci-host-ecam-generic`.
 
 The PC's root bus is `pc` when firmware (`bios`) runs, since firmware builds
 its own ACPI tables. It is `acpi` when the machine loads `kernel` itself: the
@@ -314,16 +315,26 @@ its lines in `interrupts-extended` or `_CRS`;
 
 #### `pci-host-ecam-generic` — generic ECAM PCIe host bridge
 
-Placement: FDT. Provides a `pci` bus. Devices sit directly on bus 0 and
-interrupt over INTx (MSI-X is available with `interrupt_controller:
-"aplic-imsic"`).
+Placement: FDT, or the PC's `acpi` root bus. Provides a `pci` bus. Devices
+sit directly on bus 0 and interrupt over INTx (MSI-X is available with
+`interrupt_controller: "aplic-imsic"`, or `"apic"` on the PC).
 
 | Property | Default | Meaning |
 | --- | --- | --- |
 | `bus_count` | `16` | ECAM window size in MB (one bus per MB). |
-| `mmio_size` | `256` | 32-bit memory aperture, in MB. |
-| `mmio64_size` | `4096` | Memory aperture above 4 GB, in MB; `0` for none. |
-| `io_size` | `64` | I/O aperture in KB, a power of two of at least 4; `0` for none. |
+| `mmio_size` | `256` | 32-bit memory aperture, in MB. FDT only. |
+| `mmio64_size` | `4096` | Memory aperture above 4 GB, in MB; `0` for none. FDT only. |
+| `io_size` | `64` | I/O aperture in KB, a power of two of at least 4; `0` for none. FDT only. |
+
+On the PC it takes the place of the i440FX, and the two cannot be used
+together. Like the i440FX, it decodes the memory between the end of low RAM
+and `0xf8000000`, the memory above RAM, and every port no other device
+holds. Its ECAM window is placed below the IOAPIC. The DSDT describes it as
+a `PNP0A08` root bridge of PCI segment 0, with its windows in `_CRS` and
+its INTx lines, the IOAPIC's inputs 16-23 with `interrupt_controller:
+"apic"`, in `_PRT`. The MCFG gives its configuration space, and a `PNP0C02`
+device reserves that window, which Linux requires before it uses an MCFG
+entry. Firmware knows nothing of it, so the `pc` root bus refuses it.
 
 ```js
 /* fdt bus */
