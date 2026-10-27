@@ -1,6 +1,6 @@
 /*
  * Dummy VGA device
- * 
+ *
  * Copyright (c) 2003-2017 Fabrice Bellard
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -93,13 +93,13 @@ private:
 public:
     VGAPortIO(VGAState &vga): fVga(vga) {}
 
-    uint32_t DeviceRead(uint32_t addr, int size_log2) override
+    uint64_t DeviceRead(uint32_t addr, int size_log2) override
     {
         (void)size_log2;
         return vga_ioport_read(&fVga, Base + addr);
     }
 
-    void DeviceWrite(uint32_t addr, uint32_t val, int size_log2) override
+    void DeviceWrite(uint32_t addr, uint64_t val, int size_log2) override
     {
         (void)size_log2;
         vga_ioport_write(&fVga, Base + addr, val);
@@ -143,7 +143,7 @@ public:
     int max_height;
 
     uint8_t *vga_ram; /* 128K at 0xa0000 */
-    
+
     uint8_t sr_index;
     uint8_t sr[8];
     uint8_t gr_index;
@@ -163,7 +163,7 @@ public:
     uint8_t dac_write_index;
     uint8_t dac_cache[3]; /* used when writing */
     uint8_t palette[768];
-    
+
     /* text mode state */
     uint32_t last_palette[16];
     uint16_t last_ch_attr[MAX_TEXT_WIDTH * MAX_TEXT_HEIGHT];
@@ -1159,7 +1159,7 @@ static std::unique_ptr<FBDevice> pci_vga_init(PCIBus *bus, int width,
     s->mem_range =
         mem_map->RegisterRam(0, fb_dev->fb_size,
                          DEVRAM_FLAG_DIRTY_BITS | DEVRAM_FLAG_DISABLED);
-    
+
     fb_dev->fb_data = s->mem_range->phys_mem;
 
     s->pci_dev = d;
@@ -1192,9 +1192,9 @@ static std::unique_ptr<FBDevice> pci_vga_init(PCIBus *bus, int width,
     /* VGA memory (for simple text mode no need for callbacks) */
     s->mem_range2 = mem_map->RegisterRam(0xa0000, 0x20000, 0);
     s->vga_ram = s->mem_range2->phys_mem;
-        
+
     /* standard VGA ports */
-    
+
     port_map->RegisterDevice(0x3c0, 16, &s->fIo3c0, DEVIO_SIZE8);
     port_map->RegisterDevice(0x3b4, 2, &s->fIo3b4, DEVIO_SIZE8);
     port_map->RegisterDevice(0x3d4, 2, &s->fIo3d4, DEVIO_SIZE8);
@@ -1204,7 +1204,7 @@ static std::unique_ptr<FBDevice> pci_vga_init(PCIBus *bus, int width,
     /* VBE extension: the index at 0x1ce, and the data at 0x1cf as Bochs has
        it and at 0x1d0 as QEMU also has it, which is where EDK2 looks */
     port_map->RegisterDevice(0x1ce, 4, &s->fVbeIo, DEVIO_SIZE16);
-    
+
     s->vbe_regs[VBE_DISPI_INDEX_ID] = VBE_DISPI_ID5;
     s->vbe_regs[VBE_DISPI_INDEX_VIDEO_MEMORY_64K] = fb_dev->fb_size >> 16;
 

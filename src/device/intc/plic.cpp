@@ -91,7 +91,7 @@ void PLIC::Update()
 }
 
 
-uint32_t PLIC::DeviceRead(uint32_t offset, int size_log2)
+uint64_t PLIC::DeviceRead(uint32_t offset, int size_log2)
 {
     uint32_t val = 0;
     uint32_t context_count = 2 * fHartCount;
@@ -129,7 +129,7 @@ uint32_t PLIC::DeviceRead(uint32_t offset, int size_log2)
 }
 
 
-void PLIC::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
+void PLIC::DeviceWrite(uint32_t offset, uint64_t val, int size_log2)
 {
     uint32_t context_count = 2 * fHartCount;
 

@@ -56,8 +56,8 @@ public:
     void SetIRQ(int pin, int level) override;
 
     /* DeviceIO */
-    uint32_t DeviceRead(uint32_t offset, int size_log2) override;
-    void DeviceWrite(uint32_t offset, uint32_t val, int size_log2) override;
+    uint64_t DeviceRead(uint32_t offset, int size_log2) override;
+    void DeviceWrite(uint32_t offset, uint64_t val, int size_log2) override;
 
     /* A local APIC ended an interrupt with this vector: the level
        triggered inputs waiting on it may send again. */

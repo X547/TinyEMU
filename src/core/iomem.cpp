@@ -34,25 +34,6 @@
 #include "host_memory.h"
 
 
-//#pragma mark - DeviceIO
-
-/* Reached only for a range registered with DEVIO_SIZE64 whose device left
-   these out, which is a bug in the device. */
-uint64_t DeviceIO::DeviceRead64(uint32_t offset)
-{
-    (void)offset;
-    abort();
-}
-
-
-void DeviceIO::DeviceWrite64(uint32_t offset, uint64_t val)
-{
-    (void)offset;
-    (void)val;
-    abort();
-}
-
-
 //#pragma mark - PhysMemoryRange
 
 const uint32_t *PhysMemoryRange::DirtyBits()
@@ -96,7 +77,7 @@ bool PhysMemoryRange::DeviceRead(uint32_t offset, int size_log2,
 {
     if (size_log2 == 3) {
         if (devio_flags & DEVIO_SIZE64) {
-            *val = io->DeviceRead64(offset);
+            *val = io->DeviceRead(offset, size_log2);
             return true;
         }
         if (devio_flags & DEVIO_SIZE32) {
@@ -118,7 +99,7 @@ bool PhysMemoryRange::DeviceWrite(uint32_t offset, uint64_t val,
 {
     if (size_log2 == 3) {
         if (devio_flags & DEVIO_SIZE64) {
-            io->DeviceWrite64(offset, val);
+            io->DeviceWrite(offset, val, size_log2);
             return true;
         }
         if (devio_flags & DEVIO_SIZE32) {

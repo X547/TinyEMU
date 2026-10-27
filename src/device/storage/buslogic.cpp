@@ -273,8 +273,8 @@ public:
     Bus *ChildBus() override {return fChildBus.get();}
 
     void SetBar(int bar_num, uint64_t addr, bool enabled) override;
-    uint32_t DeviceRead(uint32_t offset, int size_log2) override;
-    void DeviceWrite(uint32_t offset, uint32_t val, int size_log2) override;
+    uint64_t DeviceRead(uint32_t offset, int size_log2) override;
+    void DeviceWrite(uint32_t offset, uint64_t val, int size_log2) override;
 
     bool FindFreeAddress(int *target, int *lun) override;
     bool AttachDevice(SCSIDevice *dev, uint32_t target, uint32_t lun) override;
@@ -1031,7 +1031,7 @@ void BusLogicDevice::Finish(BLCommand *cmd)
 
 //#pragma mark - registers
 
-uint32_t BusLogicDevice::DeviceRead(uint32_t offset, int size_log2)
+uint64_t BusLogicDevice::DeviceRead(uint32_t offset, int size_log2)
 {
     (void)size_log2;
 
@@ -1074,7 +1074,7 @@ uint32_t BusLogicDevice::DeviceRead(uint32_t offset, int size_log2)
 }
 
 
-void BusLogicDevice::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
+void BusLogicDevice::DeviceWrite(uint32_t offset, uint64_t val, int size_log2)
 {
     (void)size_log2;
 

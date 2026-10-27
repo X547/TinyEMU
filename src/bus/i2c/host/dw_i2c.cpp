@@ -211,8 +211,8 @@ public:
     void BuildAML(AcpiContext &ctx) override;
     Bus *ChildBus() override {return fChildBus.get();}
 
-    uint32_t DeviceRead(uint32_t offset, int size_log2) override;
-    void DeviceWrite(uint32_t offset, uint32_t val, int size_log2) override;
+    uint64_t DeviceRead(uint32_t offset, int size_log2) override;
+    void DeviceWrite(uint32_t offset, uint64_t val, int size_log2) override;
 };
 
 
@@ -571,7 +571,7 @@ void DWI2CDevice::WriteReg(uint32_t offset, uint32_t val)
 }
 
 
-uint32_t DWI2CDevice::DeviceRead(uint32_t offset, int size_log2)
+uint64_t DWI2CDevice::DeviceRead(uint32_t offset, int size_log2)
 {
     (void)size_log2;
     if (offset >= DW_IC_REG_FILE_SIZE) {
@@ -581,7 +581,7 @@ uint32_t DWI2CDevice::DeviceRead(uint32_t offset, int size_log2)
 }
 
 
-void DWI2CDevice::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
+void DWI2CDevice::DeviceWrite(uint32_t offset, uint64_t val, int size_log2)
 {
     (void)size_log2;
     if (offset >= DW_IC_REG_FILE_SIZE) {

@@ -395,53 +395,53 @@ void HPET::Write(uint32_t offset, uint32_t val, uint64_t now)
 }
 
 
-uint32_t HPET::DeviceRead(uint32_t offset, int size_log2)
+uint64_t HPET::DeviceRead(uint32_t offset, int size_log2)
 {
     uint64_t now = host_monotonic_us();
 
-    (void)size_log2;
-    Process(now);
-    return Read(offset & ~7u, now) >> ((offset & 4) * 8);
-}
+    switch (size_log2) {
+        case 2:
+            Process(now);
+            return Read(offset & ~7u, now) >> ((offset & 4) * 8);
 
+        case 3:
+            Process(now);
+            return Read(offset & ~7u, now);
 
-void HPET::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
-{
-    uint64_t now = host_monotonic_us();
-
-    (void)size_log2;
-    Process(now);
-    Write(offset, val, now);
-    /* the next deadline may have moved */
-    fMachine->Kick();
-}
-
-
-/* The main counter and the comparators are read and written whole by an 8
-   byte access, as the specification has them. */
-uint64_t HPET::DeviceRead64(uint32_t offset)
-{
-    uint64_t now = host_monotonic_us();
-
-    Process(now);
-    return Read(offset & ~7u, now);
-}
-
-
-void HPET::DeviceWrite64(uint32_t offset, uint64_t val)
-{
-    uint64_t now = host_monotonic_us();
-
-    offset &= ~7u;
-    Process(now);
-    if (offset == HPET_COUNTER) {
-        SetCounter(val, now);
-    } else {
-        /* the halves at one instant; the set value bit carries over */
-        Write(offset, get_bits(val, 0, 32), now);
-        Write(offset + 4, get_bits(val, 32, 32), now);
+        default:
+            abort();
     }
-    fMachine->Kick();
+}
+
+
+void HPET::DeviceWrite(uint32_t offset, uint64_t val, int size_log2)
+{
+    uint64_t now = host_monotonic_us();
+
+    switch (size_log2) {
+        case 2:
+            Process(now);
+            Write(offset, val, now);
+            /* the next deadline may have moved */
+            fMachine->Kick();
+            break;
+
+        case 3:
+            offset &= ~7u;
+            Process(now);
+            if (offset == HPET_COUNTER) {
+                SetCounter(val, now);
+            } else {
+                /* the halves at one instant; the set value bit carries over */
+                Write(offset, get_bits(val, 0, 32), now);
+                Write(offset + 4, get_bits(val, 32, 32), now);
+            }
+            fMachine->Kick();
+            break;
+
+        default:
+            abort();
+    }
 }
 
 

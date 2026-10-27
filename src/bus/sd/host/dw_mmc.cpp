@@ -298,8 +298,8 @@ public:
     void BuildFDT(FDTContext &ctx) override;
     Bus *ChildBus() override {return fChildBus.get();}
 
-    uint32_t DeviceRead(uint32_t offset, int size_log2) override;
-    void DeviceWrite(uint32_t offset, uint32_t val, int size_log2) override;
+    uint64_t DeviceRead(uint32_t offset, int size_log2) override;
+    void DeviceWrite(uint32_t offset, uint64_t val, int size_log2) override;
 
     bool AttachDevice(SDDevice *dev) override;
     void SetCardInterrupt(bool level) override;
@@ -1191,7 +1191,7 @@ void DWMMCDevice::DmaRun()
 
 //#pragma mark - memory mapped access
 
-uint32_t DWMMCDevice::DeviceRead(uint32_t offset, int size_log2)
+uint64_t DWMMCDevice::DeviceRead(uint32_t offset, int size_log2)
 {
     (void)size_log2;
     if (offset >= DW_MMC_DATA) {
@@ -1201,7 +1201,7 @@ uint32_t DWMMCDevice::DeviceRead(uint32_t offset, int size_log2)
 }
 
 
-void DWMMCDevice::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
+void DWMMCDevice::DeviceWrite(uint32_t offset, uint64_t val, int size_log2)
 {
     (void)size_log2;
     if (offset >= DW_MMC_DATA) {

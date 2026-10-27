@@ -169,7 +169,7 @@ static void cpu_dump_state(X86CPUState *s)
 static uint64_t device_read(PhysMemoryRange *pr, uint32_t offset, int size)
 {
     if (size == SIZE64 && (pr->devio_flags & DEVIO_SIZE64)) {
-        return pr->io->DeviceRead64(offset);
+        return pr->io->DeviceRead(offset, size);
     }
     if (size < SIZE64 && get_bit(pr->devio_flags, size)) {
         return trunc_size(pr->io->DeviceRead(offset, size), size);
@@ -197,7 +197,7 @@ static void device_write(PhysMemoryRange *pr, uint32_t offset, uint64_t val,
                          int size)
 {
     if (size == SIZE64 && (pr->devio_flags & DEVIO_SIZE64)) {
-        pr->io->DeviceWrite64(offset, val);
+        pr->io->DeviceWrite(offset, val, size);
         return;
     }
     if (size < SIZE64 && get_bit(pr->devio_flags, size)) {

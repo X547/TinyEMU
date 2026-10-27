@@ -550,8 +550,8 @@ public:
     Bus *ChildBus() override {return fChildBus;}
 
     void SetBar(int bar_num, uint64_t addr, bool enabled) override;
-    uint32_t DeviceRead(uint32_t offset, int size_log2) override;
-    void DeviceWrite(uint32_t offset, uint32_t val, int size_log2) override;
+    uint64_t DeviceRead(uint32_t offset, int size_log2) override;
+    void DeviceWrite(uint32_t offset, uint64_t val, int size_log2) override;
 
     int FindFreePort(USBSpeedEnum speed) override;
     bool AttachDevice(USBDevice *dev, int port) override;
@@ -2570,7 +2570,7 @@ void XHCIDevice::WriteDword(uint32_t offset, uint32_t val)
 }
 
 
-uint32_t XHCIDevice::DeviceRead(uint32_t offset, int size_log2)
+uint64_t XHCIDevice::DeviceRead(uint32_t offset, int size_log2)
 {
     uint32_t val = ReadDword(offset & ~3u);
 
@@ -2581,7 +2581,7 @@ uint32_t XHCIDevice::DeviceRead(uint32_t offset, int size_log2)
 }
 
 
-void XHCIDevice::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
+void XHCIDevice::DeviceWrite(uint32_t offset, uint64_t val, int size_log2)
 {
     if (size_log2 >= 2) {
         WriteDword(offset & ~3u, val);

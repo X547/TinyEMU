@@ -1,6 +1,6 @@
 /*
  * Simple PCI bus driver
- * 
+ *
  * Copyright (c) 2017 Fabrice Bellard
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -360,8 +360,8 @@ private:
 public:
     void Init(PhysMemoryMap *port_map, uint64_t port_base, uint64_t port_size);
 
-    uint32_t DeviceRead(uint32_t offset, int size_log2) override;
-    void DeviceWrite(uint32_t offset, uint32_t val, int size_log2) override;
+    uint64_t DeviceRead(uint32_t offset, int size_log2) override;
+    void DeviceWrite(uint32_t offset, uint64_t val, int size_log2) override;
 };
 
 /* A bare PCI bus, with no host bridge attached yet. 'port_map' may be null on

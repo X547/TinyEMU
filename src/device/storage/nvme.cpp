@@ -461,8 +461,8 @@ public:
     Bus *ChildBus() override {return fChildBus.get();}
 
     void SetBar(int bar_num, uint64_t addr, bool enabled) override;
-    uint32_t DeviceRead(uint32_t offset, int size_log2) override;
-    void DeviceWrite(uint32_t offset, uint32_t val, int size_log2) override;
+    uint64_t DeviceRead(uint32_t offset, int size_log2) override;
+    void DeviceWrite(uint32_t offset, uint64_t val, int size_log2) override;
 
     int FindFreeNsid() override;
     bool AttachNamespace(NVMeNamespace *ns, uint32_t nsid) override;
@@ -1715,7 +1715,7 @@ void NVMeDevice::WriteDword(uint32_t offset, uint32_t val)
 }
 
 
-uint32_t NVMeDevice::DeviceRead(uint32_t offset, int size_log2)
+uint64_t NVMeDevice::DeviceRead(uint32_t offset, int size_log2)
 {
     uint32_t val = ReadDword(offset & ~3u);
 
@@ -1726,7 +1726,7 @@ uint32_t NVMeDevice::DeviceRead(uint32_t offset, int size_log2)
 }
 
 
-void NVMeDevice::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
+void NVMeDevice::DeviceWrite(uint32_t offset, uint64_t val, int size_log2)
 {
     if (size_log2 >= 2) {
         WriteDword(offset & ~3u, val);

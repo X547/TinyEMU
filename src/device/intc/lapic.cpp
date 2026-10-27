@@ -410,7 +410,7 @@ int64_t LocalApic::RunTimer()
 
 //#pragma mark - registers
 
-uint32_t LocalApic::DeviceRead(uint32_t offset, int size_log2)
+uint64_t LocalApic::DeviceRead(uint32_t offset, int size_log2)
 {
     offset &= 0xff0;
     switch (offset) {
@@ -459,7 +459,7 @@ uint32_t LocalApic::DeviceRead(uint32_t offset, int size_log2)
 }
 
 
-void LocalApic::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
+void LocalApic::DeviceWrite(uint32_t offset, uint64_t val, int size_log2)
 {
     offset &= 0xff0;
     switch (offset) {

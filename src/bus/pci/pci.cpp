@@ -1,6 +1,6 @@
 /*
  * Simple PCI bus driver
- * 
+ *
  * Copyright (c) 2017 Fabrice Bellard
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -752,7 +752,7 @@ void PCIIOWindow::Init(PhysMemoryMap *port_map, uint64_t port_base,
     fPortSize = port_size;
 }
 
-uint32_t PCIIOWindow::DeviceRead(uint32_t offset, int size_log2)
+uint64_t PCIIOWindow::DeviceRead(uint32_t offset, int size_log2)
 {
     /* The window is the size of the aperture, so nothing should land past it;
        an access that does reads as one nothing answers, exactly as an
@@ -763,7 +763,7 @@ uint32_t PCIIOWindow::DeviceRead(uint32_t offset, int size_log2)
     return fPortMap->IoRead(fPortBase + offset, size_log2);
 }
 
-void PCIIOWindow::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
+void PCIIOWindow::DeviceWrite(uint32_t offset, uint64_t val, int size_log2)
 {
     if (fPortMap == NULL || offset >= fPortSize)
         return;

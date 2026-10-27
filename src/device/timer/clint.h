@@ -71,9 +71,6 @@ public:
     uint64_t RunTimer(int hart, uint64_t now);
 
     /* DeviceIO */
-    uint32_t DeviceRead(uint32_t offset, int size_log2) override;
-    void DeviceWrite(uint32_t offset, uint32_t val, int size_log2) override;
-    /* mtime and mtimecmp are read and written whole by an 8 byte access */
-    uint64_t DeviceRead64(uint32_t offset) override;
-    void DeviceWrite64(uint32_t offset, uint64_t val) override;
+    uint64_t DeviceRead(uint32_t offset, int size_log2) override;
+    void DeviceWrite(uint32_t offset, uint64_t val, int size_log2) override;
 };

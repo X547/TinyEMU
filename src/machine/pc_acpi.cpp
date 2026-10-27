@@ -96,7 +96,7 @@ void AcpiPmBlock::WriteByte(uint32_t offset, uint8_t val)
 }
 
 
-uint32_t AcpiPmBlock::DeviceRead(uint32_t offset, int size_log2)
+uint64_t AcpiPmBlock::DeviceRead(uint32_t offset, int size_log2)
 {
     uint32_t val = 0;
 
@@ -113,7 +113,7 @@ uint32_t AcpiPmBlock::DeviceRead(uint32_t offset, int size_log2)
 }
 
 
-void AcpiPmBlock::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
+void AcpiPmBlock::DeviceWrite(uint32_t offset, uint64_t val, int size_log2)
 {
     for (int i = 0; i < (1 << size_log2); i++)
         WriteByte(offset + i, val >> (i * 8));

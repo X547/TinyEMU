@@ -38,7 +38,7 @@ HTIF::HTIF(VirtMachine &machine, HostConsole *console):
 {
 }
 
-uint32_t HTIF::DeviceRead(uint32_t offset, int size_log2)
+uint64_t HTIF::DeviceRead(uint32_t offset, int size_log2)
 {
     uint32_t val;
 
@@ -107,7 +107,7 @@ void HTIF::HandleCommand()
     fToHost = 0;
 }
 
-void HTIF::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
+void HTIF::DeviceWrite(uint32_t offset, uint64_t val, int size_log2)
 {
     assert(size_log2 == 2);
     switch(offset) {

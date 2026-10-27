@@ -52,6 +52,6 @@ public:
     HTIF(VirtMachine &machine, HostConsole *console);
 
     /* DeviceIO */
-    uint32_t DeviceRead(uint32_t offset, int size_log2) override;
-    void DeviceWrite(uint32_t offset, uint32_t val, int size_log2) override;
+    uint64_t DeviceRead(uint32_t offset, int size_log2) override;
+    void DeviceWrite(uint32_t offset, uint64_t val, int size_log2) override;
 };

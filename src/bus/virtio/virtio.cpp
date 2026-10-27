@@ -1,6 +1,6 @@
 /*
  * VIRTIO driver
- * 
+ *
  * Copyright (c) 2016 Fabrice Bellard
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -239,8 +239,8 @@ public:
         return pci_device_get_dma_ptr(fDev.pci_dev, paddr, is_rw);
     }
 
-    uint32_t DeviceRead(uint32_t offset, int size_log2) override;
-    void DeviceWrite(uint32_t offset, uint32_t val, int size_log2) override;
+    uint64_t DeviceRead(uint32_t offset, int size_log2) override;
+    void DeviceWrite(uint32_t offset, uint64_t val, int size_log2) override;
 };
 
 
@@ -253,8 +253,8 @@ public:
         return fDev.mem_map->GetRamPtr(paddr, is_rw);
     }
 
-    uint32_t DeviceRead(uint32_t offset, int size_log2) override;
-    void DeviceWrite(uint32_t offset, uint32_t val, int size_log2) override;
+    uint64_t DeviceRead(uint32_t offset, int size_log2) override;
+    void DeviceWrite(uint32_t offset, uint64_t val, int size_log2) override;
 };
 
 
@@ -515,7 +515,7 @@ static int virtio_memcpy_from_ram(VIRTIODevice *s, uint8_t *buf,
     return 0;
 }
 
-static int virtio_memcpy_to_ram(VIRTIODevice *s, virtio_phys_addr_t addr, 
+static int virtio_memcpy_to_ram(VIRTIODevice *s, virtio_phys_addr_t addr,
                                 const uint8_t *buf, int count)
 {
     uint8_t *ptr;
@@ -853,7 +853,7 @@ static QueueState *virtio_selected_queue(VIRTIODevice *s)
     return s->queue_sel < s->num_queues ? &s->queue[s->queue_sel] : nullptr;
 }
 
-uint32_t VIRTIOMMIOTransport::DeviceRead(uint32_t offset, int size_log2)
+uint64_t VIRTIOMMIOTransport::DeviceRead(uint32_t offset, int size_log2)
 {
     VIRTIODevice *s = &fDev;
     uint32_t val;
@@ -938,7 +938,7 @@ uint32_t VIRTIOMMIOTransport::DeviceRead(uint32_t offset, int size_log2)
     }
 #ifdef DEBUG_VIRTIO
     if (s->debug & VIRTIO_DEBUG_IO) {
-        printf("virto_mmio_read: offset=0x%x val=0x%x size=%d\n", 
+        printf("virto_mmio_read: offset=0x%x val=0x%x size=%d\n",
                offset, val, 1 << size_log2);
     }
 #endif
@@ -971,10 +971,10 @@ static void virtio_set_queue_num(QueueState *qs, uint32_t val)
         qs->num = val;
 }
 
-void VIRTIOMMIOTransport::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
+void VIRTIOMMIOTransport::DeviceWrite(uint32_t offset, uint64_t val, int size_log2)
 {
     VIRTIODevice *s = &fDev;
-    
+
 #ifdef DEBUG_VIRTIO
     if (s->debug & VIRTIO_DEBUG_IO) {
         printf("virto_mmio_write: offset=0x%x val=0x%x size=%d\n",
@@ -1052,7 +1052,7 @@ void VIRTIOMMIOTransport::DeviceWrite(uint32_t offset, uint32_t val, int size_lo
     }
 }
 
-uint32_t VIRTIOPCITransport::DeviceRead(uint32_t offset1, int size_log2)
+uint64_t VIRTIOPCITransport::DeviceRead(uint32_t offset1, int size_log2)
 {
     VIRTIODevice *s = &fDev;
     uint32_t offset;
@@ -1154,18 +1154,18 @@ uint32_t VIRTIOPCITransport::DeviceRead(uint32_t offset1, int size_log2)
     }
 #ifdef DEBUG_VIRTIO
     if (s->debug & VIRTIO_DEBUG_IO) {
-        printf("virto_pci_read: offset=0x%x val=0x%x size=%d\n", 
+        printf("virto_pci_read: offset=0x%x val=0x%x size=%d\n",
                offset1, val, 1 << size_log2);
     }
 #endif
     return val;
 }
 
-void VIRTIOPCITransport::DeviceWrite(uint32_t offset1, uint32_t val, int size_log2)
+void VIRTIOPCITransport::DeviceWrite(uint32_t offset1, uint64_t val, int size_log2)
 {
     VIRTIODevice *s = &fDev;
     uint32_t offset;
-    
+
 #ifdef DEBUG_VIRTIO
     if (s->debug & VIRTIO_DEBUG_IO) {
         printf("virto_pci_write: offset=0x%x val=0x%x size=%d\n",

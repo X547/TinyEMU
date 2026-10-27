@@ -58,14 +58,9 @@ class DeviceIO {
 public:
     virtual ~DeviceIO() = default;
 
-    /* 'size_log2' is 0 to 2. */
-    virtual uint32_t DeviceRead(uint32_t offset, int size_log2) = 0;
-    virtual void DeviceWrite(uint32_t offset, uint32_t val, int size_log2) = 0;
-
-    /* For a range registered with DEVIO_SIZE64, which must implement
-       both. */
-    virtual uint64_t DeviceRead64(uint32_t offset);
-    virtual void DeviceWrite64(uint32_t offset, uint64_t val);
+    /* 'size_log2' is 0 to 3. */
+    virtual uint64_t DeviceRead(uint32_t offset, int size_log2) = 0;
+    virtual void DeviceWrite(uint32_t offset, uint64_t val, int size_log2) = 0;
 };
 
 
@@ -85,12 +80,12 @@ private:
 public:
     DeviceIOAdapter(Owner &owner): fOwner(owner) {}
 
-    uint32_t DeviceRead(uint32_t offset, int size_log2) override
+    uint64_t DeviceRead(uint32_t offset, int size_log2) override
     {
         return (fOwner.*ReadFn)(offset, size_log2);
     }
 
-    void DeviceWrite(uint32_t offset, uint32_t val, int size_log2) override
+    void DeviceWrite(uint32_t offset, uint64_t val, int size_log2) override
     {
         (fOwner.*WriteFn)(offset, val, size_log2);
     }

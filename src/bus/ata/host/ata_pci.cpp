@@ -37,13 +37,13 @@
 
 //#pragma mark - ATAPCIWindow
 
-uint32_t ATAPCIWindow::DeviceRead(uint32_t offset, int size_log2)
+uint64_t ATAPCIWindow::DeviceRead(uint32_t offset, int size_log2)
 {
     return owner->WindowRead(channel, kind, offset, size_log2);
 }
 
 
-void ATAPCIWindow::DeviceWrite(uint32_t offset, uint32_t val, int size_log2)
+void ATAPCIWindow::DeviceWrite(uint32_t offset, uint64_t val, int size_log2)
 {
     owner->WindowWrite(channel, kind, offset, val, size_log2);
 }
