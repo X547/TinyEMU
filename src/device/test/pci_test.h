@@ -27,8 +27,8 @@
 #define TEST_PCI_REVISION  1
 #define TEST_PCI_CLASS     0xff00
 
-/* Base address registers. BAR 1 is there only on a bus with port space;
-   BAR 5 is left unimplemented. */
+/* Base address registers. BAR 1 is there only on a bus with port space,
+   BAR 5 only with the "probe" property. */
 #define TEST_PCI_BAR_REGS  0 /* 32 bit memory: the registers */
 #define TEST_PCI_BAR_IO    1 /* I/O: the registers again */
 #define TEST_PCI_BAR_MEM64 2 /* 64 bit prefetchable memory, with BAR 3:
@@ -38,6 +38,10 @@
 
 #define TEST_PCI_REGS_SIZE  0x1000
 #define TEST_PCI_IO_SIZE    0x40
+#define TEST_PCI_BAR_PROBE 5 /* 32 bit memory: a window registered with the
+                                widths "probe" lists, which logs the
+                                accesses that reach it */
+
 #define TEST_PCI_MSIX_SIZE  0x1000
 #define TEST_PCI_MSIX_TABLE 0x000
 #define TEST_PCI_MSIX_PBA   0x800
@@ -54,6 +58,26 @@
 #define TEST_PCI_DMA_HI   0x1c /* RW */
 #define TEST_PCI_DMA_DATA 0x20 /* RW: the 32 bits of RAM at that address */
 #define TEST_PCI_DMA_STATUS 0x24 /* RO: 1 when the last access found no RAM */
+#define TEST_PCI_PROBE_COUNT  0x28 /* RW: the accesses logged; a write clears
+                                      the log and refills the window */
+#define TEST_PCI_PROBE_SELECT 0x2c /* RW: the entry the next three read */
+#define TEST_PCI_PROBE_ACCESS 0x30 /* RO: below */
+#define TEST_PCI_PROBE_VAL_LO 0x34 /* RO: the value read or written */
+#define TEST_PCI_PROBE_VAL_HI 0x38 /* RO */
+#define TEST_PCI_PROBE_INFO   0x3c /* RO: how the window is registered, 0
+                                      for no window */
+
+#define TEST_PCI_PROBE_SIZE 0x1000
+#define TEST_PCI_PROBE_LOG  16    /* entries kept; COUNT goes on counting */
+/* what a byte of the window holds when it is filled */
+#define TEST_PCI_PROBE_BYTE(offset) ((uint8_t)~(offset))
+/* PROBE_ACCESS */
+#define TEST_PCI_PROBE_OFFSET_MASK 0xffff
+#define TEST_PCI_PROBE_SIZE_SHIFT  16 /* log2 of the width */
+#define TEST_PCI_PROBE_WRITE       0x1000000
+/* PROBE_INFO: bit n for a width of 1 << n bytes, and */
+#define TEST_PCI_PROBE_MERGE     0x10 /* "probe_merge" */
+#define TEST_PCI_PROBE_UNALIGNED 0x20 /* "probe_unaligned" */
 
 #define TEST_PCI_MSI_PRESENT 0x1    /* MSI or MSI-X was offered */
 #define TEST_PCI_MSI_ENABLED 0x2    /* and the guest turned one on */

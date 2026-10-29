@@ -123,6 +123,13 @@ def machine_targets(path):
     return m.group(1).split() if m else list(TARGETS)
 
 
+def machine_tests(path):
+    """The patterns of a machine's "tests:" line, or [] for every test."""
+    with open(path) as f:
+        m = re.search(r'^\s*tests:\s*(.*?)\s*(?:\*/|$)', f.read(), re.M)
+    return m.group(1).split() if m else []
+
+
 def write_config(template, target, image, cmdline, fixtures, out_dir):
     with open(template) as f:
         text = f.read()
@@ -297,6 +304,9 @@ def run_entry(opts, entry):
         base.append('tests=' + ','.join(opts.tests))
     if opts.skip:
         base.append('skip=' + ','.join(opts.skip))
+    only = machine_tests(opts.machine_files[entry.machine])
+    if only:
+        base.append('only=' + ','.join(only))
 
     def run_alone(name):
         """One test in a machine of its own; False when it did not boot."""

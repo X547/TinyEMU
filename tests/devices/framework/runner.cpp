@@ -64,6 +64,9 @@ struct Options {
     size_t tests_len = 0;
     const char *skip = nullptr;
     size_t skip_len = 0;
+    /* the tests a machine is for, whatever 'tests' asks for */
+    const char *only = nullptr;
+    size_t only_len = 0;
     const char *after = nullptr;
     size_t after_len = 0;
     bool list = false;
@@ -127,6 +130,8 @@ bool selected(const TestCase *tc, const Options &opt)
     if (opt.tests && !matches_any(opt.tests, opt.tests_len, tc->name))
         return false;
     if (opt.skip && matches_any(opt.skip, opt.skip_len, tc->name))
+        return false;
+    if (opt.only && !matches_any(opt.only, opt.only_len, tc->name))
         return false;
     if (opt.after) {
         /* strictly after, in the order the tests run */
@@ -384,6 +389,9 @@ void run_tests(const char *cmdline)
     if (option(cmdline, "skip", &opt.skip, &opt.skip_len) &&
         opt.skip_len == 0)
         opt.skip = nullptr;
+    if (option(cmdline, "only", &opt.only, &opt.only_len) &&
+        opt.only_len == 0)
+        opt.only = nullptr;
     option(cmdline, "after", &opt.after, &opt.after_len);
     opt.list = option(cmdline, "list", &v, &len) && len && *v == '1';
     opt.meta = option(cmdline, "meta", &v, &len) && len && *v == '1';

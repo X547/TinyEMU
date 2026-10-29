@@ -51,6 +51,18 @@ private:
     uint32_t fDmaHi = 0;
     uint32_t fDmaStatus = 0;
 
+    /* the probe window, 0 for none */
+    int fProbeFlags;
+    uint8_t fProbe[TEST_PCI_PROBE_SIZE];
+    struct ProbeAccess {
+        uint32_t offset;
+        int size_log2;
+        bool write;
+        uint64_t val;
+    } fProbeLog[TEST_PCI_PROBE_LOG];
+    uint32_t fProbeCount = 0;
+    uint32_t fProbeSelect = 0;
+
     uint32_t RegRead(uint32_t offset, int size_log2);
     void RegWrite(uint32_t offset, uint32_t val, int size_log2);
     uint32_t Mem64Read(uint32_t offset, int size_log2)
@@ -61,6 +73,10 @@ private:
     void MsixWrite(uint32_t offset, uint32_t val, int size_log2);
     uint32_t RomRead(uint32_t offset, int size_log2);
     void RomWrite(uint32_t, uint32_t, int) {}
+    uint64_t ProbeRead(uint32_t offset, int size_log2);
+    void ProbeWrite(uint32_t offset, uint64_t val, int size_log2);
+    void ProbeLog(uint32_t offset, int size_log2, bool write, uint64_t val);
+    void ProbeFill();
 
     DeviceIOAdapter<PCITestDevice, &PCITestDevice::RegRead,
                     &PCITestDevice::RegWrite> fRegIo {*this};
@@ -70,15 +86,22 @@ private:
                     &PCITestDevice::MsixWrite> fMsixIo {*this};
     DeviceIOAdapter<PCITestDevice, &PCITestDevice::RomRead,
                     &PCITestDevice::RomWrite> fRomIo {*this};
+    DeviceIOAdapter<PCITestDevice, &PCITestDevice::ProbeRead,
+                    &PCITestDevice::ProbeWrite> fProbeIo {*this};
 
     bool Map(PhysMemoryMap *map, int bar, uint64_t size, int type,
-             DeviceIO *io);
+             DeviceIO *io,
+             int flags = DEVIO_SIZE8 | DEVIO_SIZE16 | DEVIO_SIZE32);
 
 public:
     PCITestDevice(const char *name, int devfn, int pin, int vectors,
-                  uint64_t mem64_size, bool multifunction):
+                  uint64_t mem64_size, bool multifunction, int probe_flags):
         Device(name), fDevfn(devfn), fPin(pin), fVectors(vectors),
-        fMem64Size(mem64_size), fMultifunction(multifunction) {}
+        fMem64Size(mem64_size), fMultifunction(multifunction),
+        fProbeFlags(probe_flags)
+    {
+        ProbeFill();
+    }
 
     bool Prepare() override
     {
@@ -100,11 +123,9 @@ public:
 
 
 bool PCITestDevice::Map(PhysMemoryMap *map, int bar, uint64_t size, int type,
-                        DeviceIO *io)
+                        DeviceIO *io, int flags)
 {
-    fRange[bar] = map->RegisterDevice(0, size, io,
-                                      DEVIO_SIZE8 | DEVIO_SIZE16 |
-                                      DEVIO_SIZE32 | DEVIO_DISABLED);
+    fRange[bar] = map->RegisterDevice(0, size, io, flags | DEVIO_DISABLED);
     if (fRange[bar] == nullptr) {
         vm_error("%s: no room to map BAR %d\n", Name(), bar);
         return false;
@@ -145,6 +166,11 @@ bool PCITestDevice::Realize()
              &fMsixIo) ||
         !Map(fMemMap, PCI_ROM_SLOT, TEST_PCI_ROM_SIZE, PCI_ADDRESS_SPACE_MEM,
              &fRomIo)) {
+        return false;
+    }
+    if (fProbeFlags != 0 &&
+        !Map(fMemMap, TEST_PCI_BAR_PROBE, TEST_PCI_PROBE_SIZE,
+             PCI_ADDRESS_SPACE_MEM, &fProbeIo, fProbeFlags)) {
         return false;
     }
     PhysMemoryMap *port_map = pci_device_get_port_map(fPciDev);
@@ -200,6 +226,36 @@ uint32_t PCITestDevice::RegRead(uint32_t offset, int size_log2)
     case TEST_PCI_DMA_STATUS:
         val = fDmaStatus;
         break;
+    case TEST_PCI_PROBE_COUNT:
+        val = fProbeCount;
+        break;
+    case TEST_PCI_PROBE_SELECT:
+        val = fProbeSelect;
+        break;
+    case TEST_PCI_PROBE_INFO:
+        val = (fProbeFlags & DEVIO_SIZES) |
+            (fProbeFlags & DEVIO_WRITE_MERGE ? TEST_PCI_PROBE_MERGE : 0) |
+            (fProbeFlags & DEVIO_UNALIGNED ? TEST_PCI_PROBE_UNALIGNED : 0);
+        break;
+    case TEST_PCI_PROBE_ACCESS:
+    case TEST_PCI_PROBE_VAL_LO:
+    case TEST_PCI_PROBE_VAL_HI: {
+        if (fProbeSelect >= TEST_PCI_PROBE_LOG ||
+            fProbeSelect >= fProbeCount) {
+            val = 0;
+            break;
+        }
+        const ProbeAccess &a = fProbeLog[fProbeSelect];
+        if ((offset & ~3u) == TEST_PCI_PROBE_ACCESS) {
+            val = a.offset | a.size_log2 << TEST_PCI_PROBE_SIZE_SHIFT |
+                (a.write ? TEST_PCI_PROBE_WRITE : 0);
+        } else if ((offset & ~3u) == TEST_PCI_PROBE_VAL_LO) {
+            val = a.val;
+        } else {
+            val = a.val >> 32;
+        }
+        break;
+    }
     default:
         val = 0;
         break;
@@ -238,6 +294,12 @@ void PCITestDevice::RegWrite(uint32_t offset, uint32_t val, int size_log2)
             put_le32(ptr, val);
         break;
     }
+    case TEST_PCI_PROBE_COUNT:
+        ProbeFill();
+        break;
+    case TEST_PCI_PROBE_SELECT:
+        fProbeSelect = val;
+        break;
     }
 }
 
@@ -270,19 +332,108 @@ uint32_t PCITestDevice::RomRead(uint32_t offset, int size_log2)
 }
 
 
+/* Whatever arrives at the window is taken as it is, so that the log shows
+   just what the memory map passed on. */
+uint64_t PCITestDevice::ProbeRead(uint32_t offset, int size_log2)
+{
+    uint64_t val = 0;
+
+    for (int i = 0; i < (1 << size_log2); i++) {
+        if (offset + i < TEST_PCI_PROBE_SIZE)
+            val |= (uint64_t)fProbe[offset + i] << (8 * i);
+    }
+    ProbeLog(offset, size_log2, false, val);
+    return val;
+}
+
+
+void PCITestDevice::ProbeWrite(uint32_t offset, uint64_t val, int size_log2)
+{
+    for (int i = 0; i < (1 << size_log2); i++) {
+        if (offset + i < TEST_PCI_PROBE_SIZE)
+            fProbe[offset + i] = val >> (8 * i);
+    }
+    ProbeLog(offset, size_log2, true, val);
+}
+
+
+void PCITestDevice::ProbeLog(uint32_t offset, int size_log2, bool write,
+                             uint64_t val)
+{
+    if (fProbeCount < TEST_PCI_PROBE_LOG)
+        fProbeLog[fProbeCount] = {offset, size_log2, write, val};
+    fProbeCount++;
+}
+
+
+void PCITestDevice::ProbeFill()
+{
+    for (uint32_t i = 0; i < TEST_PCI_PROBE_SIZE; i++)
+        fProbe[i] = TEST_PCI_PROBE_BYTE(i);
+    fProbeCount = 0;
+    fProbeSelect = 0;
+}
+
+
 //#pragma mark - class
 
 /* A PCI function for the device test suite to test the buses and host
    bridges with: base address registers of every kind, an INTx pin, MSI
-   and MSI-X it sends on request, and DMA to RAM. Only in builds with the
+   and MSI-X it sends on request, and DMA to RAM; and, for the memory map,
+   a window that logs the accesses it is handed. Only in builds with the
    test_fixtures option. */
 class PCITestClass final: public DeviceClass {
+private:
+    static bool GetBool(const DeviceConfig &cfg, const char *name, bool *val)
+    {
+        JSONValue v = cfg.Get(name);
+        if (v.type == JSON_BOOL) {
+            *val = v.u.b;
+        } else if (!json_is_undefined(v)) {
+            vm_error("%s: \"%s\" is true or false\n", cfg.Type(), name);
+            return false;
+        }
+        return true;
+    }
+
+    /* "probe": the widths in bytes the window takes, none for no window;
+       "probe_merge" and "probe_unaligned" add those flags. */
+    static bool GetProbe(const DeviceConfig &cfg, int *flags)
+    {
+        bool merge = false, unaligned = false;
+
+        *flags = 0;
+        JSONValue widths = cfg.Get("probe");
+        if (json_is_undefined(widths))
+            return true;
+        if (widths.type != JSON_ARRAY || widths.u.array->Length() == 0) {
+            vm_error("%s: \"probe\" is an array of widths\n", cfg.Type());
+            return false;
+        }
+        for (int i = 0; i < widths.u.array->Length(); i++) {
+            JSONValue v = json_array_get(widths, i);
+            int w = v.type == JSON_INT ? v.u.int32 : 0;
+            if (w != 1 && w != 2 && w != 4 && w != 8) {
+                vm_error("%s: \"probe\" holds widths of 1, 2, 4 or 8 "
+                         "bytes\n", cfg.Type());
+                return false;
+            }
+            *flags |= bit_at(__builtin_ctz(w)); /* DEVIO_SIZE8 and on */
+        }
+        if (!GetBool(cfg, "probe_merge", &merge) ||
+            !GetBool(cfg, "probe_unaligned", &unaligned))
+            return false;
+        *flags |= (merge ? DEVIO_WRITE_MERGE : 0) |
+            (unaligned ? DEVIO_UNALIGNED : 0);
+        return true;
+    }
+
 public:
     PCITestClass(): DeviceClass("pci-test") {}
 
     Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
     {
-        int slot, function, pin, vectors, mem64_kb;
+        int slot, function, pin, vectors, mem64_kb, probe_flags;
         bool multifunction = false;
 
         (void)ctx;
@@ -291,14 +442,9 @@ public:
             !cfg.GetInt("pin", &pin, 1) ||
             !cfg.GetInt("vectors", &vectors, TEST_PCI_DEFAULT_VECTORS) ||
             !cfg.GetInt("mem64_size", &mem64_kb,
-                        TEST_PCI_DEFAULT_MEM64_KB)) {
-            return nullptr;
-        }
-        JSONValue multi = cfg.Get("multifunction");
-        if (multi.type == JSON_BOOL) {
-            multifunction = multi.u.b;
-        } else if (!json_is_undefined(multi)) {
-            vm_error("%s: \"multifunction\" is true or false\n", cfg.Type());
+                        TEST_PCI_DEFAULT_MEM64_KB) ||
+            !GetBool(cfg, "multifunction", &multifunction) ||
+            !GetProbe(cfg, &probe_flags)) {
             return nullptr;
         }
         if (slot < -1 || slot > 31 || function < 0 || function > 7 ||
@@ -323,7 +469,7 @@ public:
         return new PCITestDevice(cfg.IdOr("pci-test"),
                                  slot < 0 ? -1 : slot << 3 | function, pin,
                                  vectors, (uint64_t)mem64_kb << 10,
-                                 multifunction);
+                                 multifunction, probe_flags);
     }
 };
 

@@ -112,6 +112,7 @@ sources = files(
   'tests/nvme/nvme.cpp',
   'tests/pci/designware.cpp',
   'tests/pci/i440fx.cpp',
+  'tests/pci/iomem.cpp',
   'tests/pci/msi.cpp',
   'tests/pci/pci.cpp',
   'tests/pci/plda.cpp',

@@ -87,8 +87,9 @@ different `--temu-args`.
 `run.py` fills in for each target: the boot method, the command line, the
 root bus and the test-control device, which `@FIXTURE(irqs: [5, 7])@` gives
 properties. `@FIXTURE:pci-test(slot: 3)@` puts in another fixture, here the
-PCI test function. The first comment names the targets a machine is for. A
-test that needs a device the machine lacks skips.
+PCI test function. The first comment names the targets a machine is for,
+and a `tests:` line in it the only tests the machine runs. A test that
+needs a device the machine lacks skips.
 
 The fixtures, in temu's `src/device/test`:
 
@@ -96,7 +97,9 @@ The fixtures, in temu's `src/device/test`:
   the guest drives.
 * `pci-test`: a PCI function with BARs of every kind (32 and 64 bit
   memory, I/O, an expansion ROM), an INTx pin, MSI and MSI-X it sends on
-  request, and DMA to RAM, for testing the buses and host bridges.
+  request, and DMA to RAM, for testing the buses and host bridges. With
+  `probe: [4]` and the like it has a window in BAR 5 registered with those
+  widths, which logs each access the memory map hands it.
 * The `test` block driver: `{type: "virtio-block", driver: "test",
   sectors: 4096}` gives any disk device an in-memory disk holding
   `TEST_BLOCK_PATTERN`. Through test-control it finishes requests at once,

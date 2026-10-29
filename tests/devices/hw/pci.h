@@ -195,6 +195,8 @@ uint32_t pci_find_ext_cap(const PciFunc *f, uint16_t id);
 
 /* Whether the processor can reach PCI address 'addr' of this kind. */
 bool pci_reachable(const PciHost *h, uint64_t addr, uint64_t size, bool io);
+/* The processor address of a memory BAR, or 0 when it is out of reach. */
+uint64_t pci_bar_cpu(const PciFunc *f, int bar);
 /* Register access in a BAR, through the host's windows. */
 uint32_t pci_bar_read(const PciFunc *f, int bar, uint32_t offset,
                       int size_log2);

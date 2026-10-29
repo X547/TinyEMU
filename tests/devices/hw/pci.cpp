@@ -1119,6 +1119,17 @@ bool pci_space_probe(const PciHost *h, bool io, uint64_t addr, int size_log2,
 }
 
 
+uint64_t pci_bar_cpu(const PciFunc *f, int bar)
+{
+    const PciBar &b = f->bars[bar];
+    uint64_t cpu;
+    if (b.io || b.size == 0 || !pci_reachable(f->host, b.addr, b.size, false) ||
+        !cpu_address(f->host, false, b.addr, b.size, &cpu))
+        return 0;
+    return cpu;
+}
+
+
 uint32_t pci_bar_read(const PciFunc *f, int bar, uint32_t offset,
                       int size_log2)
 {
