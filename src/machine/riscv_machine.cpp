@@ -920,8 +920,7 @@ riscv_machine_init(const VirtMachineParams *p)
     s->mem_map->RegisterRam(0x00000000, LOW_RAM_SIZE, 0);
 
     s->clint = std::make_unique<Clint>(*s, s->hart_count);
-    s->mem_map->RegisterDevice(CLINT_BASE_ADDR, CLINT_SIZE, s->clint.get(),
-                               DEVIO_SIZE32 | DEVIO_SIZE64);
+    s->clint->Map(s->mem_map, CLINT_BASE_ADDR);
     s->htif = std::make_unique<HTIF>(*s, p->platform->Console());
     s->mem_map->RegisterDevice(HTIF_BASE_ADDR, HTIF_REG_SIZE, s->htif.get(),
                                DEVIO_SIZE32);

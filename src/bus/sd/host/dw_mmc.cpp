@@ -1197,7 +1197,7 @@ uint64_t DWMMCDevice::DeviceRead(uint32_t offset, int size_log2)
     if (offset >= DW_MMC_DATA) {
         return FifoRead();
     }
-    return ReadReg(offset & ~3u);
+    return ReadReg(offset);
 }
 
 
@@ -1208,7 +1208,7 @@ void DWMMCDevice::DeviceWrite(uint32_t offset, uint64_t val, int size_log2)
         FifoWrite(val);
         return;
     }
-    WriteReg(offset & ~3u, val);
+    WriteReg(offset, val);
 }
 
 

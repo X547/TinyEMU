@@ -577,7 +577,7 @@ uint64_t DWI2CDevice::DeviceRead(uint32_t offset, int size_log2)
     if (offset >= DW_IC_REG_FILE_SIZE) {
         return 0;
     }
-    return ReadReg(offset & ~3u);
+    return ReadReg(offset);
 }
 
 
@@ -587,7 +587,7 @@ void DWI2CDevice::DeviceWrite(uint32_t offset, uint64_t val, int size_log2)
     if (offset >= DW_IC_REG_FILE_SIZE) {
         return;
     }
-    WriteReg(offset & ~3u, val);
+    WriteReg(offset, val);
 }
 
 

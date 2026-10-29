@@ -51,8 +51,10 @@ public:
 };
 
 
-/* A SiFive CLINT: one msip word and one mtimecmp per hart, and mtime. */
-class Clint final: public DeviceIO {
+/* A SiFive CLINT: one msip word and one mtimecmp per hart, and mtime. It
+   maps as the two halves an ACLINT splits it into: the MSWI, of 32 bit
+   registers, and the MTIMER, of 64 bit ones. */
+class Clint final {
 private:
     ClintHost &fHost;
     int fHartCount;
@@ -63,14 +65,22 @@ private:
 
     void SetIrq(int hart, bool timer, bool level);
 
+    uint32_t MswiRead(uint32_t offset, int size_log2);
+    void MswiWrite(uint32_t offset, uint32_t val, int size_log2);
+    uint64_t MtimerRead(uint32_t offset, int size_log2);
+    void MtimerWrite(uint32_t offset, uint64_t val, int size_log2);
+    DeviceIOAdapter<Clint, &Clint::MswiRead, &Clint::MswiWrite>
+        fMswiIo {*this};
+    DeviceIOAdapter<Clint, &Clint::MtimerRead, &Clint::MtimerWrite>
+        fMtimerIo {*this};
+
 public:
     Clint(ClintHost &host, int hart_count);
+
+    /* Registers the CLINT_SIZE bytes of registers at 'base'. */
+    void Map(PhysMemoryMap *map, uint64_t base);
 
     /* Raises the timer interrupt of 'hart' if it is due at 'now', and
        returns the counter it is due at otherwise, or UINT64_MAX. */
     uint64_t RunTimer(int hart, uint64_t now);
-
-    /* DeviceIO */
-    uint64_t DeviceRead(uint32_t offset, int size_log2) override;
-    void DeviceWrite(uint32_t offset, uint64_t val, int size_log2) override;
 };

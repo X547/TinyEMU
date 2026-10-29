@@ -395,22 +395,14 @@ void HPET::Write(uint32_t offset, uint32_t val, uint64_t now)
 }
 
 
+/* A 4 byte access reads either half of a register. */
 uint64_t HPET::DeviceRead(uint32_t offset, int size_log2)
 {
     uint64_t now = host_monotonic_us();
 
-    switch (size_log2) {
-        case 2:
-            Process(now);
-            return Read(offset & ~7u, now) >> ((offset & 4) * 8);
-
-        case 3:
-            Process(now);
-            return Read(offset & ~7u, now);
-
-        default:
-            abort();
-    }
+    (void)size_log2;
+    Process(now);
+    return Read(offset & ~7u, now) >> ((offset & 4) * 8);
 }
 
 
@@ -418,30 +410,18 @@ void HPET::DeviceWrite(uint32_t offset, uint64_t val, int size_log2)
 {
     uint64_t now = host_monotonic_us();
 
-    switch (size_log2) {
-        case 2:
-            Process(now);
-            Write(offset, val, now);
-            /* the next deadline may have moved */
-            fMachine->Kick();
-            break;
-
-        case 3:
-            offset &= ~7u;
-            Process(now);
-            if (offset == HPET_COUNTER) {
-                SetCounter(val, now);
-            } else {
-                /* the halves at one instant; the set value bit carries over */
-                Write(offset, get_bits(val, 0, 32), now);
-                Write(offset + 4, get_bits(val, 32, 32), now);
-            }
-            fMachine->Kick();
-            break;
-
-        default:
-            abort();
+    Process(now);
+    if (size_log2 == 3 && offset == HPET_COUNTER) {
+        SetCounter(val, now);
+    } else {
+        /* an 8 byte access writes the halves at one instant; the set value
+           bit carries over */
+        Write(offset, get_bits(val, 0, 32), now);
+        if (size_log2 == 3)
+            Write(offset + 4, val >> 32, now);
     }
+    /* the next deadline may have moved */
+    fMachine->Kick();
 }
 
 

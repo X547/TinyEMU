@@ -21,10 +21,6 @@
  */
 #include "clint.h"
 
-#include <assert.h>
-
-#include "bits.h"
-
 /* register layout: one msip word and one 64 bit mtimecmp per hart */
 #define CLINT_MSIP_BASE     0x0000
 #define CLINT_MTIMECMP_BASE 0x4000
@@ -56,73 +52,58 @@ uint64_t Clint::RunTimer(int hart, uint64_t now)
     return fTimecmp[hart];
 }
 
-uint64_t Clint::DeviceRead(uint32_t offset, int size_log2)
+void Clint::Map(PhysMemoryMap *map, uint64_t base)
 {
-    switch (size_log2) {
-        case 2: {
-            if (offset < CLINT_MTIMECMP_BASE) {
-                uint32_t hart = (offset - CLINT_MSIP_BASE) / 4;
-                return hart < (uint32_t)fHartCount ? fSoftIrq[hart] : 0;
-            }
-            uint64_t val = DeviceRead(offset & ~7u, 3);
-            return offset & 4 ? val >> 32 : (uint32_t)val;
-        }
-        case 3: {
-            offset &= ~7u;
-            if (offset < CLINT_MTIMECMP_BASE)
-                return concat_bits(DeviceRead(offset + 4, 2), DeviceRead(offset, 2),
-                                   32);
-            if (offset < CLINT_MTIME) {
-                uint32_t hart = (offset - CLINT_MTIMECMP_BASE) / 8;
-                return hart < (uint32_t)fHartCount ? fTimecmp[hart] : 0;
-            }
-            if (offset == CLINT_MTIME)
-                return fHost.ClintTime();
-            return 0;
-        }
-        default:
-            abort();
-    }
+    map->RegisterDevice(base + CLINT_MSIP_BASE, CLINT_MTIMECMP_BASE, &fMswiIo,
+                        DEVIO_SIZE32);
+    /* mtime and mtimecmp are read and written whole by an 8 byte access, and
+       by halves with 4 byte ones */
+    map->RegisterDevice(base + CLINT_MTIMECMP_BASE,
+                        CLINT_SIZE - CLINT_MTIMECMP_BASE, &fMtimerIo,
+                        DEVIO_SIZE64 | DEVIO_WRITE_MERGE);
 }
 
-void Clint::DeviceWrite(uint32_t offset, uint64_t val, int size_log2)
+uint32_t Clint::MswiRead(uint32_t offset, int size_log2)
 {
-    switch (size_log2) {
-        case 2: {
-            if (offset < CLINT_MTIMECMP_BASE) {
-                /* a software interrupt to that hart */
-                uint32_t hart = (offset - CLINT_MSIP_BASE) / 4;
-                if (hart < (uint32_t)fHartCount)
-                    SetIrq(hart, false, val & 1);
-                return;
-            }
-            /* one half of a 64 bit register */
-            uint32_t reg = offset & ~7u;
-            DeviceWrite(reg, set_bits(DeviceRead(reg, 3), (offset & 4) * 8, 32,
-                                      val), 3);
-            break;
-        }
-        case 3: {
-            offset &= ~7u;
-            if (offset < CLINT_MTIMECMP_BASE) {
-                DeviceWrite(offset, get_bits(val, 0, 32), 2);
-                DeviceWrite(offset + 4, get_bits(val, 32, 32), 2);
-            } else if (offset < CLINT_MTIME) {
-                uint32_t hart = (offset - CLINT_MTIMECMP_BASE) / 8;
-                if (hart >= (uint32_t)fHartCount)
-                    return;
-                fTimecmp[hart] = val;
-                SetIrq(hart, true, false);
-                fHost.ClintTimerChanged(val);
-            } else if (offset == CLINT_MTIME) {
-                /* mtime is read-write; every hart's comparison is made again */
-                for (int hart = 0; hart < fHartCount; hart++)
-                    SetIrq(hart, true, false);
-                fHost.SetClintTime(val);
-            }
-            break;
-        }
-        default:
-            abort();
+    (void)size_log2;
+    uint32_t hart = offset / 4;
+    return hart < (uint32_t)fHartCount ? fSoftIrq[hart] : 0;
+}
+
+void Clint::MswiWrite(uint32_t offset, uint32_t val, int size_log2)
+{
+    (void)size_log2;
+    /* a software interrupt to that hart */
+    uint32_t hart = offset / 4;
+    if (hart < (uint32_t)fHartCount)
+        SetIrq(hart, false, val & 1);
+}
+
+uint64_t Clint::MtimerRead(uint32_t offset, int size_log2)
+{
+    (void)size_log2;
+    offset += CLINT_MTIMECMP_BASE;
+    if (offset == CLINT_MTIME)
+        return fHost.ClintTime();
+    uint32_t hart = (offset - CLINT_MTIMECMP_BASE) / 8;
+    return hart < (uint32_t)fHartCount ? fTimecmp[hart] : 0;
+}
+
+void Clint::MtimerWrite(uint32_t offset, uint64_t val, int size_log2)
+{
+    (void)size_log2;
+    offset += CLINT_MTIMECMP_BASE;
+    if (offset == CLINT_MTIME) {
+        /* mtime is read-write; every hart's comparison is made again */
+        for (int hart = 0; hart < fHartCount; hart++)
+            SetIrq(hart, true, false);
+        fHost.SetClintTime(val);
+        return;
     }
+    uint32_t hart = (offset - CLINT_MTIMECMP_BASE) / 8;
+    if (hart >= (uint32_t)fHartCount)
+        return;
+    fTimecmp[hart] = val;
+    SetIrq(hart, true, false);
+    fHost.ClintTimerChanged(val);
 }

@@ -248,8 +248,9 @@ bool BansheeDevice::Realize()
     fVram = fLfbRange->phys_mem;
     fVramPages = fVramSize >> DEVRAM_PAGE_SIZE_LOG2;
 
+    /* Every register is a word and a driver writes whole words; a narrower
+       write would need the word read back first, which no driver asks for. */
     fRegRange = mem_map->RegisterDevice(0, BANSHEE_REG_BAR_SIZE, &fRegIo,
-                                        DEVIO_SIZE8 | DEVIO_SIZE16 |
                                         DEVIO_SIZE32 | DEVIO_DISABLED);
     pci_register_bar(fPciDev, 0, BANSHEE_REG_BAR_SIZE,
                      PCI_ADDRESS_SPACE_MEM, this);
@@ -261,7 +262,6 @@ bool BansheeDevice::Realize()
     if (port_map != nullptr) {
         fPortRange = port_map->RegisterDevice(0, BANSHEE_IO_BAR_SIZE,
                                               &fPortIo,
-                                              DEVIO_SIZE8 | DEVIO_SIZE16 |
                                               DEVIO_SIZE32 | DEVIO_DISABLED);
         pci_register_bar(fPciDev, 2, BANSHEE_IO_BAR_SIZE,
                          PCI_ADDRESS_SPACE_IO, this);
@@ -1086,18 +1086,18 @@ uint32_t BansheeDevice::RegRead(uint32_t offset, int size_log2)
     uint32_t val;
 
     if (offset < BANSHEE_IO_BAR_SIZE) {
-        val = IoRegRead(offset & ~3u);
+        val = IoRegRead(offset);
     } else if (offset >= BANSHEE_REG_CMD_BASE &&
                offset < BANSHEE_REG_CMD_BASE + CMD_REG_SIZE) {
-        val = CmdRegRead((offset - BANSHEE_REG_CMD_BASE) & ~3u);
+        val = CmdRegRead(offset - BANSHEE_REG_CMD_BASE);
     } else if (offset >= BANSHEE_REG_2D_BASE && offset < BANSHEE_REG_2D_END) {
-        uint32_t off = (offset - BANSHEE_REG_2D_BASE) & ~3u;
+        uint32_t off = offset - BANSHEE_REG_2D_BASE;
         if (off >= (BLT_PATTERN_FIRST + BLT_PATTERN_COUNT) * 4) {
             return 0;
         }
         val = Reg2DRead(off);
     } else if (offset >= BANSHEE_REG_3D_BASE && offset < BANSHEE_REG_3D_END) {
-        switch ((offset - BANSHEE_REG_3D_BASE) & ~3u) {
+        switch (offset - BANSHEE_REG_3D_BASE) {
         case REG3D_STATUS:   val = StatusRead(); break;
         case REG3D_INTRCTRL: val = f2dRegs[BLT_INTRCTRL]; break;
         default:             return 0;
@@ -1106,32 +1106,24 @@ uint32_t BansheeDevice::RegRead(uint32_t offset, int size_log2)
         banshee_trace("banshee: read of register %06x\n", offset);
         return 0;
     }
-    return val >> ((offset & 3) * 8);
+    return val;
 }
 
 
 void BansheeDevice::RegWrite(uint32_t offset, uint32_t val, int size_log2)
 {
-    /* Every register here is a word and a driver writes whole words; a
-       narrower write would need the word read back first, which no driver
-       asks for. */
-    if (size_log2 != 2) {
-        banshee_trace("banshee: %d bit write of register %06x\n",
-                      8 << size_log2, offset);
-        return;
-    }
     if (offset < BANSHEE_IO_BAR_SIZE) {
-        IoRegWrite(offset & ~3u, val);
+        IoRegWrite(offset, val);
     } else if (offset >= BANSHEE_REG_CMD_BASE &&
                offset < BANSHEE_REG_CMD_BASE + CMD_REG_SIZE) {
-        CmdRegWrite((offset - BANSHEE_REG_CMD_BASE) & ~3u, val);
+        CmdRegWrite(offset - BANSHEE_REG_CMD_BASE, val);
     } else if (offset >= BANSHEE_REG_2D_BASE && offset < BANSHEE_REG_2D_END) {
-        uint32_t off = (offset - BANSHEE_REG_2D_BASE) & ~3u;
+        uint32_t off = offset - BANSHEE_REG_2D_BASE;
         if (off < (BLT_PATTERN_FIRST + BLT_PATTERN_COUNT) * 4) {
             Reg2DWrite(off, val);
         }
     } else if (offset >= BANSHEE_REG_3D_BASE && offset < BANSHEE_REG_3D_END) {
-        Reg3DWrite((offset - BANSHEE_REG_3D_BASE) & ~3u, val);
+        Reg3DWrite(offset - BANSHEE_REG_3D_BASE, val);
     } else {
         banshee_trace("banshee: write of register %06x = %08x\n", offset, val);
     }
@@ -1140,19 +1132,13 @@ void BansheeDevice::RegWrite(uint32_t offset, uint32_t val, int size_log2)
 
 uint32_t BansheeDevice::PortRead(uint32_t offset, int size_log2)
 {
-    uint32_t val = IoRegRead(offset & ~3u);
-    return val >> ((offset & 3) * 8);
+    return IoRegRead(offset);
 }
 
 
 void BansheeDevice::PortWrite(uint32_t offset, uint32_t val, int size_log2)
 {
-    if (size_log2 != 2) {
-        banshee_trace("banshee: %d bit write of port %02x\n",
-                      8 << size_log2, offset);
-        return;
-    }
-    IoRegWrite(offset & ~3u, val);
+    IoRegWrite(offset, val);
 }
 
 

@@ -1717,25 +1717,15 @@ void NVMeDevice::WriteDword(uint32_t offset, uint32_t val)
 
 uint64_t NVMeDevice::DeviceRead(uint32_t offset, int size_log2)
 {
-    uint32_t val = ReadDword(offset & ~3u);
-
-    if (size_log2 >= 2) {
-        return val;
-    }
-    return (val >> ((offset & 3) * 8)) & ((1u << (8 << size_log2)) - 1);
+    (void)size_log2;
+    return ReadDword(offset);
 }
 
 
 void NVMeDevice::DeviceWrite(uint32_t offset, uint64_t val, int size_log2)
 {
-    if (size_log2 >= 2) {
-        WriteDword(offset & ~3u, val);
-        return;
-    }
-    int shift = (offset & 3) * 8;
-    uint32_t mask = ((1u << (8 << size_log2)) - 1) << shift;
-    uint32_t cur = ReadDword(offset & ~3u);
-    WriteDword(offset & ~3u, (cur & ~mask) | ((val << shift) & mask));
+    (void)size_log2;
+    WriteDword(offset, val);
 }
 
 
@@ -1782,8 +1772,8 @@ bool NVMeDevice::Realize()
     fIrq = pci_device_get_irq(fPciDev, 0);
     PhysMemoryMap *mem_map = pci_device_get_mem_map(fPciDev);
     fMemRange = mem_map->RegisterDevice(0, NVME_BAR_SIZE, this,
-                                        DEVIO_SIZE8 | DEVIO_SIZE16 |
-                                            DEVIO_SIZE32 | DEVIO_DISABLED);
+                                        DEVIO_SIZE32 | DEVIO_WRITE_MERGE |
+                                            DEVIO_DISABLED);
     /* The specification defines BAR 0 as a 64 bit register pair, so it takes
        the slot after it too. */
     pci_register_bar(fPciDev, 0, NVME_BAR_SIZE,
