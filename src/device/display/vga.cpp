@@ -1202,8 +1202,10 @@ static std::unique_ptr<FBDevice> pci_vga_init(PCIBus *bus, int width,
     port_map->RegisterDevice(0x3da, 1, &s->fIo3da, DEVIO_SIZE8);
 
     /* VBE extension: the index at 0x1ce, and the data at 0x1cf as Bochs has
-       it and at 0x1d0 as QEMU also has it, which is where EDK2 looks */
-    port_map->RegisterDevice(0x1ce, 4, &s->fVbeIo, DEVIO_SIZE16);
+       it and at 0x1d0 as QEMU also has it, which is where EDK2 looks; the
+       Bochs one is a 16 bit port at an odd address */
+    port_map->RegisterDevice(0x1ce, 4, &s->fVbeIo,
+                             DEVIO_SIZE16 | DEVIO_UNALIGNED);
 
     s->vbe_regs[VBE_DISPI_INDEX_ID] = VBE_DISPI_ID5;
     s->vbe_regs[VBE_DISPI_INDEX_VIDEO_MEMORY_64K] = fb_dev->fb_size >> 16;

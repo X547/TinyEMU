@@ -166,53 +166,6 @@ static void cpu_dump_state(X86CPUState *s)
 
 //#pragma mark - physical memory
 
-static uint64_t device_read(PhysMemoryRange *pr, uint32_t offset, int size)
-{
-    if (size == SIZE64 && (pr->devio_flags & DEVIO_SIZE64)) {
-        return pr->io->DeviceRead(offset, size);
-    }
-    if (size < SIZE64 && get_bit(pr->devio_flags, size)) {
-        return trunc_size(pr->io->DeviceRead(offset, size), size);
-    }
-    /* compose from narrower accesses */
-    if (size > SIZE8 && (pr->devio_flags & bit_mask(size)) != 0) {
-        int half = size - 1;
-        uint64_t low = device_read(pr, offset, half);
-        uint64_t high = device_read(pr, offset + size_bytes(half), half);
-        return set_bits(low, size_bits(half), size_bits(half), high);
-    }
-    /* extract from a wider access */
-    for (int wide = size + 1; wide <= SIZE32; wide++) {
-        if (get_bit(pr->devio_flags, wide)) {
-            uint32_t val = pr->io->DeviceRead(set_bits(offset, 0, wide, 0),
-                                              wide);
-            return get_bits(val, get_bits(offset, 0, wide) * 8,
-                            size_bits(size));
-        }
-    }
-    return size_mask(size);
-}
-
-static void device_write(PhysMemoryRange *pr, uint32_t offset, uint64_t val,
-                         int size)
-{
-    if (size == SIZE64 && (pr->devio_flags & DEVIO_SIZE64)) {
-        pr->io->DeviceWrite(offset, val, size);
-        return;
-    }
-    if (size < SIZE64 && get_bit(pr->devio_flags, size)) {
-        pr->io->DeviceWrite(offset, trunc_size(val, size), size);
-        return;
-    }
-    if (size > SIZE8 && (pr->devio_flags & bit_mask(size)) != 0) {
-        int half = size - 1;
-        device_write(pr, offset, get_bits(val, 0, size_bits(half)), half);
-        device_write(pr, offset + size_bytes(half),
-                     get_bits(val, size_bits(half), size_bits(half)), half);
-    }
-    /* narrower than anything the device decodes: dropped */
-}
-
 /* The entries into device code, which hold the device lock. Nothing in them
    raises an exception, so no longjmp() leaves the lock held. The range was
    found without the lock: another processor may have moved or disabled it
@@ -226,10 +179,12 @@ static uint64_t locked_device_read(X86CPUState *s, PhysMemoryRange *pr,
                                    uint64_t phys, int size)
 {
     DeviceLocker locker(*s->device_lock);
-    if (!device_maps(pr, phys)) {
+    uint64_t val;
+    if (!device_maps(pr, phys) ||
+        !pr->DeviceRead(phys - pr->addr, size, &val)) {
         return size_mask(size);
     }
-    return device_read(pr, phys - pr->addr, size);
+    return val;
 }
 
 static void locked_device_write(X86CPUState *s, PhysMemoryRange *pr,
@@ -237,7 +192,7 @@ static void locked_device_write(X86CPUState *s, PhysMemoryRange *pr,
 {
     DeviceLocker locker(*s->device_lock);
     if (device_maps(pr, phys)) {
-        device_write(pr, phys - pr->addr, val, size);
+        pr->DeviceWrite(phys - pr->addr, val, size);
     }
 }
 

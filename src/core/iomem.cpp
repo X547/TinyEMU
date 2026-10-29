@@ -72,24 +72,54 @@ void PhysMemoryRange::SetAddr(uint64_t addr, bool enabled)
 }
 
 
+/* Whether an access goes to the device as it is. */
+static bool passes_on(int devio_flags, uint32_t offset, int size_log2)
+{
+    return get_bit(devio_flags, size_log2) &&
+        ((devio_flags & DEVIO_UNALIGNED) ||
+         (offset & bit_mask(size_log2)) == 0);
+}
+
+
+/* Whether an access that does not pass on is split into halves; if not, it
+   is narrower than any width taken. */
+static bool splits(int devio_flags, uint32_t offset, int size_log2)
+{
+    return (devio_flags & bit_mask(size_log2)) != 0 ||
+        (offset & bit_mask(size_log2)) != 0;
+}
+
+
+/* The narrowest width taken, and the register of that width holding
+   'offset'. */
+static int narrowest(int devio_flags, uint32_t offset, uint32_t *reg)
+{
+    int wide = __builtin_ctz(devio_flags & DEVIO_SIZES);
+    *reg = offset & ~bit_mask(wide);
+    return wide;
+}
+
+
 bool PhysMemoryRange::DeviceRead(uint32_t offset, int size_log2,
                                  uint64_t *val)
 {
-    if (size_log2 == 3) {
-        if (devio_flags & DEVIO_SIZE64) {
-            *val = io->DeviceRead(offset, size_log2);
-            return true;
-        }
-        if (devio_flags & DEVIO_SIZE32) {
-            *val = concat_bits(io->DeviceRead(offset + 4, 2),
-                               io->DeviceRead(offset, 2), 32);
-            return true;
-        }
+    int bits = 8 << size_log2;
+
+    assert(size_log2 <= 3);
+    if ((devio_flags & DEVIO_SIZES) == 0)
         return false;
+    if (passes_on(devio_flags, offset, size_log2)) {
+        *val = get_bits(io->DeviceRead(offset, size_log2), 0, bits);
+    } else if (splits(devio_flags, offset, size_log2)) {
+        uint64_t low, high;
+        DeviceRead(offset, size_log2 - 1, &low);
+        DeviceRead(offset + bits / 16, size_log2 - 1, &high);
+        *val = concat_bits(high, low, bits / 2);
+    } else {
+        uint32_t reg;
+        int wide = narrowest(devio_flags, offset, &reg);
+        *val = get_bits(io->DeviceRead(reg, wide), (offset - reg) * 8, bits);
     }
-    if (!get_bit(devio_flags, size_log2))
-        return false;
-    *val = io->DeviceRead(offset, size_log2);
     return true;
 }
 
@@ -97,21 +127,28 @@ bool PhysMemoryRange::DeviceRead(uint32_t offset, int size_log2,
 bool PhysMemoryRange::DeviceWrite(uint32_t offset, uint64_t val,
                                   int size_log2)
 {
-    if (size_log2 == 3) {
-        if (devio_flags & DEVIO_SIZE64) {
-            io->DeviceWrite(offset, val, size_log2);
-            return true;
-        }
-        if (devio_flags & DEVIO_SIZE32) {
-            io->DeviceWrite(offset, get_bits(val, 0, 32), 2);
-            io->DeviceWrite(offset + 4, get_bits(val, 32, 32), 2);
-            return true;
-        }
+    int bits = 8 << size_log2;
+
+    assert(size_log2 <= 3);
+    if ((devio_flags & DEVIO_SIZES) == 0)
         return false;
+    val = get_bits(val, 0, bits);
+    if (passes_on(devio_flags, offset, size_log2)) {
+        io->DeviceWrite(offset, val, size_log2);
+        return true;
     }
-    if (!get_bit(devio_flags, size_log2))
+    if (splits(devio_flags, offset, size_log2)) {
+        bool low = DeviceWrite(offset, val, size_log2 - 1);
+        bool high = DeviceWrite(offset + bits / 16, val >> (bits / 2),
+                                size_log2 - 1);
+        return low && high;
+    }
+    if (!(devio_flags & DEVIO_WRITE_MERGE))
         return false;
-    io->DeviceWrite(offset, val, size_log2);
+    uint32_t reg;
+    int wide = narrowest(devio_flags, offset, &reg);
+    val = set_bits(io->DeviceRead(reg, wide), (offset - reg) * 8, bits, val);
+    io->DeviceWrite(reg, get_bits(val, 0, 8 << wide), wide);
     return true;
 }
 
@@ -316,19 +353,11 @@ uint32_t PhysMemoryMap::IoRead(uint64_t addr, int size_log2)
     if (pr == nullptr || pr->is_ram) {
         return -1;
     }
-    uint64_t offset = addr - pr->addr;
-    if (get_bit(pr->devio_flags, size_log2)) {
-        return pr->io->DeviceRead(offset, size_log2);
+    uint64_t val;
+    if (!pr->DeviceRead(addr - pr->addr, size_log2, &val)) {
+        return -1;
     }
-    /* A halfword access to a range that only decodes bytes is split rather
-       than dropped: a device declaring one width still has to answer the
-       other, because the guest picks the width. */
-    if (size_log2 == 1 && (pr->devio_flags & DEVIO_SIZE8)) {
-        uint32_t val = get_bits(pr->io->DeviceRead(offset, 0), 0, 8);
-        val = set_bits(val, 8, 8, pr->io->DeviceRead(offset + 1, 0));
-        return val;
-    }
-    return -1;
+    return val;
 }
 
 
@@ -339,11 +368,5 @@ void PhysMemoryMap::IoWrite(uint64_t addr, uint32_t val, int size_log2)
     if (pr == nullptr || pr->is_ram) {
         return;
     }
-    uint64_t offset = addr - pr->addr;
-    if (get_bit(pr->devio_flags, size_log2)) {
-        pr->io->DeviceWrite(offset, val, size_log2);
-    } else if (size_log2 == 1 && (pr->devio_flags & DEVIO_SIZE8)) {
-        pr->io->DeviceWrite(offset, get_bits(val, 0, 8), 0);
-        pr->io->DeviceWrite(offset + 1, get_bits(val, 8, 8), 0);
-    }
+    pr->DeviceWrite(addr - pr->addr, val, size_log2);
 }

@@ -31,14 +31,21 @@
 #include "device_lock.h"
 
 
+/* The widths a range takes. Its device sees only these, at offsets aligned
+   to them; PhysMemoryRange::DeviceRead() and DeviceWrite() fit every other
+   access to them. */
 #define DEVIO_SIZE8  bit_at(0)
 #define DEVIO_SIZE16 bit_at(1)
 #define DEVIO_SIZE32 bit_at(2)
-/* 8 byte accesses as one call to DeviceRead64()/DeviceWrite64(), for
-   registers a processor must read or write atomically. Without it they
-   reach a range that takes 4 byte ones in two halves. */
 #define DEVIO_SIZE64 bit_at(3)
+#define DEVIO_SIZES (DEVIO_SIZE8 | DEVIO_SIZE16 | DEVIO_SIZE32 | DEVIO_SIZE64)
 #define DEVIO_DISABLED bit_at(4)
+/* A write narrower than any width taken is merged into the register holding
+   it, which is read first. Only for registers that are plain storage: it
+   would clear write-1-to-clear bits and ring doorbells a second time. */
+#define DEVIO_WRITE_MERGE bit_at(5)
+/* Accesses of a width taken reach the device at any offset, as they came. */
+#define DEVIO_UNALIGNED bit_at(6)
 
 #define DEVRAM_FLAG_ROM        bit_at(0) /* not writable */
 #define DEVRAM_FLAG_DIRTY_BITS bit_at(1) /* maintain dirty bits */
@@ -58,7 +65,9 @@ class DeviceIO {
 public:
     virtual ~DeviceIO() = default;
 
-    /* 'size_log2' is 0 to 3. */
+    /* 'size_log2' is a width the range was registered with, 'offset' is
+       aligned to it unless the range has DEVIO_UNALIGNED, and 'val' has no
+       bits above it. Bits a read returns above it are ignored. */
     virtual uint64_t DeviceRead(uint32_t offset, int size_log2) = 0;
     virtual void DeviceWrite(uint32_t offset, uint64_t val, int size_log2) = 0;
 };
@@ -67,12 +76,9 @@ public:
 /* A device that maps several ranges needs one DeviceIO per range, so it holds
    an adapter per range that forwards to a distinct pair of its own methods.
    The member pointers are compile-time template arguments; the dispatch the
-   memory map performs is still virtual. */
-template <
-    typename Owner,
-    uint32_t (Owner::*ReadFn)(uint32_t offset, int size_log2),
-    void (Owner::*WriteFn)(uint32_t offset, uint32_t val, int size_log2)
->
+   memory map performs is still virtual. The methods take and return
+   uint32_t or uint64_t values, as the widths of the range need. */
+template <typename Owner, auto ReadFn, auto WriteFn>
 class DeviceIOAdapter final: public DeviceIO {
 private:
     Owner &fOwner;
@@ -126,10 +132,16 @@ struct PhysMemoryRange {
     void ResetDirtyBit(size_t offset);
     void SetAddr(uint64_t addr, bool enabled);
 
-    /* One device access of 1 to 8 bytes as a processor makes it: one call
-       where the range takes the width, an 8 byte one in two 4 byte halves
-       where it takes only those. False, with nothing done, when it takes
-       neither. */
+    /* One device access of 1 to 8 bytes as a processor makes it, fitted to
+       the widths the range takes:
+       - a width taken, aligned: passed on;
+       - unaligned, or with narrower widths taken: split into halves, the
+         lower address first;
+       - narrower than any width taken: a read is taken from the register
+         holding it; a write is merged into it with DEVIO_WRITE_MERGE and
+         dropped without.
+       False when the range takes no width at all, which reaches nothing,
+       and for a write of which some part was dropped. */
     bool DeviceRead(uint32_t offset, int size_log2, uint64_t *val);
     bool DeviceWrite(uint32_t offset, uint64_t val, int size_log2);
 
@@ -205,13 +217,12 @@ public:
                                        DeviceIO *io, int devio_flags,
                                        int devram_flags);
 
-    /* Perform one access against whichever device range covers 'addr'. A
-       range that does not take the width is served as two byte accesses when
-       it takes those, and otherwise nothing answers; a read nobody answers
-       gives back all ones, which is what an undriven bus reads as. RAM is not
-       consulted -- that is what GetRamPtr() is for. This is the whole of how
-       a port space is addressed, so the map behind one is reached only
-       through here. */
+    /* Perform one access against whichever device range covers 'addr', as
+       PhysMemoryRange::DeviceRead() and DeviceWrite() fit it; a read nobody
+       answers gives back all ones, which is what an undriven bus reads as.
+       RAM is not consulted -- that is what GetRamPtr() is for. This is the
+       whole of how a port space is addressed, so the map behind one is
+       reached only through here. */
     uint32_t IoRead(uint64_t addr, int size_log2);
     void IoWrite(uint64_t addr, uint32_t val, int size_log2);
 
