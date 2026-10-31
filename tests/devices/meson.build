@@ -128,6 +128,7 @@ sources = files(
   'tests/platform/platform.cpp',
   'tests/platform/smp.cpp',
   'tests/timer/clint.cpp',
+  'tests/timer/goldfish_rtc.cpp',
   'tests/timer/hpet.cpp',
   'tests/timer/i8254.cpp',
   'tests/timer/mc146818.cpp',

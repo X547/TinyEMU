@@ -119,6 +119,7 @@ src/device/storage/virtio_block.cpp 95.6
 src/device/storage/virtio_scsi.cpp 83.9
 src/device/timer/clint.cpp 100.0
 src/device/timer/clint.h 100.0
+src/device/timer/goldfish_rtc.cpp 91.0
 src/device/timer/hpet.cpp 97.2
 src/device/timer/hpet.h 100.0
 src/device/timer/i8254.cpp 94.5
@@ -128,5 +129,5 @@ src/machine/machine.cpp 66.4
 src/machine/machine.h 50.0
 src/machine/pc_acpi.cpp 99.7
 src/machine/pc_acpi.h 100.0
-src/machine/riscv_machine.cpp 72.2
+src/machine/riscv_machine.cpp 72.3
 src/machine/x86_machine.cpp 62.4

@@ -1,0 +1,5 @@
+size 0x1000
+irqs 1
+irq_enabled 0
+alarm_status 0
+unassigned 0
