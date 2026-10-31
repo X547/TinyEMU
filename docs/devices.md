@@ -13,6 +13,7 @@ see section 3 of [`readme.txt`](../readme.txt).
 - [4. Properties shared by several devices](#4-properties-shared-by-several-devices)
 - [5. Device reference](#5-device-reference)
   - [Serial, console and power](#serial-console-and-power)
+  - [Clocks](#clocks)
   - [PCI host bridges and switches](#pci-host-bridges-and-switches)
   - [PC platform devices](#pc-platform-devices)
   - [Display](#display)
@@ -309,6 +310,20 @@ its lines in `interrupts-extended` or `_CRS`;
 
 ```js
 { type: "test-control", output: "report.txt" }
+```
+
+### Clocks
+
+#### `goldfish-rtc` — Goldfish real-time clock
+
+Placement: FDT. No properties. The Android emulator's RTC, as QEMU's `virt`
+machine has it: `google,goldfish-rtc` in the device tree, with one page of
+registers and one interrupt for its alarm. It counts nanoseconds since the
+Unix epoch from the host's clock in UTC; a time the guest sets is kept as
+an offset from it, until the emulator exits.
+
+```js
+{ type: "goldfish-rtc" }
 ```
 
 ### PCI host bridges and switches
