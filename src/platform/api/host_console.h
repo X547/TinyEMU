@@ -47,4 +47,8 @@ public:
     virtual void SetTarget(ConsoleTarget *target) = 0;
     /* The target may have room again. */
     virtual void TargetReady() {}
+    /* Before the guest runs: blocks until the far end is there, so that
+       nothing the guest sends first is lost. False when the emulator was
+       stopped meanwhile. */
+    virtual bool WaitConnected() {return true;}
 };

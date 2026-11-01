@@ -44,6 +44,7 @@ struct PlatformOptions {
 class HostPlatform final: public Platform {
 private:
     DeviceLock &fDeviceLock;
+    RunControl &fRunControl;
     EventLoop fLoop;
     PlatformOptions fOptions;
     std::unique_ptr<HostConsole> fConsole;
@@ -86,5 +87,9 @@ public:
     std::unique_ptr<HostFileSystem> OpenFileSystem(const char *path) override;
     std::unique_ptr<HostAudio> OpenAudio(
         const AudioSettings &settings) override;
+    std::unique_ptr<HostConsole> OpenPipe(const char *path,
+                                          bool server) override;
+    std::unique_ptr<HostConsole> OpenSocket(const char *path,
+                                            bool server) override;
     std::unique_ptr<HostTimer> OpenTimer() override;
 };

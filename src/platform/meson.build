@@ -41,7 +41,9 @@ if platform_os == 'windows'
   platform_sources += files(
     'win32/event_loop_wait.cpp',
     'win32/file_block.cpp',
+    'common/no_socket_console.cpp',
     'win32/fs_disk.cpp',
+    'win32/pipe_console.cpp',
     'win32/stdio_console.cpp',
     'win32/wasapi_audio.cpp',
   )
@@ -50,6 +52,8 @@ else
     'posix/event_loop_wait.cpp',
     'posix/file_block.cpp',
     'posix/fs_disk.cpp',
+    'posix/pipe_console.cpp',
+    'posix/socket_console.cpp',
     'posix/stdio_console.cpp',
   )
 endif

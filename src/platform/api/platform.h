@@ -59,6 +59,13 @@ public:
         const char *path) = 0;
     virtual std::unique_ptr<HostAudio> OpenAudio(
         const AudioSettings &settings) = 0;
+    /* A named pipe for a serial device, which is created here when 'server'
+       is set and must exist otherwise. */
+    virtual std::unique_ptr<HostConsole> OpenPipe(const char *path,
+                                                  bool server) = 0;
+    /* A UNIX domain socket, the same way. */
+    virtual std::unique_ptr<HostConsole> OpenSocket(const char *path,
+                                                    bool server) = 0;
     /* Only while the machine is being built. */
     virtual std::unique_ptr<HostTimer> OpenTimer() = 0;
 };

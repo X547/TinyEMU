@@ -54,6 +54,15 @@ public:
 std::unique_ptr<HostConsole> host_console_create(EventLoop &loop,
                                                  RunControl &run_control,
                                                  bool allow_ctrlc);
+/* A named pipe; WaitConnected() gives up on a shutdown from 'run_control'. */
+std::unique_ptr<HostConsole> pipe_console_open(EventLoop &loop,
+                                               RunControl &run_control,
+                                               const char *path, bool server);
+/* A UNIX domain socket, the same way; nullptr where the build has none. */
+std::unique_ptr<HostConsole> socket_console_open(EventLoop &loop,
+                                                 RunControl &run_control,
+                                                 const char *path,
+                                                 bool server);
 
 struct DisplayOptions {
     /* the window draws its own frame even where the window system offers

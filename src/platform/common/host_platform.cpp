@@ -28,6 +28,7 @@
 HostPlatform::HostPlatform(DeviceLock &lock, RunControl &run_control,
                            const PlatformOptions &options):
     fDeviceLock(lock),
+    fRunControl(run_control),
     fOptions(options)
 {
     url_backend_init(fLoop);
@@ -145,6 +146,20 @@ std::unique_ptr<HostAudio> HostPlatform::OpenAudio(
     }
     fprintf(stderr, "Unsupported audio driver '%s'\n", settings.driver);
     return nullptr;
+}
+
+
+std::unique_ptr<HostConsole> HostPlatform::OpenPipe(const char *path,
+                                                    bool server)
+{
+    return pipe_console_open(fLoop, fRunControl, path, server);
+}
+
+
+std::unique_ptr<HostConsole> HostPlatform::OpenSocket(const char *path,
+                                                      bool server)
+{
+    return socket_console_open(fLoop, fRunControl, path, server);
 }
 
 
