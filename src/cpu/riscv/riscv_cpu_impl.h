@@ -1873,6 +1873,9 @@ void RISCVCPUState<MaxXlen>::sbi_enter(RISCVCPUState *s, target_ulong pc,
                                        target_ulong opaque)
 {
     s->mstatus &= ~(MSTATUS_SIE | MSTATUS_MPRV);
+    /* the FPU starts on, as OpenSBI and KVM leave it */
+    if (s->misa & (MCPUID_F | MCPUID_D))
+        s->fs = 1;
     s->satp = 0;
     tlb_flush_all(s);
     set_priv(s, PRV_S);
