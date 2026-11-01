@@ -27,6 +27,7 @@
 #include <inttypes.h>
 #include <assert.h>
 
+#include "config_props.h"
 #include "cutils.h"
 #include "devices.h"
 #include "virtio.h"
@@ -37,9 +38,11 @@
 struct VIRTIOConsoleDevice final: public VIRTIODevice, public ConsoleTarget {
     DeviceContext *ctx;
     /* null discards the output */
-    HostConsole *cs = nullptr;
+    HostConsole *cs;
+    std::unique_ptr<HostConsole> owned_cs;
 
-    VIRTIOConsoleDevice(DeviceContext *ctx);
+    VIRTIOConsoleDevice(DeviceContext *ctx, HostConsole *console,
+                        std::unique_ptr<HostConsole> owned);
 
     bool Realize() override;
 
@@ -116,10 +119,14 @@ void VIRTIOConsoleDevice::Resize(int width, int height)
     virtio_config_change_notify(s);
 }
 
-VIRTIOConsoleDevice::VIRTIOConsoleDevice(DeviceContext *ctx):
+VIRTIOConsoleDevice::VIRTIOConsoleDevice(DeviceContext *ctx,
+                                         HostConsole *console,
+                                         std::unique_ptr<HostConsole> owned):
     VIRTIODevice("virtio-console", VIRTIO_CONSOLE_DEVICE_ID,
                  0x0780 /* communication */, 4, 2),
-    ctx(ctx)
+    ctx(ctx),
+    cs(console),
+    owned_cs(std::move(owned))
 {
     device_features = (1 << 0); /* VIRTIO_CONSOLE_F_SIZE */
     queue[0].manual_recv = true;
@@ -129,8 +136,8 @@ bool VIRTIOConsoleDevice::Realize()
 {
     if (!VIRTIODevice::Realize())
         return false;
-    cs = ctx->platform->Console();
-    ctx->console_input = this;
+    if (cs != nullptr)
+        ctx->consoles.push_back({cs, this});
     return true;
 }
 
@@ -143,8 +150,11 @@ public:
 
     Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
     {
-        (void)cfg;
-        return new VIRTIOConsoleDevice(ctx);
+        HostConsole *console;
+        std::unique_ptr<HostConsole> owned;
+        if (!config_open_serial(cfg, ctx, &console, &owned))
+            return nullptr;
+        return new VIRTIOConsoleDevice(ctx, console, std::move(owned));
     }
 };
 

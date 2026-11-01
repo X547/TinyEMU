@@ -144,6 +144,12 @@ def write_config(template, target, image, cmdline, fixtures, out_dir):
         '@BOOT@': boot,
         '@CMDLINE@': cmdline,
         '@ROOT@': target.root,
+        # Where a machine with a 16550 and a virtio console connects them:
+        # without the fixtures the report goes over the 16550, so it has
+        # the terminal; with them the virtio console does.
+        '@UART_OUTPUT@': 'output: "%s"' % ('null' if fixtures else 'stdio'),
+        '@CONSOLE_OUTPUT@': 'output: "%s"' % ('stdio' if fixtures
+                                              else 'null'),
     }
     for k, v in subst.items():
         text = text.replace(k, v)

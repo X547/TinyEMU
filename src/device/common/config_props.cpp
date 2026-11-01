@@ -284,6 +284,57 @@ std::unique_ptr<HostEthernet> config_open_ethernet(const DeviceConfig &cfg,
 }
 
 
+bool config_open_serial(const DeviceConfig &cfg, DeviceContext *ctx,
+                        HostConsole **console,
+                        std::unique_ptr<HostConsole> *owned)
+{
+    const char *type = cfg.Type();
+    const char *output, *path;
+    int server;
+
+    if (!cfg.GetStrOpt("output", &output) || !cfg.GetStrOpt("path", &path) ||
+        !cfg.GetInt("server", &server, 1)) {
+        return false;
+    }
+    if (output == nullptr) {
+        output = "stdio";
+    }
+    bool is_pipe = strcmp(output, "pipe") == 0;
+    bool is_socket = strcmp(output, "socket") == 0;
+    bool has_path = is_pipe || is_socket;
+    if (!has_path && strcmp(output, "stdio") != 0 &&
+        strcmp(output, "null") != 0) {
+        vm_error("%s: 'output' must be \"stdio\", \"null\", \"pipe\" or "
+                 "\"socket\"\n", type);
+        return false;
+    }
+    if (has_path != (path != nullptr)) {
+        vm_error("%s: a 'path' goes with an 'output' of \"pipe\" or "
+                 "\"socket\", and only with them\n", type);
+        return false;
+    }
+
+    *console = nullptr;
+    if (strcmp(output, "null") == 0) {
+        return true;
+    }
+    char *fname = has_path ? cfg.ResolvePath(path) : strdup(output);
+    bool taken = !ctx->serial_ends.insert(fname).second;
+    if (taken) {
+        vm_error("%s: another serial device is already connected to %s\n",
+                 type, has_path ? path : output);
+    } else if (has_path) {
+        *owned = is_pipe ? ctx->platform->OpenPipe(fname, server != 0)
+                         : ctx->platform->OpenSocket(fname, server != 0);
+        *console = owned->get();
+    } else {
+        *console = ctx->platform->Console();
+    }
+    free(fname);
+    return !taken && (!has_path || *console != nullptr);
+}
+
+
 std::unique_ptr<HostFileSystem> config_open_fs(const DeviceConfig &cfg,
                                                DeviceContext *ctx)
 {

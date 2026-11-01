@@ -6,6 +6,7 @@
 
 #include "acpi.h"
 #include "bits.h"
+#include "config_props.h"
 #include "devices.h"
 #include "fdt.h"
 #include "host_time.h"
@@ -349,13 +350,18 @@ private:
        machine hands out. */
     int fPort;
     int fIrqLine;
+    /* the host end, null for none */
+    HostConsole *fConsole;
+    std::unique_ptr<HostConsole> fOwnedConsole;
     SerialState *fSerial = nullptr;
     Resource *fRegs = nullptr;
     Resource *fIrq = nullptr;
 
 public:
-    UartDevice(DeviceContext *ctx, int port, int irq):
-        Device("serial"), fCtx(ctx), fPort(port), fIrqLine(irq) {}
+    UartDevice(DeviceContext *ctx, int port, int irq, HostConsole *console,
+               std::unique_ptr<HostConsole> owned):
+        Device("serial"), fCtx(ctx), fPort(port), fIrqLine(irq),
+        fConsole(console), fOwnedConsole(std::move(owned)) {}
 
     ~UartDevice() override {delete fSerial;}
 
@@ -399,11 +405,13 @@ public:
             return false;
         }
         fSerial = new SerialState(sys->RegisterMap(), fRegs->base, irq,
-                                  fCtx->platform->Console(),
+                                  fConsole,
                                   fRegs->type == RES_IO ? UART_PC_CLOCK_HZ
                                                         : UART_FDT_CLOCK_HZ,
                                   fCtx->platform->OpenTimer());
-        fCtx->serial_input = fSerial;
+        if (fConsole != nullptr) {
+            fCtx->consoles.push_back({fConsole, fSerial});
+        }
         return true;
     }
 
@@ -447,7 +455,8 @@ public:
 
 /* On a machine whose devices are addressed by port number the registers go at
    "reg" on line "irq"; on one that maps them into memory both are
-   allocated. */
+   allocated. "output" connects it on the host, as config_open_serial()
+   reads it. */
 class UartClass final: public DeviceClass {
 public:
     UartClass(): DeviceClass("ns16550a") {}
@@ -455,10 +464,13 @@ public:
     Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
     {
         int port, irq;
-        if (!cfg.GetInt("reg", &port, -1) || !cfg.GetInt("irq", &irq, -1)) {
+        HostConsole *console;
+        std::unique_ptr<HostConsole> owned;
+        if (!cfg.GetInt("reg", &port, -1) || !cfg.GetInt("irq", &irq, -1) ||
+            !config_open_serial(cfg, ctx, &console, &owned)) {
             return nullptr;
         }
-        return new UartDevice(ctx, port, irq);
+        return new UartDevice(ctx, port, irq, console, std::move(owned));
     }
 };
 

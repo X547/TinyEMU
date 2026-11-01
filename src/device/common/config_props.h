@@ -27,6 +27,7 @@
 #include "device_class.h"
 #include "host_audio.h"
 #include "host_block.h"
+#include "host_console.h"
 #include "host_ethernet.h"
 #include "host_fs.h"
 
@@ -77,6 +78,16 @@ std::unique_ptr<HostAudio> config_open_audio(const DeviceConfig &cfg,
    "forward" entries open. Reports and returns nullptr on failure. */
 std::unique_ptr<HostEthernet> config_open_ethernet(const DeviceConfig &cfg,
                                                    DeviceContext *ctx);
+
+/* Where a serial device's "output" connects it on the host: "stdio", the
+   default, is the emulator's console, "null" nothing, "pipe" the named pipe
+   and "socket" the UNIX domain socket its "path" names, which the emulator
+   creates unless "server" is 0.
+   No two devices take the same one. '*console' is nullptr for "null", and
+   '*owned' keeps a pipe. Reports and returns false on failure. */
+bool config_open_serial(const DeviceConfig &cfg, DeviceContext *ctx,
+                        HostConsole **console,
+                        std::unique_ptr<HostConsole> *owned);
 
 /* The device's "file", relative to the configuration file, opened as a
    directory tree to share. Reports and returns nullptr on failure. */

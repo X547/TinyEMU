@@ -19,6 +19,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#include "console.h"
 #include "heap.h"
 #include "test.h"
 #include "virtio.h"
@@ -48,6 +49,13 @@ void cleanup()
     virtio_reset(&sDev);
     if (sDev.pci)
         pci_restore_all();
+}
+
+/* A 16550 that carries the report has temu's console, input included. */
+void require_host_input()
+{
+    if (strcmp(console_kind(), "uart") == 0)
+        t_skip("the 16550 carrying the report has temu's console");
 }
 
 /* Both queues set up and DRIVER_OK, nothing in the receive queue. */
@@ -97,6 +105,7 @@ TEST(virtio_console, features)
    of bytes written into it. */
 TEST(virtio_console, receive)
 {
+    require_host_input();
     start();
     char *buf = rx_buffer(2, 32);
     t_host_input("ping", 4);
@@ -122,6 +131,7 @@ TEST(virtio_console, receive)
    comes; what was typed waits for a buffer it can use. */
 TEST(virtio_console, receive_malformed)
 {
+    require_host_input();
     start();
     char *buf = (char *)heap_alloc(8, 16);
     ASSERT_TRUE(buf != nullptr);
@@ -149,6 +159,7 @@ TEST(virtio_console, receive_malformed)
    the next one. */
 TEST(virtio_console, receive_split)
 {
+    require_host_input();
     start();
     char *a = rx_buffer(0, 2);
     t_host_input("wxyz", 4);
@@ -174,6 +185,7 @@ TEST(virtio_console, receive_split)
 /* Typed with no buffer queued, the input waits for one. */
 TEST(virtio_console, receive_waits)
 {
+    require_host_input();
     start();
     t_host_input("q", 1);
     t_delay_us(200000);

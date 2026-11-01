@@ -87,7 +87,10 @@ different `--temu-args`.
 `run.py` fills in for each target: the boot method, the command line, the
 root bus and the test-control device, which `@FIXTURE(irqs: [5, 7])@` gives
 properties. `@FIXTURE:pci-test(slot: 3)@` puts in another fixture, here the
-PCI test function. The first comment names the targets a machine is for,
+PCI test function. A machine with a 16550 and a virtio console gives them
+`@UART_OUTPUT@` and `@CONSOLE_OUTPUT@`: two serial devices cannot share
+temu's terminal, which goes to the virtio console with the fixtures and to
+the 16550, which then carries the report, without them. The first comment names the targets a machine is for,
 and a `tests:` line in it the only tests the machine runs. A test that
 needs a device the machine lacks skips.
 

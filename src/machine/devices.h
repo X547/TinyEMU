@@ -23,6 +23,8 @@
  */
 #pragma once
 
+#include <set>
+#include <string>
 #include <vector>
 
 #include "device.h"
@@ -47,11 +49,16 @@ struct DeviceContext {
     /* what a PC leaves free for its host bridge's apertures */
     const PcPciApertures *pc_pci_space = nullptr;
 
-    /* Filled in as devices are realized, then connected to the platform.
-       Console input goes to a virtio console when there is one, and to the
-       16550 otherwise. */
-    ConsoleTarget *console_input = nullptr;
-    ConsoleTarget *serial_input = nullptr;
+    /* The host ends serial devices have taken, "stdio" or a pipe's path, so
+       that no two take the same one. */
+    std::set<std::string> serial_ends;
+    /* Filled in as devices are realized, then connected to the platform:
+       each serial device and the host end its input comes from. */
+    struct ConsoleLink {
+        HostConsole *console;
+        ConsoleTarget *target;
+    };
+    std::vector<ConsoleLink> consoles;
     /* Whichever devices claimed the keyboard and the pointer roles; the last
        one realized wins. */
     KeyboardTarget *keyboard = nullptr;
@@ -73,5 +80,7 @@ struct DeviceContext {
 };
 
 
-/* Hand the realized devices to the platform's host objects. */
-void device_context_connect(DeviceContext *ctx);
+/* Hand the realized devices to the platform's host objects, and wait for
+   the far ends of their pipes. False when the emulator was stopped
+   meanwhile. */
+bool device_context_connect(DeviceContext *ctx);

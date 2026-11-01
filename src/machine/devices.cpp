@@ -24,14 +24,12 @@
 #include "devices.h"
 
 
-void device_context_connect(DeviceContext *ctx)
+bool device_context_connect(DeviceContext *ctx)
 {
     Platform *platform = ctx->platform;
-    HostConsole *console = platform->Console();
 
-    if (console != nullptr) {
-        console->SetTarget(ctx->console_input != nullptr ? ctx->console_input
-                                                         : ctx->serial_input);
+    for (const DeviceContext::ConsoleLink &link : ctx->consoles) {
+        link.console->SetTarget(link.target);
     }
     HostScreen *screen = platform->Screen();
     if (screen != nullptr && ctx->screen != nullptr) {
@@ -54,4 +52,10 @@ void device_context_connect(DeviceContext *ctx)
             net->target->SetCarrier(true);
         }
     }
+    for (const DeviceContext::ConsoleLink &link : ctx->consoles) {
+        if (!link.console->WaitConnected()) {
+            return false;
+        }
+    }
+    return true;
 }

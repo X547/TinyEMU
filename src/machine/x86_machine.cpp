@@ -816,7 +816,9 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
         return nullptr;
     }
 
-    device_context_connect(&ctx);
+    if (!device_context_connect(&ctx)) {
+        return nullptr;
+    }
     s->fb_dev = ctx.fb_dev;
     s->fb_base = ctx.fb_base;
 

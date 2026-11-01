@@ -993,7 +993,9 @@ riscv_machine_init(const VirtMachineParams *p)
         return nullptr;
     }
 
-    device_context_connect(&ctx);
+    if (!device_context_connect(&ctx)) {
+        return nullptr;
+    }
 
     if (native_sbi) {
         /* what firmware would hand the supervisor domain */

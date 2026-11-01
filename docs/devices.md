@@ -230,6 +230,47 @@ host: { driver: "wav", file: "guest-audio.wav" }
 Host back ends cannot record yet, so an input that captures from `"host"`
 hears silence. Use `"wav"` to feed the guest a file.
 
+### Serial back end: `output`, `path`, `server`
+
+Serial devices (`ns16550a`, `virtio-console`) read where they are connected
+on the host:
+
+| Property | Meaning |
+| --- | --- |
+| `output` | `"stdio"` (default): the emulator's terminal, input included. `"null"`: nothing; what the guest sends is dropped and it receives nothing. `"pipe"`: a named pipe. `"socket"`: a UNIX domain socket, not on Windows. |
+| `path` | `"pipe"` and `"socket"` only, and required there. A pipe on Windows is `\\.\pipe\<name>`; elsewhere it is two FIFOs: the guest receives from `<path>.in` and sends to `<path>.out`. A socket is the socket file. A relative path is taken from the configuration file. |
+| `server` | `"pipe"` and `"socket"` only. `1` (default): the emulator creates the pipe, the FIFOs if they are missing, or the socket. `0`: it must already exist, and the emulator connects to it as a client. |
+
+No two serial devices may take the same `output`, so `"stdio"` goes to one
+device at most; a machine with a 16550 and a virtio console sets one of them
+to something else. The guest starts only once every pipe and socket has its
+other end: a client on one the emulator serves, a reader on `<path>.out`.
+While nothing is connected, what the guest sends is dropped.
+
+As a server, the emulator takes one client at a time: another that connects
+meanwhile is disconnected at once, and the next is taken once the first
+goes. As a client, it stays disconnected once the server goes. A client that
+only shuts down its sending side counts as gone. A socket file left over
+from an earlier run, which nothing listens on any more, is replaced; one a
+program still listens on is an error, and the emulator removes its own
+socket file when it exits. FIFOs go on being read by whichever reader comes
+next, and stay in place.
+
+The HTIF and the SBI debug console of the RISC-V machine always write to the
+terminal.
+
+```js
+/* JSON strings escape the backslashes */
+{ type: "ns16550a", output: "pipe", path: "\\\\.\\pipe\\com1" }
+
+/* reads guest.in, writes guest.out */
+{ type: "virtio-console", output: "pipe", path: "guest" }
+
+/* connects to a socket another program listens on */
+{ type: "virtio-console", output: "socket", path: "/tmp/console.sock",
+  server: 0 }
+```
+
 ### Device workarounds: `quirks`
 
 `nvme` and `dwmac` read `quirks`, an array of names that switches on
@@ -255,6 +296,7 @@ Placement: FDT or PC.
 | --- | --- | --- |
 | `reg` | `0x3f8` | PC only: the I/O port base. |
 | `irq` | `4` | PC only: the ISA interrupt line. |
+| `output`, `path`, `server` | `"stdio"` | Where it is connected on the host: the terminal, nothing, a pipe or a socket; see [Serial back end](#serial-back-end-output-path-server). |
 
 On an FDT machine its registers and interrupt are allocated, and it becomes
 `/chosen/stdout-path`. On the PC it is COM1 unless `reg` and `irq` say
@@ -264,14 +306,16 @@ otherwise.
 /* fdt or pc bus */
 { type: "ns16550a" }
 
-/* pc bus: COM2 */
-{ type: "ns16550a", reg: 0x2f8, irq: 3 }
+/* pc bus: COM2, on a pipe */
+{ type: "ns16550a", reg: 0x2f8, irq: 3, output: "pipe",
+  path: "\\\\.\\pipe\\com2" }
 ```
 
 #### `virtio-console` — virtio console
 
-Placement: FDT (virtio-mmio) or PCI. No properties. Connects the guest to the
-emulator's console (`hvc0` in Linux).
+Placement: FDT (virtio-mmio) or PCI. Connects the guest to the emulator's
+terminal (`hvc0` in Linux), or to what `output`, `path` and `server` say; see
+[Serial back end](#serial-back-end-output-path-server).
 
 ```js
 { type: "virtio-console" }
