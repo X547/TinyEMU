@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "screen_rect.h"
+#include "window_scale.h"
 
 class TitleFont;
 
@@ -44,12 +45,6 @@ public:
         kResize,
     };
 
-    /* the frame's width around the content; the top, Top(), takes in the
-       tab and follows the font */
-    static const int kLeft = 5;
-    static const int kRight = 5;
-    static const int kBottom = 5;
-
 private:
     struct PlacedChar {
         uint32_t c;
@@ -58,6 +53,16 @@ private:
     };
 
     TitleFont *fFont = nullptr;
+    WindowScale fScale;
+    /* from the scale; the bevels stay one pixel wide */
+    int fBorder = 0;
+    int fTabPadding = 0;
+    int fTabPaddingBottom = 0;
+    int fTitleSpacing = 0;
+    int fResizeKnob = 0;
+    /* added to the right and the bottom border */
+    int fPadRight = 0;
+    int fPadBottom = 0;
     /* from the font's height */
     int fButtonSize = 0;
     int fTabHeight = 0;
@@ -74,6 +79,7 @@ private:
     bool fClosePressed = false;
     bool fResizable = false;
 
+    void UpdateMetrics();
     void LayoutTitle();
     /* the tab's last row */
     int FrameTop() const {return fTabHeight - 1;}
@@ -83,6 +89,11 @@ public:
 
     /* nullptr leaves the title out; the tab keeps its size */
     void SetFont(TitleFont *font);
+    /* the metrics are Haiku's times 'scale'; the font is sized by the
+       caller, then set again */
+    void SetScale(WindowScale scale);
+    /* more border on the right and the bottom than the scale gives */
+    void SetPadding(int right, int bottom);
     /* UTF-8 */
     void SetTitle(const char *title);
     /* the whole window, frame included */
@@ -93,6 +104,11 @@ public:
     void SetResizable(bool resizable) {fResizable = resizable;}
 
     bool ClosePressed() const {return fClosePressed;}
+    /* the frame's width around the content, padding left out; the top
+       takes in the tab and follows the font */
+    int Left() const {return fBorder;}
+    int Right() const {return fBorder;}
+    int Bottom() const {return fBorder;}
     int Top() const;
     ScreenRect ContentRect() const;
     ScreenRect TabRect() const;

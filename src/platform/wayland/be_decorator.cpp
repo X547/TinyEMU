@@ -24,9 +24,10 @@
 #include "be_decorator.h"
 #include "title_font.h"
 
-/* Haiku's BeOS decorator's metrics. The tab is padded kTabPadding around
-   the close button, kTabPaddingBottom under it, and kTitleSpacing on either
-   side of the title; the button is as tall as the title's font. */
+/* Haiku's BeOS decorator's metrics at a scale of 1. The tab is padded
+   kTabPadding around the close button, kTabPaddingBottom under it, and
+   kTitleSpacing on either side of the title; the button is as tall as the
+   title's font. */
 static const int kBorder = 5;
 static const int kTabPadding = 5;
 static const int kTabPaddingBottom = 4;
@@ -36,10 +37,8 @@ static const int kResizeKnob = 18;
 /* the height of DejaVu Sans Bold at 12 pixels, for when there is no font */
 static const float kDefaultAscent = 11.1387f;
 static const float kDefaultDescent = 2.8301f;
-
-static_assert(BeDecorator::kLeft == kBorder &&
-              BeDecorator::kRight == kBorder &&
-              BeDecorator::kBottom == kBorder);
+/* the border's bevels and the line around the content */
+static const int kMinBorder = 5;
 
 /* every colour is opaque */
 struct Palette {
@@ -130,15 +129,44 @@ BeDecorator::BeDecorator()
 
 void BeDecorator::SetFont(TitleFont *font)
 {
-    float ascent = font != nullptr ? font->Ascent() : kDefaultAscent;
-    float descent = font != nullptr ? font->Descent() : kDefaultDescent;
-
     fFont = font;
-    fButtonSize = (int)(ascent + descent + 0.5f) - 1;
+    UpdateMetrics();
+}
+
+
+void BeDecorator::SetScale(WindowScale scale)
+{
+    fScale = scale;
+    UpdateMetrics();
+}
+
+
+void BeDecorator::SetPadding(int right, int bottom)
+{
+    fPadRight = right;
+    fPadBottom = bottom;
+}
+
+
+void BeDecorator::UpdateMetrics()
+{
+    float scale = (float)fScale.Value() / WindowScale::kOne;
+    float ascent = fFont != nullptr ? fFont->Ascent() :
+                                      kDefaultAscent * scale;
+    float descent = fFont != nullptr ? fFont->Descent() :
+                                       kDefaultDescent * scale;
+
+    fBorder = fScale.Metric(kBorder, kMinBorder);
+    fTabPadding = fScale.Metric(kTabPadding);
+    fTabPaddingBottom = fScale.Metric(kTabPaddingBottom);
+    fTitleSpacing = fScale.Metric(kTitleSpacing);
+    fResizeKnob = fScale.Metric(kResizeKnob);
+    /* room for the two bevels and some fill */
+    fButtonSize = std::max((int)(ascent + descent + 0.5f) - 1, 5);
     /* the tab's last row is the frame's top edge */
-    fTabHeight = kTabPadding + fButtonSize + kTabPaddingBottom;
-    fTitleX = kTabPadding + fButtonSize + kTitleSpacing;
-    fTitleBaseline = kTabPadding + (int)ascent;
+    fTabHeight = fTabPadding + fButtonSize + fTabPaddingBottom;
+    fTitleX = fTabPadding + fButtonSize + fTitleSpacing;
+    fTitleBaseline = fTabPadding + (int)ascent;
     LayoutTitle();
 }
 
@@ -175,7 +203,7 @@ void BeDecorator::LayoutTitle()
     }
     fTitleWidth = (total + 63) / 64;
 
-    int room = (TabRect().Width() - fTitleX - kTitleSpacing) * 64;
+    int room = (TabRect().Width() - fTitleX - fTitleSpacing) * 64;
     if (total <= room) {
         int x = 0;
         for (size_t i = 0; i < fTitle.size(); i++) {
@@ -230,20 +258,20 @@ void BeDecorator::LayoutTitle()
 
 int BeDecorator::Top() const
 {
-    return fTabHeight - 1 + kBorder;
+    return fTabHeight - 1 + fBorder;
 }
 
 
 ScreenRect BeDecorator::ContentRect() const
 {
-    return ScreenRect(kLeft, Top(), fWidth - kLeft - kRight,
-                      fHeight - Top() - kBottom);
+    return ScreenRect(fBorder, Top(), fWidth - 2 * fBorder - fPadRight,
+                      fHeight - Top() - fBorder - fPadBottom);
 }
 
 
 ScreenRect BeDecorator::TabRect() const
 {
-    int width = std::min(fTitleX + fTitleWidth + kTitleSpacing, fWidth);
+    int width = std::min(fTitleX + fTitleWidth + fTitleSpacing, fWidth);
     return ScreenRect(0, 0, width, fTabHeight);
 }
 
@@ -260,13 +288,13 @@ BeDecorator::Part BeDecorator::HitTest(int x, int y) const
 {
     ScreenRect content = ContentRect();
 
-    if (ScreenRect(kTabPadding, kTabPadding, fButtonSize,
+    if (ScreenRect(fTabPadding, fTabPadding, fButtonSize,
                    fButtonSize).Contains(x, y))
         return kClose;
     if (content.Contains(x, y))
         return kContent;
-    if (fResizable && x >= content.x1 - kResizeKnob &&
-        y >= content.y1 - kResizeKnob && x < fWidth && y < fHeight)
+    if (fResizable && x >= content.x1 - fResizeKnob &&
+        y >= content.y1 - fResizeKnob && x < fWidth && y < fHeight)
         return kResize;
     if (TabRect().Contains(x, y) ||
         ScreenRect(0, FrameTop(), fWidth, fHeight - FrameTop()).Contains(x, y))
@@ -314,7 +342,7 @@ void BeDecorator::Paint(uint32_t *pixels, int pitch,
 
     /* the close button, flat: a raised square in a groove, sunken two
        pixels deep while pressed */
-    int x0 = kTabPadding, y0 = kTabPadding;
+    int x0 = fTabPadding, y0 = fTabPadding;
     int x1 = x0 + fButtonSize - 1, y1 = y0 + fButtonSize - 1;
     p.Bevel(x0, y0, x1, y1, c.shadow, c.light);
     if (fClosePressed)
@@ -344,7 +372,7 @@ void BeDecorator::Paint(uint32_t *pixels, int pitch,
     /* a line across the right and the bottom edge marks off the resize
        corner */
     if (fResizable) {
-        int knob = kResizeKnob - 1;
+        int knob = fResizeKnob - 1;
         p.HLine(content.x1, right - 1, content.y1 - 1 - knob, c.outer_tl);
         p.VLine(content.x1 - 1 - knob, content.y1, bottom - 1, c.outer_tl);
     }

@@ -36,6 +36,8 @@
 #include <wayland-client.h>
 #include "xdg-shell-client-protocol.h"
 #include "xdg-decoration-unstable-v1-client-protocol.h"
+#include "fractional-scale-v1-client-protocol.h"
+#include "viewporter-client-protocol.h"
 
 #include "be_decorator.h"
 #include "device_lock.h"
@@ -47,6 +49,7 @@
 #include "screen_rect.h"
 #include "title_font.h"
 #include "window_buffer.h"
+#include "window_scale.h"
 #include "WaylandKeycodes.h"
 
 #define KEYCODE_MAX 127
@@ -63,6 +66,8 @@ static const int kDoubleClickDistance = 4;
 static const int kDragDistance = 3;
 /* the smallest content a resizable window is given */
 static const int kMinContentSize = 64;
+/* the title's height at a scale of 1 */
+static const int kTitleFontSize = 12;
 
 
 /* An xRGB pixel, which need not be aligned. */
@@ -105,13 +110,18 @@ private:
         kCursorFrame,
     };
 
-    /* the window's own cursor image */
-    struct FrameCursorSurface {
+    /* a cursor image, shown pixel for pixel */
+    struct CursorSurface {
         wl_surface *surface = nullptr;
+        wp_viewport *viewport = nullptr;
         std::unique_ptr<BufferRing> buffers;
+        /* drawn, attached once the cursor is shown */
         WindowBuffer *buffer = nullptr;
+        /* in units */
         int hot_x = 0;
         int hot_y = 0;
+        int width = 0;
+        int height = 0;
     };
 
     DeviceLock &fDeviceLock;
@@ -169,6 +179,8 @@ private:
     uint32_t fDmabufVersion = 0;
     xdg_wm_base *fWmBase = nullptr;
     zxdg_decoration_manager_v1 *fDecorationManager = nullptr;
+    wp_viewporter *fViewporter = nullptr;
+    wp_fractional_scale_manager_v1 *fFractionalScaleManager = nullptr;
     wl_seat *fSeat = nullptr;
     uint32_t fSeatVersion = 0;
     wl_keyboard *fKeyboardDevice = nullptr;
@@ -178,14 +190,18 @@ private:
     xdg_surface *fXdgSurface = nullptr;
     xdg_toplevel *fToplevel = nullptr;
     zxdg_toplevel_decoration_v1 *fDecoration = nullptr;
+    /* both there or neither: the scale the window is drawn for */
+    wp_viewport *fViewport = nullptr;
+    wp_fractional_scale_v1 *fFractionalScale = nullptr;
+    WindowScale fScale;
     std::unique_ptr<ShmAllocator> fShmAllocator;
     /* the window's buffers when the compositor's GPU reads them in place */
     std::unique_ptr<BufferAllocator> fDmabufAllocator;
     std::unique_ptr<BufferRing> fBuffers;
     wl_callback *fFrameCallback = nullptr;
     bool fConfigured = false;
-    /* what the last configure asked for; a size of 0 is the window's to
-       choose */
+    /* what the last configure asked for, in units; a size of 0 is the
+       window's to choose */
     int fConfigureWidth = 0;
     int fConfigureHeight = 0;
     bool fConfigureActivated = false;
@@ -198,23 +214,32 @@ private:
     bool fFullscreen = false;
     bool fMaximized = false;
 
-    /* the content, fWidth x fHeight, sits at (fContentX, fContentY) in a
-       window of fWindowWidth x fWindowHeight */
+    /* In pixels: the content, fWidth x fHeight, sits at (fContentX,
+       fContentY) in a window of fWindowWidth x fWindowHeight, which is
+       fUnitWidth x fUnitHeight units. The frame takes fFrameWidth x
+       fFrameHeight of it, and padding on the right and the bottom up to a
+       whole number of units the rest. */
     int fWidth = 0;
     int fHeight = 0;
     int fContentX = 0;
     int fContentY = 0;
+    int fFrameWidth = 0;
+    int fFrameHeight = 0;
     int fWindowWidth = 0;
     int fWindowHeight = 0;
+    int fUnitWidth = 0;
+    int fUnitHeight = 0;
     /* the frame is drawn here rather than by the compositor */
     bool fFrame = false;
     BeDecorator fDecorator;
     /* loaded when the frame is first drawn here */
     TitleFont fTitleFont;
     bool fTitleFontLoaded = false;
-    /* the size and frame the window's regions were last set for */
+    bool fTitleFontOpen = false;
+    /* the size, scale and frame the window's regions were last set for */
     int fRegionWidth = 0;
     int fRegionHeight = 0;
+    WindowScale fRegionScale;
     bool fRegionFrame = false;
     /* what to draw at the next frame, in the window */
     ScreenRect fWindowDirty;
@@ -223,10 +248,7 @@ private:
     ScreenRect fCursorDrawn;
 
     /* the host cursor over the window: the guest's image, or none */
-    wl_surface *fCursorSurface = nullptr;
-    std::unique_ptr<BufferRing> fCursorBuffers;
-    /* drawn, attached once the cursor is shown */
-    WindowBuffer *fCursorBuffer = nullptr;
+    CursorSurface fGuestCursor;
     std::vector<uint32_t> fHostCursor;
     int fHostCursorWidth = 0;
     int fHostCursorHeight = 0;
@@ -234,14 +256,16 @@ private:
     int fHostCursorHotY = 0;
     /* waits for a free cursor buffer */
     bool fHostCursorPending = false;
-    FrameCursorSurface fFrameCursor;
+    /* the window's own */
+    CursorSurface fFrameCursor;
+    FrameCursor fFrameCursorImage;
     CursorKind fCursorKind = kCursorGuest;
     /* the cursor surface last shown with an image */
-    wl_surface *fShownCursorSurface = nullptr;
+    CursorSurface *fShownCursor = nullptr;
 
     bool fPointerInside = false;
     uint32_t fEnterSerial = 0;
-    /* in the window */
+    /* in the window, in pixels */
     int fPointerX = 0;
     int fPointerY = 0;
     BeDecorator::Part fPointerPart = BeDecorator::kContent;
@@ -277,6 +301,7 @@ private:
     static const xdg_surface_listener kXdgSurfaceListener;
     static const xdg_toplevel_listener kToplevelListener;
     static const zxdg_toplevel_decoration_v1_listener kDecorationListener;
+    static const wp_fractional_scale_v1_listener kFractionalScaleListener;
     static const wl_callback_listener kFrameListener;
     static const wl_seat_listener kSeatListener;
     static const wl_keyboard_listener kKeyboardListener;
@@ -294,21 +319,25 @@ private:
     void HandleSeatCapabilities(uint32_t caps);
     void CreateWindow(int width, int height, bool resizable);
     void CreateBuffers();
-    void CreateFrameCursor(FrameCursorSurface &cursor,
-                           const FrameCursor &image);
     void Layout();
+    bool FitToConfigure();
     void SetSizeLimits();
     void SetRegions();
     void HandleToplevelConfigure(int width, int height, wl_array *states);
     void HandleConfigure(uint32_t serial);
+    void HandleScale(int value);
     void TellSourceSize();
     bool HandleUpdate();
     void Redraw();
     void HandleFrameDone();
+    bool DrawCursor(CursorSurface &cursor, const uint32_t *pixels, int width,
+                    int height, int hot_x, int hot_y, bool premultiplied);
+    void DrawFrameCursor();
     void SetHostCursor();
     void ShowHostCursor();
     void SetCursorKind(CursorKind kind);
-    void ReplaceCursorSurface(wl_surface *old);
+    void ReplaceCursorSurface(CursorSurface &cursor);
+    void DestroyCursorSurface(CursorSurface &cursor);
     void SendKey(int code, bool down);
     void ReleaseKeys();
     void HandleKey(uint32_t key, uint32_t state);
@@ -358,14 +387,16 @@ public:
 WaylandDisplay::~WaylandDisplay()
 {
     fBuffers.reset();
-    fCursorBuffers.reset();
-    fFrameCursor.buffers.reset();
+    DestroyCursorSurface(fGuestCursor);
+    DestroyCursorSurface(fFrameCursor);
     fDmabufAllocator.reset();
     fShmAllocator.reset();
-    if (fFrameCursor.surface != nullptr)
-        wl_surface_destroy(fFrameCursor.surface);
     if (fFrameCallback != nullptr)
         wl_callback_destroy(fFrameCallback);
+    if (fFractionalScale != nullptr)
+        wp_fractional_scale_v1_destroy(fFractionalScale);
+    if (fViewport != nullptr)
+        wp_viewport_destroy(fViewport);
     if (fDecoration != nullptr)
         zxdg_toplevel_decoration_v1_destroy(fDecoration);
     if (fToplevel != nullptr)
@@ -374,8 +405,6 @@ WaylandDisplay::~WaylandDisplay()
         xdg_surface_destroy(fXdgSurface);
     if (fSurface != nullptr)
         wl_surface_destroy(fSurface);
-    if (fCursorSurface != nullptr)
-        wl_surface_destroy(fCursorSurface);
     if (fKeyboardDevice != nullptr)
         wl_keyboard_destroy(fKeyboardDevice);
     if (fPointerDevice != nullptr)
@@ -384,6 +413,10 @@ WaylandDisplay::~WaylandDisplay()
         wl_seat_destroy(fSeat);
     if (fDecorationManager != nullptr)
         zxdg_decoration_manager_v1_destroy(fDecorationManager);
+    if (fFractionalScaleManager != nullptr)
+        wp_fractional_scale_manager_v1_destroy(fFractionalScaleManager);
+    if (fViewporter != nullptr)
+        wp_viewporter_destroy(fViewporter);
     if (fWmBase != nullptr)
         xdg_wm_base_destroy(fWmBase);
     if (fShm != nullptr)
@@ -570,8 +603,19 @@ void WaylandDisplay::Paint(WindowBuffer *buffer, const ScreenRect &area)
 
     bool in_content = area.x0 >= content.x0 && area.y0 >= content.y0 &&
                       area.x1 <= content.x1 && area.y1 <= content.y1;
-    if (fFrame && !in_content)
+    if (fFrame && !in_content) {
         fDecorator.Paint(buffer->pixels, pitch, area);
+    } else if (!in_content) {
+        /* the padding, as the content is at (0, 0) */
+        ScreenRect outside[2];
+        int count = screen_rect_outside(area, fWidth, fHeight, outside);
+        for (int i = 0; i < count; i++) {
+            const ScreenRect &o = outside[i];
+            for (int y = o.y0; y < o.y1; y++)
+                std::fill_n(&buffer->pixels[y * pitch + o.x0], o.Width(),
+                            kOpaque);
+        }
+    }
 
     /* in the frame buffer's coordinates from here on */
     ScreenRect r = area & content;
@@ -735,15 +779,27 @@ void WaylandDisplay::CreateWindow(int width, int height, bool resizable)
     Layout();
 
     CreateBuffers();
-    fCursorBuffers = std::make_unique<BufferRing>(
+    fGuestCursor.buffers = std::make_unique<BufferRing>(
         *fShmAllocator, 2, [this]() {
             if (fHostCursorPending)
                 SetHostCursor();
         });
 
     fSurface = wl_compositor_create_surface(fCompositor);
-    fCursorSurface = wl_compositor_create_surface(fCompositor);
-    CreateFrameCursor(fFrameCursor, frame_cursor());
+    /* scaled only when the window is told its scale; the damage is in the
+       buffer's pixels */
+    if (fViewporter != nullptr && fFractionalScaleManager != nullptr &&
+        fCompositorVersion >= 4) {
+        fViewport = wp_viewporter_get_viewport(fViewporter, fSurface);
+        fFractionalScale = wp_fractional_scale_manager_v1_get_fractional_scale(
+            fFractionalScaleManager, fSurface);
+        wp_fractional_scale_v1_add_listener(fFractionalScale,
+                                            &kFractionalScaleListener, this);
+    }
+    fGuestCursor.surface = wl_compositor_create_surface(fCompositor);
+    fFrameCursor.surface = wl_compositor_create_surface(fCompositor);
+    fFrameCursorImage = frame_cursor();
+    DrawFrameCursor();
     fXdgSurface = xdg_wm_base_get_xdg_surface(fWmBase, fSurface);
     xdg_surface_add_listener(fXdgSurface, &kXdgSurfaceListener, this);
     fToplevel = xdg_surface_get_toplevel(fXdgSurface);
@@ -778,89 +834,111 @@ void WaylandDisplay::CreateBuffers()
 }
 
 
-void WaylandDisplay::CreateFrameCursor(FrameCursorSurface &cursor,
-                                       const FrameCursor &image)
-{
-    cursor.surface = wl_compositor_create_surface(fCompositor);
-    cursor.buffers = std::make_unique<BufferRing>(*fShmAllocator, 1, nullptr);
-    cursor.hot_x = image.hot_x;
-    cursor.hot_y = image.hot_y;
-    cursor.buffer = cursor.buffers->Acquire(image.width, image.height);
-    if (cursor.buffer != nullptr) {
-        std::copy(image.pixels.begin(), image.pixels.end(),
-                  cursor.buffer->pixels);
-    }
-}
-
-
 /* Places the content in the window, with the frame around it when it is
-   drawn here. */
+   drawn here, and pads the window to a whole number of units. */
 void WaylandDisplay::Layout()
 {
     fFrame = !fServerSide && !fFullscreen;
     if (fFrame && !fTitleFontLoaded) {
         /* the system's bold font, as Haiku titles windows */
         fTitleFontLoaded = true;
-        if (fTitleFont.Open("sans-serif:bold", 12))
+        fTitleFontOpen = fTitleFont.Open("sans-serif:bold",
+                                         fScale.Metric(kTitleFontSize));
+        if (fTitleFontOpen)
             fDecorator.SetFont(&fTitleFont);
         else
             fprintf(stderr, "No font for the window's title\n");
     }
-    fContentX = fFrame ? BeDecorator::kLeft : 0;
+    fContentX = fFrame ? fDecorator.Left() : 0;
     fContentY = fFrame ? fDecorator.Top() : 0;
-    fWindowWidth = fWidth + (fFrame ? BeDecorator::kLeft +
-                                      BeDecorator::kRight : 0);
-    fWindowHeight = fHeight + (fFrame ? fDecorator.Top() +
-                                        BeDecorator::kBottom : 0);
+    fFrameWidth = fFrame ? fDecorator.Left() + fDecorator.Right() : 0;
+    fFrameHeight = fFrame ? fDecorator.Top() + fDecorator.Bottom() : 0;
+
+    int width = fWidth + fFrameWidth;
+    int height = fHeight + fFrameHeight;
+    /* the size asked for when it fits, as a maximized window must keep it */
+    fUnitWidth = fScale.FitUnits(width, fConfigureWidth);
+    fUnitHeight = fScale.FitUnits(height, fConfigureHeight);
+    fWindowWidth = fScale.ToPixels(fUnitWidth);
+    fWindowHeight = fScale.ToPixels(fUnitHeight);
+    fDecorator.SetPadding(fWindowWidth - width, fWindowHeight - height);
     fDecorator.SetSize(fWindowWidth, fWindowHeight);
     fDecorator.SetResizable(fWindowResizable && !fMaximized);
+}
+
+
+/* A window the user sizes takes the size the compositor asked for; true
+   when that changed the content's size. */
+bool WaylandDisplay::FitToConfigure()
+{
+    if (!fWindowResizable || fConfigureWidth <= 0 || fConfigureHeight <= 0)
+        return false;
+    /* not every compositor keeps to the minimum size */
+    int width = std::max(fScale.ToPixels(fConfigureWidth) - fFrameWidth,
+                         kMinContentSize);
+    int height = std::max(fScale.ToPixels(fConfigureHeight) - fFrameHeight,
+                          kMinContentSize);
+    if (width == fWidth && height == fHeight)
+        return false;
+    fWidth = width;
+    fHeight = height;
+    Layout();
+    return true;
 }
 
 
 /* A fixed size window keeps the size of the frame buffer. */
 void WaylandDisplay::SetSizeLimits()
 {
-    int frame_width = fWindowWidth - fWidth;
-    int frame_height = fWindowHeight - fHeight;
-
     if (fWindowResizable) {
-        xdg_toplevel_set_min_size(fToplevel, kMinContentSize + frame_width,
-                                  kMinContentSize + frame_height);
+        xdg_toplevel_set_min_size(fToplevel,
+            fScale.FitUnits(kMinContentSize + fFrameWidth),
+            fScale.FitUnits(kMinContentSize + fFrameHeight));
         xdg_toplevel_set_max_size(fToplevel, 0, 0);
     } else {
-        xdg_toplevel_set_min_size(fToplevel, fWindowWidth, fWindowHeight);
-        xdg_toplevel_set_max_size(fToplevel, fWindowWidth, fWindowHeight);
+        xdg_toplevel_set_min_size(fToplevel, fUnitWidth, fUnitHeight);
+        xdg_toplevel_set_max_size(fToplevel, fUnitWidth, fUnitHeight);
     }
 }
 
 
-/* The window's shape, which the frame's see-through part is not part of,
-   set with the next commit. */
+/* The window's size in units and its shape, which the frame's see-through
+   part is not part of, set with the next commit. */
 void WaylandDisplay::SetRegions()
 {
     if (fRegionWidth == fWindowWidth && fRegionHeight == fWindowHeight &&
-        fRegionFrame == fFrame)
+        fRegionScale == fScale && fRegionFrame == fFrame)
         return;
     fRegionWidth = fWindowWidth;
     fRegionHeight = fWindowHeight;
+    fRegionScale = fScale;
     fRegionFrame = fFrame;
 
-    wl_region *region = wl_compositor_create_region(fCompositor);
-    if (fFrame) {
-        ScreenRect rects[2];
-        int count = fDecorator.SolidRects(rects);
-        for (int i = 0; i < count; i++) {
-            wl_region_add(region, rects[i].x0, rects[i].y0, rects[i].Width(),
-                          rects[i].Height());
-        }
-    } else {
-        wl_region_add(region, 0, 0, fWindowWidth, fWindowHeight);
+    ScreenRect rects[2];
+    int count = 1;
+    if (fFrame)
+        count = fDecorator.SolidRects(rects);
+    else
+        rects[0] = ScreenRect(0, 0, fWindowWidth, fWindowHeight);
+    ScreenRect window(0, 0, fUnitWidth, fUnitHeight);
+    /* opaque only where whole units are, input wherever a pixel is */
+    wl_region *opaque = wl_compositor_create_region(fCompositor);
+    wl_region *input = wl_compositor_create_region(fCompositor);
+    for (int i = 0; i < count; i++) {
+        ScreenRect r = fScale.ToUnits(rects[i], true) & window;
+        if (!r.Empty())
+            wl_region_add(opaque, r.x0, r.y0, r.Width(), r.Height());
+        r = fScale.ToUnits(rects[i], false) & window;
+        wl_region_add(input, r.x0, r.y0, r.Width(), r.Height());
     }
-    wl_surface_set_opaque_region(fSurface, region);
-    wl_surface_set_input_region(fSurface, region);
-    wl_region_destroy(region);
-    xdg_surface_set_window_geometry(fXdgSurface, 0, 0, fWindowWidth,
-                                    fWindowHeight);
+    wl_surface_set_opaque_region(fSurface, opaque);
+    wl_surface_set_input_region(fSurface, input);
+    wl_region_destroy(opaque);
+    wl_region_destroy(input);
+    if (fViewport != nullptr)
+        wp_viewport_set_destination(fViewport, fUnitWidth, fUnitHeight);
+    xdg_surface_set_window_geometry(fXdgSurface, 0, 0, fUnitWidth,
+                                    fUnitHeight);
 }
 
 
@@ -903,24 +981,41 @@ void WaylandDisplay::HandleConfigure(uint32_t serial)
     fMaximized = fConfigureMaximized;
     fDecorator.SetActive(fConfigureActivated);
     Layout();
-
-    bool resized = false;
-    if (fWindowResizable && fConfigureWidth > 0 && fConfigureHeight > 0) {
-        /* not every compositor keeps to the minimum size */
-        int width = std::max(fConfigureWidth - (fWindowWidth - fWidth),
-                             kMinContentSize);
-        int height = std::max(fConfigureHeight - (fWindowHeight - fHeight),
-                              kMinContentSize);
-        if (width != fWidth || height != fHeight) {
-            fWidth = width;
-            fHeight = height;
-            resized = true;
-            Layout();
-        }
-    }
+    bool resized = FitToConfigure();
     SetSizeLimits();
     UpdatePointerPart();
     /* the acknowledgement takes effect with the next commit */
+    fWindowDirty = ScreenRect(0, 0, fWindowWidth, fWindowHeight);
+    if (resized)
+        TellSourceSize();
+    Redraw();
+}
+
+
+/* The window is drawn for a new scale: the frame's metrics and the
+   cursors follow it, the content stays pixel for pixel. */
+void WaylandDisplay::HandleScale(int value)
+{
+    WindowScale scale(value);
+    if (scale == fScale)
+        return;
+    fScale = scale;
+    fDecorator.SetScale(scale);
+    if (fTitleFontOpen) {
+        fTitleFont.SetSize(fScale.Metric(kTitleFontSize));
+        fDecorator.SetFont(&fTitleFont);
+    }
+    /* the content keeps its size in pixels, so the size asked for in units
+       no longer holds unless the window fills its place */
+    if (!fMaximized && !fFullscreen)
+        fConfigureWidth = fConfigureHeight = 0;
+    Layout();
+    bool resized = FitToConfigure();
+    SetSizeLimits();
+    SetHostCursor();
+    DrawFrameCursor();
+    if (fCursorKind == kCursorFrame)
+        ShowHostCursor();
     fWindowDirty = ScreenRect(0, 0, fWindowWidth, fWindowHeight);
     if (resized)
         TellSourceSize();
@@ -941,24 +1036,63 @@ void WaylandDisplay::TellSourceSize()
 }
 
 
+/* Draws a cursor image, straight alpha unless 'premultiplied', into a
+   buffer of 'cursor', where the compositor shows it pixel for pixel; false
+   while no buffer is free. */
+bool WaylandDisplay::DrawCursor(CursorSurface &cursor, const uint32_t *pixels,
+                                int width, int height, int hot_x, int hot_y,
+                                bool premultiplied)
+{
+    int x, y, buffer_width, buffer_height;
+    fScale.PlaceCursor(width, hot_x, x, buffer_width, cursor.width,
+                       cursor.hot_x);
+    fScale.PlaceCursor(height, hot_y, y, buffer_height, cursor.height,
+                       cursor.hot_y);
+    /* the old buffer may go when the size changes */
+    cursor.buffer = nullptr;
+    WindowBuffer *buffer = cursor.buffers->Acquire(buffer_width,
+                                                   buffer_height);
+    if (buffer == nullptr)
+        return false;
+
+    int pitch = buffer->pitch;
+    std::fill_n(buffer->pixels, (size_t)pitch * buffer_height, 0);
+    for (int row = 0; row < height; row++) {
+        const uint32_t *src = pixels + row * width;
+        uint32_t *dst = buffer->pixels + (y + row) * pitch + x;
+        for (int col = 0; col < width; col++)
+            dst[col] = premultiplied ? src[col] : premultiply(src[col]);
+    }
+    cursor.buffer = buffer;
+    return true;
+}
+
+
+/* The window's own cursor, drawn again for each scale. */
+void WaylandDisplay::DrawFrameCursor()
+{
+    /* the one buffer may still be shown */
+    fFrameCursor.buffers = std::make_unique<BufferRing>(*fShmAllocator, 1,
+                                                        nullptr);
+    const FrameCursor &image = fFrameCursorImage;
+    DrawCursor(fFrameCursor, image.pixels.data(), image.width, image.height,
+               image.hot_x, image.hot_y, true);
+}
+
+
 /* The guest's cursor image: shown natively, or none. None is the cursor
    surface without a buffer rather than no cursor surface, which WSLg
    answers by keeping the last image. */
 void WaylandDisplay::SetHostCursor()
 {
     fHostCursorPending = false;
-    /* the old buffer may go when the size changes */
-    fCursorBuffer = nullptr;
-    if (!fHostCursor.empty()) {
-        WindowBuffer *buffer = fCursorBuffers->Acquire(fHostCursorWidth,
-                                                       fHostCursorHeight);
-        if (buffer == nullptr) {
-            fHostCursorPending = true;
-            return;
-        }
-        for (size_t i = 0; i < fHostCursor.size(); i++)
-            buffer->pixels[i] = premultiply(fHostCursor[i]);
-        fCursorBuffer = buffer;
+    fGuestCursor.buffer = nullptr;
+    if (!fHostCursor.empty() &&
+        !DrawCursor(fGuestCursor, fHostCursor.data(), fHostCursorWidth,
+                    fHostCursorHeight, fHostCursorHotX, fHostCursorHotY,
+                    false)) {
+        fHostCursorPending = true;
+        return;
     }
     if (fCursorKind == kCursorGuest)
         ShowHostCursor();
@@ -971,57 +1105,60 @@ void WaylandDisplay::ShowHostCursor()
     if (fPointerDevice == nullptr || !fPointerInside)
         return;
 
-    wl_surface *surface;
-    BufferRing *ring;
-    WindowBuffer *buffer;
-    int hot_x, hot_y;
-    if (fCursorKind == kCursorGuest) {
-        surface = fCursorSurface;
-        ring = fCursorBuffers.get();
-        buffer = fCursorBuffer;
-        hot_x = fHostCursorHotX;
-        hot_y = fHostCursorHotY;
-    } else {
-        surface = fFrameCursor.surface;
-        ring = fFrameCursor.buffers.get();
-        buffer = fFrameCursor.buffer;
-        hot_x = fFrameCursor.hot_x;
-        hot_y = fFrameCursor.hot_y;
-    }
+    CursorSurface &cursor = fCursorKind == kCursorGuest ? fGuestCursor :
+                                                          fFrameCursor;
+    WindowBuffer *buffer = cursor.buffer;
     if (buffer == nullptr) {
         /* A cursor surface without a buffer hides the cursor; WSLg hides it
            only once the surface that showed it is destroyed. */
-        if (fShownCursorSurface != nullptr) {
-            ReplaceCursorSurface(fShownCursorSurface);
-            fShownCursorSurface = nullptr;
+        if (fShownCursor != nullptr) {
+            ReplaceCursorSurface(*fShownCursor);
+            fShownCursor = nullptr;
         }
-        wl_pointer_set_cursor(fPointerDevice, fEnterSerial, fCursorSurface,
-                              0, 0);
+        wl_pointer_set_cursor(fPointerDevice, fEnterSerial,
+                              fGuestCursor.surface, 0, 0);
         return;
     }
-    wl_pointer_set_cursor(fPointerDevice, fEnterSerial, surface, hot_x,
-                          hot_y);
+    wl_pointer_set_cursor(fPointerDevice, fEnterSerial, cursor.surface,
+                          cursor.hot_x, cursor.hot_y);
     /* WSLg takes the image from a commit made after the surface became the
        cursor, not from one made before */
-    wl_surface_attach(surface, buffer->buffer, 0, 0);
-    damage_buffer(surface, fCompositorVersion,
+    wl_surface_attach(cursor.surface, buffer->buffer, 0, 0);
+    if (fViewport != nullptr) {
+        if (cursor.viewport == nullptr) {
+            cursor.viewport = wp_viewporter_get_viewport(fViewporter,
+                                                         cursor.surface);
+        }
+        wp_viewport_set_destination(cursor.viewport, cursor.width,
+                                    cursor.height);
+    }
+    damage_buffer(cursor.surface, fCompositorVersion,
                   ScreenRect(0, 0, buffer->width, buffer->height));
-    wl_surface_commit(surface);
-    ring->Attached(buffer);
-    fShownCursorSurface = surface;
+    wl_surface_commit(cursor.surface);
+    cursor.buffers->Attached(buffer);
+    fShownCursor = &cursor;
 }
 
 
-/* A new surface in place of 'old', one of the cursor surfaces. */
-void WaylandDisplay::ReplaceCursorSurface(wl_surface *old)
+/* A new surface in place of the cursor's. */
+void WaylandDisplay::ReplaceCursorSurface(CursorSurface &cursor)
 {
-    for (wl_surface **surface : {&fCursorSurface, &fFrameCursor.surface}) {
-        if (*surface == old) {
-            wl_surface_destroy(old);
-            *surface = wl_compositor_create_surface(fCompositor);
-            return;
-        }
+    if (cursor.viewport != nullptr) {
+        wp_viewport_destroy(cursor.viewport);
+        cursor.viewport = nullptr;
     }
+    wl_surface_destroy(cursor.surface);
+    cursor.surface = wl_compositor_create_surface(fCompositor);
+}
+
+
+void WaylandDisplay::DestroyCursorSurface(CursorSurface &cursor)
+{
+    cursor.buffers.reset();
+    if (cursor.viewport != nullptr)
+        wp_viewport_destroy(cursor.viewport);
+    if (cursor.surface != nullptr)
+        wl_surface_destroy(cursor.surface);
 }
 
 
@@ -1098,8 +1235,8 @@ void WaylandDisplay::HandlePointerEnter(uint32_t serial, wl_fixed_t x,
 {
     fPointerInside = true;
     fEnterSerial = serial;
-    fPointerX = wl_fixed_to_int(x);
-    fPointerY = wl_fixed_to_int(y);
+    fPointerX = fScale.ToPixel(wl_fixed_to_double(x));
+    fPointerY = fScale.ToPixel(wl_fixed_to_double(y));
     fHaveLastPos = false;
     UpdatePointerPart();
     ShowHostCursor();
@@ -1126,8 +1263,8 @@ void WaylandDisplay::HandlePointerLeave()
 
 void WaylandDisplay::HandlePointerMotion(wl_fixed_t x, wl_fixed_t y)
 {
-    fPointerX = wl_fixed_to_int(x);
-    fPointerY = wl_fixed_to_int(y);
+    fPointerX = fScale.ToPixel(wl_fixed_to_double(x));
+    fPointerY = fScale.ToPixel(wl_fixed_to_double(y));
 
     if (fCloseTracking) {
         SetClosePressed(fDecorator.HitTest(fPointerX, fPointerY) ==
@@ -1135,8 +1272,9 @@ void WaylandDisplay::HandlePointerMotion(wl_fixed_t x, wl_fixed_t y)
         return;
     }
     if (fDragPending) {
-        if (abs(fPointerX - fDragX) >= kDragDistance ||
-            abs(fPointerY - fDragY) >= kDragDistance) {
+        int distance = fScale.Metric(kDragDistance);
+        if (abs(fPointerX - fDragX) >= distance ||
+            abs(fPointerY - fDragY) >= distance) {
             fDragPending = false;
             xdg_toplevel_move(fToplevel, fSeat, fDragSerial);
         }
@@ -1189,6 +1327,8 @@ void WaylandDisplay::HandlePointerButton(uint32_t serial, uint32_t time,
 /* The left button went down on the frame. */
 void WaylandDisplay::PressFrame(uint32_t serial, uint32_t time)
 {
+    int distance = fScale.Metric(kDoubleClickDistance);
+
     switch (fPointerPart) {
     case BeDecorator::kClose:
         fCloseTracking = true;
@@ -1202,8 +1342,8 @@ void WaylandDisplay::PressFrame(uint32_t serial, uint32_t time)
 
     case BeDecorator::kMove:
         if (fHaveLastClick && time - fLastClickTime < kDoubleClickMs &&
-            abs(fPointerX - fLastClickX) <= kDoubleClickDistance &&
-            abs(fPointerY - fLastClickY) <= kDoubleClickDistance) {
+            abs(fPointerX - fLastClickX) <= distance &&
+            abs(fPointerY - fLastClickY) <= distance) {
             fHaveLastClick = false;
             if (fCanMinimize)
                 xdg_toplevel_set_minimized(fToplevel);
@@ -1376,6 +1516,15 @@ WaylandDisplay::kDecorationListener = {
 };
 
 
+const wp_fractional_scale_v1_listener
+WaylandDisplay::kFractionalScaleListener = {
+    .preferred_scale = [](void *data, wp_fractional_scale_v1 *,
+                          uint32_t scale) {
+        static_cast<WaylandDisplay *>(data)->HandleScale(scale);
+    },
+};
+
+
 const wl_callback_listener WaylandDisplay::kFrameListener = {
     .done = [](void *data, wl_callback *, uint32_t) {
         static_cast<WaylandDisplay *>(data)->HandleFrameDone();
@@ -1498,6 +1647,14 @@ void WaylandDisplay::HandleGlobal(wl_registry *registry, uint32_t name,
         fDecorationManager = static_cast<zxdg_decoration_manager_v1 *>(
             wl_registry_bind(registry, name,
                              &zxdg_decoration_manager_v1_interface, 1));
+    } else if (strcmp(interface, wp_viewporter_interface.name) == 0) {
+        fViewporter = static_cast<wp_viewporter *>(wl_registry_bind(
+            registry, name, &wp_viewporter_interface, 1));
+    } else if (strcmp(interface,
+                      wp_fractional_scale_manager_v1_interface.name) == 0) {
+        fFractionalScaleManager =
+            static_cast<wp_fractional_scale_manager_v1 *>(wl_registry_bind(
+                registry, name, &wp_fractional_scale_manager_v1_interface, 1));
     } else if (strcmp(interface, wl_seat_interface.name) == 0 &&
                fSeat == nullptr) {
         fSeatVersion = std::min(version, 8u);

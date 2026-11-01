@@ -63,6 +63,8 @@ public:
     /* The best match for a fontconfig 'pattern' such as "sans-serif:bold",
        'size' pixels high; false when there is none. */
     bool Open(const char *pattern, int size);
+    /* The open font 'size' pixels high from now on. */
+    bool SetSize(int size);
 
     /* as a font reports its height: the design's, scaled, not rounded */
     float Ascent() const;

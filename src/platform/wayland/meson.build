@@ -3,11 +3,13 @@
 
 wayland_scanner = find_program(
   dependency('wayland-scanner', native: true).get_variable('wayland_scanner'))
-wayland_protocols_dir = dependency('wayland-protocols') \
+wayland_protocols_dir = dependency('wayland-protocols', version: '>= 1.31') \
   .get_variable('pkgdatadir')
 
 wayland_protocols = [
   'stable/xdg-shell/xdg-shell.xml',
+  'stable/viewporter/viewporter.xml',
+  'staging/fractional-scale/fractional-scale-v1.xml',
   'unstable/xdg-decoration/xdg-decoration-unstable-v1.xml',
 ]
 wayland_sources = files('be_decorator.cpp', 'title_font.cpp',

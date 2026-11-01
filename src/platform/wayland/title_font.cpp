@@ -63,12 +63,19 @@ bool TitleFont::Open(const char *pattern, int size)
         found = FT_Init_FreeType(&fLibrary) == 0 &&
                 FT_New_Face(fLibrary, reinterpret_cast<const char *>(file),
                             index, &fFace) == 0 &&
-                FT_Set_Pixel_Sizes(fFace, 0, size) == 0;
+                SetSize(size);
     }
     FcPatternDestroy(match);
-    if (!found)
+    return found;
+}
+
+
+bool TitleFont::SetSize(int size)
+{
+    if (FT_Set_Pixel_Sizes(fFace, 0, size) != 0)
         return false;
     fSize = size;
+    fGlyphs.clear();
     return true;
 }
 
