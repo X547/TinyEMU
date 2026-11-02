@@ -501,6 +501,61 @@ TEST(usb, unknown_requests)
     }
 }
 
+/* A device of several functions (USB 2.0 5.2.3, 9.6.5): their interfaces
+   numbered without a gap, endpoints of their own, and a class request
+   reaching only the interface it names. Mass storage and HID are the
+   classes looked for. */
+TEST(usb, composite)
+{
+    int n = all_devices();
+    uint8_t *buf = (uint8_t *)usb_alloc(64);
+    int found = 0;
+    for (int i = 0; i < n; i++) {
+        UsbDevice &d = sDevs[i];
+        int storage = -1, hid = -1, count = 0;
+        for (int k = 0; usb_find_interface(&d, k) != nullptr; k++) {
+            const uint8_t *id = usb_find_interface(&d, k);
+            EXPECT_EQ(id[2], count);
+            count++;
+            if (id[5] == USB_CLASS_STORAGE)
+                storage = id[2];
+            if (id[5] == USB_CLASS_HID)
+                hid = id[2];
+        }
+        if (storage < 0 || hid < 0)
+            continue;
+        found++;
+        snap_bytes(d, "device", d.desc, 18);
+        snap_bytes(d, "config", d.config, d.config_len);
+        snap_dev(d, "speed", "%u", d.speed);
+
+        /* no endpoint number twice */
+        UsbEndpoint eps[USB_MAX_EPS];
+        int m = endpoints(d, eps, USB_MAX_EPS);
+        for (int a = 0; a < m; a++) {
+            for (int b = a + 1; b < m; b++)
+                EXPECT_NE(eps[a].address, eps[b].address);
+        }
+        ASSERT_EQ(d.Configure(), (uint32_t)CC_SUCCESS);
+
+        /* Get Max LUN (BOT 3.2) at the storage interface only */
+        EXPECT_EQ(req(d, USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
+                      0xfe, 0, storage, 1, buf), (uint32_t)CC_SUCCESS);
+        EXPECT_EQ(req(d, USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
+                      0xfe, 0, hid, 1, buf), (uint32_t)CC_STALL);
+        /* and Get_Protocol (HID 7.2.5) at the HID one only */
+        EXPECT_EQ(req(d, USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
+                      0x03, 0, hid, 1, buf), (uint32_t)CC_SUCCESS);
+        EXPECT_EQ(req(d, USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
+                      0x03, 0, storage, 1, buf), (uint32_t)CC_STALL);
+        /* a class request to the device names no function */
+        EXPECT_EQ(req(d, USB_DIR_IN | USB_TYPE_CLASS,
+                      0x03, 0, 0, 1, buf), (uint32_t)CC_STALL);
+    }
+    if (found == 0)
+        t_skip("no device of both classes");
+}
+
 /* A port reset puts the device back in the Default state (9.1.1.3): it
    answers at address 0 again with its configuration gone. */
 TEST(usb, bus_reset)

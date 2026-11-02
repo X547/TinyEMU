@@ -91,6 +91,60 @@ void snap_hex(const char *key, const uint8_t *p, uint32_t len)
     t_snap(key, "%s", hex);
 }
 
+/* The report ID item each top-level collection of a report descriptor
+   opens with, 0 for none (6.2.2.7); how many such collections there are. */
+int top_level_ids(const uint8_t *p, uint32_t len, uint8_t *ids, int max)
+{
+    int depth = 0, n = 0;
+    bool opened = false;
+    for (uint32_t off = 0; off < len;) {
+        uint8_t prefix = p[off];
+        uint32_t size = (prefix & 3) == 3 ? 4 : prefix & 3;
+        uint8_t item = prefix & 0xfc;
+        if (opened) {
+            ids[n - 1] = item == 0x84 && off + 1 < len ? p[off + 1] : 0;
+            opened = false;
+        }
+        if (item == 0xa0 && depth++ == 0 && n < max) {
+            n++;
+            opened = true;
+        } else if (item == 0xc0) {
+            depth--;
+        }
+        off += 1 + size;
+    }
+    return n;
+}
+
+/* A HID interface whose report descriptor has report IDs, on any device:
+   in one of several functions it need not be the first interface. */
+bool open_report_ids(UsbDevice *d, Function *f, int skip = 0)
+{
+    uint8_t *buf = (uint8_t *)usb_alloc(256);
+    for (int index = 0; usb_find_device(0, index, d); index++) {
+        for (int i = 0;; i++) {
+            const uint8_t *id = usb_find_interface(d, i);
+            if (id == nullptr)
+                break;
+            if (id[5] != USB_CLASS_HID)
+                continue;
+            uint32_t got = 0;
+            if (d->Control(USB_DIR_IN | USB_RECIP_INTERFACE,
+                           USB_REQ_GET_DESCRIPTOR, USB_DT_REPORT << 8, id[2],
+                           255, buf, &got) != CC_SUCCESS)
+                continue;
+            uint8_t ids[8];
+            if (top_level_ids(buf, got, ids, 8) < 2 || skip-- > 0)
+                continue;
+            f->iface = id;
+            f->hid = id + id[0];
+            f->boot_keyboard = id[6] == 1 && id[7] == 1;
+            return d->FindEndpoint(i, 0, &f->ep);
+        }
+    }
+    return false;
+}
+
 }
 
 TEST(hid, descriptors)
@@ -423,4 +477,160 @@ TEST(hid, halted_endpoint)
     ASSERT_TRUE(d.Recover(dci));
     EXPECT_EQ(d.Transfer(dci, buf, ep.max_packet, nullptr, 20000),
               (uint32_t)CC_TIMEOUT);
+}
+
+/* Several top-level collections in one report descriptor, each opening
+   with its report ID (6.2.2.7), numbered from 1. Every report then starts
+   with its ID: Get_Report and Set_Report name it in wValue's low byte
+   (7.2.1, 7.2.2), and 0 is no report at all. */
+TEST(hid, report_ids)
+{
+    UsbDevice d;
+    Function f;
+    uint8_t *buf = (uint8_t *)usb_alloc(256);
+    int k = 0;
+    for (; open_report_ids(&d, &f, k); k++) {
+        uint8_t ifn = f.iface[2];
+        uint32_t got;
+        char key[32];
+        ASSERT_EQ(d.Configure(), (uint32_t)CC_SUCCESS);
+        ASSERT_EQ(req(d, USB_DIR_IN | USB_RECIP_INTERFACE,
+                      USB_REQ_GET_DESCRIPTOR, USB_DT_REPORT << 8, ifn, 255,
+                      buf, &got), (uint32_t)CC_SUCCESS);
+        uint8_t ids[8];
+        int n = top_level_ids(buf, got, ids, 8);
+        for (int i = 0; i < n; i++)
+            EXPECT_EQ(ids[i], i + 1);
+        snprintf(key, sizeof(key), "d%d.report", k);
+        snap_hex(key, buf, got);
+        snprintf(key, sizeof(key), "d%d.interface", k);
+        SNAP(key, "%u/%u/%u %#x %u %u", f.iface[5], f.iface[6], f.iface[7],
+             f.ep.address, f.ep.max_packet, f.ep.interval);
+
+        for (int id = 1; id <= n; id++) {
+            memset(buf, 0xee, 64);
+            ASSERT_EQ(req(d, HID_IN, HID_GET_REPORT, HID_INPUT << 8 | id, ifn,
+                          64, buf, &got), (uint32_t)CC_SUCCESS);
+            EXPECT_GE(got, 2u);
+            EXPECT_LE(got, (uint32_t)f.ep.max_packet);
+            EXPECT_EQ(buf[0], id);
+            snprintf(key, sizeof(key), "d%d.input%d", k, id);
+            snap_hex(key, buf, got);
+
+            /* an output report starts with its ID too: the keyboard's LEDs
+               read back as set */
+            buf[0] = id;
+            buf[1] = 0x05;
+            uint32_t cc = req(d, HID_OUT, HID_SET_REPORT, HID_OUTPUT << 8 | id,
+                              ifn, 2, buf);
+            snprintf(key, sizeof(key), "d%d.output%d", k, id);
+            SNAP(key, "%u", cc);
+            if (cc != CC_SUCCESS)
+                continue;
+            memset(buf, 0, 8);
+            ASSERT_EQ(req(d, HID_IN, HID_GET_REPORT, HID_OUTPUT << 8 | id, ifn,
+                          8, buf, &got), (uint32_t)CC_SUCCESS);
+            EXPECT_EQ(got, 2u);
+            EXPECT_EQ(buf[0], id);
+            EXPECT_EQ(buf[1], 0x05);
+            /* not one whose first byte names another report */
+            buf[0] = id + 1;
+            EXPECT_EQ(req(d, HID_OUT, HID_SET_REPORT, HID_OUTPUT << 8 | id,
+                          ifn, 2, buf), (uint32_t)CC_STALL);
+        }
+        EXPECT_EQ(req(d, HID_IN, HID_GET_REPORT, HID_INPUT << 8, ifn, 64,
+                      buf), (uint32_t)CC_STALL);
+        EXPECT_EQ(req(d, HID_IN, HID_GET_REPORT, HID_INPUT << 8 | (n + 1),
+                      ifn, 64, buf), (uint32_t)CC_STALL);
+    }
+    if (k == 0)
+        t_skip("no HID device with report IDs");
+}
+
+/* The idle rate is per report ID, and ID 0 sets them all (7.2.4). A report
+   the period runs out on goes out with its ID. */
+TEST(hid, report_id_idle)
+{
+    UsbDevice d;
+    Function f;
+    if (!open_report_ids(&d, &f))
+        t_skip("no HID device with report IDs");
+    ASSERT_EQ(d.Configure(), (uint32_t)CC_SUCCESS);
+    uint8_t ifn = f.iface[2];
+    uint8_t *buf = (uint8_t *)usb_alloc(64);
+    ASSERT_EQ(req(d, HID_OUT, HID_SET_IDLE, 10 << 8 | 2, ifn),
+              (uint32_t)CC_SUCCESS);
+    ASSERT_EQ(req(d, HID_IN, HID_GET_IDLE, 2, ifn, 1, buf),
+              (uint32_t)CC_SUCCESS);
+    EXPECT_EQ(buf[0], 10);
+    ASSERT_EQ(req(d, HID_IN, HID_GET_IDLE, 1, ifn, 1, buf),
+              (uint32_t)CC_SUCCESS);
+    EXPECT_EQ(buf[0], 0);
+    ASSERT_EQ(req(d, HID_OUT, HID_SET_IDLE, 3 << 8, ifn),
+              (uint32_t)CC_SUCCESS);
+    for (int id = 1; id <= 2; id++) {
+        ASSERT_EQ(req(d, HID_IN, HID_GET_IDLE, id, ifn, 1, buf),
+                  (uint32_t)CC_SUCCESS);
+        EXPECT_EQ(buf[0], 3);
+    }
+    /* an ID it does not have */
+    EXPECT_EQ(req(d, HID_OUT, HID_SET_IDLE, 3 << 8 | 9, ifn),
+              (uint32_t)CC_STALL);
+    EXPECT_EQ(req(d, HID_IN, HID_GET_IDLE, 9, ifn, 1, buf),
+              (uint32_t)CC_STALL);
+
+    /* only report 2 repeats */
+    ASSERT_EQ(req(d, HID_OUT, HID_SET_IDLE, 0, ifn), (uint32_t)CC_SUCCESS);
+    ASSERT_EQ(req(d, HID_OUT, HID_SET_IDLE, 4 << 8 | 2, ifn),
+              (uint32_t)CC_SUCCESS);
+    int dci = usb_dci(f.ep.address);
+    for (int i = 0; i < 2; i++) {
+        uint32_t got = 0;
+        uint32_t cc = d.Transfer(dci, buf, f.ep.max_packet, &got, 1000000);
+        EXPECT_TRUE(cc == CC_SUCCESS || cc == CC_SHORT_PACKET);
+        EXPECT_GE(got, 1u);
+        EXPECT_EQ(buf[0], 2);
+    }
+    ASSERT_EQ(req(d, HID_OUT, HID_SET_IDLE, 0, ifn), (uint32_t)CC_SUCCESS);
+}
+
+/* The boot protocol has no report IDs (B.1): with the keyboard the only
+   collection with a boot format, its 8 byte report is all there is. */
+TEST(hid, report_id_boot)
+{
+    UsbDevice d;
+    Function f;
+    if (!open_report_ids(&d, &f))
+        t_skip("no HID device with report IDs");
+    if (!f.boot_keyboard)
+        t_skip("not a boot keyboard");
+    ASSERT_EQ(d.Configure(), (uint32_t)CC_SUCCESS);
+    uint8_t ifn = f.iface[2];
+    uint8_t *buf = (uint8_t *)usb_alloc(64);
+    uint32_t got;
+    ASSERT_EQ(req(d, HID_OUT, HID_SET_PROTOCOL, 0, ifn), (uint32_t)CC_SUCCESS);
+    ASSERT_EQ(req(d, HID_IN, HID_GET_REPORT, HID_INPUT << 8, ifn, 64, buf,
+                  &got), (uint32_t)CC_SUCCESS);
+    EXPECT_EQ(got, 8u);
+    EXPECT_EQ(req(d, HID_IN, HID_GET_REPORT, HID_INPUT << 8 | 1, ifn, 64,
+                  buf), (uint32_t)CC_STALL);
+    /* the LEDs as one byte */
+    buf[0] = 0x02;
+    EXPECT_EQ(req(d, HID_OUT, HID_SET_REPORT, HID_OUTPUT << 8, ifn, 1, buf),
+              (uint32_t)CC_SUCCESS);
+    /* the interrupt endpoint carries the boot report only */
+    ASSERT_EQ(req(d, HID_OUT, HID_SET_IDLE, 4 << 8, ifn),
+              (uint32_t)CC_SUCCESS);
+    int dci = usb_dci(f.ep.address);
+    for (int i = 0; i < 2; i++) {
+        got = 0;
+        uint32_t cc = d.Transfer(dci, buf, f.ep.max_packet, &got, 1000000);
+        EXPECT_TRUE(cc == CC_SUCCESS || cc == CC_SHORT_PACKET);
+        EXPECT_EQ(got, 8u);
+    }
+    ASSERT_EQ(req(d, HID_OUT, HID_SET_IDLE, 0, ifn), (uint32_t)CC_SUCCESS);
+    ASSERT_EQ(req(d, HID_OUT, HID_SET_PROTOCOL, 1, ifn), (uint32_t)CC_SUCCESS);
+    ASSERT_EQ(req(d, HID_IN, HID_GET_REPORT, HID_INPUT << 8 | 1, ifn, 64, buf,
+                  &got), (uint32_t)CC_SUCCESS);
+    EXPECT_EQ(buf[0], 1);
 }
