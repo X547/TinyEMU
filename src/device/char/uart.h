@@ -24,8 +24,8 @@
 #define UART_PC_COM1_PORT 0x3f8
 #define UART_PC_COM1_IRQ  4
 
-/* The input clocks: the PC's 1.8432 MHz crystal, and what the device tree
-   node gives. */
+/* The input clocks: the PC's 1.8432 MHz crystal, which a PCI serial port has
+   too, and what the device tree node gives. */
 #define UART_PC_CLOCK_HZ  1843200
 #define UART_FDT_CLOCK_HZ 3686400
 
@@ -142,9 +142,9 @@ private:
 
 public:
     /* 'output' may be null, which discards what the guest transmits, and
-       'timer' too, which leaves out the character timeout. */
-    SerialState(PhysMemoryMap *port_map, int addr, IRQSignal *irq,
-                HostConsole *output, uint32_t clock_hz,
+       'timer' too, which leaves out the character timeout. The owner maps
+       fIo where the registers go. */
+    SerialState(IRQSignal *irq, HostConsole *output, uint32_t clock_hz,
                 std::unique_ptr<HostTimer> timer);
 
     uint32_t Read(uint32_t offset, int size_log2);

@@ -10,11 +10,11 @@
 #include "devices.h"
 #include "fdt.h"
 #include "host_time.h"
+#include "pci.h"
 
 
-SerialState::SerialState(PhysMemoryMap *port_map, int addr, IRQSignal *irq,
-                         HostConsole *output, uint32_t clock_hz,
-                         std::unique_ptr<HostTimer> timer):
+SerialState::SerialState(IRQSignal *irq, HostConsole *output,
+                         uint32_t clock_hz, std::unique_ptr<HostTimer> timer):
     fClockHz(clock_hz),
     fIrq(irq),
     fOutput(output),
@@ -22,7 +22,6 @@ SerialState::SerialState(PhysMemoryMap *port_map, int addr, IRQSignal *irq,
 {
     if (fTimer != nullptr)
         fTimer->target = this;
-    port_map->RegisterDevice(addr, 8, &fIo, DEVIO_SIZE8);
 }
 
 
@@ -343,7 +342,14 @@ uint32_t SerialState::Read(uint32_t offset, int size_log2)
 
 //#pragma mark - UartDevice
 
-class UartDevice final: public Device {
+/* On PCI, a 16550 behind one I/O BAR with the serial controller class, under
+   Red Hat's identifiers for exactly that, which drivers know. */
+#define UART_PCI_VENDOR_ID 0x1b36
+#define UART_PCI_DEVICE_ID 0x0002
+#define UART_PCI_CLASS     0x0700
+#define UART_PCI_PROG_16550 0x02
+
+class UartDevice final: public Device, public PCIBarTarget {
 private:
     DeviceContext *fCtx;
     /* The port and line the configuration asked for, or -1 for whatever the
@@ -356,6 +362,36 @@ private:
     SerialState *fSerial = nullptr;
     Resource *fRegs = nullptr;
     Resource *fIrq = nullptr;
+    PCIDevice *fPciDev = nullptr;
+    PhysMemoryRange *fBarRange = nullptr;
+
+    bool RealizePCI(PCIBus *bus)
+    {
+        fPciDev = pci_register_device(bus, Name(), -1, UART_PCI_VENDOR_ID,
+                                      UART_PCI_DEVICE_ID, 0x01,
+                                      UART_PCI_CLASS);
+        if (fPciDev == nullptr) {
+            vm_error("%s: could not register the PCI function\n", Name());
+            return false;
+        }
+        pci_device_set_config8(fPciDev, PCI_CLASS_PROG, UART_PCI_PROG_16550);
+        pci_device_set_config8(fPciDev, PCI_INTERRUPT_PIN, 1);
+
+        PhysMemoryMap *port_map = pci_device_get_port_map(fPciDev);
+        if (port_map == nullptr) {
+            vm_error("%s: this PCI bus has no I/O port space, which is where "
+                     "a PCI 16550's registers live\n", Name());
+            return false;
+        }
+        fSerial = new SerialState(pci_device_get_irq(fPciDev, 0), fConsole,
+                                  UART_PC_CLOCK_HZ,
+                                  fCtx->platform->OpenTimer());
+        fBarRange = port_map->RegisterDevice(0, UART_PORT_SIZE, &fSerial->fIo,
+                                             DEVIO_SIZE8 | DEVIO_DISABLED);
+        pci_register_bar(fPciDev, 0, UART_PORT_SIZE, PCI_ADDRESS_SPACE_IO,
+                         this);
+        return true;
+    }
 
 public:
     UartDevice(DeviceContext *ctx, int port, int irq, HostConsole *console,
@@ -365,11 +401,28 @@ public:
 
     ~UartDevice() override {delete fSerial;}
 
+    void SetBar(int bar_num, uint64_t addr, bool enabled) override
+    {
+        (void)bar_num;
+        fBarRange->SetAddr(addr, enabled);
+    }
+
     bool Prepare() override
     {
+        if (ParentBus()->AsPCIBus() != nullptr) {
+            if (fPort >= 0 || fIrqLine >= 0) {
+                vm_error("%s: 'reg' and 'irq' are for the root bus of a "
+                         "machine that addresses its devices by port number; "
+                         "on PCI the guest places both\n", Name());
+                return false;
+            }
+            return true;
+        }
+
         SystemBus *sys = dynamic_cast<SystemBus *>(ParentBus());
         if (sys == nullptr) {
-            vm_error("%s: must be attached to a system bus\n", Name());
+            vm_error("%s: must be attached to a PCI bus or a system bus\n",
+                     Name());
             return false;
         }
 
@@ -397,18 +450,29 @@ public:
 
     bool Realize() override
     {
-        SystemBus *sys = static_cast<SystemBus *>(ParentBus());
-        IRQSignal *irq = sys->IrqSignalFor(fIrq->base);
+        PCIBus *pci_bus = ParentBus()->AsPCIBus();
 
-        if (irq == nullptr) {
-            vm_error("%s: bad interrupt line %d\n", Name(), (int)fIrq->base);
-            return false;
+        if (pci_bus != nullptr) {
+            if (!RealizePCI(pci_bus)) {
+                return false;
+            }
+        } else {
+            SystemBus *sys = static_cast<SystemBus *>(ParentBus());
+            IRQSignal *irq = sys->IrqSignalFor(fIrq->base);
+
+            if (irq == nullptr) {
+                vm_error("%s: bad interrupt line %d\n", Name(),
+                         (int)fIrq->base);
+                return false;
+            }
+            fSerial = new SerialState(irq, fConsole,
+                                      fRegs->type == RES_IO
+                                          ? UART_PC_CLOCK_HZ
+                                          : UART_FDT_CLOCK_HZ,
+                                      fCtx->platform->OpenTimer());
+            sys->RegisterMap()->RegisterDevice(fRegs->base, UART_PORT_SIZE,
+                                               &fSerial->fIo, DEVIO_SIZE8);
         }
-        fSerial = new SerialState(sys->RegisterMap(), fRegs->base, irq,
-                                  fConsole,
-                                  fRegs->type == RES_IO ? UART_PC_CLOCK_HZ
-                                                        : UART_FDT_CLOCK_HZ,
-                                  fCtx->platform->OpenTimer());
         if (fConsole != nullptr) {
             fCtx->consoles.push_back({fConsole, fSerial});
         }
@@ -417,7 +481,7 @@ public:
 
     void BuildFDT(FDTContext &ctx) override
     {
-        if (fRegs->type != RES_MMIO) {
+        if (fRegs == nullptr || fRegs->type != RES_MMIO) {
             return;
         }
         ctx.fdt->BeginNodeNum("serial", fRegs->base);
@@ -435,7 +499,7 @@ public:
 
     void BuildAML(AcpiContext &ctx) override
     {
-        if (fRegs->type != RES_IO) {
+        if (fRegs == nullptr || fRegs->type != RES_IO) {
             return;
         }
         AmlBytes r;
@@ -455,8 +519,8 @@ public:
 
 /* On a machine whose devices are addressed by port number the registers go at
    "reg" on line "irq"; on one that maps them into memory both are
-   allocated. "output" connects it on the host, as config_open_serial()
-   reads it. */
+   allocated, and on PCI the guest places them. "output" connects it on the
+   host, as config_open_serial() reads it. */
 class UartClass final: public DeviceClass {
 public:
     UartClass(): DeviceClass("ns16550a") {}

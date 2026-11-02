@@ -296,20 +296,22 @@ bus named in its comment.
 
 #### `ns16550a` — 16550A UART
 
-Placement: FDT or PC.
+Placement: FDT, PC, or PCI on a bus with I/O port space.
 
 | Property | Default | Meaning |
 | --- | --- | --- |
-| `reg` | `0x3f8` | PC only: the I/O port base. |
-| `irq` | `4` | PC only: the ISA interrupt line. |
+| `reg` | `0x3f8` | PC root bus only: the I/O port base. |
+| `irq` | `4` | PC root bus only: the ISA interrupt line. |
 | `output`, `path`, `server` | `"stdio"` | Where it is connected on the host: the terminal, nothing, a pipe or a socket; see [Serial back end](#serial-back-end-output-path-server). |
 
 On an FDT machine its registers and interrupt are allocated, and it becomes
 `/chosen/stdout-path`. On the PC it is COM1 unless `reg` and `irq` say
-otherwise.
+otherwise. On PCI it is a serial controller with a 16550 behind an 8-byte
+I/O BAR, under Red Hat's identifiers 1b36:0002 as QEMU's `pci-serial` has
+them, clocked at 1.8432 MHz.
 
 ```js
-/* fdt or pc bus */
+/* fdt, pc or pci bus */
 { type: "ns16550a" }
 
 /* pc bus: COM2, on a pipe */
