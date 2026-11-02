@@ -68,6 +68,22 @@
 #define HID_DESC_SIZE 9
 
 
+/* An interrupt endpoint's interval for a poll period in milliseconds. At full
+   speed it is in frames, so in milliseconds; at high speed it is n for a
+   period of 2^(n-1) microframes, the longest that does not exceed it. */
+static uint8_t hid_interval(USBSpeedEnum speed, int ms)
+{
+    if (speed != USB_SPEED_HIGH) {
+        return ms;
+    }
+    int n = 1;
+    while (n < 16 && (1 << n) <= ms * 8) {
+        n++;
+    }
+    return n;
+}
+
+
 //#pragma mark - USBHID
 
 /* One USB interface per HID function, each with an interrupt IN endpoint
@@ -110,6 +126,8 @@ public:
     USBHID(std::unique_ptr<HostTimer> timer);
 
     USBFunctionInfo Info() const override;
+    bool SupportsSpeed(USBSpeedEnum speed) const override
+        {return speed == USB_SPEED_FULL || speed == USB_SPEED_HIGH;}
     int InterfaceCount() const override {return fFunctionCount;}
     int EndpointCount() const override {return fFunctionCount;}
     void BuildDescriptors(USBDescBuilder &b) override;
@@ -188,11 +206,9 @@ void USBHID::BuildDescriptors(USBDescBuilder &b)
         memcpy(fFunctions[i].hid_desc, b.Data() + b.DescriptorOffset(),
                HID_DESC_SIZE);
 
-        /* the input report endpoint. At full speed the interval is in
-           frames, so in milliseconds. */
         b.Endpoint(USB_DIR_IN | (FirstEndpoint() + i),
                    USB_ENDPOINT_ATTR_INTERRUPT, dev->InputReportSize(),
-                   dev->PollInterval());
+                   hid_interval(Speed(), dev->PollInterval()));
     }
 }
 
@@ -285,8 +301,7 @@ bool USBHID::AttachDevice(HIDDevice *dev, int index)
     fFunctions[index].dev = dev;
     fFunctionCount = index + 1;
     dev->SetTransport(this, index);
-    DescriptorsChanged();
-    return true;
+    return DescriptorsChanged();
 }
 
 

@@ -636,8 +636,7 @@ bool USBAudio::AttachOutput(USBAudioOutput *out)
     }
     out->SetIndex(fOutputs.size());
     fOutputs.push_back(out);
-    DescriptorsChanged();
-    return true;
+    return DescriptorsChanged();
 }
 
 

@@ -29,8 +29,11 @@
 #include "usb.h"
 #include "usb_desc.h"
 
-/* What every device here reports, unless a function says otherwise. */
+/* What every device here reports. */
 #define USB_VENDOR_ID 0x46f4 /* not one any driver carries a quirk for */
+
+/* A device of several functions, rather than of one. */
+#define USB_COMPOSITE_PRODUCT_ID 0x0006
 
 
 class USBFunctionDevice;
@@ -39,7 +42,7 @@ class USBFunctionDevice;
    configuration's attributes and power, and how a device carrying only this
    function describes itself. */
 struct USBFunctionInfo {
-    USBSpeedEnum speed = USB_SPEED_FULL;
+    USBSpeedEnum speed = USB_SPEED_FULL; /* the one it runs at alone */
     uint16_t product_id = 0;
     const char *product = nullptr;
     const char *serial = nullptr;
@@ -65,13 +68,17 @@ protected:
     uint8_t FirstInterface() const {return fFirstInterface;}
     uint8_t FirstEndpoint() const {return fFirstEndpoint;}
 
+    /* The speed the device runs at, which the descriptors are built for. */
+    USBSpeedEnum Speed() const;
+
     /* The endpoint halt state is the device's, as are the descriptors. */
     void HaltEndpoint(uint8_t address, bool wedge = false);
     void UnwedgeEndpoints();
 
     /* The interfaces or endpoints changed, so the configuration has to be
-       assembled again. Only valid before the guest runs. */
-    void DescriptorsChanged();
+       assembled again; false when the device has no room for them. Only
+       valid before the guest runs. */
+    bool DescriptorsChanged();
 
 public:
     USBFunction(const char *name): fName(name) {}
@@ -80,6 +87,11 @@ public:
     const char *Name() const {return fName;}
 
     virtual USBFunctionInfo Info() const = 0;
+
+    /* Whether the function can run at a speed other than its own, as it has
+       to in a device with functions that cannot. */
+    virtual bool SupportsSpeed(USBSpeedEnum speed) const
+        {return speed == Info().speed;}
 
     /* How many interface numbers and endpoint numbers the function takes.
        An endpoint number counts once for both directions. */
@@ -108,7 +120,12 @@ public:
 
 
 /* A USB device made of functions. It answers the standard requests, and
-   sends the rest to the function whose interface or endpoint they name. */
+   sends the rest to the function whose interface or endpoint they name.
+
+   A device with one function describes itself as that function would. One
+   with several is a composite device, and a function among them with more
+   than one interface gets an interface association descriptor to keep those
+   together. */
 class USBFunctionDevice final: public USBDevice {
 private:
     std::vector<USBFunction *> fFunctions;
@@ -117,14 +134,22 @@ private:
 
     USBFunction *FunctionForInterface(int iface);
     USBFunction *FunctionForEndpoint(int endpoint);
+    bool ChooseSpeed();
 
 protected:
     bool SetInterface(int iface, int alt) override;
 
 public:
-    USBFunctionDevice(USBFunction *fn);
+    USBFunctionDevice(const char *name);
 
-    void Rebuild();
+    /* Every function is added before Finalize(), which picks the speed and
+       assembles the descriptors. */
+    void AddFunction(USBFunction *fn);
+    bool Finalize();
+
+    /* Assemble the descriptors again; false when the functions no longer
+       fit. */
+    bool Rebuild();
 
     using USBDevice::HaltEndpoint;
     using USBDevice::UnwedgeEndpoints;
@@ -135,12 +160,29 @@ public:
 };
 
 
-/* Attaches one USB function to the bus it was declared on, with a device of
-   its own around it. */
+/* The bus a usb-device provides: its functions, in the order they are
+   declared. */
+class USBFunctionBus final: public Bus {
+private:
+    USBFunctionDevice *fDev;
+
+public:
+    USBFunctionBus(Device *owner, USBFunctionDevice *dev):
+        Bus(owner), fDev(dev) {}
+
+    const char *Type() const override {return "usb-function";}
+    USBFunctionDevice *Dev() const {return fDev;}
+
+    bool AssignResources(Device *dev) override;
+};
+
+
+/* Attaches one USB function to the bus it was declared on: a usb-device's,
+   or a USB bus, where it gets a device of its own. */
 class USBFunctionNode: public Device {
 private:
     USBFunction *fFunction;
-    USBFunctionDevice *fDev;
+    USBFunctionDevice *fDev = nullptr; /* the one of its own */
     Bus *fChildBus = nullptr;
     int fPort; /* 0 asks for the first free port */
 
@@ -151,6 +193,7 @@ public:
     /* Takes ownership, as USBDeviceNode::SetChildBus() does. */
     void SetChildBus(Bus *bus) {fChildBus = bus;}
 
+    bool Prepare() override;
     bool Realize() override;
     Bus *ChildBus() override {return fChildBus;}
 };

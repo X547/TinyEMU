@@ -46,6 +46,7 @@
 #define USB_DT_ENDPOINT             0x05
 #define USB_DT_DEVICE_QUALIFIER     0x06
 #define USB_DT_OTHER_SPEED_CONFIG   0x07
+#define USB_DT_IAD                  0x0b
 #define USB_DT_BOS                  0x0f
 #define USB_DT_HUB                  0x29
 
@@ -85,6 +86,12 @@
 #define USB_CLASS_HID               0x03
 #define USB_CLASS_HUB               0x09
 #define USB_CLASS_MASS_STORAGE      0x08
+#define USB_CLASS_MISC              0xef
+
+/* The device class, subclass and protocol of a device whose functions carry
+   interface association descriptors. */
+#define USB_MISC_SUBCLASS_COMMON    0x02
+#define USB_MISC_PROTOCOL_IAD       0x01
 
 
 typedef enum {
@@ -212,6 +219,10 @@ protected:
        endpoints, with wTotalLength already correct. */
     void SetDescriptors(const uint8_t *device_desc, const uint8_t *config_desc);
     void SetStringDescriptor(int index, const char *str);
+
+    /* For a device that learns its speed only after it was made; before it
+       is attached to a port. */
+    void SetSpeed(USBSpeedEnum speed) {fSpeed = speed;}
 
     /* Answer one standard device request from those descriptors. A request
        this cannot serve gets USB_STATUS_STALL, which is what a real device

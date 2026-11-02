@@ -125,7 +125,8 @@ FDT bus -> pci-host-ecam-generic -> PCI bus -> xhci -> USB bus
 | `scsi` | `atapi`, `buslogic`, `virtio-scsi`, `usb-storage` | `scsi-disk`, `scsi-cd` |
 | `nvme` | `nvme` | `nvme-ns` |
 | `sd` | `sdhci`, `dw-mmc` | `sd-card`, `mmc-card` |
-| `usb` | `xhci`, `usb-hub` | `usb-hub`, `usb-storage`, `usb-hid`, `usb-audio` |
+| `usb` | `xhci`, `usb-hub` | `usb-hub`, `usb-device`, `usb-storage`, `usb-hid`, `usb-audio` |
+| `usb-function` | `usb-device` | `usb-storage`, `usb-hid`, `usb-audio` |
 | `hid` | `usb-hid`, `i2c-hid` | `hid-keyboard`, `hid-tablet` |
 | `i2c` | `dw-i2c` | `i2c-hid` |
 | `mdio` | `dwmac` | `ethernet-phy` |
@@ -679,13 +680,14 @@ carries the same functions.
 
 #### `usb-hid` — USB HID device
 
-Placement: `usb` bus. Provides a `hid` bus with up to four functions, each on
-its own interface. A guest whose driver binds one function per USB device
-needs a separate `usb-hid` for each function.
+Placement: `usb` or `usb-function` bus. Provides a `hid` bus with up to four
+functions, each on its own interface. A guest whose driver binds one function
+per USB device needs a separate `usb-hid` for each function. Full or high
+speed, whichever the other functions of its `usb-device` run at.
 
 | Property | Default | Meaning |
 | --- | --- | --- |
-| `port` | first free | The parent's port to occupy. |
+| `port` | first free | The parent's port to occupy; only on a `usb` bus. |
 
 ```js
 /* usb bus */
@@ -1060,14 +1062,47 @@ Placement: `usb` bus. Provides a `usb` bus.
 }
 ```
 
-#### `usb-storage` — USB mass storage (bulk-only)
+#### `usb-device` — USB device of several functions
 
-Placement: `usb` bus. Provides a `scsi` bus, and needs at least one device
-on it.
+Placement: `usb` bus. Provides a `usb-function` bus for `usb-storage`,
+`usb-hid` and `usb-audio`, and needs at least one function on it. The
+functions get their interfaces and endpoints in the order they are declared.
+
+A function declared straight on a `usb` bus is a device of its own, which is
+the same as a `usb-device` holding only that function. One with several is a
+composite device; a function with more than one interface, such as
+`usb-audio`, gets an interface association descriptor in it. The device runs
+at the speed its functions share: `usb-storage` is high speed only,
+`usb-audio` full speed only, and `usb-hid` either, so `usb-storage` and
+`usb-audio` cannot be in one device.
 
 | Property | Default | Meaning |
 | --- | --- | --- |
 | `port` | first free | The parent's port to occupy. |
+
+```js
+/* usb bus */
+{
+    type: "usb-device",
+    bus: { type: "usb-function", devices: [
+        { type: "usb-storage", bus: { type: "scsi", devices: [
+            { type: "scsi-disk", file: "usb.img" },
+        ] } },
+        { type: "usb-hid", bus: { type: "hid", devices: [
+            { type: "hid-keyboard" },
+        ] } },
+    ] },
+}
+```
+
+#### `usb-storage` — USB mass storage (bulk-only)
+
+Placement: `usb` or `usb-function` bus. Provides a `scsi` bus, and needs at
+least one device on it. High speed.
+
+| Property | Default | Meaning |
+| --- | --- | --- |
+| `port` | first free | The parent's port to occupy; only on a `usb` bus. |
 
 ```js
 /* usb bus */
@@ -1320,12 +1355,12 @@ rates from 8000 to 48000 Hz.
 
 #### `usb-audio` — USB Audio Class 1.0 device
 
-Placement: `usb` bus. A full-speed device that provides a `usb-audio` bus
-with up to four outputs, and needs at least one.
+Placement: `usb` or `usb-function` bus. A full-speed function that provides
+a `usb-audio` bus with up to four outputs, and needs at least one.
 
 | Property | Default | Meaning |
 | --- | --- | --- |
-| `port` | first free | The parent's port to occupy. |
+| `port` | first free | The parent's port to occupy; only on a `usb` bus. |
 
 ```js
 /* usb bus */
