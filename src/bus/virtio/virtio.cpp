@@ -30,6 +30,7 @@
 #include <limits.h>
 #include <atomic>
 
+#include "acpi.h"
 #include "cutils.h"
 #include "fdt.h"
 #include "machine.h"
@@ -359,6 +360,13 @@ bool VIRTIODevice::Prepare()
 {
     if (ParentBus()->AsPCIBus() != nullptr)
         return true;
+    /* virtio-mmio is found only through a description of it */
+    SystemBus *sys = dynamic_cast<SystemBus *>(ParentBus());
+    if (sys == nullptr || (sys->IsPortBased() && !sys->IsAcpi())) {
+        vm_error("%s: must be attached to a PCI bus, the fdt or the acpi "
+                 "bus\n", Name());
+        return false;
+    }
     fMmio = AddResource(RES_MMIO, VIRTIO_PAGE_SIZE, VIRTIO_PAGE_SIZE);
     fIrq = AddResource(RES_IRQ, 1);
     return fMmio != nullptr && fIrq != nullptr;
@@ -451,6 +459,21 @@ void VIRTIODevice::BuildFDT(FDTContext &ctx)
     ctx.fdt->PropU64Range("reg", fMmio->base, fMmio->size);
     fdt_prop_irq(ctx, fIrq->base);
     ctx.fdt->EndNode();
+}
+
+void VIRTIODevice::BuildAML(AcpiContext &ctx)
+{
+    if (fMmio == nullptr)
+        return;
+    AmlBytes r;
+    aml_res_memory32_fixed(r, fMmio->base, fMmio->size);
+    ctx.AddInterrupt(r, fIrq->base);
+
+    /* the ID virtio-mmio has in ACPI, whichever kind of device it is */
+    AmlBytes dev = aml_name("_HID", aml_string("LNRO0005"));
+    aml_append(dev, aml_name("_UID", aml_int(ctx.NewUid("LNRO0005"))));
+    aml_append(dev, aml_name("_CRS", aml_resource_template(r)));
+    aml_append(*ctx.aml, aml_device(ctx.NewName("VIO").c_str(), dev));
 }
 
 uint16_t virtio_read16(VIRTIODevice *s, virtio_phys_addr_t addr)

@@ -149,6 +149,7 @@ struct VIRTIODevice: public Device, public PCIBarTarget,
     bool Prepare() override;
     bool Realize() override;
     void BuildFDT(FDTContext &ctx) override;
+    void BuildAML(AcpiContext &ctx) override;
 
     /* return < 0 to stop the notification (it must be manually restarted
        later), 0 if OK */

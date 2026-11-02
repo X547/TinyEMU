@@ -249,10 +249,13 @@ device models behave.
 
 The virtio devices work on either transport: attached to the FDT bus they
 appear as virtio-mmio, and attached to a PCI bus they appear as PCI devices.
-On the PC that means inside the host bridge, because a PC has no way to reach
-a device that is neither on PCI nor at a fixed port:
+Under firmware, the PC has no way to reach a device that is neither on PCI nor
+at a fixed port, so there they go inside the host bridge:
 
     pc bus -> pci-host-i440fx -> PCI bus -> virtio-block
+
+On the "acpi" root bus they may also be virtio-mmio, which the DSDT describes
+as LNRO0005.
 
 The disk of a PC nests one tier further, because the controller and the drive
 are separate parts:

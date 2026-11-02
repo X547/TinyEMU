@@ -118,7 +118,7 @@ FDT bus -> pci-host-ecam-generic -> PCI bus -> xhci -> USB bus
 | --- | --- | --- |
 | `fdt` | the RISC-V machine (root) | memory-mapped devices, PCI host bridges |
 | `pc` | the PC machine (root), for firmware | `ns16550a`, `i8042`, `hpet`, `ne2000`, `pci-host-i440fx`, `pci-host-cloudhv` |
-| `acpi` | the PC machine (root), for a kernel it loads | as `pc`, and `dw-i2c`, `sdhci`, `xhci`, `pci-host-ecam-generic`; described in the DSDT |
+| `acpi` | the PC machine (root), for a kernel it loads | as `pc`, and memory-mapped devices (`dw-i2c`, `sdhci`, `xhci`, the virtio devices), `pci-host-ecam-generic`; described in the DSDT |
 | `pci` | PCI host bridges, `pci-bridge` | PCI devices |
 | `ps2` | `i8042` | `ps2-keyboard`, `ps2-mouse` |
 | `ata` | `pci-ide` | `ata-disk`, `atapi` |
@@ -142,12 +142,14 @@ The machine allocates them when it is built, checks them for overlaps, and
 describes what it assigned in the device tree. The only exception is
 `cfi-flash`, which takes an optional `base`.
 
-The PC machine places nothing. Its devices sit at the fixed addresses a PC
-has always used, and the machine only checks that two devices do not
-overlap. Only `ns16550a`, `i8042`, `hpet` and the ISA form of `ne2000` go
-straight on the root bus. Everything else is a PCI device and goes inside
+The PC's legacy devices sit at the fixed addresses a PC has always used, and
+the machine only checks that two devices do not overlap. On the `pc` root
+bus only `ns16550a`, `i8042`, `hpet` and the ISA form of `ne2000` go straight
+on the root bus. Everything else is a PCI device and goes inside
 `pci-host-i440fx` or `pci-host-cloudhv`, or on the `acpi` root bus
-`pci-host-ecam-generic`.
+`pci-host-ecam-generic`. The `acpi` root bus also carries memory-mapped
+devices, which the machine places below the IOAPIC and describes in the
+DSDT.
 
 The PC's root bus is `pc` when firmware (`bios`) runs, since firmware builds
 its own ACPI tables. It is `acpi` when the machine loads `kernel` itself: the
@@ -280,8 +282,12 @@ Without `quirks`, the device follows its specification.
 ## 5. Device reference
 
 Placement is given as the bus the device goes on: **FDT** is the RISC-V root
-bus, **PC** is the PC root bus (`pc` or `acpi`), and **PCI** is any PCI bus (behind any host
-bridge, on either machine).
+bus, **PC** is the PC root bus (`pc` or `acpi`), **`acpi`** is the PC's
+`acpi` root bus alone, and **PCI** is any PCI bus (behind any host bridge, on
+either machine).
+
+The virtio devices are virtio-mmio on the FDT and `acpi` buses, described as
+`virtio,mmio` in the device tree and as `LNRO0005` in the DSDT.
 
 The examples are fragments: each is one entry of the `devices` array of the
 bus named in its comment.
@@ -313,7 +319,7 @@ otherwise.
 
 #### `virtio-console` — virtio console
 
-Placement: FDT (virtio-mmio) or PCI. Connects the guest to the emulator's
+Placement: FDT, `acpi` or PCI. Connects the guest to the emulator's
 terminal (`hvc0` in Linux), or to what `output`, `path` and `server` say; see
 [Serial back end](#serial-back-end-output-path-server).
 
@@ -606,8 +612,8 @@ so the screen stays blank until a guest driver sets a mode.
 
 #### `virtio-gpu` — virtio 2D GPU
 
-Placement: FDT or PCI. A 2D display with a hardware cursor. The guest is
-asked to follow when the window is resized.
+Placement: FDT, `acpi` or PCI. A 2D display with a hardware cursor. The
+guest is asked to follow when the window is resized.
 
 | Property | Default | Meaning |
 | --- | --- | --- |
@@ -625,7 +631,7 @@ HID devices for each role, not several of them.
 
 #### `virtio-input` — virtio input device
 
-Placement: FDT or PCI.
+Placement: FDT, `acpi` or PCI.
 
 | Property | Default | Meaning |
 | --- | --- | --- |
@@ -744,7 +750,7 @@ needs no reference clock.
 
 #### `virtio-block` — virtio block device
 
-Placement: FDT or PCI.
+Placement: FDT, `acpi` or PCI.
 
 | Property | Default | Meaning |
 | --- | --- | --- |
@@ -757,7 +763,7 @@ Placement: FDT or PCI.
 
 #### `virtio-scsi` — virtio SCSI host
 
-Placement: FDT or PCI. No properties. Provides a `scsi` bus.
+Placement: FDT, `acpi` or PCI. No properties. Provides a `scsi` bus.
 
 ```js
 {
@@ -1075,7 +1081,7 @@ back-end properties in [section 4](#network-back-end-driver-ifname-forward).
 
 #### `virtio-net` — virtio network adapter
 
-Placement: FDT or PCI.
+Placement: FDT, `acpi` or PCI.
 
 ```js
 { type: "virtio-net", driver: "user" }
@@ -1345,9 +1351,9 @@ guest, with a master mute and volume control.
 
 #### `virtio-9p` — virtio 9P filesystem
 
-Placement: FDT or PCI. Shares a host directory, or a remote filesystem over
-HTTP when built with `-Dfs_net=enabled`. There is no host directory back end
-on Windows yet.
+Placement: FDT, `acpi` or PCI. Shares a host directory, or a remote
+filesystem over HTTP when built with `-Dfs_net=enabled`. There is no host
+directory back end on Windows yet.
 
 | Property | Default | Meaning |
 | --- | --- | --- |
