@@ -336,8 +336,17 @@ USBStatusEnum USBStorage::HandleControl(URB *urb)
     const USBSetup &setup = urb->setup;
 
     if ((setup.request_type & USB_TYPE_MASK) == USB_TYPE_CLASS) {
+        /* Both requests go to the interface with wValue 0, and their
+           wLength is fixed (3.1, 3.2). */
+        if ((setup.request_type & USB_RECIP_MASK) != USB_RECIP_INTERFACE ||
+            setup.value != 0 || setup.index != 0) {
+            return USB_STATUS_STALL;
+        }
         switch (setup.request) {
         case MSC_REQUEST_GET_MAX_LUN: {
+            if (setup.length != 1) {
+                return USB_STATUS_STALL;
+            }
             uint8_t val = MaxLun();
             urb->actual_length =
                 urb->buffer != nullptr ? urb->buffer->Write(0, &val, 1) : 0;
@@ -345,6 +354,9 @@ USBStatusEnum USBStorage::HandleControl(URB *urb)
         }
 
         case MSC_REQUEST_RESET:
+            if (setup.length != 0) {
+                return USB_STATUS_STALL;
+            }
             /* Abandon whatever was in flight and go back to waiting for a
                command wrapper. */
             if (fCommandRunning) {
@@ -355,6 +367,8 @@ USBStatusEnum USBStorage::HandleControl(URB *urb)
             fParkedUrb = nullptr;
             fDataPos = 0;
             fDataDone = 0;
+            /* The halts themselves stay for CLEAR_FEATURE (5.3.4). */
+            UnwedgeEndpoints();
             urb->actual_length = 0;
             return USB_STATUS_OK;
         }
@@ -370,11 +384,14 @@ USBStatusEnum USBStorage::HandleBulkOut(URB *urb)
     if (fState == MSC_STATE_CBW) {
         uint8_t cbw[CBW_SIZE];
 
-        if (urb->buffer == nullptr ||
+        if (urb->buffer == nullptr || urb->buffer->Length() != CBW_SIZE ||
             urb->buffer->Read(0, cbw, CBW_SIZE) != CBW_SIZE ||
             get_le32(cbw) != CBW_SIGNATURE) {
-            /* A wrapper that is not a wrapper: the host has lost sync, and
-               stalling is how it is told to reset the interface. */
+            /* A wrapper that is not valid: the host has lost sync, and both
+               pipes stall until a Reset Recovery, clearing the halt alone
+               not being enough (BOT 6.6.1, 5.3.4). */
+            HaltEndpoint(USB_DIR_IN | MSC_EP_IN, true);
+            HaltEndpoint(MSC_EP_OUT, true);
             return USB_STATUS_STALL;
         }
 
