@@ -25,6 +25,8 @@
 
 #include <string.h>
 
+#include <algorithm>
+
 #include "bits.h"
 #include "config_props.h"
 #include "cutils.h"
@@ -49,8 +51,14 @@
 #define GMAC_MMC_BASE             0x0700
 #define GMAC_MMC_END              0x0900
 
-#define GMAC_CONFIG_RE bit_at(0)
-#define GMAC_CONFIG_TE bit_at(1)
+#define GMAC_CONFIG_RE  bit_at(0)
+#define GMAC_CONFIG_TE  bit_at(1)
+#define GMAC_CONFIG_ACS bit_at(20) /* strip the FCS of length frames */
+#define GMAC_CONFIG_CST bit_at(21) /* strip the FCS of type frames */
+
+/* The shortest frame the wire carries, without its FCS, and the FCS. */
+#define ETH_MIN_FRAME 60
+#define ETH_FCS_LEN   4
 
 #define GMAC_PACKET_FILTER_PR  bit_at(0)  /* promiscuous */
 #define GMAC_PACKET_FILTER_PM  bit_at(4)  /* pass all multicast */
@@ -165,6 +173,21 @@
 #define DWMAC_HW_FEATURE3 0
 
 static const uint8_t kBroadcastAddr[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+
+
+/* The Ethernet FCS: the reflected CRC-32 of the frame, complemented. */
+static uint32_t ethernet_fcs(const uint8_t *buf, int len)
+{
+    uint32_t crc = 0xffffffff;
+
+    for (int i = 0; i < len; i++) {
+        crc ^= buf[i];
+        for (int bit = 0; bit < 8; bit++) {
+            crc = (crc >> 1) ^ ((crc & 1) != 0 ? 0xedb88320 : 0);
+        }
+    }
+    return ~crc;
+}
 
 
 /* The core revision a driver reads back. It has to agree with what the
@@ -694,17 +717,32 @@ bool DwmacDevice::CanWritePacket()
 }
 
 
-void DwmacDevice::WritePacket(const uint8_t *buf, int len)
+void DwmacDevice::WritePacket(const uint8_t *data, int data_len)
 {
     uint32_t desc[4];
     uint64_t addr;
 
-    if (!RxEnabled() || !AddressMatches(buf, len)) {
+    if (!RxEnabled() || !AddressMatches(data, data_len) ||
+        data_len > DWMAC_MAX_FRAME - ETH_FCS_LEN) {
         return;
     }
     if (!RxDescAvailable(desc, &addr)) {
         RaiseDma(DMA_CHAN_STATUS_RBU);
         return;
+    }
+
+    /* The frame as it came off the wire: padded to the shortest a wire
+       carries, and with its FCS, which the MAC passes to memory and counts
+       in the length unless it was told to strip it. */
+    uint8_t buf[DWMAC_MAX_FRAME];
+    int len = std::max(data_len, ETH_MIN_FRAME);
+    memcpy(buf, data, data_len);
+    memset(buf + data_len, 0, len - data_len);
+    bool type_frame = len >= 14 && ((buf[12] << 8) | buf[13]) >= 0x600;
+    uint32_t strip = type_frame ? GMAC_CONFIG_CST : GMAC_CONFIG_ACS;
+    if ((Reg(GMAC_CONFIG) & strip) == 0) {
+        put_le32(buf + len, ethernet_fcs(buf, len));
+        len += ETH_FCS_LEN;
     }
 
     uint32_t buf_size = (ChanReg(DMA_CHAN_RX_CONTROL) >>
