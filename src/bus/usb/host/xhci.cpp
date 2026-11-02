@@ -30,10 +30,12 @@
 #include <memory>
 #include <vector>
 
+#include "acpi.h"
 #include "bits.h"
 #include "cutils.h"
 #include "device_class.h"
 #include "devices.h"
+#include "fdt.h"
 #include "host_time.h"
 #include "host_timer.h"
 #include "machine.h"
@@ -52,7 +54,8 @@
 //#pragma mark - register map
 
 /* The BAR is laid out the way QEMU lays its own out, which is the
-   best-travelled path through both target guests' drivers. */
+   best-travelled path through both target guests' drivers. Off PCI the same
+   window is the register window, and the MSI-X part of it reads as zero. */
 #define XHCI_CAP_LENGTH     0x40
 #define XHCI_EXTCAP_OFFSET  0x20
 #define XHCI_OPER_OFFSET    0x40
@@ -404,10 +407,15 @@ private:
     int fUsb3Ports;
     int fPortCount;
 
+    /* transport: a PCI function, or a register window and a line of its own
+       on the fdt or the acpi bus */
     PCIDevice *fPciDev = nullptr;
+    PhysMemoryMap *fMemMap = nullptr;
     PhysMemoryRange *fMemRange = nullptr;
     IRQSignal *fIrq = nullptr;
     PCIMessageIrq fMsgIrq {};
+    Resource *fMmioRes = nullptr;
+    Resource *fIrqRes = nullptr;
 
     USBBus *fChildBus = nullptr;
 
@@ -451,6 +459,8 @@ private:
     /* The bus clock that services the isochronous endpoints. */
     std::unique_ptr<HostTimer> fTimer;
     std::vector<XHCIEndpoint *> fIsochEps;
+
+    uint8_t *GuestPtr(uint64_t addr, bool is_rw);
 
     /* register file */
     uint32_t CapRead(uint32_t offset);
@@ -547,6 +557,8 @@ public:
 
     bool Prepare() override;
     bool Realize() override;
+    void BuildFDT(FDTContext &ctx) override;
+    void BuildAML(AcpiContext &ctx) override;
     Bus *ChildBus() override {return fChildBus;}
 
     void SetBar(int bar_num, uint64_t addr, bool enabled) override;
@@ -592,6 +604,15 @@ XHCIDevice::~XHCIDevice()
 
 //#pragma mark - DMA
 
+uint8_t *XHCIDevice::GuestPtr(uint64_t addr, bool is_rw)
+{
+    if (fPciDev != nullptr) {
+        return pci_device_get_dma_ptr(fPciDev, addr, is_rw);
+    }
+    return fMemMap->GetRamPtr(addr, is_rw);
+}
+
+
 bool XHCIDevice::DmaRead(uint64_t addr, void *buf, uint32_t len)
 {
     uint8_t *dst = static_cast<uint8_t *>(buf);
@@ -599,7 +620,7 @@ bool XHCIDevice::DmaRead(uint64_t addr, void *buf, uint32_t len)
     while (len > 0) {
         uint32_t page_left = DEVRAM_PAGE_SIZE - (addr & (DEVRAM_PAGE_SIZE - 1));
         uint32_t l = len < page_left ? len : page_left;
-        uint8_t *ptr = pci_device_get_dma_ptr(fPciDev, addr, false);
+        uint8_t *ptr = GuestPtr(addr, false);
         if (ptr == nullptr) {
             return false;
         }
@@ -619,7 +640,7 @@ bool XHCIDevice::DmaWrite(uint64_t addr, const void *buf, uint32_t len)
     while (len > 0) {
         uint32_t page_left = DEVRAM_PAGE_SIZE - (addr & (DEVRAM_PAGE_SIZE - 1));
         uint32_t l = len < page_left ? len : page_left;
-        uint8_t *ptr = pci_device_get_dma_ptr(fPciDev, addr, true);
+        uint8_t *ptr = GuestPtr(addr, true);
         if (ptr == nullptr) {
             return false;
         }
@@ -2531,7 +2552,7 @@ uint32_t XHCIDevice::ReadDword(uint32_t offset)
     if (offset < XHCI_DOORBELL_OFFSET) {
         return RuntimeRead(offset - XHCI_RUNTIME_OFFSET);
     }
-    if (offset < XHCI_MSIX_TABLE_OFFSET) {
+    if (offset < XHCI_MSIX_TABLE_OFFSET || fPciDev == nullptr) {
         return 0; /* the doorbell array reads as zero */
     }
     if (offset < XHCI_MSIX_PBA_OFFSET) {
@@ -2562,7 +2583,7 @@ void XHCIDevice::WriteDword(uint32_t offset, uint32_t val)
         DoorbellWrite(offset - XHCI_DOORBELL_OFFSET, val);
         return;
     }
-    if (offset < XHCI_MSIX_PBA_OFFSET) {
+    if (offset < XHCI_MSIX_PBA_OFFSET && fPciDev != nullptr) {
         fMsgIrq.TableWrite(offset - XHCI_MSIX_TABLE_OFFSET, val, 2);
         return;
     }
@@ -2595,15 +2616,26 @@ void XHCIDevice::SetBar(int bar_num, uint64_t addr, bool enabled)
 
 bool XHCIDevice::Prepare()
 {
-    if (ParentBus()->AsPCIBus() == nullptr) {
-        vm_error("%s: must be attached to a PCI bus\n", Name());
-        return false;
-    }
     if (fPortCount < 1 || fPortCount > XHCI_MAX_PORTS) {
         vm_error("%s: %d ports is out of range\n", Name(), fPortCount);
         return false;
     }
-    /* The BARs are placed by the guest, so no resources are declared. */
+    if (ParentBus()->AsPCIBus() == nullptr) {
+        /* Off PCI the controller is described rather than enumerated, so it
+           takes a register window and a line, and needs a bus that describes
+           it. On PCI the guest places the BAR and the bridge routes INTx. */
+        SystemBus *sys = dynamic_cast<SystemBus *>(ParentBus());
+        if (sys == nullptr || (sys->IsPortBased() && !sys->IsAcpi())) {
+            vm_error("%s: must be attached to a PCI bus, the fdt or the acpi "
+                     "bus\n", Name());
+            return false;
+        }
+        fMmioRes = AddResource(RES_MMIO, XHCI_BAR_SIZE, XHCI_BAR_SIZE);
+        fIrqRes = AddResource(RES_IRQ, 1);
+        if (fMmioRes == nullptr || fIrqRes == nullptr) {
+            return false;
+        }
+    }
     fChildBus = new USBBus(this, this);
     return true;
 }
@@ -2612,35 +2644,51 @@ bool XHCIDevice::Prepare()
 bool XHCIDevice::Realize()
 {
     PCIBus *bus = ParentBus()->AsPCIBus();
-
-    /* Red Hat's identifiers for a plain xHCI controller. They matter: the
-       NEC and Intel ones carry driver quirks that would oblige this to
-       implement vendor commands or work around errata it does not have. */
-    fPciDev = pci_register_device(bus, "xhci", -1, 0x1b36, 0x000d, 0x01,
-                                  0x0c03);
-    if (fPciDev == nullptr) {
-        vm_error("%s: could not register the PCI device\n", Name());
-        return false;
-    }
-    /* The programming interface byte is what actually makes a driver bind. */
-    pci_device_set_config8(fPciDev, PCI_CLASS_PROG, 0x30);
-    pci_device_set_config8(fPciDev, PCI_INTERRUPT_PIN, 1);
-
-    fMsgIrq.Init(fPciDev, 1, 0, XHCI_MSIX_TABLE_OFFSET,
-                 XHCI_MSIX_PBA_OFFSET);
-
-    fIrq = pci_device_get_irq(fPciDev, 0);
-    PhysMemoryMap *mem_map = pci_device_get_mem_map(fPciDev);
     /* Neither target driver accesses the registers below a dword, but
        merging is better than dropping the write on the floor. */
-    fMemRange = mem_map->RegisterDevice(0, XHCI_BAR_SIZE, this,
-                                        DEVIO_SIZE32 | DEVIO_WRITE_MERGE |
-                                            DEVIO_DISABLED);
-    /* The specification defines BAR 0 as a 64 bit register pair, so it takes
-       the slot after it too. */
-    pci_register_bar(fPciDev, 0, XHCI_BAR_SIZE,
-                     PCI_ADDRESS_SPACE_MEM | PCI_ADDRESS_SPACE_MEM_TYPE_64,
-                     this);
+    int devio_flags = DEVIO_SIZE32 | DEVIO_WRITE_MERGE;
+
+    if (bus != nullptr) {
+        /* Red Hat's identifiers for a plain xHCI controller. They matter: the
+           NEC and Intel ones carry driver quirks that would oblige this to
+           implement vendor commands or work around errata it does not
+           have. */
+        fPciDev = pci_register_device(bus, "xhci", -1, 0x1b36, 0x000d, 0x01,
+                                      0x0c03);
+        if (fPciDev == nullptr) {
+            vm_error("%s: could not register the PCI device\n", Name());
+            return false;
+        }
+        /* The programming interface byte is what actually makes a driver
+           bind. */
+        pci_device_set_config8(fPciDev, PCI_CLASS_PROG, 0x30);
+        pci_device_set_config8(fPciDev, PCI_INTERRUPT_PIN, 1);
+
+        fMsgIrq.Init(fPciDev, 1, 0, XHCI_MSIX_TABLE_OFFSET,
+                     XHCI_MSIX_PBA_OFFSET);
+
+        fIrq = pci_device_get_irq(fPciDev, 0);
+        fMemMap = pci_device_get_mem_map(fPciDev);
+        fMemRange = fMemMap->RegisterDevice(0, XHCI_BAR_SIZE, this,
+                                            devio_flags | DEVIO_DISABLED);
+        /* The specification defines BAR 0 as a 64 bit register pair, so it
+           takes the slot after it too. */
+        pci_register_bar(fPciDev, 0, XHCI_BAR_SIZE,
+                         PCI_ADDRESS_SPACE_MEM |
+                             PCI_ADDRESS_SPACE_MEM_TYPE_64,
+                         this);
+    } else {
+        SystemBus *sys = static_cast<SystemBus *>(ParentBus());
+        fIrq = sys->IrqSignalFor(fIrqRes->base);
+        if (fIrq == nullptr) {
+            vm_error("%s: bad interrupt line %d\n", Name(),
+                     (int)fIrqRes->base);
+            return false;
+        }
+        fMemMap = sys->MemMap();
+        fMemRange = fMemMap->RegisterDevice(fMmioRes->base, XHCI_BAR_SIZE,
+                                            this, devio_flags);
+    }
 
     /* Give every port its powered, empty state now. The devices declared
        below this one are attached as they are realized, and each of those
@@ -2651,6 +2699,39 @@ bool XHCIDevice::Realize()
 
     fUsbSts = USBSTS_HCH;
     return true;
+}
+
+
+void XHCIDevice::BuildFDT(FDTContext &ctx)
+{
+    /* On PCI the guest finds the controller by enumerating configuration
+       space, so it must not also appear as a node. */
+    if (fMmioRes == nullptr) {
+        return;
+    }
+    ctx.fdt->BeginNodeNum("usb", fMmioRes->base);
+    ctx.fdt->PropStr("compatible", "generic-xhci");
+    ctx.fdt->PropU64Range("reg", fMmioRes->base, fMmioRes->size);
+    fdt_prop_irq(ctx, fIrqRes->base);
+    ctx.fdt->EndNode();
+}
+
+
+void XHCIDevice::BuildAML(AcpiContext &ctx)
+{
+    if (fMmioRes == nullptr) {
+        return;
+    }
+    AmlBytes r;
+    aml_res_memory32_fixed(r, fMmioRes->base, fMmioRes->size);
+    ctx.AddInterrupt(r, fIrqRes->base);
+
+    /* The ID of a controller that follows the xHCI specification and needs
+       nothing else. */
+    AmlBytes dev = aml_name("_HID", aml_eisaid("PNP0D10"));
+    aml_append(dev, aml_name("_UID", aml_int(ctx.NewUid("PNP0D10"))));
+    aml_append(dev, aml_name("_CRS", aml_resource_template(r)));
+    aml_append(*ctx.aml, aml_device(ctx.NewName("XHC").c_str(), dev));
 }
 
 

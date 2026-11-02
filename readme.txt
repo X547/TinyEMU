@@ -269,6 +269,10 @@ the PCI bus down to the image file is spelled out in the file:
 
     PCI bus -> xhci -> USB bus -> usb-storage -> SCSI bus -> scsi-disk
 
+The controller can also sit on the FDT bus, or on the PC's "acpi" root bus,
+as a memory mapped xHCI with a line of its own, the way many SoCs have one:
+"generic-xhci" in the device tree and PNP0D10 in the DSDT.
+
 A hub may be inserted between the controller and a device, which puts that
 device one tier further down; the controller reaches it by the route string
 the guest programs, exactly as real hardware does. The controller advertises

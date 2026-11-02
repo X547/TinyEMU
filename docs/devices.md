@@ -118,7 +118,7 @@ FDT bus -> pci-host-ecam-generic -> PCI bus -> xhci -> USB bus
 | --- | --- | --- |
 | `fdt` | the RISC-V machine (root) | memory-mapped devices, PCI host bridges |
 | `pc` | the PC machine (root), for firmware | `ns16550a`, `i8042`, `hpet`, `ne2000`, `pci-host-i440fx`, `pci-host-cloudhv` |
-| `acpi` | the PC machine (root), for a kernel it loads | as `pc`, and `dw-i2c`, `pci-host-ecam-generic`; described in the DSDT |
+| `acpi` | the PC machine (root), for a kernel it loads | as `pc`, and `dw-i2c`, `xhci`, `pci-host-ecam-generic`; described in the DSDT |
 | `pci` | PCI host bridges, `pci-bridge` | PCI devices |
 | `ps2` | `i8042` | `ps2-keyboard`, `ps2-mouse` |
 | `ata` | `pci-ide` | `ata-disk`, `atapi` |
@@ -996,8 +996,10 @@ execution starts.
 
 #### `xhci` — USB 3.0 host controller
 
-Placement: PCI. Provides a `usb` bus. The device models are full or high
-speed, so they use the USB 2.0 ports.
+Placement: PCI, FDT, or the PC's `acpi` root bus. Provides a `usb` bus. The
+device models are full or high speed, so they use the USB 2.0 ports. Off PCI
+it is `generic-xhci` in the device tree and `PNP0D10` in the DSDT, with a
+register window and an interrupt line of its own, and it has no MSI-X.
 
 | Property | Default | Meaning |
 | --- | --- | --- |
@@ -1005,7 +1007,7 @@ speed, so they use the USB 2.0 ports.
 | `usb3_ports` | `2` | Number of USB 3.0 root ports. |
 
 ```js
-/* pci bus */
+/* pci, fdt or acpi bus */
 {
     type: "xhci",
     bus: {
