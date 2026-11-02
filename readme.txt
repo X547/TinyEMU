@@ -287,6 +287,12 @@ A "usb-storage" with no SCSI device below it is an error rather than an empty
 drive, and the bus type named in each nested "bus" object is checked against
 the bus the device above it actually provides.
 
+"usb-storage", "usb-hid" and "usb-audio" are USB functions. Declared on a USB
+bus each is a device of its own; several of them make one composite device
+when declared on the bus of a "usb-device":
+
+    USB bus -> usb-device -> usb-function bus -> usb-storage, usb-hid
+
 An ATAPI drive is a SCSI device behind an ATA one, so a CD drive on a PC's
 IDE controller nests the same way:
 
@@ -299,12 +305,12 @@ Input devices nest the same way:
 
     PCI bus -> xhci -> USB bus -> usb-hid -> HID bus -> hid-keyboard
 
-A HID function is a report descriptor and the reports that go with it, and
-knows nothing about the transport carrying it, so the same "hid-keyboard" and
-"hid-tablet" nodes work over USB and over I2C. A "usb-hid" carries up to four
-of them, each on an interface and an interrupt endpoint of its own; a guest
-whose driver binds one function per USB device rather than per interface
-needs a "usb-hid" for each instead.
+The HID bus is one HID device, and "hid-keyboard" and "hid-tablet" are the
+collections in its report descriptor. They know nothing about the transport
+carrying them, so the same nodes work over USB and over I2C. With more than
+one collection on the bus, their reports carry report IDs. A "usb-hid" puts
+its HID device on one interface; for collections on interfaces of their own,
+declare a "usb-hid" for each.
 
 Over I2C the path runs through the controller and the bus it provides:
 
@@ -314,8 +320,8 @@ The controller may also be a PCI function, as on Intel's SoCs; its targets
 are then described inside the host bridge's node, under the function's
 device and function number.
 
-An "i2c-hid" carries one function, because the protocol gives a target one
-report descriptor; a keyboard and a tablet are two targets. Like an MDIO bus,
+An "i2c-hid" is one target with one HID device, which may hold a keyboard and
+a tablet together, or each may be a target of its own. Like an MDIO bus,
 an I2C bus is described rather than enumerated: it places the targets that
 name no address on the first free one from 0x08, after every address the
 configuration names has been taken, and emits them into the device tree. Each

@@ -59,3 +59,13 @@ void HIDReportBuilder::ItemEmpty(int type, int tag)
 {
     fData.push_back(set_bits(set_bits((uint32_t)0, 4, 4, tag), 2, 2, type));
 }
+
+
+void HIDReportBuilder::BeginCollection(uint32_t kind)
+{
+    Item(MAIN, 0xa, kind);
+    if (fDepth++ == 0 && fNextId != 0) {
+        ReportId(fNextId);
+        fNextId = 0;
+    }
+}

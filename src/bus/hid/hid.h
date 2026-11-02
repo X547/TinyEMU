@@ -25,17 +25,21 @@
 
 #include <stdint.h>
 
+#include <vector>
+
 #include "device.h"
 
-/* How many functions one transport may carry. A USB HID device gives each of
-   them an interface of its own. */
-#define HID_MAX_FUNCTIONS 4
+class HIDReportBuilder;
 
-/* The longest report here is the eight byte boot keyboard one. */
+/* Top-level collections one HID device may hold. */
+#define HID_MAX_COLLECTIONS 8
+
+/* The longest report here is the eight byte boot keyboard one, and its
+   report ID. */
 #define HID_MAX_REPORT_SIZE 16
 
-/* Reports a function may have outstanding before the oldest are dropped. It
-   only fills up while the guest is not polling. */
+/* Reports a device may have outstanding before the oldest are dropped. It
+   only fills up while the host is not collecting them. */
 #define HID_REPORT_QUEUE_SIZE 32
 
 /* Report types, as GET_REPORT and SET_REPORT number them. */
@@ -44,9 +48,9 @@
 #define HID_REPORT_FEATURE 3
 
 
-/* Which boot protocol report format a function can also produce. A device
-   whose format has no boot equivalent -- an absolute pointer, for one -- says
-   none, and the transport must not advertise a boot interface for it. */
+/* Which boot protocol report format a collection can also produce. One whose
+   format has no boot equivalent -- an absolute pointer, for one -- says
+   none. */
 typedef enum {
     HID_BOOT_NONE,
     HID_BOOT_KEYBOARD,
@@ -63,126 +67,186 @@ public:
     virtual ~HIDTransport() = default;
 
     virtual void HandleInputReport(HIDDevice *dev) = 0;
+
+    /* A collection was added, so the report descriptor changed; false when
+       the transport cannot carry it. */
+    virtual bool CollectionsChanged(HIDDevice *dev)
+        {(void)dev; return true;}
 };
 
 
-/* One HID function: a report descriptor and the reports that go with it. How
-   those reach the guest is the transport's business, so the same object works
-   over USB and would work over I2C or SPI. */
-class HIDDevice {
+/* One top-level collection: a keyboard, a pointer. Its reports carry no
+   report ID; the device it is in adds one where it has to. */
+class HIDCollection {
 private:
     const char *fName;
-    HIDTransport *fTransport = nullptr;
-    int fIndex = -1; /* which function of the transport this is */
-    bool fBootProtocol = false;
+    HIDDevice *fDevice = nullptr;
 
-    /* Reports the transport has not collected yet. */
-    struct QueuedReport {
-        uint8_t data[HID_MAX_REPORT_SIZE];
-        int len;
-    };
-    QueuedReport fQueue[HID_REPORT_QUEUE_SIZE] {};
-    int fQueueHead = 0;
-    int fQueueCount = 0;
+    friend class HIDDevice;
 
 protected:
-    /* Hand one input report to the transport. A full queue drops its oldest
-       report, which for a pointer leaves the current position. */
-    void QueueInputReport(const uint8_t *data, int len);
-
-    bool BootProtocolActive() const {return fBootProtocol;}
+    /* Hand one input report to the device. */
+    void SendInputReport(const uint8_t *data, int len);
 
 public:
-    HIDDevice(const char *name): fName(name) {}
-    virtual ~HIDDevice() = default;
+    HIDCollection(const char *name): fName(name) {}
+    virtual ~HIDCollection() = default;
 
     const char *Name() const {return fName;}
-    int Index() const {return fIndex;}
 
-    /* Called by the transport as it attaches the function. */
-    void SetTransport(HIDTransport *transport, int index)
-        {fTransport = transport; fIndex = index;}
+    /* The collection's items. It sets every global item its own items rely
+       on, since another collection may come before it. */
+    virtual void BuildReportDescriptor(HIDReportBuilder &r) const = 0;
 
-    /* Must outlive the device; a static table in the function's source. */
-    virtual const uint8_t *ReportDescriptor(int *len) const = 0;
-
-    /* How long the report is, so a transport can size the pipe for it. */
+    /* How long the reports are. */
     virtual int InputReportSize() const = 0;
+    virtual int OutputReportSize() const {return 0;}
 
     virtual HIDBootProtocolEnum BootProtocol() const {return HID_BOOT_NONE;}
 
     /* Key localisation, as the HID descriptor reports it; 0 for none. */
     virtual uint8_t CountryCode() const {return 0;}
 
-    /* How often the host should poll, in milliseconds. */
+    /* How often a host that polls should, in milliseconds. */
     virtual int PollInterval() const {return 10;}
 
-    /* Answer GET_REPORT: bytes produced, or -1 for a report this function
+    /* Answer GET_REPORT: bytes produced, or -1 for a report this collection
        does not have. The default hands back the current input report. */
     virtual int GetReport(uint8_t type, uint8_t *buf, int size);
 
-    /* Take a report the host sent; false for one this function refuses. */
+    /* Take a report the host sent; false for one this collection refuses. */
     virtual bool SetReport(uint8_t type, const uint8_t *buf, int len)
         {(void)type; (void)buf; (void)len; return false;}
 
-    /* Drops any state the guest set, as a bus reset does. An override must
-       call up. */
-    virtual void Reset();
+    /* Drops any state the host set. */
+    virtual void Reset() {}
+
+protected:
+    /* The current state, as an input report. */
+    virtual int BuildInputReport(uint8_t *buf, int size) const = 0;
+};
+
+
+/* A HID device: one report descriptor over the collections in it, and the
+   reports that go with them, as a transport carries them. With more than one
+   collection every report starts with its collection's report ID, numbered
+   from 1 in the order they were added. The boot protocol has no IDs and only
+   the boot format, so while it is active the collection that has that format
+   is the only one heard.
+
+   How the reports reach the host is the transport's business, so the same
+   device works over USB and I2C. */
+class HIDDevice {
+private:
+    struct QueuedReport {
+        uint8_t data[HID_MAX_REPORT_SIZE];
+        int len;
+        int collection;
+    };
+
+    const char *fName;
+    HIDTransport *fTransport;
+    HIDCollection *fCollections[HID_MAX_COLLECTIONS] {};
+    int fCount = 0;
+    std::vector<uint8_t> fReportDesc;
+
+    bool fBootProtocol = false;
+    /* the idle rate the host set for each report, in 4 ms units, and when
+       the report is due again without a change (HID 1.11 7.2.4) */
+    uint8_t fIdle[HID_MAX_COLLECTIONS] {};
+    uint64_t fIdleDue[HID_MAX_COLLECTIONS] {};
+
+    QueuedReport fQueue[HID_REPORT_QUEUE_SIZE] {};
+    int fQueueHead = 0;
+    int fQueueCount = 0;
+
+    int IndexOf(const HIDCollection *c) const;
+    int BootCollection() const;
+    int CollectionForId(int id) const;
+    int BuildReport(int index, uint8_t type, uint8_t *buf, int size);
+    void ReportSent(int index);
+
+    friend class HIDCollection;
+    void QueueInputReport(HIDCollection *c, const uint8_t *data, int len);
+
+public:
+    HIDDevice(const char *name, HIDTransport *transport):
+        fName(name), fTransport(transport) {}
+
+    const char *Name() const {return fName;}
+
+    bool AddCollection(HIDCollection *c);
+    int CollectionCount() const {return fCount;}
+    bool UsesReportIds() const {return fCount > 1;}
+
+    const uint8_t *ReportDescriptor(int *len) const
+        {*len = fReportDesc.size(); return fReportDesc.data();}
+
+    /* The longest reports, with their report IDs. */
+    int MaxInputReportSize() const;
+    int MaxOutputReportSize() const;
+
+    /* What the device as a whole tells the host. */
+    HIDBootProtocolEnum BootProtocol() const;
+    uint8_t CountryCode() const;
+    int PollInterval() const;
 
     bool Protocol() const {return fBootProtocol;}
     void SetProtocol(bool boot_protocol);
+
+    /* Reports as they go on the wire: the report ID first where there is
+       one. 'id' is the one the request named, or for SetReport() -1 when the
+       transport has none to give and the report itself says. GetReport()
+       returns -1, and SetReport() false, for a report the device does not
+       have. */
+    int GetReport(uint8_t type, int id, uint8_t *buf, int size);
+    bool SetReport(uint8_t type, int id, const uint8_t *buf, int len);
+
+    /* The idle rate of one report, or of all of them for ID 0. Idle() is -1
+       and SetIdle() false for a report ID the device does not have. */
+    int Idle(int id) const;
+    bool SetIdle(int id, uint8_t rate);
+
+    /* When the next report is due again without a change, or UINT64_MAX;
+       and the oldest one that is due by now, 0 if none is. */
+    uint64_t NextIdleDue() const;
+    int TakeIdleReport(uint8_t *buf, int size);
 
     /* Whether a report is waiting, and taking the oldest one. */
     bool HasInputReport() const {return fQueueCount > 0;}
     int TakeInputReport(uint8_t *buf, int size);
 
-protected:
-    /* The current state, in the format the active protocol asks for. */
-    virtual int BuildInputReport(uint8_t *buf, int size) const = 0;
+    /* Drops any state the host set, as a bus reset does. */
+    void Reset();
 };
 
 
-/* Implemented by the transport, which owns the functions attached to it. */
-class HIDBusTarget {
-public:
-    virtual ~HIDBusTarget() = default;
-
-    /* The lowest unused function index, or -1 when the transport is full. */
-    virtual int FindFreeIndex() = 0;
-    virtual bool AttachDevice(HIDDevice *dev, int index) = 0;
-};
-
-
-/* The bus a HID transport provides. Like the USB and SCSI buses it hands out
-   an index rather than host address space, so it assigns no resources. */
+/* The bus a HID transport provides: the collections of its device. Like the
+   USB and SCSI buses it assigns no resources. */
 class HIDBus final: public Bus {
 private:
-    HIDBusTarget *fTarget;
+    HIDDevice *fDev;
 
 public:
-    HIDBus(Device *owner, HIDBusTarget *target):
-        Bus(owner), fTarget(target) {}
+    HIDBus(Device *owner, HIDDevice *dev): Bus(owner), fDev(dev) {}
 
     const char *Type() const override {return "hid";}
-    HIDBusTarget *Target() const {return fTarget;}
+    HIDDevice *Dev() const {return fDev;}
 
     bool AssignResources(Device *dev) override;
 };
 
 
-/* Attaches one HID function to the bus it was declared on, the way
-   USBDeviceNode attaches a USB device. Subclassed by a function that claims a
-   machine role once it is attached. */
-class HIDDeviceNode: public Device {
+/* Adds one collection to the device of the bus it was declared on, the way
+   USBDeviceNode attaches a USB device. Subclassed by a collection that
+   claims a machine role once it is added. */
+class HIDCollectionNode: public Device {
 private:
-    HIDDevice *fDev;
-    int fIndex; /* < 0 asks for the first free one */
+    HIDCollection *fCollection;
 
 public:
-    HIDDeviceNode(const char *name, HIDDevice *dev, int index);
-    ~HIDDeviceNode() override;
-
-    HIDDevice *Dev() const {return fDev;}
+    HIDCollectionNode(const char *name, HIDCollection *c);
+    ~HIDCollectionNode() override;
 
     bool Realize() override;
 };

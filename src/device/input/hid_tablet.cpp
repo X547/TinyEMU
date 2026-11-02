@@ -44,10 +44,8 @@
 /* An absolute pointer, declared as a mouse whose axes are absolute: a mouse
    driver reads the axes as declared, where a digitiser usage would need a
    driver that knows about pens and contacts. */
-static std::vector<uint8_t> tablet_report_desc()
+static void tablet_report_desc(HIDReportBuilder &r)
 {
-    HIDReportBuilder r;
-
     r.UsagePage(HID_PAGE_GENERIC_DESKTOP);
     r.Usage(HID_USAGE_MOUSE);
     r.BeginCollection(HID_COLLECTION_APPLICATION);
@@ -84,15 +82,13 @@ static std::vector<uint8_t> tablet_report_desc()
 
     r.EndCollection();
     r.EndCollection();
-    return r.Take();
 }
 
 
 //#pragma mark - HIDTablet
 
-class HIDTablet final: public HIDDevice, public PointerTarget {
+class HIDTablet final: public HIDCollection, public PointerTarget {
 private:
-    std::vector<uint8_t> fReportDesc = tablet_report_desc();
     uint16_t fX = 0;
     uint16_t fY = 0;
     uint8_t fButtons = 0;
@@ -104,10 +100,10 @@ protected:
         {return BuildReport(buf, size, 0);}
 
 public:
-    HIDTablet(): HIDDevice("hid-tablet") {}
+    HIDTablet(): HIDCollection("hid-tablet") {}
 
-    const uint8_t *ReportDescriptor(int *len) const override
-        {*len = fReportDesc.size(); return fReportDesc.data();}
+    void BuildReportDescriptor(HIDReportBuilder &r) const override
+        {tablet_report_desc(r);}
 
     int InputReportSize() const override {return TABLET_REPORT_SIZE;}
     void Reset() override;
@@ -121,7 +117,6 @@ public:
 
 void HIDTablet::Reset()
 {
-    HIDDevice::Reset();
     fX = 0;
     fY = 0;
     fButtons = 0;
@@ -170,27 +165,26 @@ void HIDTablet::SendMouseEvent(int dx, int dy, int dz, unsigned int buttons)
 
     int len = BuildReport(buf, sizeof(buf), dz);
     if (len > 0) {
-        QueueInputReport(buf, len);
+        SendInputReport(buf, len);
     }
 }
 
 
 //#pragma mark - factory
 
-/* Claims the machine's pointer role once the function is attached. */
-class HIDTabletNode final: public HIDDeviceNode {
+/* Claims the machine's pointer role once the collection is added. */
+class HIDTabletNode final: public HIDCollectionNode {
 private:
     DeviceContext *fCtx;
     HIDTablet *fTablet;
 
 public:
-    HIDTabletNode(HIDTablet *tablet, DeviceContext *ctx, int index):
-        HIDDeviceNode("hid-tablet", tablet, index), fCtx(ctx),
-        fTablet(tablet) {}
+    HIDTabletNode(HIDTablet *tablet, DeviceContext *ctx):
+        HIDCollectionNode("hid-tablet", tablet), fCtx(ctx), fTablet(tablet) {}
 
     bool Realize() override
     {
-        if (!HIDDeviceNode::Realize()) {
+        if (!HIDCollectionNode::Realize()) {
             return false;
         }
         fCtx->mouse = fTablet;
@@ -199,19 +193,14 @@ public:
 };
 
 
-/* "index" is the function it takes on its transport, or -1 for the first
-   free one. */
 class HIDTabletClass final: public DeviceClass {
 public:
     HIDTabletClass(): DeviceClass("hid-tablet") {}
 
     Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
     {
-        int index;
-        if (!cfg.GetInt("index", &index, -1)) {
-            return nullptr;
-        }
-        return new HIDTabletNode(new HIDTablet(), ctx, index);
+        (void)cfg;
+        return new HIDTabletNode(new HIDTablet(), ctx);
     }
 };
 

@@ -53,10 +53,8 @@
 
 /* Six key usages plus the eight modifiers, with the LEDs coming back. This is
    the shape a boot keyboard's report protocol is expected to have. */
-static std::vector<uint8_t> kbd_report_desc()
+static void kbd_report_desc(HIDReportBuilder &r)
 {
-    HIDReportBuilder r;
-
     r.UsagePage(HID_PAGE_GENERIC_DESKTOP);
     r.Usage(HID_USAGE_KEYBOARD);
     r.BeginCollection(HID_COLLECTION_APPLICATION);
@@ -93,7 +91,6 @@ static std::vector<uint8_t> kbd_report_desc()
     r.Input(HID_DATA | HID_ARRAY);
 
     r.EndCollection();
-    return r.Take();
 }
 
 
@@ -136,9 +133,8 @@ static const uint8_t kKeyUsage[KBD_EVDEV_KEY_COUNT] = {
 
 //#pragma mark - HIDKeyboard
 
-class HIDKeyboard final: public HIDDevice, public KeyboardTarget {
+class HIDKeyboard final: public HIDCollection, public KeyboardTarget {
 private:
-    std::vector<uint8_t> fReportDesc = kbd_report_desc();
     uint8_t fModifiers = 0;
     uint8_t fPressed[KBD_MAX_PRESSED] {}; /* held usages, in press order */
     int fPressedCount = 0;
@@ -151,12 +147,13 @@ protected:
     int BuildInputReport(uint8_t *buf, int size) const override;
 
 public:
-    HIDKeyboard(): HIDDevice("hid-keyboard") {}
+    HIDKeyboard(): HIDCollection("hid-keyboard") {}
 
-    const uint8_t *ReportDescriptor(int *len) const override
-        {*len = fReportDesc.size(); return fReportDesc.data();}
+    void BuildReportDescriptor(HIDReportBuilder &r) const override
+        {kbd_report_desc(r);}
 
     int InputReportSize() const override {return KBD_REPORT_SIZE;}
+    int OutputReportSize() const override {return 1;}
     HIDBootProtocolEnum BootProtocol() const override
         {return HID_BOOT_KEYBOARD;}
 
@@ -171,7 +168,6 @@ public:
 
 void HIDKeyboard::Reset()
 {
-    HIDDevice::Reset();
     fModifiers = 0;
     fPressedCount = 0;
     fLeds = 0;
@@ -255,7 +251,7 @@ void HIDKeyboard::SendKeyEvent(bool is_down, uint16_t key_code)
 
     int len = BuildInputReport(buf, sizeof(buf));
     if (len > 0) {
-        QueueInputReport(buf, len);
+        SendInputReport(buf, len);
     }
 }
 
@@ -267,7 +263,7 @@ int HIDKeyboard::GetReport(uint8_t type, uint8_t *buf, int size)
         buf[0] = fLeds;
         return 1;
     }
-    return HIDDevice::GetReport(type, buf, size);
+    return HIDCollection::GetReport(type, buf, size);
 }
 
 
@@ -284,20 +280,20 @@ bool HIDKeyboard::SetReport(uint8_t type, const uint8_t *buf, int len)
 
 //#pragma mark - factory
 
-/* Claims the machine's keyboard role once the function is attached. */
-class HIDKeyboardNode final: public HIDDeviceNode {
+/* Claims the machine's keyboard role once the collection is added. */
+class HIDKeyboardNode final: public HIDCollectionNode {
 private:
     DeviceContext *fCtx;
     HIDKeyboard *fKeyboard;
 
 public:
-    HIDKeyboardNode(HIDKeyboard *keyboard, DeviceContext *ctx, int index):
-        HIDDeviceNode("hid-keyboard", keyboard, index), fCtx(ctx),
+    HIDKeyboardNode(HIDKeyboard *keyboard, DeviceContext *ctx):
+        HIDCollectionNode("hid-keyboard", keyboard), fCtx(ctx),
         fKeyboard(keyboard) {}
 
     bool Realize() override
     {
-        if (!HIDDeviceNode::Realize()) {
+        if (!HIDCollectionNode::Realize()) {
             return false;
         }
         fCtx->keyboard = fKeyboard;
@@ -306,19 +302,14 @@ public:
 };
 
 
-/* "index" is the function it takes on its transport, or -1 for the first
-   free one. */
 class HIDKeyboardClass final: public DeviceClass {
 public:
     HIDKeyboardClass(): DeviceClass("hid-keyboard") {}
 
     Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
     {
-        int index;
-        if (!cfg.GetInt("index", &index, -1)) {
-            return nullptr;
-        }
-        return new HIDKeyboardNode(new HIDKeyboard(), ctx, index);
+        (void)cfg;
+        return new HIDKeyboardNode(new HIDKeyboard(), ctx);
     }
 };
 

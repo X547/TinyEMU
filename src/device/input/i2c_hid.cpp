@@ -71,14 +71,13 @@
 
 //#pragma mark - I2CHID
 
-/* One HID function behind an I2C target. The protocol has one report
-   descriptor per target, so each function needs a target of its own. The
-   interrupt line is held while there is something to read. */
-class I2CHID final: public I2CDevice, public HIDBusTarget,
-                    public HIDTransport {
+/* One HID device behind an I2C target, which the protocol gives one report
+   descriptor. The interrupt line is held while there is something to
+   read. */
+class I2CHID final: public I2CDevice, public HIDTransport {
 private:
     std::unique_ptr<HIDBus> fChildBus;
-    HIDDevice *fDev = nullptr;
+    HIDDevice fDev;
 
     Resource *fIrqRes = nullptr;
     IRQSignal *fIrq = nullptr;
@@ -110,7 +109,8 @@ private:
     void WriteOutput();
 
 public:
-    I2CHID(int address): I2CDevice("i2c-hid", address) {}
+    I2CHID(int address):
+        I2CDevice("i2c-hid", address), fDev("i2c-hid", this) {}
 
     bool Prepare() override;
     bool Realize() override;
@@ -123,10 +123,6 @@ public:
     uint8_t Read() override;
     void Stop() override;
 
-    /* HIDBusTarget */
-    int FindFreeIndex() override {return fDev == nullptr ? 0 : -1;}
-    bool AttachDevice(HIDDevice *dev, int index) override;
-
     /* HIDTransport */
     void HandleInputReport(HIDDevice *dev) override;
 };
@@ -134,7 +130,7 @@ public:
 
 void I2CHID::UpdateIrq()
 {
-    bool level = fResetPending || (fDev != nullptr && fDev->HasInputReport());
+    bool level = fResetPending || fDev.HasInputReport();
 
     if (level != fIrqLevel) {
         fIrqLevel = level;
@@ -150,19 +146,6 @@ void I2CHID::HandleInputReport(HIDDevice *dev)
 }
 
 
-bool I2CHID::AttachDevice(HIDDevice *dev, int index)
-{
-    if (fDev != nullptr || index != 0) {
-        vm_error("i2c-hid: carries one HID function; declare an i2c-hid for "
-                 "each\n");
-        return false;
-    }
-    fDev = dev;
-    dev->SetTransport(this, 0);
-    return true;
-}
-
-
 //#pragma mark - reads
 
 void I2CHID::ReadInput()
@@ -172,8 +155,8 @@ void I2CHID::ReadInput()
         fResetPending = false;
         put_le16(fReadBuf, 0);
         fReadLen = 2;
-    } else if (fDev != nullptr && fDev->HasInputReport()) {
-        int len = fDev->TakeInputReport(fReadBuf + 2, HID_MAX_REPORT_SIZE);
+    } else if (fDev.HasInputReport()) {
+        int len = fDev.TakeInputReport(fReadBuf + 2, HID_MAX_REPORT_SIZE);
         put_le16(fReadBuf, len + 2);
         fReadLen = len + 2;
     } else {
@@ -209,14 +192,12 @@ void I2CHID::RespondToCommand()
 {
     int type, id;
 
-    if (DecodeCommand(&type, &id) < 0 || fDev == nullptr) {
+    if (DecodeCommand(&type, &id) < 0) {
         return;
     }
     switch (get_bits(fWriteBuf[3], 0, 4)) {
     case I2C_HID_OPCODE_GET_REPORT: {
-        /* Reports here carry no ID, so there is one report of each type. */
-        int len = id == 0 ? fDev->GetReport(type, fReadBuf + 2,
-                                            HID_MAX_REPORT_SIZE) : -1;
+        int len = fDev.GetReport(type, id, fReadBuf + 2, HID_MAX_REPORT_SIZE);
         if (len < 0) {
             len = 0;
         }
@@ -244,10 +225,9 @@ void I2CHID::ReadRegister()
 {
     switch (get_le16(fWriteBuf)) {
     case I2C_HID_REG_DESC: {
-        int desc_len = 0;
-        if (fDev != nullptr) {
-            fDev->ReportDescriptor(&desc_len);
-        }
+        int desc_len;
+        fDev.ReportDescriptor(&desc_len);
+        int output_len = fDev.MaxOutputReportSize();
         uint8_t *d = fReadBuf;
         memset(d, 0, I2C_HID_DESC_SIZE);
         put_le16(d + 0, I2C_HID_DESC_SIZE);
@@ -255,9 +235,9 @@ void I2CHID::ReadRegister()
         put_le16(d + 4, desc_len);
         put_le16(d + 6, I2C_HID_REG_REPORT_DESC);
         put_le16(d + 8, I2C_HID_REG_INPUT);
-        put_le16(d + 10, 2 + (fDev != nullptr ? fDev->InputReportSize() : 0));
+        put_le16(d + 10, 2 + fDev.MaxInputReportSize());
         put_le16(d + 12, I2C_HID_REG_OUTPUT);
-        put_le16(d + 14, 2 + HID_MAX_REPORT_SIZE);
+        put_le16(d + 14, output_len != 0 ? 2 + output_len : 0);
         put_le16(d + 16, I2C_HID_REG_COMMAND);
         put_le16(d + 18, I2C_HID_REG_DATA);
         put_le16(d + 20, I2C_HID_VENDOR_ID);
@@ -268,9 +248,7 @@ void I2CHID::ReadRegister()
         break;
     }
     case I2C_HID_REG_REPORT_DESC:
-        if (fDev != nullptr) {
-            fReadData = fDev->ReportDescriptor(&fReadLen);
-        }
+        fReadData = fDev.ReportDescriptor(&fReadLen);
         break;
     case I2C_HID_REG_INPUT:
         ReadInput();
@@ -296,27 +274,21 @@ void I2CHID::RunCommand()
     }
     switch (get_bits(fWriteBuf[3], 0, 4)) {
     case I2C_HID_OPCODE_RESET:
-        if (fDev != nullptr) {
-            fDev->Reset();
-        }
+        fDev.Reset();
         fResetPending = true;
         UpdateIrq();
         break;
     case I2C_HID_OPCODE_SET_REPORT: {
-        /* The data register, the length, the ID when there is one, and the
-           report. */
+        /* The data register, the length, and the report, which starts with
+           its ID when there is one. */
         pos += 2;
-        if (fWriteLen < pos + 2 || fDev == nullptr) {
+        if (fWriteLen < pos + 2) {
             break;
         }
         int len = get_le16(fWriteBuf + pos) - 2;
         pos += 2;
-        if (id != 0) {
-            pos++;
-            len--;
-        }
         if (len >= 0 && pos + len <= fWriteLen) {
-            fDev->SetReport(type, fWriteBuf + pos, len);
+            fDev.SetReport(type, id, fWriteBuf + pos, len);
         }
         break;
     }
@@ -329,12 +301,13 @@ void I2CHID::RunCommand()
 
 void I2CHID::WriteOutput()
 {
-    if (fWriteLen < 4 || fDev == nullptr) {
+    if (fWriteLen < 4) {
         return;
     }
+    /* The report says its own ID, if it has one. */
     int len = get_le16(fWriteBuf + 2) - 2;
     if (len >= 0 && 4 + len <= fWriteLen) {
-        fDev->SetReport(HID_REPORT_OUTPUT, fWriteBuf + 4, len);
+        fDev.SetReport(HID_REPORT_OUTPUT, -1, fWriteBuf + 4, len);
     }
 }
 
@@ -423,7 +396,7 @@ bool I2CHID::Prepare()
     if (fIrqRes == nullptr) {
         return false;
     }
-    fChildBus = std::make_unique<HIDBus>(this, this);
+    fChildBus = std::make_unique<HIDBus>(this, &fDev);
     return true;
 }
 
@@ -497,8 +470,8 @@ public:
             return nullptr;
         }
         if (!cfg.HasChildren()) {
-            vm_error("i2c-hid: needs a nested HID bus with a function on "
-                     "it\n");
+            vm_error("i2c-hid: needs a nested HID bus with at least one "
+                     "collection on it\n");
             return nullptr;
         }
         return new I2CHID(address);

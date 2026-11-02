@@ -70,6 +70,8 @@ private:
     };
 
     std::vector<uint8_t> fData;
+    int fDepth = 0;          /* collections open */
+    uint32_t fNextId = 0;    /* to put in the next top-level one */
 
     void Item(int type, int tag, int32_t value);
     void ItemEmpty(int type, int tag);
@@ -94,8 +96,12 @@ public:
     void Input(uint32_t flags) {Item(MAIN, 0x8, flags);}
     void Output(uint32_t flags) {Item(MAIN, 0x9, flags);}
     void Feature(uint32_t flags) {Item(MAIN, 0xb, flags);}
-    void BeginCollection(uint32_t kind) {Item(MAIN, 0xa, kind);}
-    void EndCollection() {ItemEmpty(MAIN, 0xc);}
+    void BeginCollection(uint32_t kind);
+    void EndCollection() {ItemEmpty(MAIN, 0xc); fDepth--;}
+
+    /* The report ID of the next top-level collection, written as its first
+       item so that every report in it carries the ID. */
+    void NextReportId(uint32_t id) {fNextId = id;}
 
     /* Bits of padding, which is an input field with no usage. */
     void InputPadding(uint32_t bits)

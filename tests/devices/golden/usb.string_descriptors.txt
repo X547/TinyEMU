@@ -4,7 +4,7 @@ xhci.p3.product USB Mass Storage
 xhci.p3.serial TEMU00000001
 xhci.p4.langid 0x409
 xhci.p4.manufacturer TinyEMU
-xhci.p4.product USB HID
+xhci.p4.product USB Composite Device
 xhci.p6.2.langid 0x409
 xhci.p6.2.manufacturer TinyEMU
 xhci.p6.2.product USB HID

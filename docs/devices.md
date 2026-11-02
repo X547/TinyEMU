@@ -663,14 +663,17 @@ Placement: the `ps2` bus of an `i8042`.
 { type: "ps2-mouse", port: 1 }
 ```
 
-#### `hid-keyboard`, `hid-tablet` — HID functions
+#### `hid-keyboard`, `hid-tablet` — HID collections
 
 Placement: the `hid` bus of a `usb-hid` or an `i2c-hid`. Either transport
-carries the same functions.
+carries the same collections. No properties.
 
-| Property | Default | Meaning |
-| --- | --- | --- |
-| `index` | first free | Which function of the transport to be (up to 4 on `usb-hid`, 1 on `i2c-hid`). |
+A `hid` bus is one HID device, with one report descriptor. With several
+collections on it, up to 8, each one's reports carry a report ID, numbered
+from 1 in the order they are declared. The device offers the boot protocol
+when exactly one of its collections has a boot format, which only
+`hid-keyboard` has; while the host uses it, that collection is the only one
+it hears.
 
 ```js
 /* hid bus */
@@ -680,17 +683,18 @@ carries the same functions.
 
 #### `usb-hid` — USB HID device
 
-Placement: `usb` or `usb-function` bus. Provides a `hid` bus with up to four
-functions, each on its own interface. A guest whose driver binds one function
-per USB device needs a separate `usb-hid` for each function. Full or high
-speed, whichever the other functions of its `usb-device` run at.
+Placement: `usb` or `usb-function` bus. Provides a `hid` bus, and takes one
+interface with one interrupt IN endpoint. Full or high speed, whichever the
+other functions of its `usb-device` run at. For collections on interfaces of
+their own, declare a `usb-hid` for each, in one `usb-device` or as devices of
+their own; a guest whose driver binds one per USB device wants the latter.
 
 | Property | Default | Meaning |
 | --- | --- | --- |
 | `port` | first free | The parent's port to occupy; only on a `usb` bus. |
 
 ```js
-/* usb bus */
+/* usb bus: a keyboard and a tablet in one HID device, with report IDs */
 {
     type: "usb-hid",
     bus: {
@@ -702,9 +706,9 @@ speed, whichever the other functions of its `usb-device` run at.
 
 #### `i2c-hid` — HID over I2C
 
-Placement: `i2c` bus. Provides a `hid` bus carrying one function, and takes
-an interrupt line of its own. In ACPI it is a `PNP0C50` device whose `_DSM`
-gives the HID descriptor's register.
+Placement: `i2c` bus. Provides a `hid` bus, and takes an interrupt line of its
+own. In ACPI it is a `PNP0C50` device whose `_DSM` gives the HID descriptor's
+register.
 
 | Property | Default | Meaning |
 | --- | --- | --- |

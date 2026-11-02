@@ -25,16 +25,150 @@
 
 #include <string.h>
 
+#include "hid_report.h"
+#include "host_time.h"
 #include "machine.h"
+
+/* An idle rate counts in these. */
+#define HID_IDLE_UNIT_US 4000
+
+
+//#pragma mark - HIDCollection
+
+void HIDCollection::SendInputReport(const uint8_t *data, int len)
+{
+    if (fDevice != nullptr) {
+        fDevice->QueueInputReport(this, data, len);
+    }
+}
+
+
+int HIDCollection::GetReport(uint8_t type, uint8_t *buf, int size)
+{
+    if (type != HID_REPORT_INPUT) {
+        return -1;
+    }
+    return BuildInputReport(buf, size);
+}
 
 
 //#pragma mark - HIDDevice
 
-void HIDDevice::Reset()
+bool HIDDevice::AddCollection(HIDCollection *c)
 {
-    fBootProtocol = false;
-    fQueueHead = 0;
-    fQueueCount = 0;
+    if (fCount >= HID_MAX_COLLECTIONS) {
+        vm_error("%s: holds at most %d collections\n", fName,
+                 HID_MAX_COLLECTIONS);
+        return false;
+    }
+    fCollections[fCount++] = c;
+    c->fDevice = this;
+
+    HIDReportBuilder r;
+    for (int i = 0; i < fCount; i++) {
+        if (UsesReportIds()) {
+            r.NextReportId(i + 1);
+        }
+        fCollections[i]->BuildReportDescriptor(r);
+    }
+    fReportDesc = r.Take();
+    return fTransport->CollectionsChanged(this);
+}
+
+
+int HIDDevice::IndexOf(const HIDCollection *c) const
+{
+    for (int i = 0; i < fCount; i++) {
+        if (fCollections[i] == c) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+
+/* The collection with a boot format, when exactly one has one. */
+int HIDDevice::BootCollection() const
+{
+    int found = -1;
+    for (int i = 0; i < fCount; i++) {
+        if (fCollections[i]->BootProtocol() == HID_BOOT_NONE) {
+            continue;
+        }
+        if (found >= 0) {
+            return -1;
+        }
+        found = i;
+    }
+    return found;
+}
+
+
+/* The collection a request for a report ID reaches in the active protocol,
+   or -1. */
+int HIDDevice::CollectionForId(int id) const
+{
+    if (fBootProtocol) {
+        return id == 0 ? BootCollection() : -1;
+    }
+    if (!UsesReportIds()) {
+        return id == 0 && fCount > 0 ? 0 : -1;
+    }
+    return id >= 1 && id <= fCount ? id - 1 : -1;
+}
+
+
+HIDBootProtocolEnum HIDDevice::BootProtocol() const
+{
+    int i = BootCollection();
+    return i < 0 ? HID_BOOT_NONE : fCollections[i]->BootProtocol();
+}
+
+
+uint8_t HIDDevice::CountryCode() const
+{
+    for (int i = 0; i < fCount; i++) {
+        if (fCollections[i]->CountryCode() != 0) {
+            return fCollections[i]->CountryCode();
+        }
+    }
+    return 0;
+}
+
+
+/* Polled as often as the most demanding collection asks. */
+int HIDDevice::PollInterval() const
+{
+    int ms = 0;
+    for (int i = 0; i < fCount; i++) {
+        int p = fCollections[i]->PollInterval();
+        if (ms == 0 || p < ms) {
+            ms = p;
+        }
+    }
+    return ms != 0 ? ms : 10;
+}
+
+
+int HIDDevice::MaxInputReportSize() const
+{
+    int size = 0;
+    for (int i = 0; i < fCount; i++) {
+        int s = fCollections[i]->InputReportSize();
+        size = s > size ? s : size;
+    }
+    return size + (UsesReportIds() ? 1 : 0);
+}
+
+
+int HIDDevice::MaxOutputReportSize() const
+{
+    int size = 0;
+    for (int i = 0; i < fCount; i++) {
+        int s = fCollections[i]->OutputReportSize();
+        size = s > size ? s : size;
+    }
+    return size == 0 ? 0 : size + (UsesReportIds() ? 1 : 0);
 }
 
 
@@ -50,29 +184,48 @@ void HIDDevice::SetProtocol(bool boot_protocol)
 }
 
 
-void HIDDevice::QueueInputReport(const uint8_t *data, int len)
+void HIDDevice::QueueInputReport(HIDCollection *c, const uint8_t *data,
+                                 int len)
 {
-    if (len <= 0) {
+    int index = IndexOf(c);
+    if (index < 0 || len <= 0) {
         return;
     }
-    if (len > HID_MAX_REPORT_SIZE) {
-        len = HID_MAX_REPORT_SIZE;
+    if (fBootProtocol && index != BootCollection()) {
+        /* It has no boot format, so the host is not listening for it. */
+        return;
+    }
+    int id_len = !fBootProtocol && UsesReportIds() ? 1 : 0;
+    if (len > HID_MAX_REPORT_SIZE - id_len) {
+        len = HID_MAX_REPORT_SIZE - id_len;
     }
 
     if (fQueueCount >= HID_REPORT_QUEUE_SIZE) {
-        /* Nothing is collecting the reports; the oldest goes. */
+        /* Nothing is collecting the reports; the oldest goes, which for a
+           pointer leaves the current position. */
         fQueueHead = (fQueueHead + 1) % HID_REPORT_QUEUE_SIZE;
         fQueueCount--;
     }
 
-    int slot = (fQueueHead + fQueueCount) % HID_REPORT_QUEUE_SIZE;
-    memcpy(fQueue[slot].data, data, len);
-    fQueue[slot].len = len;
+    QueuedReport &report =
+        fQueue[(fQueueHead + fQueueCount) % HID_REPORT_QUEUE_SIZE];
+    if (id_len != 0) {
+        report.data[0] = index + 1;
+    }
+    memcpy(report.data + id_len, data, len);
+    report.len = id_len + len;
+    report.collection = index;
     fQueueCount++;
 
-    if (fTransport != nullptr) {
-        fTransport->HandleInputReport(this);
-    }
+    fTransport->HandleInputReport(this);
+}
+
+
+/* A report of one collection went out, so its idle period starts over. */
+void HIDDevice::ReportSent(int index)
+{
+    fIdleDue[index] = host_monotonic_us() +
+                      fIdle[index] * (uint64_t)HID_IDLE_UNIT_US;
 }
 
 
@@ -87,16 +240,139 @@ int HIDDevice::TakeInputReport(uint8_t *buf, int size)
     memcpy(buf, report.data, len);
     fQueueHead = (fQueueHead + 1) % HID_REPORT_QUEUE_SIZE;
     fQueueCount--;
+    ReportSent(report.collection);
     return len;
 }
 
 
-int HIDDevice::GetReport(uint8_t type, uint8_t *buf, int size)
+/* The current report of one collection, as the active protocol sends it. */
+int HIDDevice::BuildReport(int index, uint8_t type, uint8_t *buf, int size)
 {
-    if (type != HID_REPORT_INPUT) {
+    int id_len = !fBootProtocol && UsesReportIds() ? 1 : 0;
+    if (size < id_len) {
         return -1;
     }
-    return BuildInputReport(buf, size);
+    int len = fCollections[index]->GetReport(type, buf + id_len,
+                                             size - id_len);
+    if (len < 0) {
+        return -1;
+    }
+    if (id_len != 0) {
+        buf[0] = index + 1;
+    }
+    return id_len + len;
+}
+
+
+int HIDDevice::GetReport(uint8_t type, int id, uint8_t *buf, int size)
+{
+    int index = CollectionForId(id);
+    if (index < 0) {
+        return -1;
+    }
+    return BuildReport(index, type, buf, size);
+}
+
+
+bool HIDDevice::SetReport(uint8_t type, int id, const uint8_t *buf, int len)
+{
+    if (!fBootProtocol && UsesReportIds()) {
+        /* The report starts with its ID, which has to be the one asked
+           for. */
+        if (len < 1 || (id >= 0 && buf[0] != id)) {
+            return false;
+        }
+        id = buf[0];
+        buf++;
+        len--;
+    } else if (id < 0) {
+        id = 0;
+    }
+    int index = CollectionForId(id);
+    return index >= 0 && fCollections[index]->SetReport(type, buf, len);
+}
+
+
+int HIDDevice::Idle(int id) const
+{
+    if (fCount == 0) {
+        return -1;
+    }
+    if (id == 0) {
+        return fIdle[0];
+    }
+    if (!UsesReportIds() || id > fCount) {
+        return -1;
+    }
+    return fIdle[id - 1];
+}
+
+
+bool HIDDevice::SetIdle(int id, uint8_t rate)
+{
+    if (id != 0 && (!UsesReportIds() || id > fCount)) {
+        return false;
+    }
+    for (int i = 0; i < fCount; i++) {
+        if (id == 0 || i == id - 1) {
+            /* The new period counts from now. */
+            fIdle[i] = rate;
+            ReportSent(i);
+        }
+    }
+    return true;
+}
+
+
+uint64_t HIDDevice::NextIdleDue() const
+{
+    int boot = fBootProtocol ? BootCollection() : -1;
+    uint64_t due = UINT64_MAX;
+    for (int i = 0; i < fCount; i++) {
+        if (fIdle[i] != 0 && (!fBootProtocol || i == boot) &&
+            fIdleDue[i] < due) {
+            due = fIdleDue[i];
+        }
+    }
+    return due;
+}
+
+
+/* A collection whose idle period ran out without a change sends its
+   current state again. */
+int HIDDevice::TakeIdleReport(uint8_t *buf, int size)
+{
+    uint64_t now = host_monotonic_us();
+    int boot = fBootProtocol ? BootCollection() : -1;
+    int index = -1;
+    for (int i = 0; i < fCount; i++) {
+        if (fIdle[i] != 0 && (!fBootProtocol || i == boot) &&
+            fIdleDue[i] <= now &&
+            (index < 0 || fIdleDue[i] < fIdleDue[index])) {
+            index = i;
+        }
+    }
+    if (index < 0) {
+        return 0;
+    }
+    int len = BuildReport(index, HID_REPORT_INPUT, buf, size);
+    if (len <= 0) {
+        return 0;
+    }
+    ReportSent(index);
+    return len;
+}
+
+
+void HIDDevice::Reset()
+{
+    fBootProtocol = false;
+    fQueueHead = 0;
+    fQueueCount = 0;
+    for (int i = 0; i < fCount; i++) {
+        fIdle[i] = 0;
+        fCollections[i]->Reset();
+    }
 }
 
 
@@ -104,12 +380,12 @@ int HIDDevice::GetReport(uint8_t type, uint8_t *buf, int size)
 
 bool HIDBus::AssignResources(Device *dev)
 {
-    /* A HID function reaches the host only through its transport, so it holds
+    /* A collection reaches the host only through its transport, so it holds
        no address space and no interrupt line of its own. */
     for (int i = 0; i < dev->ResourceCount(); i++) {
         if (dev->ResourceAt(i)->type != RES_NONE) {
             vm_error("hid bus: device '%s' declared a resource, but a HID "
-                     "function has none of its own\n", dev->Name());
+                     "collection has none of its own\n", dev->Name());
             return false;
         }
     }
@@ -117,36 +393,26 @@ bool HIDBus::AssignResources(Device *dev)
 }
 
 
-//#pragma mark - HIDDeviceNode
+//#pragma mark - HIDCollectionNode
 
-HIDDeviceNode::HIDDeviceNode(const char *name, HIDDevice *dev, int index):
-    Device(name), fDev(dev), fIndex(index)
+HIDCollectionNode::HIDCollectionNode(const char *name, HIDCollection *c):
+    Device(name), fCollection(c)
 {
 }
 
 
-HIDDeviceNode::~HIDDeviceNode()
+HIDCollectionNode::~HIDCollectionNode()
 {
-    delete fDev;
+    delete fCollection;
 }
 
 
-bool HIDDeviceNode::Realize()
+bool HIDCollectionNode::Realize()
 {
     HIDBus *bus = dynamic_cast<HIDBus *>(ParentBus());
     if (bus == nullptr) {
         vm_error("%s: must be attached to a HID bus\n", Name());
         return false;
     }
-
-    HIDBusTarget *target = bus->Target();
-    int index = fIndex;
-    if (index < 0) {
-        index = target->FindFreeIndex();
-        if (index < 0) {
-            vm_error("%s: the transport has no free function left\n", Name());
-            return false;
-        }
-    }
-    return target->AttachDevice(fDev, index);
+    return bus->Dev()->AddCollection(fCollection);
 }
