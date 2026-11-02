@@ -160,6 +160,7 @@ public:
     HIDBootProtocolEnum BootProtocol() const override
         {return HID_BOOT_KEYBOARD;}
 
+    int GetReport(uint8_t type, uint8_t *buf, int size) override;
     bool SetReport(uint8_t type, const uint8_t *buf, int len) override;
     void Reset() override;
 
@@ -256,6 +257,17 @@ void HIDKeyboard::SendKeyEvent(bool is_down, uint16_t key_code)
     if (len > 0) {
         QueueInputReport(buf, len);
     }
+}
+
+
+/* The output report reads back as the host last set it. */
+int HIDKeyboard::GetReport(uint8_t type, uint8_t *buf, int size)
+{
+    if (type == HID_REPORT_OUTPUT && size >= 1) {
+        buf[0] = fLeds;
+        return 1;
+    }
+    return HIDDevice::GetReport(type, buf, size);
 }
 
 

@@ -24,12 +24,16 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <memory>
 #include <vector>
 
 #include "bits.h"
 #include "cutils.h"
 #include "device_class.h"
+#include "devices.h"
 #include "hid.h"
+#include "host_time.h"
+#include "host_timer.h"
 #include "machine.h"
 #include "usb.h"
 #include "usb_desc.h"
@@ -79,7 +83,8 @@ static std::vector<uint8_t> hid_device_desc()
 
 /* One USB interface per HID function, each with an interrupt IN endpoint
    carrying that function's input reports. */
-class USBHID final: public USBDevice, public HIDBusTarget, public HIDTransport {
+class USBHID final: public USBDevice, public HIDBusTarget, public HIDTransport,
+                    public TimerTarget {
 private:
     struct Function {
         HIDDevice *dev = nullptr;
@@ -87,6 +92,9 @@ private:
            give. */
         URB *parked_urb = nullptr;
         uint8_t idle = 0; /* the idle rate the host set, in 4 ms units */
+        /* With a non-zero idle rate, when the report is due again even
+           without a change (HID 1.11 7.2.4). */
+        uint64_t idle_due_us = 0;
         /* Where this function's HID descriptor sits in the configuration,
            which is the copy a request for it is answered from. */
         int hid_desc_offset = 0;
@@ -98,7 +106,11 @@ private:
     std::vector<uint8_t> fDeviceDesc = hid_device_desc();
     std::vector<uint8_t> fConfigDesc;
 
+    std::unique_ptr<HostTimer> fTimer;
+
     void BuildConfigDescriptor();
+    void ArmIdleTimer();
+    void CompleteParked(Function *fn, const uint8_t *buf, int len);
     Function *FunctionForInterface(int index);
     Function *FunctionForEndpoint(int endpoint);
 
@@ -110,9 +122,10 @@ private:
     USBStatusEnum HandleInterruptIn(URB *urb, Function *fn);
 
 public:
-    USBHID();
+    USBHID(std::unique_ptr<HostTimer> timer);
 
     void Reset() override;
+    void TimerExpired() override;
     USBStatusEnum Submit(URB *urb) override;
     void Cancel(URB *urb) override;
 
@@ -127,8 +140,10 @@ public:
 };
 
 
-USBHID::USBHID(): USBDevice("usb-hid", USB_SPEED_FULL)
+USBHID::USBHID(std::unique_ptr<HostTimer> timer):
+    USBDevice("usb-hid", USB_SPEED_FULL), fTimer(std::move(timer))
 {
+    fTimer->target = this;
     SetStringDescriptor(1, "TinyEMU");
     SetStringDescriptor(2, "USB HID");
     BuildConfigDescriptor();
@@ -203,6 +218,59 @@ void USBHID::Reset()
         fFunctions[i].idle = 0;
         fFunctions[i].dev->Reset();
     }
+    fTimer->Disarm();
+}
+
+
+/* Wake for the first function whose poll waits on its idle rate. */
+void USBHID::ArmIdleTimer()
+{
+    uint64_t due = UINT64_MAX;
+    for (int i = 0; i < fFunctionCount; i++) {
+        const Function &fn = fFunctions[i];
+        if (fn.parked_urb != nullptr && fn.idle != 0 && fn.idle_due_us < due) {
+            due = fn.idle_due_us;
+        }
+    }
+    if (due == UINT64_MAX) {
+        fTimer->Disarm();
+    } else {
+        fTimer->Arm(due);
+    }
+}
+
+
+/* Hand a report to the poll that waited for it. Detaching the transfer
+   before completing it matters: the completion runs the endpoint's ring on,
+   which comes straight back here. */
+void USBHID::CompleteParked(Function *fn, const uint8_t *buf, int len)
+{
+    URB *urb = fn->parked_urb;
+    fn->parked_urb = nullptr;
+    fn->idle_due_us = host_monotonic_us() + fn->idle * 4000ULL;
+    uint32_t actual =
+        urb->buffer != nullptr ? urb->buffer->Write(0, buf, len) : 0;
+    usb_urb_complete(urb, USB_STATUS_OK, actual);
+}
+
+
+void USBHID::TimerExpired()
+{
+    uint64_t now = host_monotonic_us();
+    for (int i = 0; i < fFunctionCount; i++) {
+        Function *fn = &fFunctions[i];
+        if (fn->parked_urb == nullptr || fn->idle == 0 ||
+            fn->idle_due_us > now) {
+            continue;
+        }
+        /* The period ran out without a change: the current state again. */
+        uint8_t buf[HID_MAX_REPORT_SIZE];
+        int len = fn->dev->GetReport(HID_REPORT_INPUT, buf, sizeof(buf));
+        if (len > 0) {
+            CompleteParked(fn, buf, len);
+        }
+    }
+    ArmIdleTimer();
 }
 
 
@@ -253,8 +321,6 @@ USBHID::Function *USBHID::FunctionForEndpoint(int endpoint)
 }
 
 
-/* Detaching the transfer before completing it matters: the completion runs
-   the endpoint's ring on, which comes straight back here. */
 void USBHID::HandleInputReport(HIDDevice *dev)
 {
     Function *fn = FunctionForInterface(dev->Index());
@@ -262,18 +328,13 @@ void USBHID::HandleInputReport(HIDDevice *dev)
         return;
     }
 
-    URB *urb = fn->parked_urb;
-    fn->parked_urb = nullptr;
-
     uint8_t buf[HID_MAX_REPORT_SIZE];
     int len = dev->TakeInputReport(buf, sizeof(buf));
     if (len <= 0) {
-        fn->parked_urb = urb;
         return;
     }
-    uint32_t actual =
-        urb->buffer != nullptr ? urb->buffer->Write(0, buf, len) : 0;
-    usb_urb_complete(urb, USB_STATUS_OK, actual);
+    CompleteParked(fn, buf, len);
+    ArmIdleTimer();
 }
 
 
@@ -403,9 +464,12 @@ USBStatusEnum USBHID::HandleControl(URB *urb)
     }
 
     case HID_REQUEST_SET_IDLE:
-        /* Recorded so that GET_IDLE agrees. Reports go out when the state
-           changes, which is what an idle rate of zero asks for. */
+        /* Reports go out when the state changes, and with a non-zero rate
+           also when that long passed without one (7.2.4). The new period
+           counts from now. */
         fn->idle = setup.value >> 8;
+        fn->idle_due_us = host_monotonic_us() + fn->idle * 4000ULL;
+        ArmIdleTimer();
         urb->actual_length = 0;
         return USB_STATUS_OK;
 
@@ -434,19 +498,25 @@ USBStatusEnum USBHID::HandleInterruptIn(URB *urb, Function *fn)
 {
     uint8_t buf[HID_MAX_REPORT_SIZE];
 
-    if (!fn->dev->HasInputReport()) {
+    int len;
+    if (fn->dev->HasInputReport()) {
+        len = fn->dev->TakeInputReport(buf, sizeof(buf));
+    } else if (fn->idle != 0 && host_monotonic_us() >= fn->idle_due_us) {
+        len = fn->dev->GetReport(HID_REPORT_INPUT, buf, sizeof(buf));
+    } else {
         /* Hold the transfer rather than refusing it: a refusal here would
            never be retried. */
         if (fn->parked_urb != nullptr) {
             return USB_STATUS_STALL;
         }
         fn->parked_urb = urb;
+        ArmIdleTimer();
         return USB_STATUS_ASYNC;
     }
 
-    int len = fn->dev->TakeInputReport(buf, sizeof(buf));
-    urb->actual_length =
-        urb->buffer != nullptr ? urb->buffer->Write(0, buf, len) : 0;
+    fn->idle_due_us = host_monotonic_us() + fn->idle * 4000ULL;
+    urb->actual_length = urb->buffer != nullptr && len > 0
+                             ? urb->buffer->Write(0, buf, len) : 0;
     return USB_STATUS_OK;
 }
 
@@ -473,6 +543,7 @@ void USBHID::Cancel(URB *urb)
             fFunctions[i].parked_urb = nullptr;
         }
     }
+    ArmIdleTimer();
 }
 
 
@@ -487,7 +558,6 @@ public:
     {
         int port;
 
-        (void)ctx;
         if (!cfg.GetInt("port", &port, 0)) {
             return nullptr;
         }
@@ -496,7 +566,7 @@ public:
                      "function on it\n");
             return nullptr;
         }
-        USBHID *hid = new USBHID();
+        USBHID *hid = new USBHID(ctx->platform->OpenTimer());
         USBDeviceNode *node = new USBDeviceNode("usb-hid", hid, port);
 
         node->SetChildBus(new HIDBus(node, hid));
