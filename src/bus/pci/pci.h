@@ -469,6 +469,7 @@ void pci_device_set_wmask(PCIDevice *d, uint16_t addr, uint32_t mask,
    Its PCIConfigTarget is not told. */
 uint32_t pci_device_get_config(PCIDevice *d, uint16_t addr, int size_log2);
 int pci_device_get_devfn(PCIDevice *d);
+PCIBus *pci_device_get_bus(PCIDevice *d);
 /* Tell 'target' of accesses to the 'size' bytes at 'addr'. One range per
    device. */
 void pci_device_set_config_target(PCIDevice *d, uint16_t addr, uint16_t size,

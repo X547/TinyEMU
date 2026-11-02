@@ -284,6 +284,7 @@ void PCIHostECAMDevice::BuildFDT(FDTContext &ctx)
         fdt->PropU32("msi-parent", ctx.msi_phandle);
     }
 
+    fChildBus->BuildFDTAll(ctx);
     fdt->EndNode();
 }
 
@@ -317,6 +318,7 @@ void PCIHostECAMDevice::BuildAML(AcpiContext &ctx)
         }
     }
 
+    std::string name = ctx.NewName("PCI");
     AmlBytes dev = aml_name("_HID", aml_eisaid("PNP0A08"));
     aml_append(dev, aml_name("_CID", aml_eisaid("PNP0A03")));
     aml_append(dev, aml_name("_UID", aml_int(segment)));
@@ -324,7 +326,9 @@ void PCIHostECAMDevice::BuildAML(AcpiContext &ctx)
     aml_append(dev, aml_name("_BBN", aml_int(0)));
     aml_append(dev, aml_name("_CRS", aml_resource_template(r)));
     aml_append(dev, aml_name("_PRT", aml_package(prt)));
-    aml_append(*ctx.aml, aml_device(ctx.NewName("PCI").c_str(), dev));
+    AcpiContext nested = ctx.Nested(name, &dev);
+    fChildBus->BuildAMLAll(nested);
+    aml_append(*ctx.aml, aml_device(name.c_str(), dev));
 
     assert(fEcamRes->End() <= 0x100000000ull);
     r.clear();

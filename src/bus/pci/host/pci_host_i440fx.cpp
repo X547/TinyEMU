@@ -366,11 +366,14 @@ public:
             }
         }
 
+        std::string name = ctx.NewName("PCI");
         AmlBytes dev = aml_name("_HID", aml_eisaid("PNP0A03"));
         aml_append(dev, aml_name("_ADR", aml_int(0)));
         aml_append(dev, aml_name("_CRS", aml_resource_template(r)));
         aml_append(dev, aml_name("_PRT", aml_package(prt)));
-        aml_append(*ctx.aml, aml_device(ctx.NewName("PCI").c_str(), dev));
+        AcpiContext nested = ctx.Nested(name, &dev);
+        fChildBus->BuildAMLAll(nested);
+        aml_append(*ctx.aml, aml_device(name.c_str(), dev));
     }
 
     Bus *ChildBus() override {return fChildBus.get();}

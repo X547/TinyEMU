@@ -59,3 +59,19 @@ public:
 
    Returns null on failure. */
 std::unique_ptr<Bus> pci_attach_bus_create(Device *owner, PCIBus *bus);
+
+
+/* A function the guest enumerates needs no description, but one with
+   something more to say -- devices behind it that nothing enumerates -- is
+   described inside its host bridge's node, by its device and function
+   number. Only a function on the host bridge's own bus can be: the number of
+   a bus behind a bridge is the guest's to choose. The host bridges with a
+   bus of their own pass BuildFDT() and BuildAML() down to its devices. */
+bool pci_function_describable(PCIBus *bus);
+
+/* Open the device tree node of function 'd', named 'name' with its device
+   and function number as the unit address, inside its host bridge's node. */
+void pci_fdt_begin_function(FDTContext &ctx, const char *name, PCIDevice *d);
+
+/* The _ADR of function 'd' within its host bridge's Device(). */
+uint32_t pci_acpi_address(PCIDevice *d);

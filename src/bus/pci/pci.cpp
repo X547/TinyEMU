@@ -978,6 +978,11 @@ int pci_device_get_devfn(PCIDevice *d)
     return d->devfn;
 }
 
+PCIBus *pci_device_get_bus(PCIDevice *d)
+{
+    return d->bus;
+}
+
 void pci_device_set_config_target(PCIDevice *d, uint16_t addr, uint16_t size,
                                   PCIConfigTarget *target)
 {

@@ -26,6 +26,7 @@
 #include <stdio.h>
 
 #include "device_class.h"
+#include "fdt.h"
 #include "machine.h"
 
 
@@ -194,6 +195,44 @@ static std::unique_ptr<Bus> pci_switch_bus_create(Device *owner, PCIBus *bus)
         bus = inner;
     }
     return std::make_unique<PCISwitchBus>(owner, bus);
+}
+
+
+//#pragma mark - description of functions
+
+bool pci_function_describable(PCIBus *bus)
+{
+    return pci_bus_is_root(bus);
+}
+
+
+void pci_fdt_begin_function(FDTContext &ctx, const char *name, PCIDevice *d)
+{
+    int devfn = pci_device_get_devfn(d);
+    char node[64];
+
+    if ((devfn & 7) != 0) {
+        snprintf(node, sizeof(node), "%s@%x,%x", name, devfn >> 3, devfn & 7);
+    } else {
+        snprintf(node, sizeof(node), "%s@%x", name, devfn >> 3);
+    }
+    ctx.fdt->BeginNode(node);
+    /* The configuration address, with no space of its own: phys.hi only. */
+    ctx.fdt->AddCellU32(
+        ((uint32_t)pci_bus_get_bus_num(pci_device_get_bus(d)) << 16) |
+        ((uint32_t)devfn << 8));
+    for (int i = 0; i < 4; i++) {
+        ctx.fdt->AddCellU32(0);
+    }
+    ctx.fdt->PropCells("reg");
+}
+
+
+uint32_t pci_acpi_address(PCIDevice *d)
+{
+    int devfn = pci_device_get_devfn(d);
+
+    return ((uint32_t)(devfn >> 3) << 16) | (uint32_t)(devfn & 7);
 }
 
 
