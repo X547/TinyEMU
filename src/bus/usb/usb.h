@@ -77,6 +77,10 @@
 #define USB_FEATURE_ENDPOINT_HALT   0x00
 #define USB_FEATURE_REMOTE_WAKEUP   0x01
 
+/* bmAttributes of a configuration descriptor. */
+#define USB_CONFIG_SELF_POWERED     0x40
+#define USB_CONFIG_REMOTE_WAKEUP    0x20
+
 /* Interface class codes this tree uses. */
 #define USB_CLASS_HID               0x03
 #define USB_CLASS_HUB               0x09
@@ -183,12 +187,23 @@ private:
     uint8_t fAddress = 0;
     uint8_t fConfigValue = 0;
     uint8_t fAltSettings[USB_MAX_INTERFACES] {};
+    bool fRemoteWakeup = false;
+
+    /* Endpoint halt, a bit per endpoint and direction: set by
+       SET_FEATURE(ENDPOINT_HALT) or by the device stalling a transfer, and
+       cleared by CLEAR_FEATURE(ENDPOINT_HALT) unless the class wedged it. */
+    uint32_t fHalted = 0;
+    uint32_t fWedged = 0;
 
     const uint8_t *fDeviceDesc = nullptr;
     const uint8_t *fConfigDesc = nullptr;
     const char *fStrings[USB_MAX_STRINGS] {};
 
     void ResetAltSettings();
+    bool HasInterface(int iface) const;
+    bool HasEndpoint(uint8_t address) const;
+    USBStatusEnum EndpointRequest(URB *urb);
+    USBStatusEnum OtherSpeedDescriptor(URB *urb, uint8_t type);
 
 protected:
     /* Both blobs are the bytes that go on the wire, and both must outlive the
@@ -208,6 +223,12 @@ protected:
        setting when the configuration changes or the device is reset. The
        default knows only setting 0. */
     virtual bool SetInterface(int iface, int alt) {(void)iface; return alt == 0;}
+
+    /* Halt an endpoint, as a functional stall does. A wedged one stays
+       halted through CLEAR_FEATURE(ENDPOINT_HALT) until the class unwedges
+       it, which is what a mass storage device asks for (BOT 6.6.1). */
+    void HaltEndpoint(uint8_t address, bool wedge = false);
+    void UnwedgeEndpoints() {fWedged = 0;}
 
 public:
     USBDevice(const char *name, USBSpeedEnum speed);
@@ -229,6 +250,10 @@ public:
     /* USB_STATUS_ASYNC means the answer arrives through urb->completion. It
        is not an answer an isochronous URB may get. */
     virtual USBStatusEnum Submit(URB *urb) = 0;
+
+    /* What a controller calls: Submit(), behind the endpoint halt state a
+       device keeps for every endpoint but 0 (USB 2.0 9.4.5, 8.4.5). */
+    USBStatusEnum SubmitURB(URB *urb);
 
     /* Give back an URB the submitter no longer wants: the endpoint was
        stopped, or the controller is being reset. The device must not call the

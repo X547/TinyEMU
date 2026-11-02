@@ -1453,7 +1453,7 @@ void XHCIDevice::KickEndpoint(XHCIEndpoint *ep)
             continue;
         }
 
-        USBStatusEnum status = dev->Submit(urb);
+        USBStatusEnum status = dev->SubmitURB(urb);
         if (status == USB_STATUS_ASYNC) {
             /* The endpoint keeps the descriptor and stops fetching; the
                device's completion picks it up again. */
@@ -1542,7 +1542,7 @@ void XHCIDevice::IsochTransfer(XHCIEndpoint *ep)
         return;
     }
 
-    USBStatusEnum status = dev->Submit(urb);
+    USBStatusEnum status = dev->SubmitURB(urb);
     if (status == USB_STATUS_ASYNC) {
         vm_error("xhci: %s answered an isochronous transfer later\n",
                  dev->Name());
@@ -1808,7 +1808,7 @@ int XHCIDevice::CmdAddressDevice(int slot_id, const XHCITRB &trb)
         urb.setup.request_type = 0x00;
         urb.setup.request = USB_REQ_SET_ADDRESS;
         urb.setup.value = slot_id;
-        if (dev->Submit(&urb) != USB_STATUS_OK) {
+        if (dev->SubmitURB(&urb) != USB_STATUS_OK) {
             return CC_USB_TRANSACTION_ERROR;
         }
         address = slot_id;
