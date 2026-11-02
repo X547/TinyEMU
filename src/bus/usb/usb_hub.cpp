@@ -52,6 +52,11 @@
 #define C_PORT_RESET        20
 #define PORT_INDICATOR      22
 
+/* Transaction translator requests (11.24.2). */
+#define HUB_REQ_CLEAR_TT_BUFFER 8
+#define HUB_REQ_RESET_TT        9
+#define HUB_REQ_STOP_TT         11
+
 /* wPortStatus and wPortChange bits. */
 #define PORT_STAT_CONNECTION bit_at(0)
 #define PORT_STAT_ENABLE     bit_at(1)
@@ -116,6 +121,7 @@ private:
     bool AnyChange() const;
     void BuildChangeBitmap(uint8_t *buf) const;
     void NotifyChange();
+    void PowerOffPorts();
     USBStatusEnum HubDescriptor(URB *urb);
     USBStatusEnum PortStatus(URB *urb, int port);
     USBStatusEnum SetPortFeature(int port, int feature);
@@ -140,9 +146,9 @@ USBHub::USBHub(int port_count):
 {
     fBitmapSize = (fPortCount + 1 + 7) / 8;
 
+    /* Powered off until the host switches each port on (11.11). */
     for (int i = 0; i < fPortCount; i++) {
         fPorts[i].port.index = i + 1;
-        fPorts[i].status = PORT_STAT_POWER;
     }
 
     USBDescBuilder b;
@@ -169,14 +175,17 @@ void USBHub::Reset()
 {
     USBDevice::Reset();
     fParkedUrb = nullptr;
+    PowerOffPorts();
+}
 
+
+/* An unconfigured hub has its ports in the Powered-off state, which
+   reports no connection and carries no traffic (11.5.1.1). */
+void USBHub::PowerOffPorts()
+{
     for (int i = 0; i < fPortCount; i++) {
-        fPorts[i].status = PORT_STAT_POWER;
+        fPorts[i].status = 0;
         fPorts[i].change = 0;
-        if (fPorts[i].port.dev != nullptr) {
-            fPorts[i].status |= PORT_STAT_CONNECTION;
-            fPorts[i].change |= PORT_CHG_CONNECTION;
-        }
     }
 }
 
@@ -215,9 +224,11 @@ bool USBHub::AttachDevice(USBDevice *dev, int port)
 
     p.port.dev = dev;
     dev->SetPort(&p.port);
-    p.status |= PORT_STAT_CONNECTION;
-    p.change |= PORT_CHG_CONNECTION;
-    NotifyChange();
+    if ((p.status & PORT_STAT_POWER) != 0) {
+        p.status |= PORT_STAT_CONNECTION;
+        p.change |= PORT_CHG_CONNECTION;
+        NotifyChange();
+    }
     return true;
 }
 
@@ -225,6 +236,10 @@ bool USBHub::AttachDevice(USBDevice *dev, int port)
 USBDevice *USBHub::DownstreamDevice(int port)
 {
     if (port < 1 || port > fPortCount) {
+        return nullptr;
+    }
+    /* Nothing goes through a port that is not enabled (11.5.1). */
+    if ((fPorts[port - 1].status & PORT_STAT_ENABLE) == 0) {
         return nullptr;
     }
     return fPorts[port - 1].port.dev;
@@ -332,7 +347,7 @@ USBStatusEnum USBHub::SetPortFeature(int port, int feature)
 
     switch (feature) {
     case PORT_RESET:
-        if (p.port.dev != nullptr) {
+        if (p.port.dev != nullptr && (p.status & PORT_STAT_POWER) != 0) {
             p.port.dev->Reset();
             /* The reset completes at once, so the port comes back enabled
                with the reset change pending. The speed is known only after the
@@ -351,7 +366,16 @@ USBStatusEnum USBHub::SetPortFeature(int port, int feature)
         return USB_STATUS_OK;
 
     case PORT_POWER:
-        p.status |= PORT_STAT_POWER;
+        if ((p.status & PORT_STAT_POWER) == 0) {
+            /* Disconnected, then whatever is plugged in is seen
+               (11.5.1.2). */
+            p.status |= PORT_STAT_POWER;
+            if (p.port.dev != nullptr) {
+                p.status |= PORT_STAT_CONNECTION;
+                p.change |= PORT_CHG_CONNECTION;
+                NotifyChange();
+            }
+        }
         return USB_STATUS_OK;
 
     case PORT_SUSPEND:
@@ -374,13 +398,20 @@ USBStatusEnum USBHub::ClearPortFeature(int port, int feature)
 
     switch (feature) {
     case PORT_ENABLE:
-        p.status &= ~PORT_STAT_ENABLE;
+        p.status &= ~(PORT_STAT_ENABLE | PORT_STAT_SUSPEND);
         return USB_STATUS_OK;
     case PORT_SUSPEND:
-        p.status &= ~PORT_STAT_SUSPEND;
+        /* The resume completes at once, and says so (11.24.2.7.2.3). */
+        if ((p.status & PORT_STAT_SUSPEND) != 0) {
+            p.status &= ~PORT_STAT_SUSPEND;
+            p.change |= PORT_CHG_SUSPEND;
+            NotifyChange();
+        }
         return USB_STATUS_OK;
     case PORT_POWER:
-        p.status &= ~PORT_STAT_POWER;
+        /* Powered-off: nothing is reported, the device is gone from the
+           bus (11.5.1.1). */
+        p.status = 0;
         return USB_STATUS_OK;
     case PORT_INDICATOR:
         return USB_STATUS_OK;
@@ -411,7 +442,12 @@ USBStatusEnum USBHub::Submit(URB *urb)
         const USBSetup &setup = urb->setup;
 
         if ((setup.request_type & USB_TYPE_MASK) != USB_TYPE_CLASS) {
-            return HandleStandardControl(urb);
+            USBStatusEnum status = HandleStandardControl(urb);
+            if (setup.request == USB_REQ_SET_CONFIGURATION &&
+                ConfigValue() == 0) {
+                PowerOffPorts();
+            }
+            return status;
         }
 
         int recipient = setup.request_type & USB_RECIP_MASK;
@@ -451,6 +487,20 @@ USBStatusEnum USBHub::Submit(URB *urb)
                 urb->actual_length = 0;
                 return ClearPortFeature(get_bits(setup.index, 0, 8),
                                         setup.value);
+            }
+            urb->actual_length = 0;
+            return USB_STATUS_OK;
+
+        case HUB_REQ_CLEAR_TT_BUFFER:
+        case HUB_REQ_RESET_TT:
+        case HUB_REQ_STOP_TT:
+            /* The single TT keeps no split transaction state here, so there
+               is nothing to clear, reset or stop; a high speed hub must
+               take these all the same (11.24.2.3, 11.24.2.9, 11.24.2.11).
+               With one TT, wIndex names port 1. */
+            if (recipient != USB_RECIP_OTHER ||
+                get_bits(setup.index, 0, 8) != 1) {
+                break;
             }
             urb->actual_length = 0;
             return USB_STATUS_OK;
