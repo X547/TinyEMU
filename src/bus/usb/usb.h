@@ -331,6 +331,11 @@ public:
 };
 
 
+/* Plug a device into the USB bus 'node' was declared on, at 'port' or, for 0,
+   the first free one that takes the device's speed. */
+bool usb_attach_device(Device *node, USBDevice *dev, int port);
+
+
 /* Fill in an URB's outcome and hand it back. A device that answered
    asynchronously calls this from its own callback; one that answered on the
    spot never needs it. */

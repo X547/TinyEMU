@@ -33,6 +33,7 @@
 #include "scsi.h"
 #include "usb.h"
 #include "usb_desc.h"
+#include "usb_function.h"
 
 /* Command and status wrappers, as they go over the bulk endpoints. */
 #define CBW_SIGNATURE 0x43425355 /* "USBC" */
@@ -52,8 +53,9 @@
    this is refused rather than being allowed to size an allocation here. */
 #define MSC_MAX_TRANSFER (1 << 20)
 
-#define MSC_EP_IN  1
-#define MSC_EP_OUT 2
+/* The endpoints, counted from the function's first. */
+#define MSC_EP_IN  0
+#define MSC_EP_OUT 1
 
 
 typedef enum {
@@ -67,50 +69,12 @@ typedef enum {
 /* The bulk endpoints carry the 512 byte packets high speed requires. */
 #define MSC_MAX_PACKET 512
 
-static std::vector<uint8_t> msc_device_desc()
-{
-    USBDescBuilder b;
-
-    b.Device({
-        .device_class = 0, /* it is declared per interface */
-        .vendor_id = 0x46f4, /* not one any driver carries a quirk for */
-        .product_id = 0x0001,
-        .manufacturer_str = 1,
-        .product_str = 2,
-        .serial_str = 3,
-    });
-    return b.Take();
-}
-
-static std::vector<uint8_t> msc_config_desc()
-{
-    USBDescBuilder b;
-
-    b.BeginConfig({
-        .attributes = USB_CONFIG_ATTR_ONE | USB_CONFIG_ATTR_SELF_POWERED,
-        .max_power_ma = 100,
-    });
-    b.BeginInterface({
-        .iface_class = USB_CLASS_MASS_STORAGE,
-        .iface_subclass = 0x06, /* SCSI transparent command set */
-        .iface_protocol = 0x50, /* bulk-only transport */
-    });
-    b.Endpoint(USB_DIR_IN | MSC_EP_IN, USB_ENDPOINT_ATTR_BULK,
-               MSC_MAX_PACKET, 0);
-    b.Endpoint(MSC_EP_OUT, USB_ENDPOINT_ATTR_BULK, MSC_MAX_PACKET, 0);
-    b.EndConfig();
-    return b.Take();
-}
-
 
 //#pragma mark - USBStorage
 
-class USBStorage final: public USBDevice, public SCSIBusTarget,
+class USBStorage final: public USBFunction, public SCSIBusTarget,
                         public SCSICompletion {
 private:
-    std::vector<uint8_t> fDeviceDesc = msc_device_desc();
-    std::vector<uint8_t> fConfigDesc = msc_config_desc();
-
     SCSIDevice *fUnits[SCSI_MAX_LUN] {};
     int fMaxLun = -1;
 
@@ -138,17 +102,26 @@ private:
     void FinishCommand();
     bool ReportLuns();
 
-    USBStatusEnum HandleControl(URB *urb);
+    uint8_t EndpointIn() const
+        {return USB_DIR_IN | (FirstEndpoint() + MSC_EP_IN);}
+    uint8_t EndpointOut() const {return FirstEndpoint() + MSC_EP_OUT;}
+
     USBStatusEnum HandleBulkOut(URB *urb);
     USBStatusEnum HandleBulkIn(URB *urb);
     USBStatusEnum ServeDataIn(URB *urb);
     USBStatusEnum ServeStatus(URB *urb);
 
 public:
-    USBStorage();
+    USBStorage(): USBFunction("usb-storage") {}
     ~USBStorage() override;
 
+    USBFunctionInfo Info() const override;
+    int InterfaceCount() const override {return 1;}
+    int EndpointCount() const override {return 2;}
+    void BuildDescriptors(USBDescBuilder &b) override;
+
     void Reset() override;
+    USBStatusEnum HandleControl(URB *urb) override;
     USBStatusEnum Submit(URB *urb) override;
     void Cancel(URB *urb) override;
 
@@ -160,17 +133,7 @@ public:
     void Complete(SCSIRequest *req) override;
 
     int MaxLun() const {return fMaxLun < 0 ? 0 : fMaxLun;}
-    bool HasUnit() const {return fMaxLun >= 0;}
 };
-
-
-USBStorage::USBStorage(): USBDevice("usb-storage", USB_SPEED_HIGH)
-{
-    SetDescriptors(fDeviceDesc.data(), fConfigDesc.data());
-    SetStringDescriptor(1, "TinyEMU");
-    SetStringDescriptor(2, "USB Mass Storage");
-    SetStringDescriptor(3, "TEMU00000001");
-}
 
 
 USBStorage::~USBStorage()
@@ -179,9 +142,33 @@ USBStorage::~USBStorage()
 }
 
 
+USBFunctionInfo USBStorage::Info() const
+{
+    return {
+        .speed = USB_SPEED_HIGH,
+        .product_id = 0x0001,
+        .product = "USB Mass Storage",
+        .serial = "TEMU00000001",
+        .config_attributes = USB_CONFIG_ATTR_SELF_POWERED,
+    };
+}
+
+
+void USBStorage::BuildDescriptors(USBDescBuilder &b)
+{
+    b.BeginInterface({
+        .number = FirstInterface(),
+        .iface_class = USB_CLASS_MASS_STORAGE,
+        .iface_subclass = 0x06, /* SCSI transparent command set */
+        .iface_protocol = 0x50, /* bulk-only transport */
+    });
+    b.Endpoint(EndpointIn(), USB_ENDPOINT_ATTR_BULK, MSC_MAX_PACKET, 0);
+    b.Endpoint(EndpointOut(), USB_ENDPOINT_ATTR_BULK, MSC_MAX_PACKET, 0);
+}
+
+
 void USBStorage::Reset()
 {
-    USBDevice::Reset();
     fState = MSC_STATE_CBW;
     fCommandRunning = false;
     fParkedUrb = nullptr;
@@ -335,47 +322,44 @@ USBStatusEnum USBStorage::HandleControl(URB *urb)
 {
     const USBSetup &setup = urb->setup;
 
-    if ((setup.request_type & USB_TYPE_MASK) == USB_TYPE_CLASS) {
-        /* Both requests go to the interface with wValue 0, and their
-           wLength is fixed (3.1, 3.2). */
-        if ((setup.request_type & USB_RECIP_MASK) != USB_RECIP_INTERFACE ||
-            setup.value != 0 || setup.index != 0) {
-            return USB_STATUS_STALL;
-        }
-        switch (setup.request) {
-        case MSC_REQUEST_GET_MAX_LUN: {
-            if (setup.length != 1) {
-                return USB_STATUS_STALL;
-            }
-            uint8_t val = MaxLun();
-            urb->actual_length =
-                urb->buffer != nullptr ? urb->buffer->Write(0, &val, 1) : 0;
-            return USB_STATUS_OK;
-        }
-
-        case MSC_REQUEST_RESET:
-            if (setup.length != 0) {
-                return USB_STATUS_STALL;
-            }
-            /* Abandon whatever was in flight and go back to waiting for a
-               command wrapper. */
-            if (fCommandRunning) {
-                fUnits[fLun]->Cancel(&fRequest);
-                fCommandRunning = false;
-            }
-            fState = MSC_STATE_CBW;
-            fParkedUrb = nullptr;
-            fDataPos = 0;
-            fDataDone = 0;
-            /* The halts themselves stay for CLEAR_FEATURE (5.3.4). */
-            UnwedgeEndpoints();
-            urb->actual_length = 0;
-            return USB_STATUS_OK;
-        }
+    /* Both requests go to the interface with wValue 0, and their wLength is
+       fixed (3.1, 3.2). */
+    if ((setup.request_type & USB_TYPE_MASK) != USB_TYPE_CLASS ||
+        (setup.request_type & USB_RECIP_MASK) != USB_RECIP_INTERFACE ||
+        setup.value != 0 || setup.index != FirstInterface()) {
         return USB_STATUS_STALL;
     }
+    switch (setup.request) {
+    case MSC_REQUEST_GET_MAX_LUN: {
+        if (setup.length != 1) {
+            return USB_STATUS_STALL;
+        }
+        uint8_t val = MaxLun();
+        urb->actual_length =
+            urb->buffer != nullptr ? urb->buffer->Write(0, &val, 1) : 0;
+        return USB_STATUS_OK;
+    }
 
-    return HandleStandardControl(urb);
+    case MSC_REQUEST_RESET:
+        if (setup.length != 0) {
+            return USB_STATUS_STALL;
+        }
+        /* Abandon whatever was in flight and go back to waiting for a
+           command wrapper. */
+        if (fCommandRunning) {
+            fUnits[fLun]->Cancel(&fRequest);
+            fCommandRunning = false;
+        }
+        fState = MSC_STATE_CBW;
+        fParkedUrb = nullptr;
+        fDataPos = 0;
+        fDataDone = 0;
+        /* The halts themselves stay for CLEAR_FEATURE (5.3.4). */
+        UnwedgeEndpoints();
+        urb->actual_length = 0;
+        return USB_STATUS_OK;
+    }
+    return USB_STATUS_STALL;
 }
 
 
@@ -390,8 +374,8 @@ USBStatusEnum USBStorage::HandleBulkOut(URB *urb)
             /* A wrapper that is not valid: the host has lost sync, and both
                pipes stall until a Reset Recovery, clearing the halt alone
                not being enough (BOT 6.6.1, 5.3.4). */
-            HaltEndpoint(USB_DIR_IN | MSC_EP_IN, true);
-            HaltEndpoint(MSC_EP_OUT, true);
+            HaltEndpoint(EndpointIn(), true);
+            HaltEndpoint(EndpointOut(), true);
             return USB_STATUS_STALL;
         }
 
@@ -510,13 +494,10 @@ USBStatusEnum USBStorage::HandleBulkIn(URB *urb)
 
 USBStatusEnum USBStorage::Submit(URB *urb)
 {
-    if (urb->type == USB_ENDPOINT_CONTROL) {
-        return HandleControl(urb);
-    }
-    if (urb->endpoint == MSC_EP_IN && urb->is_in) {
+    if (urb->is_in && (USB_DIR_IN | urb->endpoint) == EndpointIn()) {
         return HandleBulkIn(urb);
     }
-    if (urb->endpoint == MSC_EP_OUT && !urb->is_in) {
+    if (!urb->is_in && urb->endpoint == EndpointOut()) {
         return HandleBulkOut(urb);
     }
     return USB_STATUS_STALL;
@@ -551,7 +532,8 @@ public:
             return nullptr;
         }
         USBStorage *storage = new USBStorage();
-        USBDeviceNode *node = new USBDeviceNode("usb-storage", storage, port);
+        USBFunctionNode *node = new USBFunctionNode("usb-storage", storage,
+                                                    port);
 
         node->SetChildBus(new SCSIBus(node, storage));
         return node;

@@ -479,21 +479,26 @@ USBDeviceNode::~USBDeviceNode()
 
 bool USBDeviceNode::Realize()
 {
-    USBBus *bus = dynamic_cast<USBBus *>(ParentBus());
+    return usb_attach_device(this, fDev, fPort);
+}
+
+
+bool usb_attach_device(Device *node, USBDevice *dev, int port)
+{
+    USBBus *bus = dynamic_cast<USBBus *>(node->ParentBus());
     if (bus == nullptr) {
-        vm_error("%s: must be attached to a USB bus\n", Name());
+        vm_error("%s: must be attached to a USB bus\n", node->Name());
         return false;
     }
 
     USBPortTarget *target = bus->Target();
-    int port = fPort;
     if (port == 0) {
-        port = target->FindFreePort(fDev->Speed());
+        port = target->FindFreePort(dev->Speed());
         if (port == 0) {
-            vm_error("%s: no free port for a %s speed device\n", Name(),
-                     fDev->Speed() == USB_SPEED_SUPER ? "super" : "high");
+            vm_error("%s: no free port for a %s speed device\n", node->Name(),
+                     dev->Speed() == USB_SPEED_SUPER ? "super" : "high");
             return false;
         }
     }
-    return target->AttachDevice(fDev, port);
+    return target->AttachDevice(dev, port);
 }

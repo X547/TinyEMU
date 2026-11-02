@@ -34,6 +34,7 @@
 #include "machine.h"
 #include "usb.h"
 #include "usb_desc.h"
+#include "usb_function.h"
 
 //#define DEBUG_USB_AUDIO
 
@@ -185,9 +186,7 @@ public:
     uint16_t MaxPacket() const;
 
     void SetIndex(int index) {fIndex = index;}
-    uint8_t Interface() const {return 1 + fIndex;}
-    uint8_t DataEndpoint() const {return 1 + fIndex;}
-    uint8_t FeedbackEndpoint() const {return USB_DIR_IN | (1 + fIndex);}
+    int Index() const {return fIndex;}
     uint8_t InputTerminalId() const {return 3 * fIndex + 1;}
     uint8_t FeatureUnitId() const {return 3 * fIndex + 2;}
     uint8_t OutputTerminalId() const {return 3 * fIndex + 3;}
@@ -562,21 +561,6 @@ void USBAudioOutput::AudioTick()
 
 //#pragma mark - USBAudio
 
-static std::vector<uint8_t> audio_device_desc()
-{
-    USBDescBuilder b;
-
-    b.Device({
-        .device_class = 0, /* it is declared per interface */
-        .vendor_id = 0x46f4, /* not one any driver carries a quirk for */
-        .product_id = 0x0004,
-        .manufacturer_str = 1,
-        .product_str = 2,
-    });
-    return b.Take();
-}
-
-
 /* The spatial positions of the first channels, as a cluster describes them;
    a single channel has none. */
 static uint16_t audio_channel_config(int channels)
@@ -596,13 +580,19 @@ static uint16_t audio_channel_config(int channels)
    output. Each output is a chain of three entities: the USB streaming input
    terminal, a feature unit with the master mute and volume, and the output
    terminal its "kind" names. */
-class USBAudio final: public USBDevice {
+class USBAudio final: public USBFunction {
 private:
     std::vector<USBAudioOutput *> fOutputs;
-    std::vector<uint8_t> fDeviceDesc = audio_device_desc();
-    std::vector<uint8_t> fConfigDesc;
 
-    void BuildConfigDescriptor();
+    /* The control interface comes first, then a streaming interface per
+       output, each with an endpoint number of its own. */
+    uint8_t StreamingInterface(const USBAudioOutput *out) const
+        {return FirstInterface() + 1 + out->Index();}
+    uint8_t DataEndpoint(const USBAudioOutput *out) const
+        {return FirstEndpoint() + out->Index();}
+    uint8_t FeedbackEndpoint(const USBAudioOutput *out) const
+        {return USB_DIR_IN | DataEndpoint(out);}
+
     USBAudioOutput *OutputForInterface(int iface);
     USBAudioOutput *OutputForEntity(int id);
     USBAudioOutput *OutputForEndpoint(int address);
@@ -610,27 +600,31 @@ private:
     USBStatusEnum Reply(URB *urb, const void *data, uint32_t len);
     USBStatusEnum FeatureUnitRequest(URB *urb, USBAudioOutput *out);
     USBStatusEnum EndpointRequest(URB *urb, USBAudioOutput *out);
-    USBStatusEnum HandleControl(URB *urb);
-
-protected:
-    bool SetInterface(int iface, int alt) override;
 
 public:
-    USBAudio();
+    USBAudio(): USBFunction("usb-audio") {}
 
-    bool HasOutput() const {return !fOutputs.empty();}
     bool AttachOutput(USBAudioOutput *out);
 
+    USBFunctionInfo Info() const override;
+    int InterfaceCount() const override {return 1 + fOutputs.size();}
+    int EndpointCount() const override {return fOutputs.size();}
+    void BuildDescriptors(USBDescBuilder &b) override;
+
+    bool SetInterface(int iface, int alt) override;
     void Reset() override;
+    USBStatusEnum HandleControl(URB *urb) override;
     USBStatusEnum Submit(URB *urb) override;
 };
 
 
-USBAudio::USBAudio(): USBDevice("usb-audio", USB_SPEED_FULL)
+USBFunctionInfo USBAudio::Info() const
 {
-    SetStringDescriptor(1, "TinyEMU");
-    SetStringDescriptor(2, "USB Audio");
-    BuildConfigDescriptor();
+    return {
+        .speed = USB_SPEED_FULL,
+        .product_id = 0x0004,
+        .product = "USB Audio",
+    };
 }
 
 
@@ -642,22 +636,17 @@ bool USBAudio::AttachOutput(USBAudioOutput *out)
     }
     out->SetIndex(fOutputs.size());
     fOutputs.push_back(out);
-    BuildConfigDescriptor();
+    DescriptorsChanged();
     return true;
 }
 
 
-void USBAudio::BuildConfigDescriptor()
+void USBAudio::BuildDescriptors(USBDescBuilder &b)
 {
-    USBDescBuilder b;
     int n = fOutputs.size();
 
-    b.BeginConfig({
-        .max_power_ma = 100,
-    });
-
     b.BeginInterface({
-        .number = 0,
+        .number = FirstInterface(),
         .iface_class = USB_CLASS_AUDIO,
         .iface_subclass = UAC_SUBCLASS_CONTROL,
     });
@@ -672,8 +661,8 @@ void USBAudio::BuildConfigDescriptor()
     b.Word(UAC_VERSION);
     b.Word(total);
     b.Byte(n);
-    for (int i = 0; i < n; i++) {
-        b.Byte(1 + i);
+    for (USBAudioOutput *out : fOutputs) {
+        b.Byte(StreamingInterface(out));
     }
     b.EndDescriptor();
 
@@ -715,7 +704,7 @@ void USBAudio::BuildConfigDescriptor()
 
     for (USBAudioOutput *out : fOutputs) {
         const USBAudioPortConfig &c = out->Config();
-        uint8_t number = out->Interface();
+        uint8_t number = StreamingInterface(out);
 
         /* Setting 0 takes no bandwidth; setting 1 streams. */
         b.BeginInterface({
@@ -751,9 +740,9 @@ void USBAudio::BuildConfigDescriptor()
         }
         b.EndDescriptor();
 
-        b.AudioEndpoint(out->DataEndpoint(),
+        b.AudioEndpoint(DataEndpoint(out),
                         USB_ENDPOINT_ATTR_ISOCH | USB_ENDPOINT_SYNC_ASYNC,
-                        out->MaxPacket(), 1, 0, out->FeedbackEndpoint());
+                        out->MaxPacket(), 1, 0, FeedbackEndpoint(out));
 
         b.BeginDescriptor(UAC_DT_CS_ENDPOINT);
         b.Byte(UAC_EP_GENERAL);
@@ -763,17 +752,13 @@ void USBAudio::BuildConfigDescriptor()
         b.EndDescriptor();
 
         /* The feedback value is three bytes at full speed. */
-        b.AudioEndpoint(out->FeedbackEndpoint(), USB_ENDPOINT_ATTR_ISOCH, 3,
+        b.AudioEndpoint(FeedbackEndpoint(out), USB_ENDPOINT_ATTR_ISOCH, 3,
                         1, USB_AUDIO_REFRESH, 0);
     }
-
-    b.EndConfig();
-    fConfigDesc = b.Take();
-    /* The bytes moved, so the device has to be pointed at them again. */
-    SetDescriptors(fDeviceDesc.data(), fConfigDesc.data());
 }
 
 
+/* 'iface' counts from the control interface. */
 USBAudioOutput *USBAudio::OutputForInterface(int iface)
 {
     if (iface < 1 || iface > (int)fOutputs.size()) {
@@ -797,8 +782,7 @@ USBAudioOutput *USBAudio::OutputForEntity(int id)
 USBAudioOutput *USBAudio::OutputForEndpoint(int address)
 {
     for (USBAudioOutput *out : fOutputs) {
-        if (out->DataEndpoint() == address ||
-            out->FeedbackEndpoint() == address) {
+        if (DataEndpoint(out) == address || FeedbackEndpoint(out) == address) {
             return out;
         }
     }
@@ -822,7 +806,6 @@ bool USBAudio::SetInterface(int iface, int alt)
 
 void USBAudio::Reset()
 {
-    USBDevice::Reset();
     for (USBAudioOutput *out : fOutputs) {
         out->Reset();
     }
@@ -901,7 +884,7 @@ USBStatusEnum USBAudio::EndpointRequest(URB *urb, USBAudioOutput *out)
     uint8_t buf[3] = {0, 0, 0};
 
     if ((setup.value >> 8) != UAC_EP_SAMPLING_FREQ ||
-        get_bits(setup.index, 0, 8) != out->DataEndpoint()) {
+        get_bits(setup.index, 0, 8) != DataEndpoint(out)) {
         return USB_STATUS_STALL;
     }
 
@@ -934,9 +917,6 @@ USBStatusEnum USBAudio::HandleControl(URB *urb)
 {
     const USBSetup &setup = urb->setup;
 
-    if ((setup.request_type & USB_TYPE_MASK) == USB_TYPE_STANDARD) {
-        return HandleStandardControl(urb);
-    }
     if ((setup.request_type & USB_TYPE_MASK) != USB_TYPE_CLASS) {
         return USB_STATUS_STALL;
     }
@@ -944,7 +924,7 @@ USBStatusEnum USBAudio::HandleControl(URB *urb)
     switch (setup.request_type & USB_RECIP_MASK) {
     case USB_RECIP_INTERFACE: {
         /* The entity in the high byte, the control interface in the low. */
-        if (get_bits(setup.index, 0, 8) != 0) {
+        if (get_bits(setup.index, 0, 8) != FirstInterface()) {
             return USB_STATUS_STALL;
         }
         USBAudioOutput *out = OutputForEntity(setup.index >> 8);
@@ -968,9 +948,6 @@ USBStatusEnum USBAudio::HandleControl(URB *urb)
 
 USBStatusEnum USBAudio::Submit(URB *urb)
 {
-    if (urb->type == USB_ENDPOINT_CONTROL) {
-        return HandleControl(urb);
-    }
     if (urb->type != USB_ENDPOINT_ISOCH) {
         return USB_STATUS_STALL;
     }
@@ -1050,7 +1027,7 @@ public:
             return nullptr;
         }
         USBAudio *audio = new USBAudio();
-        USBDeviceNode *node = new USBDeviceNode("usb-audio", audio, port);
+        USBFunctionNode *node = new USBFunctionNode("usb-audio", audio, port);
 
         node->SetChildBus(new USBAudioBus(node, audio));
         return node;

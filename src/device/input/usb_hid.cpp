@@ -37,6 +37,7 @@
 #include "machine.h"
 #include "usb.h"
 #include "usb_desc.h"
+#include "usb_function.h"
 
 /* HID specific descriptor types. */
 #define USB_DT_HID      0x21
@@ -63,28 +64,16 @@
 /* HID 1.11, as the version field of a HID descriptor spells it. */
 #define HID_VERSION 0x0111
 
-
-static std::vector<uint8_t> hid_device_desc()
-{
-    USBDescBuilder b;
-
-    b.Device({
-        .device_class = 0, /* it is declared per interface */
-        .vendor_id = 0x46f4, /* not one any driver carries a quirk for */
-        .product_id = 0x0003,
-        .manufacturer_str = 1,
-        .product_str = 2,
-    });
-    return b.Take();
-}
+/* With one report descriptor. */
+#define HID_DESC_SIZE 9
 
 
 //#pragma mark - USBHID
 
 /* One USB interface per HID function, each with an interrupt IN endpoint
    carrying that function's input reports. */
-class USBHID final: public USBDevice, public HIDBusTarget, public HIDTransport,
-                    public TimerTarget {
+class USBHID final: public USBFunction, public HIDBusTarget,
+                    public HIDTransport, public TimerTarget {
 private:
     struct Function {
         HIDDevice *dev = nullptr;
@@ -95,41 +84,41 @@ private:
         /* With a non-zero idle rate, when the report is due again even
            without a change (HID 1.11 7.2.4). */
         uint64_t idle_due_us = 0;
-        /* Where this function's HID descriptor sits in the configuration,
-           which is the copy a request for it is answered from. */
-        int hid_desc_offset = 0;
+        /* This function's HID descriptor as the configuration has it, which
+           is what a request for it is answered with. */
+        uint8_t hid_desc[HID_DESC_SIZE] {};
     };
 
     Function fFunctions[HID_MAX_FUNCTIONS] {};
     int fFunctionCount = 0;
 
-    std::vector<uint8_t> fDeviceDesc = hid_device_desc();
-    std::vector<uint8_t> fConfigDesc;
-
     std::unique_ptr<HostTimer> fTimer;
 
-    void BuildConfigDescriptor();
     void ArmIdleTimer();
     void CompleteParked(Function *fn, const uint8_t *buf, int len);
-    Function *FunctionForInterface(int index);
+    Function *FunctionAt(int index);
+    Function *FunctionForInterface(int iface);
     Function *FunctionForEndpoint(int endpoint);
 
     USBStatusEnum HIDDescriptor(URB *urb, Function *fn);
     USBStatusEnum ReportDescriptor(URB *urb, Function *fn);
     USBStatusEnum GetReport(URB *urb, Function *fn);
     USBStatusEnum SetReport(URB *urb, Function *fn);
-    USBStatusEnum HandleControl(URB *urb);
     USBStatusEnum HandleInterruptIn(URB *urb, Function *fn);
 
 public:
     USBHID(std::unique_ptr<HostTimer> timer);
 
+    USBFunctionInfo Info() const override;
+    int InterfaceCount() const override {return fFunctionCount;}
+    int EndpointCount() const override {return fFunctionCount;}
+    void BuildDescriptors(USBDescBuilder &b) override;
+
     void Reset() override;
     void TimerExpired() override;
+    USBStatusEnum HandleControl(URB *urb) override;
     USBStatusEnum Submit(URB *urb) override;
     void Cancel(URB *urb) override;
-
-    bool HasFunction() const {return fFunctionCount > 0;}
 
     /* HIDBusTarget */
     int FindFreeIndex() override;
@@ -141,26 +130,27 @@ public:
 
 
 USBHID::USBHID(std::unique_ptr<HostTimer> timer):
-    USBDevice("usb-hid", USB_SPEED_FULL), fTimer(std::move(timer))
+    USBFunction("usb-hid"), fTimer(std::move(timer))
 {
     fTimer->target = this;
-    SetStringDescriptor(1, "TinyEMU");
-    SetStringDescriptor(2, "USB HID");
-    BuildConfigDescriptor();
 }
 
 
-/* The configuration is whatever was attached, so it is assembled rather than
-   being a table. */
-void USBHID::BuildConfigDescriptor()
+USBFunctionInfo USBHID::Info() const
 {
-    USBDescBuilder b;
+    return {
+        .speed = USB_SPEED_FULL,
+        .product_id = 0x0003,
+        .product = "USB HID",
+        .config_attributes = USB_CONFIG_ATTR_REMOTE_WAKEUP,
+    };
+}
 
-    b.BeginConfig({
-        .attributes = USB_CONFIG_ATTR_ONE | USB_CONFIG_ATTR_REMOTE_WAKEUP,
-        .max_power_ma = 100,
-    });
 
+/* The interfaces are whatever was attached, so they are assembled rather than
+   being a table. */
+void USBHID::BuildDescriptors(USBDescBuilder &b)
+{
     for (int i = 0; i < fFunctionCount; i++) {
         HIDDevice *dev = fFunctions[i].dev;
         int desc_len;
@@ -182,7 +172,7 @@ void USBHID::BuildConfigDescriptor()
         }
 
         b.BeginInterface({
-            .number = (uint8_t)i,
+            .number = (uint8_t)(FirstInterface() + i),
             .iface_class = USB_CLASS_HID,
             .iface_subclass = subclass,
             .iface_protocol = protocol,
@@ -195,24 +185,20 @@ void USBHID::BuildConfigDescriptor()
         b.Byte(USB_DT_REPORT);
         b.Word(desc_len);
         b.EndDescriptor();
-        fFunctions[i].hid_desc_offset = b.DescriptorOffset();
+        memcpy(fFunctions[i].hid_desc, b.Data() + b.DescriptorOffset(),
+               HID_DESC_SIZE);
 
         /* the input report endpoint. At full speed the interval is in
            frames, so in milliseconds. */
-        b.Endpoint(USB_DIR_IN | (i + 1), USB_ENDPOINT_ATTR_INTERRUPT,
-                   dev->InputReportSize(), dev->PollInterval());
+        b.Endpoint(USB_DIR_IN | (FirstEndpoint() + i),
+                   USB_ENDPOINT_ATTR_INTERRUPT, dev->InputReportSize(),
+                   dev->PollInterval());
     }
-
-    b.EndConfig();
-    fConfigDesc = b.Take();
-    /* The bytes moved, so the device has to be pointed at them again. */
-    SetDescriptors(fDeviceDesc.data(), fConfigDesc.data());
 }
 
 
 void USBHID::Reset()
 {
-    USBDevice::Reset();
     for (int i = 0; i < fFunctionCount; i++) {
         fFunctions[i].parked_urb = nullptr;
         fFunctions[i].idle = 0;
@@ -299,12 +285,12 @@ bool USBHID::AttachDevice(HIDDevice *dev, int index)
     fFunctions[index].dev = dev;
     fFunctionCount = index + 1;
     dev->SetTransport(this, index);
-    BuildConfigDescriptor();
+    DescriptorsChanged();
     return true;
 }
 
 
-USBHID::Function *USBHID::FunctionForInterface(int index)
+USBHID::Function *USBHID::FunctionAt(int index)
 {
     if (index < 0 || index >= fFunctionCount) {
         return nullptr;
@@ -313,17 +299,22 @@ USBHID::Function *USBHID::FunctionForInterface(int index)
 }
 
 
+/* Function i has the i-th interface and the i-th endpoint. */
+USBHID::Function *USBHID::FunctionForInterface(int iface)
+{
+    return FunctionAt(iface - FirstInterface());
+}
+
+
 USBHID::Function *USBHID::FunctionForEndpoint(int endpoint)
 {
-    /* Interface i owns endpoint i + 1, since endpoint 0 is the control
-       endpoint the whole device shares. */
-    return FunctionForInterface(endpoint - 1);
+    return FunctionAt(endpoint - FirstEndpoint());
 }
 
 
 void USBHID::HandleInputReport(HIDDevice *dev)
 {
-    Function *fn = FunctionForInterface(dev->Index());
+    Function *fn = FunctionAt(dev->Index());
     if (fn == nullptr || fn->parked_urb == nullptr) {
         return;
     }
@@ -340,9 +331,7 @@ void USBHID::HandleInputReport(HIDDevice *dev)
 
 USBStatusEnum USBHID::HIDDescriptor(URB *urb, Function *fn)
 {
-    /* The HID descriptor is part of the configuration, so it is answered from
-       the copy already there. */
-    const uint8_t *desc = fConfigDesc.data() + fn->hid_desc_offset;
+    const uint8_t *desc = fn->hid_desc;
     uint32_t len = desc[0];
 
     if (len > urb->setup.length) {
@@ -414,38 +403,29 @@ USBStatusEnum USBHID::HandleControl(URB *urb)
 {
     const USBSetup &setup = urb->setup;
 
-    if ((setup.request_type & USB_TYPE_MASK) == USB_TYPE_STANDARD) {
-        /* The HID and report descriptors are fetched with a standard
-           GET_DESCRIPTOR naming the interface. */
-        if (setup.request == USB_REQ_GET_DESCRIPTOR) {
-            int type = setup.value >> 8;
-            if (type == USB_DT_HID || type == USB_DT_REPORT ||
-                type == USB_DT_PHYSICAL) {
-                Function *fn =
-                    FunctionForInterface(get_bits(setup.index, 0, 8));
-                if (fn == nullptr) {
-                    return USB_STATUS_STALL;
-                }
-                if (type == USB_DT_HID) {
-                    return HIDDescriptor(urb, fn);
-                }
-                if (type == USB_DT_REPORT) {
-                    return ReportDescriptor(urb, fn);
-                }
-                /* Physical descriptors describe which finger presses which
-                   key, and a device is free not to have any. */
-                return USB_STATUS_STALL;
-            }
-        }
-        return HandleStandardControl(urb);
-    }
-
-    if ((setup.request_type & USB_TYPE_MASK) != USB_TYPE_CLASS) {
+    Function *fn = FunctionForInterface(get_bits(setup.index, 0, 8));
+    if (fn == nullptr) {
         return USB_STATUS_STALL;
     }
 
-    Function *fn = FunctionForInterface(get_bits(setup.index, 0, 8));
-    if (fn == nullptr) {
+    if ((setup.request_type & USB_TYPE_MASK) == USB_TYPE_STANDARD) {
+        /* The HID and report descriptors are fetched with a standard
+           GET_DESCRIPTOR naming the interface. */
+        if (setup.request != USB_REQ_GET_DESCRIPTOR) {
+            return USB_STATUS_STALL;
+        }
+        switch (setup.value >> 8) {
+        case USB_DT_HID:
+            return HIDDescriptor(urb, fn);
+        case USB_DT_REPORT:
+            return ReportDescriptor(urb, fn);
+        }
+        /* Physical descriptors describe which finger presses which key, and
+           a device is free not to have any. */
+        return USB_STATUS_STALL;
+    }
+
+    if ((setup.request_type & USB_TYPE_MASK) != USB_TYPE_CLASS) {
         return USB_STATUS_STALL;
     }
 
@@ -523,9 +503,6 @@ USBStatusEnum USBHID::HandleInterruptIn(URB *urb, Function *fn)
 
 USBStatusEnum USBHID::Submit(URB *urb)
 {
-    if (urb->type == USB_ENDPOINT_CONTROL) {
-        return HandleControl(urb);
-    }
     if (urb->type == USB_ENDPOINT_INTERRUPT && urb->is_in) {
         Function *fn = FunctionForEndpoint(urb->endpoint);
         if (fn != nullptr) {
@@ -567,7 +544,7 @@ public:
             return nullptr;
         }
         USBHID *hid = new USBHID(ctx->platform->OpenTimer());
-        USBDeviceNode *node = new USBDeviceNode("usb-hid", hid, port);
+        USBFunctionNode *node = new USBFunctionNode("usb-hid", hid, port);
 
         node->SetChildBus(new HIDBus(node, hid));
         return node;

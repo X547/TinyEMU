@@ -5,6 +5,7 @@ emu_libs += static_library('bus_usb',
   files(
     'usb.cpp',
     'usb_desc.cpp',
+    'usb_function.cpp',
     'usb_hub.cpp',
   ),
   kwargs: lib_kwargs,
