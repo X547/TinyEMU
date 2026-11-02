@@ -339,7 +339,8 @@ works on either transport:
 Attached to a PCI bus the controller is enumerated, and the guest places its
 register window; attached to the FDT bus it takes a register window and an
 interrupt line and describes itself in the device tree, together with the
-fixed clock the drivers for such a part expect to find. Which driver binds to
+fixed clock the drivers for such a part expect to find. On the PC's "acpi"
+root bus it does the same in the DSDT, as PNP0D40. Which driver binds to
 that node is decided by "compatible", exactly as it is for the DesignWare
 host bridge; the default names an Arasan controller, which is a plain SDHCI
 part with no platform glue beyond that clock.

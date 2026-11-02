@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "acpi.h"
 #include "bits.h"
 #include "cutils.h"
 #include "device_class.h"
@@ -297,8 +298,9 @@ static uint32_t sdhci_size_mask(uint32_t size)
 
    Which transport it is on is decided by the bus it was attached to, exactly
    as it is for a virtio device: on PCI the guest enumerates it and places its
-   base address register, and on the device tree bus it takes a register
-   window and an interrupt line of its own and describes itself in the tree.
+   base address register, and on the device tree or the ACPI bus it takes a
+   register window and an interrupt line of its own and describes itself
+   there.
    Everything between the register file and the card is the same either way,
    which is the point of having one class rather than two. */
 class SDHCIDevice final: public Device, public PCIBarTarget, public DeviceIO,
@@ -438,6 +440,7 @@ public:
     bool Prepare() override;
     bool Realize() override;
     void BuildFDT(FDTContext &ctx) override;
+    void BuildAML(AcpiContext &ctx) override;
     Bus *ChildBus() override {return fChildBus;}
 
     void SetBar(int bar_num, uint64_t addr, bool enabled) override;
@@ -1649,10 +1652,16 @@ bool SDHCIDevice::AttachDevice(SDDevice *dev)
 bool SDHCIDevice::Prepare()
 {
     if (ParentBus()->AsPCIBus() == nullptr) {
-        /* On a device tree machine the controller is described rather than
-           enumerated, so it needs a register window and a line of its own.
-           On PCI the guest places the base address register and the bridge
-           routes INTx, so it declares neither. */
+        /* Off PCI the controller is described rather than enumerated, so it
+           needs a register window and a line of its own, and a bus that
+           describes it. On PCI the guest places the base address register
+           and the bridge routes INTx, so it declares neither. */
+        SystemBus *sys = dynamic_cast<SystemBus *>(ParentBus());
+        if (sys == nullptr || (sys->IsPortBased() && !sys->IsAcpi())) {
+            vm_error("%s: must be attached to a PCI bus, the fdt or the acpi "
+                     "bus\n", Name());
+            return false;
+        }
         fMmioRes = AddResource(RES_MMIO, SDHCI_REG_SIZE, 0x1000);
         fIrqRes = AddResource(RES_IRQ, 1);
         if (fMmioRes == nullptr || fIrqRes == nullptr) {
@@ -1764,6 +1773,25 @@ void SDHCIDevice::BuildFDT(FDTContext &ctx)
     ctx.fdt->PropEmpty("no-1-8-v");
     ctx.fdt->PropEmpty("disable-wp");
     ctx.fdt->EndNode();
+}
+
+
+void SDHCIDevice::BuildAML(AcpiContext &ctx)
+{
+    if (fMmioRes == nullptr) {
+        return;
+    }
+    AmlBytes r;
+    aml_res_memory32_fixed(r, fMmioRes->base, fMmioRes->size);
+    ctx.AddInterrupt(r, fIrqRes->base);
+
+    /* The ID of a controller that follows the SD Host Controller
+       specification and needs nothing else; its capabilities registers say
+       the rest, the base clock included. */
+    AmlBytes dev = aml_name("_HID", aml_eisaid("PNP0D40"));
+    aml_append(dev, aml_name("_UID", aml_int(ctx.NewUid("PNP0D40"))));
+    aml_append(dev, aml_name("_CRS", aml_resource_template(r)));
+    aml_append(*ctx.aml, aml_device(ctx.NewName("SDC").c_str(), dev));
 }
 
 

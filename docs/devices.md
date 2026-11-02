@@ -118,7 +118,7 @@ FDT bus -> pci-host-ecam-generic -> PCI bus -> xhci -> USB bus
 | --- | --- | --- |
 | `fdt` | the RISC-V machine (root) | memory-mapped devices, PCI host bridges |
 | `pc` | the PC machine (root), for firmware | `ns16550a`, `i8042`, `hpet`, `ne2000`, `pci-host-i440fx`, `pci-host-cloudhv` |
-| `acpi` | the PC machine (root), for a kernel it loads | as `pc`, and `dw-i2c`, `xhci`, `pci-host-ecam-generic`; described in the DSDT |
+| `acpi` | the PC machine (root), for a kernel it loads | as `pc`, and `dw-i2c`, `sdhci`, `xhci`, `pci-host-ecam-generic`; described in the DSDT |
 | `pci` | PCI host bridges, `pci-bridge` | PCI devices |
 | `ps2` | `i8042` | `ps2-keyboard`, `ps2-mouse` |
 | `ata` | `pci-ide` | `ata-disk`, `atapi` |
@@ -914,8 +914,10 @@ Placement: `nvme` bus, up to 8 per controller.
 
 #### `sdhci` — SD host controller
 
-Placement: PCI or FDT. Provides an `sd` bus with one slot. It supports PIO,
-SDMA and ADMA2 transfers, and uses MSI-X or MSI where the bus has a receiver.
+Placement: PCI, FDT, or the PC's `acpi` root bus. Provides an `sd` bus with
+one slot. It supports PIO, SDMA and ADMA2 transfers, and uses MSI-X or MSI
+where the bus has a receiver. In the DSDT it is `PNP0D40`, a standard SD host
+controller.
 
 | Property | Default | Meaning |
 | --- | --- | --- |
