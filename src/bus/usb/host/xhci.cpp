@@ -388,6 +388,9 @@ struct XHCIEndpoint final: public URBCompletion {
 
 struct XHCISlot {
     bool enabled = false;
+    /* SLOT_DISABLED while only enabled; the output context's copy is the
+       guest's to overwrite, so the state is kept here */
+    uint8_t state = SLOT_DISABLED;
     uint8_t port = 0;      /* root hub port, 1 based */
     USBDevice *dev = nullptr;
     XHCIEndpoint *ep[XHCI_DCI_COUNT] {};
@@ -525,6 +528,7 @@ private:
     int CmdAddressDevice(int slot_id, const XHCITRB &trb);
     int CmdConfigureEndpoint(int slot_id, const XHCITRB &trb);
     int CmdEvaluateContext(int slot_id, const XHCITRB &trb);
+    int CheckEndpointCommand(int slot_id);
     int CmdResetEndpoint(int slot_id, int dci);
     int CmdStopEndpoint(int slot_id, int dci);
     int CmdSetTrDequeue(int slot_id, int dci, const XHCITRB &trb);
@@ -1434,6 +1438,14 @@ void XHCIDevice::KickEndpoint(XHCIEndpoint *ep)
             XferReport(ep);
             continue;
         }
+        if (ep->dci == 1 && urb->setup.request_type == 0 &&
+            urb->setup.request == USB_REQ_SET_ADDRESS) {
+            /* The address is Address Device's to give; the request never
+               reaches the device (4.6.5). */
+            x->cc = CC_TRB_ERROR;
+            XferReport(ep);
+            continue;
+        }
 
         if (dev == nullptr) {
             x->cc = CC_USB_TRANSACTION_ERROR;
@@ -1662,6 +1674,19 @@ void XHCIDevice::TimerExpired()
 
 //#pragma mark - commands
 
+/* What the endpoint commands ask of the slot (4.6.8-4.6.10). */
+int XHCIDevice::CheckEndpointCommand(int slot_id)
+{
+    if (slot_id < 1 || slot_id > XHCI_MAX_SLOTS || !fSlots[slot_id].enabled) {
+        return CC_SLOT_NOT_ENABLED;
+    }
+    if (fSlots[slot_id].state == SLOT_DISABLED) {
+        return CC_CONTEXT_STATE_ERROR;
+    }
+    return CC_SUCCESS;
+}
+
+
 int XHCIDevice::CmdEnableSlot(int *pslot_id)
 {
     int max = get_bits(fConfig, 0, 8);
@@ -1678,6 +1703,7 @@ int XHCIDevice::CmdEnableSlot(int *pslot_id)
                 }
             }
             fSlots[i].enabled = true;
+            fSlots[i].state = SLOT_DISABLED;
             fSlots[i].dev = nullptr;
             fSlots[i].port = 0;
             *pslot_id = i;
@@ -1702,6 +1728,7 @@ int XHCIDevice::CmdDisableSlot(int slot_id)
     }
     SetSlotState(slot_id, SLOT_DISABLED);
     fSlots[slot_id].enabled = false;
+    fSlots[slot_id].state = SLOT_DISABLED;
     fSlots[slot_id].dev = nullptr;
     return CC_SUCCESS;
 }
@@ -1722,6 +1749,13 @@ int XHCIDevice::CmdAddressDevice(int slot_id, const XHCITRB &trb)
 {
     if (slot_id < 1 || slot_id > XHCI_MAX_SLOTS || !fSlots[slot_id].enabled) {
         return CC_SLOT_NOT_ENABLED;
+    }
+    /* With BSR only from Enabled, without it from Enabled or Default
+       (4.6.5). */
+    bool bsr = (trb.control & TRB_CR_BSR) != 0;
+    int cur = fSlots[slot_id].state;
+    if (cur != SLOT_DISABLED && (bsr || cur != SLOT_DEFAULT)) {
+        return CC_CONTEXT_STATE_ERROR;
     }
 
     uint64_t in_ctx = trb.parameter & ~0xfULL;
@@ -1765,7 +1799,7 @@ int XHCIDevice::CmdAddressDevice(int slot_id, const XHCITRB &trb)
 
     int address = 0;
     int slot_state = SLOT_DEFAULT;
-    if ((trb.control & TRB_CR_BSR) == 0) {
+    if (!bsr) {
         /* Without Block Set Address the command really does address the
            device. The slot id is unique, so it serves as the address. */
         URB urb {};
@@ -1781,6 +1815,7 @@ int XHCIDevice::CmdAddressDevice(int slot_id, const XHCITRB &trb)
         slot_state = SLOT_ADDRESSED;
     }
 
+    fSlots[slot_id].state = slot_state;
     uint32_t out_dw3 = CtxRead(out_slot, 3);
     CtxWrite(out_slot, 3,
              set_bits(set_bits(out_dw3, 0, 8, address), 27, 5, slot_state));
@@ -1798,19 +1833,24 @@ int XHCIDevice::CmdConfigureEndpoint(int slot_id, const XHCITRB &trb)
     }
 
     uint64_t out_slot = SlotCtxAddr(slot_id);
-    int slot_state = CtxRead(out_slot, 3) >> 27;
+    int slot_state = fSlots[slot_id].state;
     if (slot_state != SLOT_ADDRESSED && slot_state != SLOT_CONFIGURED) {
         return CC_CONTEXT_STATE_ERROR;
     }
 
     if ((trb.control & TRB_CR_DC) != 0) {
-        /* Deconfigure: the input context is not consulted at all. */
+        /* Deconfigure, only from Configured (4.6.6): the input context is
+           not consulted at all. */
+        if (slot_state != SLOT_CONFIGURED) {
+            return CC_CONTEXT_STATE_ERROR;
+        }
         for (int dci = 2; dci < XHCI_DCI_COUNT; dci++) {
             DisableEndpoint(slot_id, dci);
             SetEpState(slot_id, dci, EP_DISABLED);
         }
         uint32_t dw0 = CtxRead(out_slot, 0);
         CtxWrite(out_slot, 0, set_bits(dw0, 27, 5, 1));
+        fSlots[slot_id].state = SLOT_ADDRESSED;
         SetSlotState(slot_id, SLOT_ADDRESSED);
         return CC_SUCCESS;
     }
@@ -1823,6 +1863,14 @@ int XHCIDevice::CmdConfigureEndpoint(int slot_id, const XHCITRB &trb)
        endpoint, neither of which this command is allowed to drop. */
     if (get_bits(drop_flags, 0, 2) != 0) {
         return CC_PARAMETER_ERROR;
+    }
+    /* An endpoint added past the input slot context's Context Entries is
+       not valid (4.6.6), and nothing changes. */
+    uint32_t in_entries = CtxRead(in_ctx + XHCI_CTX_SIZE, 0) >> 27;
+    for (int dci = 2; dci < XHCI_DCI_COUNT; dci++) {
+        if (get_bit(add_flags, dci) && (uint32_t)dci > in_entries) {
+            return CC_PARAMETER_ERROR;
+        }
     }
 
     for (int dci = 2; dci < XHCI_DCI_COUNT; dci++) {
@@ -1877,7 +1925,19 @@ int XHCIDevice::CmdConfigureEndpoint(int slot_id, const XHCITRB &trb)
         CtxWrite(out_slot, 2, in_dw2);
     }
 
-    SetSlotState(slot_id, SLOT_CONFIGURED);
+    /* Configured with the last enabled endpoint as Context Entries, or
+       back to Addressed when none is left (4.6.6). */
+    int last = 0;
+    for (int dci = 2; dci < XHCI_DCI_COUNT; dci++) {
+        XHCIEndpoint *ep = fSlots[slot_id].ep[dci];
+        if (ep != nullptr && ep->state != EP_DISABLED) {
+            last = dci;
+        }
+    }
+    uint32_t dw0 = CtxRead(out_slot, 0);
+    CtxWrite(out_slot, 0, set_bits(dw0, 27, 5, last != 0 ? last : 1));
+    fSlots[slot_id].state = last != 0 ? SLOT_CONFIGURED : SLOT_ADDRESSED;
+    SetSlotState(slot_id, fSlots[slot_id].state);
     return CC_SUCCESS;
 }
 
@@ -1886,6 +1946,11 @@ int XHCIDevice::CmdEvaluateContext(int slot_id, const XHCITRB &trb)
 {
     if (slot_id < 1 || slot_id > XHCI_MAX_SLOTS || !fSlots[slot_id].enabled) {
         return CC_SLOT_NOT_ENABLED;
+    }
+
+    if (fSlots[slot_id].state == SLOT_DISABLED) {
+        /* nothing to evaluate before Address Device (4.6.7) */
+        return CC_CONTEXT_STATE_ERROR;
     }
 
     uint64_t in_ctx = trb.parameter & ~0xfULL;
@@ -1924,12 +1989,15 @@ int XHCIDevice::CmdEvaluateContext(int slot_id, const XHCITRB &trb)
 
 int XHCIDevice::CmdResetEndpoint(int slot_id, int dci)
 {
+    int cc = CheckEndpointCommand(slot_id);
+    if (cc != CC_SUCCESS) {
+        return cc;
+    }
+    /* Only a halted endpoint (4.6.8). */
     XHCIEndpoint *ep = GetEndpoint(slot_id, dci);
-    if (ep == nullptr || ep->state == EP_DISABLED) {
+    if (ep == nullptr || ep->state != EP_HALTED) {
         return CC_CONTEXT_STATE_ERROR;
     }
-    /* A host can reach here with an endpoint that is not halted, and refusing
-       the command there only confuses its recovery. */
     UnscheduleIsoch(ep);
     ep->state = EP_STOPPED;
     SetEpState(slot_id, dci, EP_STOPPED);
@@ -1939,8 +2007,13 @@ int XHCIDevice::CmdResetEndpoint(int slot_id, int dci)
 
 int XHCIDevice::CmdStopEndpoint(int slot_id, int dci)
 {
+    int cc = CheckEndpointCommand(slot_id);
+    if (cc != CC_SUCCESS) {
+        return cc;
+    }
+    /* Only a running endpoint (4.6.9). */
     XHCIEndpoint *ep = GetEndpoint(slot_id, dci);
-    if (ep == nullptr || ep->state == EP_DISABLED) {
+    if (ep == nullptr || ep->state != EP_RUNNING) {
         return CC_CONTEXT_STATE_ERROR;
     }
 
@@ -1950,10 +2023,10 @@ int XHCIDevice::CmdStopEndpoint(int slot_id, int dci)
             dev->Cancel(&ep->xfer.urb);
         }
         ep->busy = false;
-        /* The descriptor's own event comes before the command's, and the ring
-           rewinds to its start so the guest can retry it. */
-        ep->xfer.cc = ep->xfer.actual_length == 0 ? CC_STOPPED_LENGTH_INVALID
-                                                  : CC_STOPPED;
+        /* The descriptor's own event, Stopped with what was left to move,
+           comes before the command's (4.6.9), and the ring rewinds to its
+           start so the guest can retry it. */
+        ep->xfer.cc = CC_STOPPED;
         XferReport(ep);
         ep->ring.deq = ep->xfer.snap_deq;
         ep->ring.ccs = ep->xfer.snap_ccs;
@@ -1974,11 +2047,16 @@ int XHCIDevice::CmdStopEndpoint(int slot_id, int dci)
 
 int XHCIDevice::CmdSetTrDequeue(int slot_id, int dci, const XHCITRB &trb)
 {
+    int cc = CheckEndpointCommand(slot_id);
+    if (cc != CC_SUCCESS) {
+        return cc;
+    }
     XHCIEndpoint *ep = GetEndpoint(slot_id, dci);
     if (ep == nullptr || ep->state == EP_DISABLED) {
         return CC_CONTEXT_STATE_ERROR;
     }
-    if (ep->state == EP_RUNNING || ep->busy) {
+    /* Only a stopped endpoint, or one in error (4.6.10). */
+    if ((ep->state != EP_STOPPED && ep->state != EP_ERROR) || ep->busy) {
         return CC_CONTEXT_STATE_ERROR;
     }
 
@@ -1998,7 +2076,7 @@ int XHCIDevice::CmdResetDevice(int slot_id)
         return CC_SLOT_NOT_ENABLED;
     }
     uint64_t out_slot = SlotCtxAddr(slot_id);
-    int slot_state = CtxRead(out_slot, 3) >> 27;
+    int slot_state = fSlots[slot_id].state;
     if (slot_state != SLOT_ADDRESSED && slot_state != SLOT_CONFIGURED) {
         return CC_CONTEXT_STATE_ERROR;
     }
@@ -2007,9 +2085,11 @@ int XHCIDevice::CmdResetDevice(int slot_id)
         DisableEndpoint(slot_id, dci);
         SetEpState(slot_id, dci, EP_DISABLED);
     }
+    /* Default, at address 0 (4.6.11) */
+    fSlots[slot_id].state = SLOT_DEFAULT;
     uint32_t dw3 = CtxRead(out_slot, 3);
     CtxWrite(out_slot, 3,
-             set_bits(dw3, 27, 5, SLOT_DEFAULT));
+             set_bits(set_bits(dw3, 0, 8, 0), 27, 5, SLOT_DEFAULT));
     uint32_t dw0 = CtxRead(out_slot, 0);
     CtxWrite(out_slot, 0, set_bits(dw0, 27, 5, 1));
     return CC_SUCCESS;
@@ -2123,6 +2203,7 @@ void XHCIDevice::Reset()
             }
         }
         fSlots[i].enabled = false;
+        fSlots[i].state = SLOT_DISABLED;
         fSlots[i].dev = nullptr;
     }
 
