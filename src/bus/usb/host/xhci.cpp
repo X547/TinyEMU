@@ -126,6 +126,9 @@
 #define XHCI_ERDP_LO    0x18
 #define XHCI_ERDP_HI    0x1c
 
+/* IMODI after reset: 4000 250 ns steps, 1 ms (5.5.2.2) */
+#define IMOD_DEFAULT    4000
+
 #define IMAN_IP         bit_at(0)
 #define IMAN_IE         bit_at(1)
 #define ERDP_EHB        bit_at(3)
@@ -431,10 +434,13 @@ private:
 
     XHCIRing fCmdRing {};
     bool fInCmdRing = false;
+    /* CRCR's low half was written with the ring stopped, so the high half
+       commits a new pointer */
+    bool fCrcrLoPending = false;
 
     /* interrupter 0, the only one HCSPARAMS1 advertises */
     uint32_t fIman = 0;
-    uint32_t fImod = 0;
+    uint32_t fImod = IMOD_DEFAULT;
     uint32_t fErstSz = 0;
     uint32_t fErstBaLo = 0;
     uint64_t fErstBa = 0;
@@ -1090,7 +1096,11 @@ void XHCIDevice::PortUpdate(int index)
     }
 
     p.portsc = portsc | (pls << PORTSC_PLS_SHIFT);
-    PortNotify(index, PORTSC_CSC);
+    /* A port that never saw a device has no connect change to report
+       (5.4.8). */
+    if ((portsc & PORTSC_CCS) != 0) {
+        PortNotify(index, PORTSC_CSC);
+    }
 }
 
 
@@ -2077,7 +2087,10 @@ void XHCIDevice::RunCommandRing()
         return;
     }
     fInCmdRing = true;
+    /* The ring stays running, idle once empty, until it is stopped or the
+       controller halts (5.4.5). */
     fCrcrLo |= CRCR_CRR;
+    fCrcrLoPending = false;
 
     while (RingFetch(&fCmdRing, &trb) != 0) {
         ExecuteCommand(trb.addr, trb);
@@ -2087,7 +2100,6 @@ void XHCIDevice::RunCommandRing()
         }
     }
 
-    fCrcrLo &= ~CRCR_CRR;
     fInCmdRing = false;
 }
 
@@ -2120,12 +2132,13 @@ void XHCIDevice::Reset()
     fConfig = 0;
     fCrcrLo = 0;
     fCrcrHi = 0;
+    fCrcrLoPending = false;
     fCmdRing = XHCIRing();
     fDcbaap = 0;
     fDcbaapLo = 0;
 
     fIman = 0;
-    fImod = 0;
+    fImod = IMOD_DEFAULT;
     fErstSz = 0;
     fErstBa = 0;
     fErstBaLo = 0;
@@ -2176,6 +2189,7 @@ void XHCIDevice::SetRunning(bool running)
             UnscheduleIsoch(ep);
         }
         fTimer->Disarm();
+        fCrcrLo &= ~CRCR_CRR;
         fUsbSts |= USBSTS_HCH;
     }
 }
@@ -2267,11 +2281,10 @@ uint32_t XHCIDevice::OperRead(uint32_t offset)
     case XHCI_DNCTRL:
         return fDnCtrl;
     case XHCI_CRCR_LO:
-        /* The command ring's own status bits always read back as zero: the
-           ring only ever runs inside the write that rang its doorbell. */
-        return fCrcrLo & ~(CRCR_CS | CRCR_CA | CRCR_CRR);
+        /* Only CRR reads back; the pointer and RCS read as zero (5.4.5). */
+        return fCrcrLo & CRCR_CRR;
     case XHCI_CRCR_HI:
-        return fCrcrHi;
+        return 0;
     case XHCI_DCBAAP_LO:
         return (uint32_t)fDcbaap;
     case XHCI_DCBAAP_HI:
@@ -2296,8 +2309,9 @@ void XHCIDevice::OperWrite(uint32_t offset, uint32_t val)
         bool was_running = (fUsbCmd & USBCMD_RS) != 0;
         /* The save and restore bits are accepted and self-clear; there is no
            state here worth saving. */
+        /* CME is reserved: HCCPARAMS2.CMC is 0. */
         fUsbCmd = val & (USBCMD_RS | USBCMD_INTE | USBCMD_HSEE | USBCMD_EWE |
-                         USBCMD_EU3S | USBCMD_CME);
+                         USBCMD_EU3S);
         bool running = (fUsbCmd & USBCMD_RS) != 0;
         if (running != was_running) {
             SetRunning(running);
@@ -2317,21 +2331,31 @@ void XHCIDevice::OperWrite(uint32_t offset, uint32_t val)
         return;
 
     case XHCI_CRCR_LO:
-        /* Latched only; the high half is what commits. */
-        fCrcrLo = (val & 0xffffffcf) | (fCrcrLo & CRCR_CRR);
+        if ((fCrcrLo & CRCR_CRR) != 0) {
+            /* Running: the pointer and RCS are ignored, and a stop or an
+               abort, which here never catches a command half done, stops
+               the ring at its dequeue pointer (4.6.1.1, 4.6.1.2). */
+            if ((val & (CRCR_CS | CRCR_CA)) != 0) {
+                fCrcrLo &= ~CRCR_CRR;
+                PostCommandComplete(fCmdRing.deq, CC_COMMAND_RING_STOPPED, 0);
+            }
+            return;
+        }
+        /* Stopped: latched, and the high half commits it. A high half
+           written alone, after a stop written to the low half only, leaves
+           the pointer where the ring stopped. */
+        fCrcrLo = val & ~(CRCR_CS | CRCR_CA | CRCR_CRR | 0x30);
+        fCrcrLoPending = true;
         return;
 
     case XHCI_CRCR_HI:
-        fCrcrHi = val;
-        if ((fCrcrLo & (CRCR_CS | CRCR_CA)) != 0 &&
-            (fCrcrLo & CRCR_CRR) != 0) {
-            fCrcrLo &= ~CRCR_CRR;
-            PostCommandComplete(fCmdRing.deq, CC_COMMAND_RING_STOPPED, 0);
-        } else {
-            fCmdRing.deq =
-                concat_bits(fCrcrHi, fCrcrLo & ~0x3fu, 32);
-            fCmdRing.ccs = (fCrcrLo & CRCR_RCS) != 0;
+        if ((fCrcrLo & CRCR_CRR) != 0 || !fCrcrLoPending) {
+            return;
         }
+        fCrcrHi = val;
+        fCrcrLoPending = false;
+        fCmdRing.deq = concat_bits(fCrcrHi, fCrcrLo & ~0x3fu, 32);
+        fCmdRing.ccs = (fCrcrLo & CRCR_RCS) != 0;
         return;
 
     case XHCI_DCBAAP_LO:
@@ -2390,6 +2414,15 @@ void XHCIDevice::PortWrite(uint32_t offset, uint32_t val)
     /* The change bits are write one to clear. */
     portsc &= ~(val & PORTSC_CHANGE_MASK);
 
+    if ((val & PORTSC_PED) != 0 && (portsc & PORTSC_PED) != 0) {
+        /* Software disables the port, with no change reported for it; a
+           USB2 port goes back to Disabled, which reads as Polling, a USB3
+           one to the Disabled link state (5.4.8). */
+        portsc &= ~(PORTSC_PED | PORTSC_PLS_MASK);
+        portsc |= (fPorts[index].is_super ? PLS_DISABLED : PLS_POLLING)
+                  << PORTSC_PLS_SHIFT;
+    }
+
     if ((val & PORTSC_LWS) != 0) {
         uint32_t old_pls = (fPorts[index].portsc & PORTSC_PLS_MASK)
                            >> PORTSC_PLS_SHIFT;
@@ -2402,8 +2435,10 @@ void XHCIDevice::PortWrite(uint32_t offset, uint32_t val)
         }
     }
 
-    portsc &= ~(PORTSC_PP | PORTSC_WCE | PORTSC_WDE | PORTSC_WOE);
-    portsc |= val & (PORTSC_PP | PORTSC_WCE | PORTSC_WDE | PORTSC_WOE);
+    /* PP stays set: without port power switches (HCCPARAMS1.PPC = 0) the
+       ports are powered whatever is written (5.4.8). */
+    portsc &= ~(PORTSC_WCE | PORTSC_WDE | PORTSC_WOE);
+    portsc |= val & (PORTSC_WCE | PORTSC_WDE | PORTSC_WOE);
     fPorts[index].portsc = portsc;
 
     if (notify != 0) {
