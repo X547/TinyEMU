@@ -151,9 +151,9 @@ private:
     std::vector<uint8_t> fReportDesc;
 
     bool fBootProtocol = false;
-    /* the idle rate the host set for each report, in 4 ms units, and when
-       the report is due again without a change (HID 1.11 7.2.4) */
-    uint8_t fIdle[HID_MAX_COLLECTIONS] {};
+    /* the idle period the host set for each report, in milliseconds, and
+       when the report is due again without a change (HID 1.11 7.2.4) */
+    uint16_t fIdle[HID_MAX_COLLECTIONS] {};
     uint64_t fIdleDue[HID_MAX_COLLECTIONS] {};
 
     QueuedReport fQueue[HID_REPORT_QUEUE_SIZE] {};
@@ -164,7 +164,9 @@ private:
     int BootCollection() const;
     int CollectionForId(int id) const;
     int BuildReport(int index, uint8_t type, uint8_t *buf, int size);
+    void Enqueue(int index, const uint8_t *data, int len);
     void ReportSent(int index);
+    int DueCollection() const;
 
     friend class HIDCollection;
     void QueueInputReport(HIDCollection *c, const uint8_t *data, int len);
@@ -202,15 +204,19 @@ public:
     int GetReport(uint8_t type, int id, uint8_t *buf, int size);
     bool SetReport(uint8_t type, int id, const uint8_t *buf, int len);
 
-    /* The idle rate of one report, or of all of them for ID 0. Idle() is -1
-       and SetIdle() false for a report ID the device does not have. */
+    /* The idle period of one report, or of all of them for ID 0, in
+       milliseconds; 0 for none. Idle() is -1 and SetIdle() false for a
+       report ID the device does not have. */
     int Idle(int id) const;
-    bool SetIdle(int id, uint8_t rate);
+    bool SetIdle(int id, uint16_t ms);
 
     /* When the next report is due again without a change, or UINT64_MAX;
-       and the oldest one that is due by now, 0 if none is. */
+       and the oldest one that is due by now, 0 if none is. A transport that
+       interrupts the host rather than being polled queues that report
+       instead, which is false when none is due. */
     uint64_t NextIdleDue() const;
     int TakeIdleReport(uint8_t *buf, int size);
+    bool QueueIdleReport();
 
     /* Whether a report is waiting, and taking the oldest one. */
     bool HasInputReport() const {return fQueueCount > 0;}

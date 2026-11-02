@@ -29,9 +29,6 @@
 #include "host_time.h"
 #include "machine.h"
 
-/* An idle rate counts in these. */
-#define HID_IDLE_UNIT_US 4000
-
 
 //#pragma mark - HIDCollection
 
@@ -195,11 +192,22 @@ void HIDDevice::QueueInputReport(HIDCollection *c, const uint8_t *data,
         /* It has no boot format, so the host is not listening for it. */
         return;
     }
+    uint8_t buf[HID_MAX_REPORT_SIZE];
     int id_len = !fBootProtocol && UsesReportIds() ? 1 : 0;
     if (len > HID_MAX_REPORT_SIZE - id_len) {
         len = HID_MAX_REPORT_SIZE - id_len;
     }
+    if (id_len != 0) {
+        buf[0] = index + 1;
+    }
+    memcpy(buf + id_len, data, len);
+    Enqueue(index, buf, id_len + len);
+}
 
+
+/* A report as it goes on the wire, for the transport to collect. */
+void HIDDevice::Enqueue(int index, const uint8_t *data, int len)
+{
     if (fQueueCount >= HID_REPORT_QUEUE_SIZE) {
         /* Nothing is collecting the reports; the oldest goes, which for a
            pointer leaves the current position. */
@@ -209,11 +217,8 @@ void HIDDevice::QueueInputReport(HIDCollection *c, const uint8_t *data,
 
     QueuedReport &report =
         fQueue[(fQueueHead + fQueueCount) % HID_REPORT_QUEUE_SIZE];
-    if (id_len != 0) {
-        report.data[0] = index + 1;
-    }
-    memcpy(report.data + id_len, data, len);
-    report.len = id_len + len;
+    memcpy(report.data, data, len);
+    report.len = len;
     report.collection = index;
     fQueueCount++;
 
@@ -224,8 +229,7 @@ void HIDDevice::QueueInputReport(HIDCollection *c, const uint8_t *data,
 /* A report of one collection went out, so its idle period starts over. */
 void HIDDevice::ReportSent(int index)
 {
-    fIdleDue[index] = host_monotonic_us() +
-                      fIdle[index] * (uint64_t)HID_IDLE_UNIT_US;
+    fIdleDue[index] = host_monotonic_us() + fIdle[index] * (uint64_t)1000;
 }
 
 
@@ -308,7 +312,7 @@ int HIDDevice::Idle(int id) const
 }
 
 
-bool HIDDevice::SetIdle(int id, uint8_t rate)
+bool HIDDevice::SetIdle(int id, uint16_t ms)
 {
     if (id != 0 && (!UsesReportIds() || id > fCount)) {
         return false;
@@ -316,7 +320,7 @@ bool HIDDevice::SetIdle(int id, uint8_t rate)
     for (int i = 0; i < fCount; i++) {
         if (id == 0 || i == id - 1) {
             /* The new period counts from now. */
-            fIdle[i] = rate;
+            fIdle[i] = ms;
             ReportSent(i);
         }
     }
@@ -338,9 +342,9 @@ uint64_t HIDDevice::NextIdleDue() const
 }
 
 
-/* A collection whose idle period ran out without a change sends its
-   current state again. */
-int HIDDevice::TakeIdleReport(uint8_t *buf, int size)
+/* The collection whose idle period ran out first without a change, or
+   -1. */
+int HIDDevice::DueCollection() const
 {
     uint64_t now = host_monotonic_us();
     int boot = fBootProtocol ? BootCollection() : -1;
@@ -352,6 +356,14 @@ int HIDDevice::TakeIdleReport(uint8_t *buf, int size)
             index = i;
         }
     }
+    return index;
+}
+
+
+/* Such a collection sends its current state again. */
+int HIDDevice::TakeIdleReport(uint8_t *buf, int size)
+{
+    int index = DueCollection();
     if (index < 0) {
         return 0;
     }
@@ -361,6 +373,24 @@ int HIDDevice::TakeIdleReport(uint8_t *buf, int size)
     }
     ReportSent(index);
     return len;
+}
+
+
+bool HIDDevice::QueueIdleReport()
+{
+    uint8_t buf[HID_MAX_REPORT_SIZE];
+    int index = DueCollection();
+    if (index < 0) {
+        return false;
+    }
+    int len = BuildReport(index, HID_REPORT_INPUT, buf, sizeof(buf));
+    if (len <= 0) {
+        return false;
+    }
+    /* The period counts from now, not from when the host reads it. */
+    ReportSent(index);
+    Enqueue(index, buf, len);
+    return true;
 }
 
 

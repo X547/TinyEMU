@@ -61,6 +61,9 @@
 /* With one report descriptor. */
 #define HID_DESC_SIZE 9
 
+/* GET_IDLE and SET_IDLE count in these. */
+#define HID_IDLE_UNIT_MS 4
+
 
 /* An interrupt endpoint's interval for a poll period in milliseconds. At full
    speed it is in frames, so in milliseconds; at high speed it is n for a
@@ -349,14 +352,15 @@ USBStatusEnum USBHID::HandleControl(URB *urb)
         if (idle < 0) {
             return USB_STATUS_STALL;
         }
-        uint8_t val = idle;
+        uint8_t val = idle / HID_IDLE_UNIT_MS;
         return Reply(urb, &val, 1);
     }
 
     case HID_REQUEST_SET_IDLE:
         /* Reports go out when the state changes, and with a non-zero rate
            also when that long passed without one (7.2.4). */
-        if (!fDev.SetIdle(get_bits(setup.value, 0, 8), setup.value >> 8)) {
+        if (!fDev.SetIdle(get_bits(setup.value, 0, 8),
+                          (setup.value >> 8) * HID_IDLE_UNIT_MS)) {
             return USB_STATUS_STALL;
         }
         ArmIdleTimer();

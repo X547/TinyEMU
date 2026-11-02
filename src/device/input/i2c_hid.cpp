@@ -21,12 +21,16 @@
  */
 #include <string.h>
 
+#include <memory>
+
 #include "acpi.h"
 #include "bits.h"
 #include "cutils.h"
 #include "device_class.h"
+#include "devices.h"
 #include "fdt.h"
 #include "hid.h"
+#include "host_timer.h"
 #include "i2c.h"
 #include "machine.h"
 
@@ -52,6 +56,10 @@
 #define I2C_HID_OPCODE_SET_PROTOCOL 0x07
 #define I2C_HID_OPCODE_SET_POWER    0x08
 
+/* GET_PROTOCOL and SET_PROTOCOL's values. */
+#define I2C_HID_PROTOCOL_BOOT   0
+#define I2C_HID_PROTOCOL_REPORT 1
+
 /* A report ID field of 15 says the ID follows in a byte of its own. */
 #define I2C_HID_REPORT_ID_ESCAPE 0x0f
 
@@ -74,10 +82,13 @@
 /* One HID device behind an I2C target, which the protocol gives one report
    descriptor. The interrupt line is held while there is something to
    read. */
-class I2CHID final: public I2CDevice, public HIDTransport {
+class I2CHID final: public I2CDevice, public HIDTransport,
+                    public TimerTarget {
 private:
     std::unique_ptr<HIDBus> fChildBus;
     HIDDevice fDev;
+    /* Wakes when a report is due again on its idle rate. */
+    std::unique_ptr<HostTimer> fTimer;
 
     Resource *fIrqRes = nullptr;
     IRQSignal *fIrq = nullptr;
@@ -99,8 +110,10 @@ private:
     int fReadPos = 0;
 
     void UpdateIrq();
+    void ArmIdleTimer();
 
     int DecodeCommand(int *type, int *id) const;
+    int CommandValue(int pos) const;
     void ReadInput();
     void ReadRegister();
     void RespondToCommand();
@@ -109,8 +122,7 @@ private:
     void WriteOutput();
 
 public:
-    I2CHID(int address):
-        I2CDevice("i2c-hid", address), fDev("i2c-hid", this) {}
+    I2CHID(int address, std::unique_ptr<HostTimer> timer);
 
     bool Prepare() override;
     bool Realize() override;
@@ -123,9 +135,19 @@ public:
     uint8_t Read() override;
     void Stop() override;
 
+    void TimerExpired() override;
+
     /* HIDTransport */
     void HandleInputReport(HIDDevice *dev) override;
 };
+
+
+I2CHID::I2CHID(int address, std::unique_ptr<HostTimer> timer):
+    I2CDevice("i2c-hid", address), fDev("i2c-hid", this),
+    fTimer(std::move(timer))
+{
+    fTimer->target = this;
+}
 
 
 void I2CHID::UpdateIrq()
@@ -143,6 +165,28 @@ void I2CHID::HandleInputReport(HIDDevice *dev)
 {
     (void)dev;
     UpdateIrq();
+}
+
+
+/* An unchanged report is due again only once the host read the last one,
+   as the input register holds one report at a time. */
+void I2CHID::ArmIdleTimer()
+{
+    uint64_t due = fDev.HasInputReport() ? UINT64_MAX : fDev.NextIdleDue();
+    if (due == UINT64_MAX) {
+        fTimer->Disarm();
+    } else {
+        fTimer->Arm(due);
+    }
+}
+
+
+void I2CHID::TimerExpired()
+{
+    if (!fDev.HasInputReport()) {
+        fDev.QueueIdleReport();
+    }
+    ArmIdleTimer();
 }
 
 
@@ -165,6 +209,7 @@ void I2CHID::ReadInput()
     }
     fReadData = fReadBuf;
     UpdateIrq();
+    ArmIdleTimer();
 }
 
 
@@ -188,6 +233,18 @@ int I2CHID::DecodeCommand(int *type, int *id) const
 }
 
 
+/* The two byte value SET_IDLE and SET_PROTOCOL leave in the data register
+   after the command at 'pos': the register, a length of 4, and the value;
+   -1 when the write is short. */
+int I2CHID::CommandValue(int pos) const
+{
+    if (fWriteLen < pos + 6) {
+        return -1;
+    }
+    return get_le16(fWriteBuf + pos + 4);
+}
+
+
 void I2CHID::RespondToCommand()
 {
     int type, id;
@@ -205,12 +262,21 @@ void I2CHID::RespondToCommand()
         fReadLen = len + 2;
         break;
     }
-    case I2C_HID_OPCODE_GET_IDLE:
-    case I2C_HID_OPCODE_GET_PROTOCOL:
-        /* Neither idle rates nor the boot protocol exist over I2C, so both
-           read as zero. */
+    case I2C_HID_OPCODE_GET_IDLE: {
+        /* In milliseconds, where USB counts in fours of them (7.2.4). */
+        int idle = fDev.Idle(id);
+        if (idle < 0) {
+            return;
+        }
         put_le16(fReadBuf, 4);
-        put_le16(fReadBuf + 2, 0);
+        put_le16(fReadBuf + 2, idle);
+        fReadLen = 4;
+        break;
+    }
+    case I2C_HID_OPCODE_GET_PROTOCOL:
+        put_le16(fReadBuf, 4);
+        put_le16(fReadBuf + 2, fDev.Protocol() ? I2C_HID_PROTOCOL_BOOT
+                                               : I2C_HID_PROTOCOL_REPORT);
         fReadLen = 4;
         break;
     default:
@@ -277,6 +343,7 @@ void I2CHID::RunCommand()
         fDev.Reset();
         fResetPending = true;
         UpdateIrq();
+        ArmIdleTimer();
         break;
     case I2C_HID_OPCODE_SET_REPORT: {
         /* The data register, the length, and the report, which starts with
@@ -292,8 +359,29 @@ void I2CHID::RunCommand()
         }
         break;
     }
+    case I2C_HID_OPCODE_SET_IDLE: {
+        int ms = CommandValue(pos);
+        if (ms >= 0 && fDev.SetIdle(id, ms)) {
+            ArmIdleTimer();
+        }
+        break;
+    }
+    case I2C_HID_OPCODE_SET_PROTOCOL: {
+        /* The boot protocol only for a device with a boot format; the
+           request is ignored otherwise, as one a device does not support
+           is. */
+        int value = CommandValue(pos);
+        if (value == I2C_HID_PROTOCOL_REPORT ||
+            (value == I2C_HID_PROTOCOL_BOOT &&
+             fDev.BootProtocol() != HID_BOOT_NONE)) {
+            fDev.SetProtocol(value == I2C_HID_PROTOCOL_BOOT);
+            UpdateIrq();
+            ArmIdleTimer();
+        }
+        break;
+    }
     default:
-        /* Power states, idle rates and protocols change nothing here. */
+        /* Power states change nothing here. */
         break;
     }
 }
@@ -463,7 +551,6 @@ public:
     {
         int address;
 
-        (void)ctx;
         /* Without an address the bus places the target, as it does an
            Ethernet PHY. */
         if (!cfg.GetInt("reg", &address, -1)) {
@@ -474,7 +561,7 @@ public:
                      "collection on it\n");
             return nullptr;
         }
-        return new I2CHID(address);
+        return new I2CHID(address, ctx->platform->OpenTimer());
     }
 };
 
