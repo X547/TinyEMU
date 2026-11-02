@@ -31,6 +31,8 @@
 #include "fdt.h"
 #include "i2c.h"
 #include "machine.h"
+#include "pci.h"
+#include "pci_bridge.h"
 
 #define DW_IC_CON               0x00
 #define DW_IC_TAR               0x04
@@ -128,6 +130,12 @@
    ones. */
 #define DW_I2C_DEFAULT_ACPI_HID "AMDI0010"
 
+/* On PCI, the first I2C function of Intel's Bay Trail, which drivers take
+   with the DesignWare registers alone and a 100 MHz reference clock. */
+#define DW_I2C_PCI_VENDOR_ID 0x8086
+#define DW_I2C_PCI_DEVICE_ID 0x0f41
+#define DW_I2C_PCI_CLASS     0x0c80
+
 /* A 32 bit APB interface, fast mode at most, a single combined interrupt,
    and the FIFO depths encoded as depth minus one. */
 #define DW_IC_COMP_PARAM_1_VALUE \
@@ -144,8 +152,11 @@
 /* The controller in master mode. Commands run as they are queued, each
    taking the bus no time, so a transfer is over as soon as its last command
    is written. Like the parts the drivers assume, it holds the bus when the
-   command FIFO runs dry without a STOP, rather than ending the transfer. */
-class DWI2CDevice final: public Device, public DeviceIO {
+   command FIFO runs dry without a STOP, rather than ending the transfer.
+
+   On PCI it is a function whose BAR holds the registers, and its targets are
+   still described, inside the host bridge's node. */
+class DWI2CDevice final: public Device, public DeviceIO, public PCIBarTarget {
 private:
     const char *fCompatible;
     const char *fAcpiHid;
@@ -154,6 +165,8 @@ private:
     bool fIrqLevel = false;
     Resource *fMmioRes = nullptr;
     Resource *fIrqRes = nullptr;
+    PCIDevice *fPciDev = nullptr;
+    PhysMemoryRange *fBarRange = nullptr;
     std::unique_ptr<I2CBus> fChildBus;
 
     /* Registers without side effects are kept here as written. */
@@ -213,6 +226,8 @@ public:
 
     uint64_t DeviceRead(uint32_t offset, int size_log2) override;
     void DeviceWrite(uint32_t offset, uint64_t val, int size_log2) override;
+
+    void SetBar(int bar_num, uint64_t addr, bool enabled) override;
 };
 
 
@@ -591,21 +606,43 @@ void DWI2CDevice::DeviceWrite(uint32_t offset, uint64_t val, int size_log2)
 }
 
 
+void DWI2CDevice::SetBar(int bar_num, uint64_t addr, bool enabled)
+{
+    (void)bar_num;
+    fBarRange->SetAddr(addr, enabled);
+}
+
+
 //#pragma mark - lifecycle
 
 bool DWI2CDevice::Prepare()
 {
-    /* The targets are found only through the description of the bus. */
-    SystemBus *sys = dynamic_cast<SystemBus *>(ParentBus());
-    if (sys == nullptr || (sys->IsPortBased() && !sys->IsAcpi())) {
-        vm_error("%s: must be attached to the fdt or the acpi bus\n",
-                 Name());
+    /* The targets are found only through the description of the bus, so the
+       controller has to be somewhere the machine describes. */
+    SystemBus *root = dynamic_cast<SystemBus *>(ParentBus()->Root());
+    if (root == nullptr || (root->IsPortBased() && !root->IsAcpi())) {
+        vm_error("%s: must be on a machine that describes its devices: under "
+                 "the fdt or the acpi bus\n", Name());
         return false;
     }
-    fMmioRes = AddResource(RES_MMIO, DW_I2C_REG_SIZE, DW_I2C_REG_SIZE);
-    fIrqRes = AddResource(RES_IRQ, 1);
-    if (fMmioRes == nullptr || fIrqRes == nullptr) {
+
+    PCIBus *pci_bus = ParentBus()->AsPCIBus();
+    if (pci_bus != nullptr) {
+        if (!pci_function_describable(pci_bus)) {
+            vm_error("%s: on PCI it has to be on the host bridge's own bus, "
+                     "where its targets can be described\n", Name());
+            return false;
+        }
+    } else if (ParentBus() != root) {
+        vm_error("%s: must be attached to the fdt, the acpi or a PCI bus\n",
+                 Name());
         return false;
+    } else {
+        fMmioRes = AddResource(RES_MMIO, DW_I2C_REG_SIZE, DW_I2C_REG_SIZE);
+        fIrqRes = AddResource(RES_IRQ, 1);
+        if (fMmioRes == nullptr || fIrqRes == nullptr) {
+            return false;
+        }
     }
     fChildBus = std::make_unique<I2CBus>(this);
     return true;
@@ -614,14 +651,33 @@ bool DWI2CDevice::Prepare()
 
 bool DWI2CDevice::Realize()
 {
-    SystemBus *sys = static_cast<SystemBus *>(ParentBus());
+    PCIBus *pci_bus = ParentBus()->AsPCIBus();
 
+    ResetRegs();
+    if (pci_bus != nullptr) {
+        fPciDev = pci_register_device(pci_bus, Name(), -1,
+                                      DW_I2C_PCI_VENDOR_ID,
+                                      DW_I2C_PCI_DEVICE_ID, 0x01,
+                                      DW_I2C_PCI_CLASS);
+        if (fPciDev == nullptr) {
+            vm_error("%s: could not register the PCI function\n", Name());
+            return false;
+        }
+        pci_device_set_config8(fPciDev, PCI_INTERRUPT_PIN, 1);
+        fIrq = pci_device_get_irq(fPciDev, 0);
+        fBarRange = pci_device_get_mem_map(fPciDev)->RegisterDevice(
+            0, DW_I2C_REG_SIZE, this, DEVIO_SIZE32 | DEVIO_DISABLED);
+        pci_register_bar(fPciDev, 0, DW_I2C_REG_SIZE, PCI_ADDRESS_SPACE_MEM,
+                         this);
+        return true;
+    }
+
+    SystemBus *sys = static_cast<SystemBus *>(ParentBus());
     fIrq = sys->IrqSignalFor(fIrqRes->base);
     if (fIrq == nullptr) {
         vm_error("%s: bad interrupt line %d\n", Name(), (int)fIrqRes->base);
         return false;
     }
-    ResetRegs();
     sys->MemMap()->RegisterDevice(fMmioRes->base, DW_I2C_REG_SIZE, this,
                                   DEVIO_SIZE32);
     return true;
@@ -631,6 +687,17 @@ bool DWI2CDevice::Realize()
 void DWI2CDevice::BuildFDT(FDTContext &ctx)
 {
     FDTBuilder *fdt = ctx.fdt;
+
+    if (fPciDev != nullptr) {
+        /* The driver takes the function by its ID and needs no clock: only
+           the targets are described. */
+        pci_fdt_begin_function(ctx, "i2c", fPciDev);
+        fdt->PropU32("#address-cells", 1);
+        fdt->PropU32("#size-cells", 0);
+        fChildBus->BuildFDTAll(ctx);
+        fdt->EndNode();
+        return;
+    }
 
     /* The reference and the bus interface clock, from one fixed clock of
        their own. */
@@ -660,14 +727,20 @@ void DWI2CDevice::BuildFDT(FDTContext &ctx)
 void DWI2CDevice::BuildAML(AcpiContext &ctx)
 {
     std::string name = ctx.NewName("I2C");
-    AmlBytes r;
+    AmlBytes dev;
 
-    aml_res_memory32_fixed(r, fMmioRes->base, fMmioRes->size);
-    ctx.AddInterrupt(r, fIrqRes->base);
+    if (fPciDev != nullptr) {
+        /* the function, by its address on the host bridge's bus */
+        dev = aml_name("_ADR", aml_int(pci_acpi_address(fPciDev)));
+    } else {
+        AmlBytes r;
+        aml_res_memory32_fixed(r, fMmioRes->base, fMmioRes->size);
+        ctx.AddInterrupt(r, fIrqRes->base);
 
-    AmlBytes dev = aml_name("_HID", aml_string(fAcpiHid));
-    aml_append(dev, aml_name("_UID", aml_int(ctx.NewUid(fAcpiHid))));
-    aml_append(dev, aml_name("_CRS", aml_resource_template(r)));
+        dev = aml_name("_HID", aml_string(fAcpiHid));
+        aml_append(dev, aml_name("_UID", aml_int(ctx.NewUid(fAcpiHid))));
+        aml_append(dev, aml_name("_CRS", aml_resource_template(r)));
+    }
     aml_append(dev, aml_name("SSCN", aml_package({
         aml_int(DW_I2C_SS_HCNT), aml_int(DW_I2C_SS_LCNT),
         aml_int(DW_I2C_SDA_HOLD),

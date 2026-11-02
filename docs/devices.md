@@ -719,18 +719,25 @@ gives the HID descriptor's register.
 
 #### `dw-i2c` — Synopsys DesignWare I2C controller
 
-Placement: FDT, or the PC's `acpi` root bus. Provides an `i2c` bus. The bus
-places targets that name no address and describes them in the device tree
-or the DSDT. In ACPI the controller carries `SSCN` and `FMCN`, so a driver
-needs no reference clock.
+Placement: FDT, the PC's `acpi` root bus, or PCI. Provides an `i2c` bus. The
+bus places targets that name no address and describes them in the device
+tree or the DSDT. In ACPI the controller carries `SSCN` and `FMCN`, so a
+driver needs no reference clock.
+
+On PCI it is the first I2C function of Intel's Bay Trail (8086:0f41), whose
+driver needs nothing beyond the DesignWare registers. Its targets are still
+described, in a node of the function inside its host bridge's node, so it
+has to be on the bus of a `pci-host-ecam-generic`, `pci-host-i440fx` or
+`pci-host-cloudhv`, not behind a bridge or a root port, and on a machine that
+describes its devices: not on the `pc` root bus.
 
 | Property | Default | Meaning |
 | --- | --- | --- |
-| `compatible` | `"snps,designware-i2c"` | Device tree compatible string. |
-| `acpi_hid` | `"AMDI0010"` | The `_HID` in ACPI. |
+| `compatible` | `"snps,designware-i2c"` | Device tree compatible string. Not on PCI. |
+| `acpi_hid` | `"AMDI0010"` | The `_HID` in ACPI. Not on PCI. |
 
 ```js
-/* fdt or acpi bus */
+/* fdt, acpi or pci bus */
 {
     type: "dw-i2c",
     id: "i2c0",

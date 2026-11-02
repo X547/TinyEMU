@@ -310,6 +310,10 @@ Over I2C the path runs through the controller and the bus it provides:
 
     FDT bus -> dw-i2c -> I2C bus -> i2c-hid -> HID bus -> hid-keyboard
 
+The controller may also be a PCI function, as on Intel's SoCs; its targets
+are then described inside the host bridge's node, under the function's
+device and function number.
+
 An "i2c-hid" carries one function, because the protocol gives a target one
 report descriptor; a keyboard and a tablet are two targets. Like an MDIO bus,
 an I2C bus is described rather than enumerated: it places the targets that
