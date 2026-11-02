@@ -470,6 +470,11 @@ device tree. A PHY that names no "reg" is placed like any other resource, and
 one that does cannot collide with one that does not. A "dwmac" with no PHY
 below it is an error rather than a MAC with a dead link.
 
+On a PCI bus the MAC is the Ethernet function of Intel's Elkhart Lake
+instead, which drivers find by its ID; they then scan the MDIO bus for the
+PHY, and read the station address from the MAC's first address filter
+entry, where the model leaves it after every reset.
+
 The MAC takes the same "user" and "tap" back ends virtio-net does, and only
 one network device may be declared in a machine: the emulator polls a single
 back end from its main loop, so a second would never receive anything.

@@ -25,6 +25,7 @@
 
 #include "devices.h"
 #include "mdio.h"
+#include "pci.h"
 
 /* The register file spans MAC, MTL and DMA blocks; real parts publish a
    window far larger than they decode, and so does the device tree node. */
@@ -45,6 +46,12 @@
    which is what Linux's generic dwmac platform driver binds to. */
 #define DWMAC_DEFAULT_COMPATIBLE "snps,dwmac-5.10a"
 #define DWMAC_DEFAULT_PHY_MODE "rgmii-id"
+
+/* On PCI, the RGMII function of Intel's Elkhart Lake and the 5.20 core in
+   it, which distribution kernels carry a driver for. */
+#define DWMAC_PCI_VENDOR_ID 0x8086
+#define DWMAC_PCI_DEVICE_ID 0x4b30
+#define DWMAC_PCI_VERSION   0x52
 
 /* The rate the emitted clocks report: the gigabit transmit clock, which is
    what a driver expects to find on the one it calls "gtx". */
@@ -82,8 +89,12 @@ uint32_t dwmac_quirks_from_name(const char *name);
    providing the MDIO bus its PHY sits on. Descriptors are moved synchronously:
    a write to a tail pointer drains the transmit ring, and a frame arriving
    from the host back end is placed straight into the current receive
-   descriptor. */
-class DwmacDevice final: public Device, public EthernetTarget {
+   descriptor.
+
+   On PCI it is a function with the registers behind BAR 0, which a driver
+   takes by its ID rather than by a node. */
+class DwmacDevice final: public Device, public EthernetTarget,
+                         public PCIBarTarget {
 private:
     DeviceContext *fCtx;
     const char *fCompatible;
@@ -102,6 +113,8 @@ private:
 
     Resource *fMmioRes = nullptr;
     Resource *fIrqRes = nullptr;
+    PCIDevice *fPciDev = nullptr;
+    PhysMemoryRange *fBarRange = nullptr;
 
     /* Registers the guest writes and reads back unchanged. The ones with
        behaviour are intercepted in Read()/Write() and are the only state that
@@ -120,6 +133,8 @@ private:
     bool fTxRunning = false;
 
     void Reset();
+    bool RealizePCI(PCIBus *bus);
+    uint8_t *GuestPtr(uint64_t addr, bool is_rw);
 
     uint32_t &Reg(uint32_t offset) {return fRegs[offset / 4];}
     uint32_t Reg(uint32_t offset) const {return fRegs[offset / 4];}
@@ -169,6 +184,9 @@ public:
     bool CanWritePacket() override;
     void WritePacket(const uint8_t *buf, int len) override;
     void SetCarrier(bool carrier_state) override;
+
+    /* PCIBarTarget */
+    void SetBar(int bar_num, uint64_t addr, bool enabled) override;
 
     DeviceIOAdapter<DwmacDevice, &DwmacDevice::Read,
                     &DwmacDevice::Write> fIo {*this};

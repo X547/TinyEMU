@@ -1128,12 +1128,18 @@ DMA, so it is much faster than the `ne2000` under a hypervisor.
 
 #### `dwmac` — Synopsys DesignWare Ethernet QoS MAC
 
-Placement: FDT. Provides an `mdio` bus and needs a PHY on it.
+Placement: FDT or PCI. Provides an `mdio` bus and needs a PHY on it.
+
+On PCI it is the RGMII Ethernet function of Intel's Elkhart Lake
+(8086:4b30), a 5.20 core behind a 64 KB memory BAR, with INTx. The driver
+for it is x86 only, but distribution kernels there carry it. There is no
+device tree node, so the driver scans the MDIO bus for the PHY, and the
+station address is in the first address filter entry after a reset.
 
 | Property | Default | Meaning |
 | --- | --- | --- |
-| `compatible` | `"snps,dwmac-5.10a"` | Must name a 4.x or 5.x core. `"snps,dwmac"` is always appended. |
-| `phy_mode` | `"rgmii-id"` | `phy-mode` of the device tree node. |
+| `compatible` | `"snps,dwmac-5.10a"` | FDT only. Must name a 4.x or 5.x core. `"snps,dwmac"` is always appended. |
+| `phy_mode` | `"rgmii-id"` | FDT only: `phy-mode` of the device tree node. |
 | `quirks` | none | Workarounds for drivers written for a SoC that wraps this core; see below. |
 
 | Quirk | Effect |
@@ -1143,7 +1149,7 @@ Placement: FDT. Provides an `mdio` bus and needs a PHY on it.
 | `haiku` | Both, which Haiku's driver needs together. |
 
 ```js
-/* fdt bus */
+/* fdt or pci bus */
 {
     type: "dwmac",
     driver: "user",

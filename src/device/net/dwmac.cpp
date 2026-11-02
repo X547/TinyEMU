@@ -261,9 +261,16 @@ Bus *DwmacDevice::ChildBus()
 
 bool DwmacDevice::Prepare()
 {
-    SystemBus *sys = static_cast<SystemBus *>(ParentBus());
-    if (sys == nullptr || ParentBus()->AsPCIBus() != nullptr) {
-        vm_error("%s: must be attached to a system bus\n", Name());
+    if (ParentBus()->AsPCIBus() != nullptr) {
+        /* The core of the part it claims to be, as its driver expects. */
+        fVersion = DWMAC_PCI_VERSION;
+        fMdioBus = std::make_unique<MDIOBus>(this);
+        return true;
+    }
+
+    SystemBus *sys = dynamic_cast<SystemBus *>(ParentBus());
+    if (sys == nullptr || sys->IsPortBased()) {
+        vm_error("%s: must be attached to the fdt or a PCI bus\n", Name());
         return false;
     }
 
@@ -290,10 +297,27 @@ bool DwmacDevice::Prepare()
 }
 
 
+bool DwmacDevice::RealizePCI(PCIBus *bus)
+{
+    fPciDev = pci_register_device(bus, Name(), -1, DWMAC_PCI_VENDOR_ID,
+                                  DWMAC_PCI_DEVICE_ID, 0x01, 0x0200);
+    if (fPciDev == nullptr) {
+        vm_error("%s: could not register the PCI function\n", Name());
+        return false;
+    }
+    pci_device_set_config8(fPciDev, PCI_INTERRUPT_PIN, 1);
+    fIrq = pci_device_get_irq(fPciDev, 0);
+    fMemMap = pci_device_get_mem_map(fPciDev);
+    fBarRange = fMemMap->RegisterDevice(0, DWMAC_REG_SIZE, &fIo,
+                                        DEVIO_SIZE8 | DEVIO_SIZE16 |
+                                            DEVIO_SIZE32 | DEVIO_DISABLED);
+    pci_register_bar(fPciDev, 0, DWMAC_REG_SIZE, PCI_ADDRESS_SPACE_MEM, this);
+    return true;
+}
+
+
 bool DwmacDevice::Realize()
 {
-    SystemBus *sys = static_cast<SystemBus *>(ParentBus());
-
     if (fNet == nullptr) {
         vm_error("%s: no network back end\n", Name());
         return false;
@@ -303,21 +327,35 @@ bool DwmacDevice::Realize()
         return false;
     }
 
-    fIrq = sys->IrqSignalFor(fIrqRes->base);
-    if (fIrq == nullptr) {
-        vm_error("%s: bad interrupt line %d\n", Name(), (int)fIrqRes->base);
-        return false;
+    PCIBus *pci_bus = ParentBus()->AsPCIBus();
+    if (pci_bus != nullptr) {
+        if (!RealizePCI(pci_bus)) {
+            return false;
+        }
+    } else {
+        SystemBus *sys = static_cast<SystemBus *>(ParentBus());
+        fIrq = sys->IrqSignalFor(fIrqRes->base);
+        if (fIrq == nullptr) {
+            vm_error("%s: bad interrupt line %d\n", Name(),
+                     (int)fIrqRes->base);
+            return false;
+        }
+        fMemMap = sys->MemMap();
+        fMemMap->RegisterDevice(fMmioRes->base, fMmioRes->size, &fIo,
+                                DEVIO_SIZE8 | DEVIO_SIZE16 | DEVIO_SIZE32);
     }
-
-    fMemMap = sys->MemMap();
     Reset();
-
-    fMemMap->RegisterDevice(fMmioRes->base, fMmioRes->size, &fIo,
-                            DEVIO_SIZE8 | DEVIO_SIZE16 | DEVIO_SIZE32);
 
     fNet->target = this;
     fCtx->ethernet.push_back(fNet.get());
     return true;
+}
+
+
+void DwmacDevice::SetBar(int bar_num, uint64_t addr, bool enabled)
+{
+    (void)bar_num;
+    fBarRange->SetAddr(addr, enabled);
 }
 
 
@@ -342,6 +380,18 @@ void DwmacDevice::Reset()
         if (phy != nullptr && phy->LinkUp()) {
             fMacIntStatus |= GMAC_INT_RGSMIIIS;
         }
+    }
+
+    /* A card has no node to give its address in, so the address is where
+       its firmware leaves it and a driver looks for it: in the first
+       perfect filter entry. */
+    if (fPciDev != nullptr) {
+        const uint8_t *mac = fNet->mac_addr;
+        Reg(GMAC_ADDR_HIGH(0)) = GMAC_ADDR_HIGH_AE | mac[4] |
+                                 ((uint32_t)mac[5] << 8);
+        Reg(GMAC_ADDR_LOW(0)) = mac[0] | ((uint32_t)mac[1] << 8) |
+                                ((uint32_t)mac[2] << 16) |
+                                ((uint32_t)mac[3] << 24);
     }
 }
 
@@ -454,7 +504,16 @@ void DwmacDevice::UpdateIrq()
 
 //#pragma mark - guest memory
 
-/* GetRamPtr() is only valid inside one page, so both directions walk the
+uint8_t *DwmacDevice::GuestPtr(uint64_t addr, bool is_rw)
+{
+    if (fPciDev != nullptr) {
+        return pci_device_get_dma_ptr(fPciDev, addr, is_rw);
+    }
+    return fMemMap->GetRamPtr(addr, is_rw);
+}
+
+
+/* A guest pointer is only valid inside one page, so both directions walk the
    transfer a page at a time, exactly as the virtio queue helpers do. */
 bool DwmacDevice::DmaRead(uint64_t addr, uint8_t *buf, int len)
 {
@@ -462,7 +521,7 @@ bool DwmacDevice::DmaRead(uint64_t addr, uint8_t *buf, int len)
         int page_left =
             DEVRAM_PAGE_SIZE - (int)(addr & (DEVRAM_PAGE_SIZE - 1));
         int chunk = min_int(len, page_left);
-        uint8_t *ptr = fMemMap->GetRamPtr(addr, false);
+        uint8_t *ptr = GuestPtr(addr, false);
         if (ptr == nullptr) {
             return false;
         }
@@ -481,7 +540,7 @@ bool DwmacDevice::DmaWrite(uint64_t addr, const uint8_t *buf, int len)
         int page_left =
             DEVRAM_PAGE_SIZE - (int)(addr & (DEVRAM_PAGE_SIZE - 1));
         int chunk = min_int(len, page_left);
-        uint8_t *ptr = fMemMap->GetRamPtr(addr, true);
+        uint8_t *ptr = GuestPtr(addr, true);
         if (ptr == nullptr) {
             return false;
         }
@@ -976,6 +1035,11 @@ void DwmacDevice::BuildFDT(FDTContext &ctx)
 {
     FDTBuilder *fdt = ctx.fdt;
     MDIODevice *phy = Phy();
+
+    if (fPciDev != nullptr) {
+        /* the driver scans the MDIO bus for the PHY */
+        return;
+    }
 
     /* Properties come before child nodes, so the phandle the MAC points at
        has to be handed to the PHY before its node is written. */
