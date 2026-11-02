@@ -1,0 +1,8 @@
+xhci.usbcmd 0xc0c
+xhci.config 0xff
+xhci.imod 0x12345678
+xhci.erdp 0x12345670
+xhci-pci.usbcmd 0xc0c
+xhci-pci.config 0xff
+xhci-pci.imod 0x12345678
+xhci-pci.erdp 0x12345670

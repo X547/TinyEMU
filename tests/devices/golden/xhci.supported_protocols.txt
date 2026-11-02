@@ -1,0 +1,12 @@
+xhci.protocol0 0x200
+xhci.protocol0.ports 0x403
+xhci.protocol0.slot 0
+xhci.protocol1 0x300
+xhci.protocol1.ports 0x201
+xhci.protocol1.slot 0
+xhci-pci.protocol0 0x200
+xhci-pci.protocol0.ports 0x202
+xhci-pci.protocol0.slot 0
+xhci-pci.protocol1 0x300
+xhci-pci.protocol1.ports 0x101
+xhci-pci.protocol1.slot 0

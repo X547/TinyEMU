@@ -1,0 +1,2 @@
+xhci.ports 0x58
+xhci-pci.ports 0x4

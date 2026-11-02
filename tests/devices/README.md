@@ -174,6 +174,15 @@ either transport. `virtio_negotiate()` takes it through feature
 negotiation, and `virtq_setup()` gives it a split virtqueue whose
 descriptors a test fills in itself.
 
+USB goes through the xHCI hosts the tables and PCI give, found afresh in
+every test and reset after it. `xhci_require()` gives a running host with
+its command and event rings, polled; `usb_find_device(class, index, &dev)`
+resets the root ports, addresses what is on them and walks through hubs,
+and `UsbDevice` does control transfers, Configure Endpoint and transfers
+on the other endpoints. `UsbBot` speaks the mass storage Bulk-Only
+Transport, which `hw/scsi.cpp` uses too, so the SCSI unit tests also run
+over USB.
+
 `smp_run(cpu, fn, ctx)` runs a function on another processor, which is
 started the first time: by INIT and STARTUP on x86, by its software
 interrupt in M-mode and by the SBI in S-mode. `t_require_other_cpu()` gives

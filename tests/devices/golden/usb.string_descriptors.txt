@@ -1,0 +1,21 @@
+xhci.p3.langid 0x409
+xhci.p3.manufacturer TinyEMU
+xhci.p3.product USB Mass Storage
+xhci.p3.serial TEMU00000001
+xhci.p4.langid 0x409
+xhci.p4.manufacturer TinyEMU
+xhci.p4.product USB HID
+xhci.p6.2.langid 0x409
+xhci.p6.2.manufacturer TinyEMU
+xhci.p6.2.product USB HID
+xhci.p6.3.langid 0x409
+xhci.p6.3.manufacturer TinyEMU
+xhci.p6.3.product USB Mass Storage
+xhci.p6.3.serial TEMU00000001
+xhci.p6.langid 0x409
+xhci.p6.manufacturer TinyEMU
+xhci.p6.product USB Hub
+xhci-pci.p2.langid 0x409
+xhci-pci.p2.manufacturer TinyEMU
+xhci-pci.p2.product USB Mass Storage
+xhci-pci.p2.serial TEMU00000001

@@ -1,0 +1,3 @@
+table_size 1
+table 0x3000
+pba 0x3800

@@ -1,0 +1,2 @@
+if1.get 1/1
+if1.set_boot 6

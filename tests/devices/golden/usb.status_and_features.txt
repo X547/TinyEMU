@@ -1,0 +1,6 @@
+xhci.p3.status 0x1
+xhci.p4.status 0
+xhci.p6.2.status 0
+xhci.p6.3.status 0x1
+xhci.p6.status 0x1
+xhci-pci.p2.status 0x1

@@ -334,11 +334,15 @@ TEST(scsi_disk, out_of_range)
                  SCSI_KEY_ILLEGAL_REQUEST, 0x2100);
     uint8_t rs[6] = {0x03, 0, 0, 0, 18, 0};
     uint8_t *sense = (uint8_t *)alloc(18);
-    ScsiResult r = cmd(rs, 6, SCSI_IN, sense, 18);
-    EXPECT_GOOD(r);
-    EXPECT_EQ(sense[0] & 0x7f, 0x70);
-    EXPECT_EQ(sense[2] & 0x0f, SCSI_KEY_ILLEGAL_REQUEST);
-    EXPECT_EQ(sense[12], 0x21);
+    ScsiResult r;
+    /* an initiator without autosense took it already */
+    if (sUnit.init->AutoSense()) {
+        r = cmd(rs, 6, SCSI_IN, sense, 18);
+        EXPECT_GOOD(r);
+        EXPECT_EQ(sense[0] & 0x7f, 0x70);
+        EXPECT_EQ(sense[2] & 0x0f, SCSI_KEY_ILLEGAL_REQUEST);
+        EXPECT_EQ(sense[12], 0x21);
+    }
     r = cmd(rs, 6, SCSI_IN, sense, 18);
     EXPECT_EQ(sense[2] & 0x0f, SCSI_KEY_NO_SENSE);
     EXPECT_EQ(sense[12], 0);

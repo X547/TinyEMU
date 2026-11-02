@@ -1,0 +1,2 @@
+route0x2 speed 1 tt 1/2
+route0x3 speed 3 tt 0/0

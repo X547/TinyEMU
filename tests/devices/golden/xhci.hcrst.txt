@@ -1,0 +1,9 @@
+xhci.portsc1 0x2a0
+xhci.portsc2 0x2a0
+xhci.portsc3 0x20ee1
+xhci.portsc4 0x206e1
+xhci.portsc5 0x2a0
+xhci.portsc6 0x20ee1
+xhci-pci.portsc1 0x2a0
+xhci-pci.portsc2 0x20ee1
+xhci-pci.portsc3 0x2a0

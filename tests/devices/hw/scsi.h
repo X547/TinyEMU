@@ -66,6 +66,9 @@ public:
     /* The targets it can address, and the longest CDB it carries. */
     virtual int TargetCount() const = 0;
     virtual int MaxCdb() const = 0;
+    /* Whether a failure brings its sense data along, leaving it with the
+       unit for REQUEST SENSE too; without, the initiator asks for it. */
+    virtual bool AutoSense() const {return true;}
     virtual bool Command(int target, int lun, const uint8_t *cdb, int cdb_len,
                          ScsiDir dir, void *buf, uint32_t len,
                          ScsiResult *res) = 0;

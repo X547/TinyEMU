@@ -1,0 +1,6 @@
+xhci.disabled3 0xee1
+xhci.disabled4 0x6e1
+xhci.empty5 0x2a0
+xhci.disabled6 0xee1
+xhci-pci.disabled2 0xee1
+xhci-pci.empty3 0x2a0

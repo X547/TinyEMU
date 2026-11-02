@@ -1,0 +1,16 @@
+xhci.p3.other_speed 09072000010100c0320904000002080650000705810240000007050202400000
+xhci.p3.bos 6
+xhci.p3.set_descriptor 6
+xhci.p4.bos 6
+xhci.p4.set_descriptor 6
+xhci.p6.2.bos 6
+xhci.p6.2.set_descriptor 6
+xhci.p6.3.other_speed 09072000010100c0320904000002080650000705810240000007050202400000
+xhci.p6.3.bos 6
+xhci.p6.3.set_descriptor 6
+xhci.p6.other_speed 09071900010100e000090400000109000000070581030100ff
+xhci.p6.bos 6
+xhci.p6.set_descriptor 6
+xhci-pci.p2.other_speed 09072000010100c0320904000002080650000705810240000007050202400000
+xhci-pci.p2.bos 6
+xhci-pci.p2.set_descriptor 6

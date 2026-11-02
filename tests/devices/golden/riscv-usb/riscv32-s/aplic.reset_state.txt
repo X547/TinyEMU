@@ -1,0 +1,6 @@
+domaincfg 0x80000004
+sourcecfg 0
+target 0
+setip0 0
+setie0 0
+sources 31

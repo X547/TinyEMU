@@ -91,6 +91,7 @@ sources = files(
   'hw/scsi.cpp',
   'hw/sd.cpp',
   'hw/testctl.cpp',
+  'hw/usb.cpp',
   'hw/virtio.cpp',
   'lib/cxxrt.cpp',
   'lib/divmod.cpp',
@@ -132,6 +133,11 @@ sources = files(
   'tests/timer/hpet.cpp',
   'tests/timer/i8254.cpp',
   'tests/timer/mc146818.cpp',
+  'tests/usb/hid.cpp',
+  'tests/usb/hub.cpp',
+  'tests/usb/storage.cpp',
+  'tests/usb/usb.cpp',
+  'tests/usb/xhci.cpp',
   'tests/virtio/block.cpp',
   'tests/virtio/console.cpp',
   'tests/virtio/scsi.cpp',
@@ -157,7 +163,7 @@ if is_riscv
   add_project_arguments('-fpie', language: ['c', 'cpp'])
   inc = [inc, include_directories('arch/riscv')]
   ld_script = meson.current_source_dir() / 'arch/riscv/link.ld'
-  link_args += ['-pie', '-z', 'text']
+  link_args += ['-pie', '-z', 'text', '-z', 'norelro']
 else
   # Linked where the PVH loader puts it, at the physical address of its
   # PT_LOAD segments.

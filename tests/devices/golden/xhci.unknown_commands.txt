@@ -1,0 +1,9 @@
+type1 5
+type18 5
+type19 5
+type20 5
+type21 5
+type22 5
+type24 5
+type31 5
+type40 5

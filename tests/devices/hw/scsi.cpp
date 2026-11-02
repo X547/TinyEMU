@@ -24,6 +24,7 @@
 #include "ata.h"
 #include "heap.h"
 #include "test.h"
+#include "usb.h"
 #include "virtio.h"
 
 /* The virtio SCSI host of the virtio specification (1.2, 5.6): a command
@@ -363,6 +364,7 @@ public:
     const char *Name() const override {return "atapi";}
     int TargetCount() const override {return ATAPI_TARGETS;}
     int MaxCdb() const override {return 12;}
+    bool AutoSense() const override {return false;}
 
     bool SetUp()
     {
@@ -426,6 +428,94 @@ public:
 
 Atapi sAtapi;
 
+
+/* USB mass storage by the Bulk-Only Transport, target n being the n'th
+   logical unit of all the devices together. A failed command's sense
+   comes by REQUEST SENSE, as with ATAPI. */
+#define USB_SCSI_DEVICES 4
+#define USB_SCSI_TARGETS 8
+
+class UsbScsi final: public ScsiInitiator {
+private:
+    bool fReady = false;
+    UsbBot *fBots = nullptr;
+    int fBotCount = 0;
+    int fTargets = 0;
+    uint8_t fBot[USB_SCSI_TARGETS] {};
+    uint8_t fLun[USB_SCSI_TARGETS] {};
+
+public:
+    const char *Name() const override {return "usb-storage";}
+    int TargetCount() const override {return fTargets;}
+    int MaxCdb() const override {return 16;}
+    bool AutoSense() const override {return false;}
+
+    bool SetUp()
+    {
+        if (fReady)
+            return true;
+        fBots = (UsbBot *)heap_alloc(USB_SCSI_DEVICES * sizeof(UsbBot), 16);
+        if (fBots == nullptr)
+            return false;
+        fBotCount = fTargets = 0;
+        for (int i = 0; i < USB_SCSI_DEVICES; i++) {
+            new (&fBots[i]) UsbBot();
+            if (!fBots[i].Open(i))
+                break;
+            fBotCount++;
+            int max_lun = fBots[i].MaxLun();
+            for (int l = 0; l <= max_lun && fTargets < USB_SCSI_TARGETS;
+                 l++) {
+                fBot[fTargets] = i;
+                fLun[fTargets++] = l;
+            }
+        }
+        if (fTargets == 0)
+            return false;
+        t_on_cleanup(scsi_reset);
+        fReady = true;
+        return true;
+    }
+
+    void Reset()
+    {
+        fReady = false;
+    }
+
+    bool Command(int target, int lun, const uint8_t *cdb, int cdb_len,
+                 ScsiDir dir, void *buf, uint32_t len,
+                 ScsiResult *res) override
+    {
+        *res = ScsiResult {};
+        if (target >= fTargets || lun != 0)
+            return false;
+        UsbBot &bot = fBots[fBot[target]];
+        uint8_t l = fLun[target];
+        uint32_t residue = 0;
+        uint32_t st = bot.Command(l, cdb, cdb_len, dir == SCSI_IN, buf,
+                                  dir == SCSI_NONE ? 0 : len, &residue);
+        if (st == BOT_TRANSPORT || st == BOT_PHASE) {
+            bot.ResetRecovery();
+            res->adapter = st;
+            return true;
+        }
+        res->delivered = true;
+        res->residual = residue;
+        if (st == BOT_PASS)
+            return true;
+        res->status = SCSI_CHECK_CONDITION;
+        static const uint8_t kRequestSense[6] = {0x03, 0, 0, 0, 18, 0};
+        uint8_t *sense = (uint8_t *)usb_alloc(18);
+        if (bot.Command(l, kRequestSense, 6, true, sense, 18) == BOT_PASS) {
+            memcpy(res->sense, sense, 18);
+            res->sense_len = 18;
+        }
+        return true;
+    }
+};
+
+UsbScsi sUsbScsi;
+
 ScsiInitiator *initiator(int i)
 {
     switch (i) {
@@ -435,12 +525,14 @@ ScsiInitiator *initiator(int i)
         return sBusLogic.SetUp() ? &sBusLogic : nullptr;
     case 2:
         return sAtapi.SetUp() ? &sAtapi : nullptr;
+    case 3:
+        return sUsbScsi.SetUp() ? &sUsbScsi : nullptr;
     default:
         return nullptr;
     }
 }
 
-const int kInitiators = 3;
+const int kInitiators = 4;
 
 }
 
@@ -450,6 +542,7 @@ void scsi_reset()
     sVirtioScsi.Reset();
     sBusLogic.Reset();
     sAtapi.Reset();
+    sUsbScsi.Reset();
 }
 
 
