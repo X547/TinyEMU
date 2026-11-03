@@ -105,6 +105,11 @@ TEST(lapic, read_only)
     EXPECT_EQ(l->Read(0x40), 0u);
     l->Write(LAPIC_ESR, 0);
     EXPECT_EQ(l->Read(LAPIC_ESR), 0x80u);
+    /* and so is a write to one */
+    l->Write(LAPIC_ESR, 0);
+    l->Write(0x40, 1);
+    l->Write(LAPIC_ESR, 0);
+    EXPECT_EQ(l->Read(LAPIC_ESR), 0x80u);
 }
 
 TEST(lapic, register_masks)

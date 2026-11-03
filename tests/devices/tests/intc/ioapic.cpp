@@ -144,6 +144,23 @@ TEST(ioapic, edge)
     EXPECT_FALSE(s.io->Rte(s.pin[0]) & RTE_REMOTE_IRR);
 }
 
+TEST(ioapic, broadcast)
+{
+    Setup s = need_ioapic(1);
+    sCount = 0;
+    uint8_t v = VEC_TEST;
+    arch_set_irq_handler(v, [](void *) {
+        sCount = sCount + 1;
+        tc_irq_lower(0);
+        Lapic::Get()->Eoi();
+    }, nullptr);
+    s.io->SetRte(s.pin[0], v | RTE_DEST(0xff));
+    arch_irq_enable();
+    tc_irq_raise(0);
+    EXPECT_TRUE(t_wait_until([] { return sCount > 0; }));
+    arch_irq_disable();
+}
+
 TEST(ioapic, edge_while_masked)
 {
     Setup s = need_ioapic(1);

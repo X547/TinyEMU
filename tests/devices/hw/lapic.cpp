@@ -57,6 +57,37 @@ void wrmsr(uint32_t msr, uint64_t value)
 }
 
 
+bool cpu_has_x2apic()
+{
+    uint32_t a, b, c, d;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                     : "a"(1), "c"(0));
+    return (c >> 21) & 1;
+}
+
+
+bool Lapic::X2Apic()
+{
+    return rdmsr(MSR_APIC_BASE) & APIC_BASE_X2APIC;
+}
+
+
+void Lapic::EnterX2Apic()
+{
+    wrmsr(MSR_APIC_BASE, rdmsr(MSR_APIC_BASE) | APIC_BASE_X2APIC);
+}
+
+
+void Lapic::LeaveX2Apic()
+{
+    uint64_t base = rdmsr(MSR_APIC_BASE);
+    wrmsr(MSR_APIC_BASE, base & ~(uint64_t)(APIC_BASE_X2APIC |
+                                            APIC_BASE_ENABLE));
+    wrmsr(MSR_APIC_BASE, (base & ~(uint64_t)APIC_BASE_X2APIC) |
+                         APIC_BASE_ENABLE);
+}
+
+
 Lapic *Lapic::Get()
 {
     if (sLooked)
@@ -80,13 +111,18 @@ Lapic::Lapic(uint64_t base):
 
 uint32_t Lapic::Read(uint32_t reg) const
 {
+    if (X2Apic())
+        return rdmsr(X2APIC_MSR(reg));
     return mmio_read32(fBase + reg);
 }
 
 
 void Lapic::Write(uint32_t reg, uint32_t value) const
 {
-    mmio_write32(fBase + reg, value);
+    if (X2Apic())
+        wrmsr(X2APIC_MSR(reg), value);
+    else
+        mmio_write32(fBase + reg, value);
 }
 
 
@@ -99,6 +135,11 @@ void Lapic::Enable() const
 
 void Lapic::SendIpi(uint32_t dest, uint32_t low) const
 {
+    /* one 64 bit register */
+    if (X2Apic()) {
+        wrmsr(X2APIC_MSR(LAPIC_ICR_LOW), (uint64_t)dest << 32 | low);
+        return;
+    }
     Write(LAPIC_ICR_HIGH, dest << 24);
     Write(LAPIC_ICR_LOW, low);
 }
@@ -124,10 +165,13 @@ int Lapic::SpuriousCount() const
 
 void Lapic::Reset()
 {
-    /* back on, if a test turned it off at its base register */
+    /* back on in xAPIC mode, if a test turned it off at its base register
+       or left it in x2APIC mode */
+    if (X2Apic())
+        LeaveX2Apic();
     uint64_t msr = rdmsr(MSR_APIC_BASE);
-    if (!(msr & (1u << 11)))
-        wrmsr(MSR_APIC_BASE, msr | (1u << 11));
+    if (!(msr & APIC_BASE_ENABLE))
+        wrmsr(MSR_APIC_BASE, msr | APIC_BASE_ENABLE);
     Write(LAPIC_TIMER_INITIAL, 0);
     Write(LAPIC_TIMER_DIVIDE, 0);
     Enable();

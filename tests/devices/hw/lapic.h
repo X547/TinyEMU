@@ -49,6 +49,10 @@
 #define LAPIC_TIMER_INITIAL 0x380
 #define LAPIC_TIMER_CURRENT 0x390
 #define LAPIC_TIMER_DIVIDE  0x3e0
+#define LAPIC_SELF_IPI      0x3f0 /* x2APIC only */
+
+/* a register's MSR in x2APIC mode */
+#define X2APIC_MSR(reg)     (0x800 + (reg) / 16)
 
 #define LAPIC_SVR_ENABLE    (1u << 8)
 #define LAPIC_LVT_MASKED    (1u << 16)
@@ -66,11 +70,17 @@
 #define LAPIC_ICR_OTHERS    (3u << 18)
 
 #define MSR_APIC_BASE 0x1b
+#define APIC_BASE_X2APIC    (1u << 10)
+#define APIC_BASE_ENABLE    (1u << 11)
 
 uint64_t rdmsr(uint32_t msr);
 void wrmsr(uint32_t msr, uint64_t value);
+/* CPUID 1 reports x2APIC mode */
+bool cpu_has_x2apic();
 
-/* The boot processor's xAPIC, where the MADT says it is. */
+/* The local APIC, where the MADT says it is. Each processor reaches its
+   own there in xAPIC mode, and by MSR in x2APIC mode, which the calling
+   processor's decides. */
 class Lapic final : public IntController {
 public:
     static Lapic *Get();
@@ -78,11 +88,18 @@ public:
     uint64_t Base() const {return fBase;}
     uint32_t Read(uint32_t reg) const;
     void Write(uint32_t reg, uint32_t value) const;
-    uint32_t Id() const {return Read(LAPIC_ID) >> 24;}
+    uint32_t Id() const
+        {return X2Apic() ? Read(LAPIC_ID) : Read(LAPIC_ID) >> 24;}
+    /* the calling processor's APIC is in x2APIC mode */
+    static bool X2Apic();
+    /* From xAPIC mode, and back by way of disabled, which leaves the
+       APIC software disabled. */
+    static void EnterX2Apic();
+    static void LeaveX2Apic();
     /* software enabled, with the spurious vector handled */
     void Enable() const;
     void Eoi() const {Write(LAPIC_EOI, 0);}
-    /* an IPI by the ICR */
+    /* an IPI by the ICR, to an 8 bit or, in x2APIC mode, 32 bit 'dest' */
     void SendIpi(uint32_t dest, uint32_t low) const;
     bool InService(int vector) const;
     bool Requested(int vector) const;
