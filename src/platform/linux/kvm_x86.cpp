@@ -55,6 +55,8 @@
 #define CPUID_TSC_DEADLINE bit_at(24)
 
 #define MSR_IA32_PAT 0x277
+#define APIC_BASE_X2APIC bit_at(10)
+#define APIC_BASE_ENABLE bit_at(11)
 
 
 class KvmX86Hypervisor;
@@ -94,6 +96,7 @@ private:
     void ExitApicState();
     void ExitIo();
     void ExitMmio();
+    void ExitMsr();
 
 public:
     KvmX86Vcpu(KvmX86Hypervisor &owner, int index);
@@ -129,6 +132,9 @@ private:
     bool fLocalApic;
     /* the kernel has the interrupt controllers */
     bool fIrqchip;
+    /* or else the machine's local APIC takes the x2APIC MSRs, which the
+       kernel refuses without its own */
+    bool fApicMsrExits = false;
     int fCpuCount;
     int fMaxPhysAddressBits;
     int fPhysAddressBits = 36;
@@ -273,6 +279,19 @@ void KvmX86Hypervisor::Init()
         }
         if (fLocalApic)
             SetGsiRouting();
+    } else if (fLocalApic &&
+               ioctl(fVmFd, KVM_CHECK_EXTENSION,
+                     KVM_CAP_X86_USER_SPACE_MSR) > 0) {
+        /* the kernel fails an x2APIC MSR as an invalid access */
+        struct kvm_enable_cap cap;
+        memset(&cap, 0, sizeof(cap));
+        cap.cap = KVM_CAP_X86_USER_SPACE_MSR;
+        cap.args[0] = KVM_MSR_EXIT_REASON_INVAL;
+        if (ioctl(fVmFd, KVM_ENABLE_CAP, &cap) < 0) {
+            perror("KVM_ENABLE_CAP KVM_CAP_X86_USER_SPACE_MSR");
+            exit(1);
+        }
+        fApicMsrExits = true;
     }
 
     /* before the vcpus, whose CPUID reports it */
@@ -491,10 +510,14 @@ void KvmX86Vcpu::SetCpuid(int index)
             if (!fOwner.fLocalApic)
                 ent->edx &= ~CPUID_APIC;
         }
-        /* the machine's local APIC is an xAPIC only, and the paravirtual
-           interfaces that go through the in-kernel one are not there */
-        if (ent->function == 1 && !fOwner.fIrqchip)
+        /* the machine's local APIC has no TSC deadline mode, and x2APIC
+           mode where its MSRs come here; the paravirtual interfaces that go
+           through the in-kernel one are not there */
+        if (ent->function == 1 && !fOwner.fIrqchip) {
             ent->ecx &= ~(CPUID_X2APIC | CPUID_TSC_DEADLINE);
+            if (fOwner.fApicMsrExits)
+                ent->ecx |= CPUID_X2APIC;
+        }
         if (ent->function == KVM_CPUID_FEATURES && !fOwner.fIrqchip) {
             ent->eax &= ~(bit_at(KVM_FEATURE_ASYNC_PF) |
                           bit_at(KVM_FEATURE_PV_EOI) |
@@ -698,6 +721,29 @@ void KvmX86Vcpu::ExitMmio()
 }
 
 
+/* An MSR access the kernel failed: an x2APIC register goes to the machine's
+   local APIC, and anything else raises #GP as it would have. A TPR written
+   here reaches CR8 before the next run. */
+void KvmX86Vcpu::ExitMsr()
+{
+    X86CpuTarget &target = fOwner.fTarget;
+    struct kvm_run *run = fRun;
+    uint32_t msr = run->msr.index;
+    bool ok = false;
+
+    if (msr >= X86_MSR_X2APIC_FIRST && msr <= X86_MSR_X2APIC_LAST) {
+        if (run->exit_reason == KVM_EXIT_X86_RDMSR) {
+            uint64_t val = 0;
+            ok = target.ApicMsrRead(msr, &val);
+            run->msr.data = val;
+        } else {
+            ok = target.ApicMsrWrite(msr, run->msr.data);
+        }
+    }
+    run->msr.error = !ok;
+}
+
+
 /* Without the in-kernel interrupt controllers, with the lock held, before a
    run: CR8 and IA32_APIC_BASE take what the machine's local APIC has, and
    the processor the interrupt the 8259s or that APIC raise when it can take
@@ -751,9 +797,17 @@ void KvmX86Vcpu::ExitApicState()
         fTaskPriority = run->cr8;
         target.SetTaskPriority(fTaskPriority);
     }
+    /* Of the writes the kernel allowed, this sees only the last, so the APIC
+       goes there by way of disabled and xAPIC mode. */
     if (run->apic_base != fApicBase) {
         fApicBase = run->apic_base;
-        target.SetApicBase(fApicBase);
+        if (!target.SetApicBase(fApicBase)) {
+            target.SetApicBase(fApicBase &
+                               ~(uint64_t)(APIC_BASE_ENABLE | APIC_BASE_X2APIC));
+            if (fApicBase & APIC_BASE_ENABLE)
+                target.SetApicBase(fApicBase & ~(uint64_t)APIC_BASE_X2APIC);
+            target.SetApicBase(fApicBase);
+        }
     }
 }
 
@@ -838,6 +892,12 @@ void KvmX86Vcpu::Run()
     case KVM_EXIT_MMIO: {
         DeviceLocker locker(fOwner.fLock);
         ExitMmio();
+        break;
+    }
+    case KVM_EXIT_X86_RDMSR:
+    case KVM_EXIT_X86_WRMSR: {
+        DeviceLocker locker(fOwner.fLock);
+        ExitMsr();
         break;
     }
     case KVM_EXIT_SHUTDOWN: {

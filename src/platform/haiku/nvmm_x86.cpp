@@ -47,6 +47,7 @@ extern "C" {
 
 #define CPUID_APIC bit_at(9)
 #define CPUID_ACPI bit_at(22)
+#define CPUID_X2APIC bit_at(21) /* 1 ECX */
 #define CPUID_TOPOEXT bit_at(22) /* 0x80000001 ECX */
 #define RFLAGS_IF bit_at(9)
 
@@ -331,6 +332,16 @@ NvmmX86Vcpu::NvmmX86Vcpu(NvmmX86Hypervisor &owner, struct nvmm_machine *mach,
         if (leaf == 0x80000001) {
             c.u.mask.del.ecx |= CPUID_TOPOEXT;
             c.u.mask.set.ecx &= ~CPUID_TOPOEXT;
+        }
+        /* the machine's local APIC has x2APIC mode */
+        if (leaf == 1) {
+            if (owner.fLocalApic) {
+                c.u.mask.del.ecx &= ~CPUID_X2APIC;
+                c.u.mask.set.ecx |= CPUID_X2APIC;
+            } else {
+                c.u.mask.del.ecx |= CPUID_X2APIC;
+                c.u.mask.set.ecx &= ~CPUID_X2APIC;
+            }
         }
     }
 
@@ -653,35 +664,50 @@ void NvmmX86Vcpu::InjectException(int vector)
 
 #define MSR_IA32_APIC_BASE 0x1b
 
-/* IA32_APIC_BASE goes to the machine's local APIC. Another MSR the kernel
-   does not handle reads as 0 and ignores writes, rather than faulting a
-   guest that probes it. */
+static bool is_x2apic_msr(uint32_t msr)
+{
+    return msr >= X86_MSR_X2APIC_FIRST && msr <= X86_MSR_X2APIC_LAST;
+}
+
+/* IA32_APIC_BASE and the x2APIC registers go to the machine's local APIC.
+   Another MSR the kernel does not handle reads as 0 and ignores writes,
+   rather than faulting a guest that probes it. */
 void NvmmX86Vcpu::ExitMsr(const struct nvmm_vcpu_exit *ctx)
 {
     struct nvmm_x64_state *state = fVcpu.vcpu.state;
     X86CpuTarget &target = fOwner.fTarget;
     bool apic = fOwner.fLocalApic;
+    bool ok = true;
 
     if (nvmm_vcpu_getstate(fMach, &fVcpu.vcpu, NVMM_X64_STATE_GPRS) == -1)
         nvmm_fail("nvmm_vcpu_getstate");
     if (ctx->reason == NVMM_VCPU_EXIT_RDMSR) {
+        uint32_t msr = ctx->u.rdmsr.msr;
         uint64_t val = 0;
-        if (apic && ctx->u.rdmsr.msr == MSR_IA32_APIC_BASE) {
+        if (apic && msr == MSR_IA32_APIC_BASE) {
             DeviceLocker locker(fOwner.fLock);
             val = target.ApicBase();
+        } else if (apic && is_x2apic_msr(msr)) {
+            DeviceLocker locker(fOwner.fLock);
+            ok = target.ApicMsrRead(msr, &val);
         }
         state->gprs[NVMM_X64_GPR_RAX] = (uint32_t)val;
         state->gprs[NVMM_X64_GPR_RDX] = val >> 32;
         state->gprs[NVMM_X64_GPR_RIP] = ctx->u.rdmsr.npc;
     } else {
-        if (apic && ctx->u.wrmsr.msr == MSR_IA32_APIC_BASE) {
+        uint32_t msr = ctx->u.wrmsr.msr;
+        if (apic && msr == MSR_IA32_APIC_BASE) {
             DeviceLocker locker(fOwner.fLock);
-            if (!target.SetApicBase(ctx->u.wrmsr.val)) {
-                InjectException(13); /* #GP */
-                return;
-            }
+            ok = target.SetApicBase(ctx->u.wrmsr.val);
+        } else if (apic && is_x2apic_msr(msr)) {
+            DeviceLocker locker(fOwner.fLock);
+            ok = target.ApicMsrWrite(msr, ctx->u.wrmsr.val);
         }
         state->gprs[NVMM_X64_GPR_RIP] = ctx->u.wrmsr.npc;
+    }
+    if (!ok) {
+        InjectException(13); /* #GP */
+        return;
     }
     if (nvmm_vcpu_setstate(fMach, &fVcpu.vcpu, NVMM_X64_STATE_GPRS) == -1)
         nvmm_fail("nvmm_vcpu_setstate");

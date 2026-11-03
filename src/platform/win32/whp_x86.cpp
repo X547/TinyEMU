@@ -301,7 +301,8 @@ bool WhpX86Hypervisor::Init()
        those of the processor shown in place of the host's. */
     WHV_EXTENDED_VM_EXITS exits {};
     exits.X64CpuidExit = 1;
-    /* the machine's local APIC hears of a write to IA32_APIC_BASE */
+    /* the machine's local APIC hears of a write to IA32_APIC_BASE and of
+       the x2APIC registers */
     if (fLocalApic && !fApicEmulation)
         exits.X64MsrExit = 1;
     /* A guest shown another processor may use its MSRs, which the host's
@@ -326,6 +327,8 @@ bool WhpX86Hypervisor::Init()
     if (exits.X64MsrExit) {
         WHV_X64_MSR_EXIT_BITMAP msr_exits {};
         msr_exits.ApicBaseMsrWrite = 1;
+        /* the x2APIC registers among them */
+        msr_exits.UnhandledMsrs = 1;
         hr = WHvSetPartitionProperty(fPartition,
                                      WHvPartitionPropertyCodeX64MsrExitBitmap,
                                      &msr_exits, sizeof(msr_exits));
@@ -801,12 +804,12 @@ void WhpX86Vcpu::ExitCpuid(const WHV_RUN_VP_EXIT_CONTEXT &ctx)
         if (!fOwner.fLocalApic)
             values[4].Reg64 &= ~(uint64_t)CPUID_APIC;
     }
-    /* the machine's local APIC: xAPIC only */
+    /* the machine's local APIC, without TSC deadline mode */
     if (c.Rax == 1 && fOwner.fLocalApic && !fOwner.fApicEmulation) {
-        values[3].Reg64 &= ~(uint64_t)(CPUID_X2APIC | CPUID_TSC_DEADLINE);
+        values[3].Reg64 &= ~(uint64_t)CPUID_TSC_DEADLINE;
+        values[3].Reg64 |= CPUID_X2APIC;
         values[4].Reg64 |= CPUID_APIC;
-    }
-    /* the physical address width, with no separate guest width */
+    }    /* the physical address width, with no separate guest width */
     if (c.Rax == 0x80000008) {
         values[1].Reg64 = (values[1].Reg64 & ~(uint64_t)0x00ff00ff) |
             fOwner.fPhysAddressBits;
@@ -892,27 +895,50 @@ void WhpX86Vcpu::ExitGeneralProtection(const WHV_RUN_VP_EXIT_CONTEXT &ctx)
 }
 
 
-/* Only a write to IA32_APIC_BASE exits, for the machine's local APIC. */
+/* Only for the machine's local APIC: a write to IA32_APIC_BASE, and the
+   MSRs the hypervisor does not handle, which include the x2APIC registers.
+   Any other of those reads as 0 and ignores writes, as the partition is
+   set to treat them without the exit. */
 void WhpX86Vcpu::ExitMsr(const WHV_RUN_VP_EXIT_CONTEXT &ctx)
 {
     const WHV_X64_MSR_ACCESS_CONTEXT &m = ctx.MsrAccess;
     X86CpuTarget &target = fOwner.fTarget;
-    WHV_REGISTER_NAME names[2] = {WHvX64RegisterRip, WHvX64RegisterApicBase};
-    WHV_REGISTER_VALUE values[2] {};
+    WHV_REGISTER_NAME names[3] = {WHvX64RegisterRip};
+    WHV_REGISTER_VALUE values[3] {};
+    UINT32 count = 1;
+    uint64_t val = ((uint64_t)m.Rdx << 32) | (uint32_t)m.Rax;
+    bool ok = true;
 
-    if (!m.AccessInfo.IsWrite || m.MsrNumber != MSR_IA32_APIC_BASE) {
-        fprintf(stderr, "WHP: unexpected exit for MSR 0x%x at rip=0x%" PRIx64
-                "\n", m.MsrNumber, (uint64_t)ctx.VpContext.Rip);
-        exit(1);
-    }
     DeviceLocker locker(fOwner.fLock);
-    if (!target.SetApicBase(((uint64_t)m.Rdx << 32) | (uint32_t)m.Rax)) {
+    if (m.MsrNumber == MSR_IA32_APIC_BASE && m.AccessInfo.IsWrite) {
+        ok = target.SetApicBase(val);
+        names[count] = WHvX64RegisterApicBase;
+        values[count++].Reg64 = target.ApicBase();
+    } else if (m.MsrNumber >= X86_MSR_X2APIC_FIRST &&
+               m.MsrNumber <= X86_MSR_X2APIC_LAST) {
+        /* a TPR written here reaches CR8 before the next run */
+        if (m.AccessInfo.IsWrite) {
+            ok = target.ApicMsrWrite(m.MsrNumber, val);
+        } else {
+            val = 0;
+            ok = target.ApicMsrRead(m.MsrNumber, &val);
+            names[count] = WHvX64RegisterRax;
+            values[count++].Reg64 = (uint32_t)val;
+            names[count] = WHvX64RegisterRdx;
+            values[count++].Reg64 = val >> 32;
+        }
+    } else if (!m.AccessInfo.IsWrite) {
+        names[count] = WHvX64RegisterRax;
+        values[count++].Reg64 = 0;
+        names[count] = WHvX64RegisterRdx;
+        values[count++].Reg64 = 0;
+    }
+    if (!ok) {
         InjectGeneralProtection();
         return;
     }
     values[0].Reg64 = ctx.VpContext.Rip + ctx.VpContext.InstructionLength;
-    values[1].Reg64 = target.ApicBase();
-    SetVpRegisters(names, 2, values);
+    SetVpRegisters(names, count, values);
 }
 
 
@@ -1085,9 +1111,10 @@ std::unique_ptr<X86CpuBackend> host_x86_hypervisor_open(
     } else if (options.local_apic) {
         hr = WHvGetCapability(WHvCapabilityCodeX64MsrExitBitmap, &cap,
                               sizeof(cap), &size);
-        if (FAILED(hr) || !cap.X64MsrExitBitmap.ApicBaseMsrWrite) {
+        if (FAILED(hr) || !cap.X64MsrExitBitmap.ApicBaseMsrWrite ||
+            !cap.X64MsrExitBitmap.UnhandledMsrs) {
             fprintf(stderr, "WHP cannot exit at a write to "
-                    "IA32_APIC_BASE\n");
+                    "IA32_APIC_BASE or at an MSR it does not handle\n");
             return nullptr;
         }
     }
