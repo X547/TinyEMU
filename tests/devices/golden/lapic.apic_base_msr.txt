@@ -1,3 +1,2 @@
 value 0xfee00900
 move trap
-x2apic trap

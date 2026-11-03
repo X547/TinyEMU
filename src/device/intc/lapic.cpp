@@ -47,6 +47,7 @@ enum {
     REG_INITIAL_COUNT = 0x380,
     REG_CURRENT_COUNT = 0x390,
     REG_DIVIDE = 0x3e0,
+    REG_SELF_IPI = 0x3f0, /* x2APIC only */
 };
 
 /* fLvt indexes */
@@ -94,6 +95,9 @@ enum {
 };
 
 #define SVR_ENABLE 8
+
+/* the bits of the x2APIC ICR's low half a write must leave clear */
+#define X2APIC_ICR_RESERVED 0xfff32000u
 
 /* ESR bits, by the Intel SDM */
 #define ESR_SEND_ILLEGAL_VECTOR bit_at(5)
@@ -166,6 +170,20 @@ bool LocalApic::Enabled() const
 }
 
 
+bool LocalApic::X2Apic() const
+{
+    return get_bit(fBase, BASE_ENABLE) && get_bit(fBase, BASE_X2APIC);
+}
+
+
+/* In x2APIC mode the LDR follows from the ID: a cluster of 16 and a bit
+   in it. */
+uint32_t LocalApic::X2ApicLdr() const
+{
+    return set_bits(bit_at(fId & 0xf), 16, 16, fId >> 4);
+}
+
+
 /* A disabled APIC passes INTR straight through. */
 bool LocalApic::AcceptsExtInt() const
 {
@@ -182,6 +200,51 @@ static bool reserved_register(uint32_t offset)
     return offset <= 0x010 || (offset >= 0x040 && offset <= 0x070) ||
         offset == 0x0c0 || (offset >= 0x290 && offset <= 0x2e0) ||
         (offset >= 0x3a0 && offset <= 0x3d0) || offset == 0x3f0;
+}
+
+
+/* An xAPIC message's 8 bit destination as the bus has it: physical 0xff
+   is the broadcast. */
+static uint32_t xapic_destination(uint32_t dest, bool logical)
+{
+    return !logical && dest == 0xff ? LAPIC_BROADCAST : dest;
+}
+
+
+/* What an x2APIC MSR allows, by the offset of its register in the xAPIC
+   page; 0 for an MSR no register answers at. */
+enum {
+    X2APIC_READ = 1,
+    X2APIC_WRITE = 2,
+};
+
+static int x2apic_access(uint32_t offset)
+{
+    switch (offset) {
+    case REG_ID:
+    case REG_VERSION:
+    case REG_PPR:
+    case REG_LDR:
+    case REG_CURRENT_COUNT:
+        return X2APIC_READ;
+    case REG_EOI:
+    case REG_SELF_IPI:
+        return X2APIC_WRITE;
+    case REG_TPR:
+    case REG_SVR:
+    case REG_ESR:
+    case REG_LVT_CMCI:
+    case REG_ICR_LOW:
+    case REG_INITIAL_COUNT:
+    case REG_DIVIDE:
+        return X2APIC_READ | X2APIC_WRITE;
+    }
+    /* ISR, TMR and IRR */
+    if (offset >= REG_ISR && offset < REG_IRR + 0x80)
+        return X2APIC_READ;
+    if (offset >= REG_LVT_TIMER && offset <= REG_LVT_ERROR)
+        return X2APIC_READ | X2APIC_WRITE;
+    return 0;
 }
 
 
@@ -257,9 +320,20 @@ bool LocalApic::MatchesLogical(uint32_t dest) const
 }
 
 
+/* All ones is everyone in either mode. An xAPIC takes the low 8 bits of a
+   logical destination; an x2APIC in logical mode matches the cluster and
+   any of its bits. */
 bool LocalApic::IsDestination(uint32_t dest, bool logical) const
 {
-    return logical ? MatchesLogical(dest) : dest == fId || dest == 0xff;
+    if (dest == LAPIC_BROADCAST)
+        return true;
+    if (!logical)
+        return dest == fId;
+    if (!X2Apic())
+        return MatchesLogical(get_bits(dest, 0, 8));
+    uint32_t ldr = X2ApicLdr();
+    return get_bits(dest, 16, 16) == get_bits(ldr, 16, 16) &&
+        (get_bits(dest, 0, 16) & ldr) != 0;
 }
 
 
@@ -319,21 +393,32 @@ void LocalApic::SendIpi()
         Error(ESR_SEND_ILLEGAL_VECTOR);
         return;
     }
-    fBus.Send(fId, get_bits(fIcrLow, ICR_SHORTHAND, 2),
-              get_bits(fIcrHigh, 24, 8), get_bit(fIcrLow, ICR_LOGICAL),
+    bool logical = get_bit(fIcrLow, ICR_LOGICAL);
+    uint32_t dest = X2Apic() ? fIcrHigh :
+        xapic_destination(get_bits(fIcrHigh, 24, 8), logical);
+    fBus.Send(fId, get_bits(fIcrLow, ICR_SHORTHAND, 2), dest, logical,
               get_bits(fIcrLow, DELIVERY_MODE, 3), get_bits(fIcrLow, 0, 8),
               get_bit(fIcrLow, TRIGGER_LEVEL), get_bit(fIcrLow, LEVEL_ASSERT));
 }
 
 
+/* The page stays where the machine put it. x2APIC mode is entered from
+   xAPIC mode and left by disabling the APIC. */
 bool LocalApic::SetBase(uint64_t val)
 {
     uint64_t addr = val & ~(uint64_t)0xfff;
-    /* no x2APIC, and the page stays where the machine put it */
-    if (get_bit(val, BASE_X2APIC) || addr != LAPIC_BASE ||
-        (val & 0xfff & ~(bit_at(BASE_BSP) | bit_at(BASE_ENABLE))) != 0)
+    bool enable = get_bit(val, BASE_ENABLE);
+    bool x2apic = get_bit(val, BASE_X2APIC);
+    if (addr != LAPIC_BASE ||
+        (val & 0xfff & ~(bit_at(BASE_BSP) | bit_at(BASE_ENABLE) |
+                         bit_at(BASE_X2APIC))) != 0)
         return false;
-    fBase = set_bit(fBase, BASE_ENABLE, get_bit(val, BASE_ENABLE));
+    /* x2APIC mode disabled, entered from disabled, or left for xAPIC */
+    if ((x2apic && !enable) || (x2apic && !get_bit(fBase, BASE_ENABLE)) ||
+        (X2Apic() && enable && !x2apic))
+        return false;
+    fBase = set_bit(fBase, BASE_ENABLE, enable);
+    fBase = set_bit(fBase, BASE_X2APIC, x2apic);
     Update();
     return true;
 }
@@ -410,12 +495,12 @@ int64_t LocalApic::RunTimer()
 
 //#pragma mark - registers
 
-uint64_t LocalApic::DeviceRead(uint32_t offset, int size_log2)
+/* A register of either mode, by its offset in the xAPIC page. */
+uint32_t LocalApic::ReadRegister(uint32_t offset)
 {
-    offset &= 0xff0;
     switch (offset) {
     case REG_ID:
-        return fId << 24;
+        return X2Apic() ? fId : fId << 24;
     case REG_VERSION:
         return LAPIC_VERSION;
     case REG_TPR:
@@ -423,7 +508,7 @@ uint64_t LocalApic::DeviceRead(uint32_t offset, int size_log2)
     case REG_PPR:
         return Ppr();
     case REG_LDR:
-        return fLdr;
+        return X2Apic() ? X2ApicLdr() : fLdr;
     case REG_DFR:
         return fDfr;
     case REG_SVR:
@@ -432,7 +517,8 @@ uint64_t LocalApic::DeviceRead(uint32_t offset, int size_log2)
         /* IPIs are sent at once */
         return set_bit(fIcrLow, DELIVERY_STATUS, false);
     case REG_ICR_HIGH:
-        return fIcrHigh;
+        /* the x2APIC destination is 32 bits */
+        return fIcrHigh & 0xff000000;
     case REG_LVT_CMCI:
         return fLvt[LVT_CMCI];
     case REG_INITIAL_COUNT:
@@ -452,16 +538,13 @@ uint64_t LocalApic::DeviceRead(uint32_t offset, int size_log2)
         return fLvt[LVT_TIMER + (offset - REG_LVT_TIMER) / 16];
     if (offset == REG_ESR)
         return fEsr;
-    if (reserved_register(offset))
-        Error(ESR_ILLEGAL_REGISTER);
     /* APR, EOI and the reserved registers */
     return 0;
 }
 
 
-void LocalApic::DeviceWrite(uint32_t offset, uint64_t val, int size_log2)
+void LocalApic::WriteRegister(uint32_t offset, uint32_t val)
 {
-    offset &= 0xff0;
     switch (offset) {
     case REG_TPR:
         fTpr = get_bits(val, 0, 8);
@@ -537,9 +620,87 @@ void LocalApic::DeviceWrite(uint32_t offset, uint64_t val, int size_log2)
             fHost.ApicTimerChanged(TimerDue());
         return;
     }
-    if (reserved_register(offset))
-        Error(ESR_ILLEGAL_REGISTER);
     /* ID and the read only registers ignore writes */
+}
+
+
+/* In x2APIC mode the page is not there, as with the APIC disabled. */
+uint64_t LocalApic::DeviceRead(uint32_t offset, int size_log2)
+{
+    if (X2Apic())
+        return 0;
+    offset &= 0xff0;
+    if (reserved_register(offset)) {
+        Error(ESR_ILLEGAL_REGISTER);
+        return 0;
+    }
+    return ReadRegister(offset);
+}
+
+
+void LocalApic::DeviceWrite(uint32_t offset, uint64_t val, int size_log2)
+{
+    if (X2Apic())
+        return;
+    offset &= 0xff0;
+    if (reserved_register(offset)) {
+        Error(ESR_ILLEGAL_REGISTER);
+        return;
+    }
+    WriteRegister(offset, val);
+}
+
+
+/* Outside x2APIC mode, and for an MSR with no register or one the access
+   does not suit, the processor raises #GP rather than setting the ESR. */
+bool LocalApic::MsrRead(uint32_t msr, uint64_t *val)
+{
+    uint32_t offset = (msr - LAPIC_MSR_BASE) << 4;
+    if (!X2Apic() || !(x2apic_access(offset) & X2APIC_READ))
+        return false;
+    *val = ReadRegister(offset);
+    /* the ICR is one 64 bit register */
+    if (offset == REG_ICR_LOW)
+        *val |= (uint64_t)fIcrHigh << 32;
+    return true;
+}
+
+
+/* A write that sets reserved bits faults where the register's are known:
+   the upper half of all but the ICR, and those of the ICR, the EOI, the ESR
+   and the self IPI. Elsewhere they are dropped as in xAPIC mode. */
+bool LocalApic::MsrWrite(uint32_t msr, uint64_t val)
+{
+    uint32_t offset = (msr - LAPIC_MSR_BASE) << 4;
+    if (!X2Apic() || !(x2apic_access(offset) & X2APIC_WRITE))
+        return false;
+    switch (offset) {
+    case REG_ICR_LOW:
+        if (val & X2APIC_ICR_RESERVED)
+            return false;
+        fIcrLow = val;
+        fIcrHigh = val >> 32;
+        SendIpi();
+        return true;
+    case REG_SELF_IPI:
+        if (val > 0xff)
+            return false;
+        /* a fixed, edge triggered IPI to itself */
+        if (val < 16)
+            Error(ESR_SEND_ILLEGAL_VECTOR);
+        else
+            Accept(val, false);
+        return true;
+    case REG_EOI:
+    case REG_ESR:
+        if (val != 0)
+            return false;
+        break;
+    }
+    if (val > UINT32_MAX)
+        return false;
+    WriteRegister(offset, val);
+    return true;
 }
 
 
@@ -554,8 +715,9 @@ LocalApicBus::LocalApicBus(LocalApicHost &host, int count)
 
 void LocalApicBus::Deliver(uint64_t addr, uint32_t data)
 {
-    Send(0, SHORTHAND_NONE, get_bits(addr, 12, 8), get_bit(addr, 2),
-         get_bits(data, DELIVERY_MODE, 3), get_bits(data, 0, 8),
+    bool logical = get_bit(addr, 2);
+    Send(0, SHORTHAND_NONE, xapic_destination(get_bits(addr, 12, 8), logical),
+         logical, get_bits(data, DELIVERY_MODE, 3), get_bits(data, 0, 8),
          get_bit(data, TRIGGER_LEVEL), get_bit(data, LEVEL_ASSERT));
 }
 

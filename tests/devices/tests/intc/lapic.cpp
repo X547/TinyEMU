@@ -516,13 +516,11 @@ TEST(lapic, apic_base_msr)
     Lapic *l = need_lapic();
     uint64_t base = rdmsr(MSR_APIC_BASE);
     SNAP("value", "%#llx", T_FMT_VAL(base));
-    /* moving the page, or x2APIC mode, is refused */
+    /* moving the page is refused; x2APIC mode is the x2apic tests' */
     sWrmsrValue = (base & ~0xfffull) + 0x100000;
     TrapInfo info;
     bool moved = t_trap(write_apic_base, nullptr, &info);
     SNAP("move", "%s", moved ? "trap" : "ok");
-    sWrmsrValue = base | (1u << 10);
-    SNAP("x2apic", "%s", t_trap(write_apic_base) ? "trap" : "ok");
     /* hardware disabled: the 8259s' INTR passes straight through */
     sWrmsrValue = base & ~(1ull << 11);
     EXPECT_FALSE(t_trap(write_apic_base));

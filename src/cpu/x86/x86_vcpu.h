@@ -28,6 +28,10 @@
 
 class PhysMemoryMap;
 
+/* the MSRs of the x2APIC registers */
+#define X86_MSR_X2APIC_FIRST 0x800
+#define X86_MSR_X2APIC_LAST 0x8ff
+
 
 /* The general registers in encoding order: eax, ecx, edx, ebx, esp, ebp, esi,
    edi. */
@@ -98,6 +102,10 @@ public:
     virtual bool SetApicBase(uint64_t val) = 0;
     virtual int TaskPriority() = 0;
     virtual void SetTaskPriority(int cr8) = 0;
+    /* RDMSR and WRMSR of an x2APIC register, from X86_MSR_X2APIC_FIRST to
+       X86_MSR_X2APIC_LAST; false for an access that raises #GP. */
+    virtual bool ApicMsrRead(uint32_t msr, uint64_t *val) = 0;
+    virtual bool ApicMsrWrite(uint32_t msr, uint64_t val) = 0;
 
     /* A local APIC the back end emulates ended a level triggered interrupt
        with this vector, for the IOAPIC the machine may have. */

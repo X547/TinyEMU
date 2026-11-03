@@ -57,6 +57,7 @@ enum {
 /* CPUID 1 ECX */
 enum {
     CPUID_CX16 = 13,
+    CPUID_X2APIC = 21,
 };
 
 /* CPUID 0x80000001 ECX and EDX */
@@ -1079,6 +1080,7 @@ void cpu_cpuid(X86CPUState *s)
     if (leaf == 1 && s->local_apic != nullptr) {
         DeviceLocker locker(*s->device_lock);
         regs[3] |= bit_at(CPUID_APIC);
+        regs[2] |= bit_at(CPUID_X2APIC);
         regs[1] = set_bits(regs[1], 24, 8, s->local_apic->ApicId());
     }
     s->regs[REG_EAX] = regs[0];
@@ -1129,14 +1131,34 @@ uint64_t cpu_get_tsc(X86CPUState *s)
     return tsc + s->tsc_offset;
 }
 
+/* The x2APIC registers, which the local APIC answers for. */
+static bool is_x2apic_msr(X86CPUState *s, uint32_t msr)
+{
+    return s->local_apic != nullptr && msr >= X86_MSR_X2APIC_FIRST &&
+        msr <= X86_MSR_X2APIC_LAST;
+}
+
 void cpu_rdmsr(X86CPUState *s)
 {
+    uint32_t msr = s->regs[REG_ECX];
     uint64_t val;
 
     if (s->cpl != 0) {
         raise_exception(s, EXCP_GP, 0);
     }
-    switch (s->regs[REG_ECX]) {
+    if (is_x2apic_msr(s, msr)) {
+        bool ok;
+        {
+            DeviceLocker locker(*s->device_lock);
+            ok = s->local_apic->MsrRead(msr, &val);
+        }
+        if (!ok) {
+            raise_exception(s, EXCP_GP, 0);
+        }
+        set_edx_eax(s, val);
+        return;
+    }
+    switch (msr) {
     case MSR_TSC:
         val = cpu_get_tsc(s);
         break;
@@ -1217,12 +1239,24 @@ static uint64_t canonical_msr(X86CPUState *s, uint64_t val)
 
 void cpu_wrmsr(X86CPUState *s)
 {
+    uint32_t msr = s->regs[REG_ECX];
     uint64_t val = get_edx_eax(s);
 
     if (s->cpl != 0) {
         raise_exception(s, EXCP_GP, 0);
     }
-    switch (s->regs[REG_ECX]) {
+    if (is_x2apic_msr(s, msr)) {
+        bool ok;
+        {
+            DeviceLocker locker(*s->device_lock);
+            ok = s->local_apic->MsrWrite(msr, val);
+        }
+        if (!ok) {
+            raise_exception(s, EXCP_GP, 0);
+        }
+        return;
+    }
+    switch (msr) {
     case MSR_TSC:
         s->tsc_offset += val - cpu_get_tsc(s);
         break;

@@ -35,6 +35,13 @@
 /* Acknowledge() for an interrupt the 8259s give the vector of. */
 #define LAPIC_EXTINT (-1)
 
+/* the x2APIC registers' MSRs, from the ID's at 0x802 */
+#define LAPIC_MSR_BASE 0x800
+#define LAPIC_MSR_COUNT 0x100
+
+/* the destination of a message to every APIC */
+#define LAPIC_BROADCAST UINT32_MAX
+
 
 /* What the local APICs need of the machine. Processors are named by their
    APIC IDs, which count from 0. */
@@ -57,9 +64,10 @@ public:
 class LocalApicBus;
 
 
-/* The xAPIC of one processor. The timer counts at 1 GHz, the bus clock a
-   hypervisor's APIC has, from the host clock. NMI, SMI and ExtINT
-   messages are not modelled. The device lock covers every call. */
+/* The local APIC of one processor, in xAPIC or x2APIC mode. The timer
+   counts at 1 GHz, the bus clock a hypervisor's APIC has, from the host
+   clock. NMI, SMI and ExtINT messages are not modelled. The device lock
+   covers every call. */
 class LocalApic final: public DeviceIO {
 private:
     LocalApicBus &fBus;
@@ -90,6 +98,8 @@ private:
     uint64_t fTimerFired = 0;   /* periods counted so far */
 
     bool Enabled() const;
+    bool X2Apic() const;
+    uint32_t X2ApicLdr() const;
     bool AcceptsExtInt() const;
     bool Deliverable() const;
     void Update();
@@ -102,17 +112,24 @@ private:
     uint64_t TimerTicks(uint64_t now) const;
     uint32_t CurrentCount(uint64_t now) const;
     uint64_t TimerDue() const;
+    uint32_t ReadRegister(uint32_t offset);
+    void WriteRegister(uint32_t offset, uint32_t val);
 
 public:
     LocalApic(LocalApicBus &bus, LocalApicHost &host, uint32_t id);
 
     void Reset();
 
-    /* DeviceIO: the register page */
+    /* DeviceIO: the register page, in xAPIC mode */
     uint64_t DeviceRead(uint32_t offset, int size_log2) override;
     void DeviceWrite(uint32_t offset, uint64_t val, int size_log2) override;
+    /* The registers in x2APIC mode, by MSR from LAPIC_MSR_BASE; false for
+       an access that raises #GP. */
+    bool MsrRead(uint32_t msr, uint64_t *val);
+    bool MsrWrite(uint32_t msr, uint64_t val);
 
-    /* Whether a message to 'dest' reaches this APIC. */
+    /* Whether a message to 'dest', an APIC ID, a logical destination or
+       LAPIC_BROADCAST, reaches this APIC. */
     bool IsDestination(uint32_t dest, bool logical) const;
     /* A message with delivery mode 'mode'; 'level' for level triggered,
        'assert' for its level. */
@@ -155,7 +172,8 @@ public:
     /* An MSI or an IOAPIC message. */
     void Deliver(uint64_t addr, uint32_t data);
     /* A message from APIC 'source' by ICR shorthand 'shorthand': to
-       itself, to all, to all others, or to 'dest'. */
+       itself, to all, to all others, or to 'dest' as IsDestination() takes
+       it. */
     void Send(uint32_t source, int shorthand, uint32_t dest, bool logical,
               int mode, int vector, bool level, bool assert);
     /* LocalApic::RunTimer() for each; the soonest of their results. */

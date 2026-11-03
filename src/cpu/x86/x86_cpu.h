@@ -108,6 +108,9 @@ public:
     /* CR8 */
     virtual int TaskPriority() = 0;
     virtual void SetTaskPriority(int val) = 0;
+    /* the x2APIC registers' MSRs; false for an access to fault */
+    virtual bool MsrRead(uint32_t msr, uint64_t *val) = 0;
+    virtual bool MsrWrite(uint32_t msr, uint64_t val) = 0;
 };
 
 /* Implemented by the machine, which decides what a shut down processor

@@ -90,6 +90,10 @@ public:
         {return fTarget.SetApicBase(val);}
     int TaskPriority() override {return fTarget.TaskPriority();}
     void SetTaskPriority(int val) override {fTarget.SetTaskPriority(val);}
+    bool MsrRead(uint32_t msr, uint64_t *val) override
+        {return fTarget.ApicMsrRead(msr, val);}
+    bool MsrWrite(uint32_t msr, uint64_t val) override
+        {return fTarget.ApicMsrWrite(msr, val);}
     /* X86ShutdownTarget */
     void ProcessorShutdown() override;
 };

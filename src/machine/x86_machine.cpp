@@ -194,6 +194,10 @@ public:
     int TaskPriority() override {return CurrentApic().TaskPriority();}
     void SetTaskPriority(int val) override
         {CurrentApic().SetTaskPriority(val);}
+    bool ApicMsrRead(uint32_t msr, uint64_t *val) override
+        {return CurrentApic().MsrRead(msr, val);}
+    bool ApicMsrWrite(uint32_t msr, uint64_t val) override
+        {return CurrentApic().MsrWrite(msr, val);}
     /* the local APICs' page, each processor seeing its own */
     uint32_t LapicRead(uint32_t offset, int size_log2)
         {return CurrentApic().DeviceRead(offset, size_log2);}
