@@ -208,8 +208,9 @@ private:
     DeviceLock &fLock;
     /* the processors have local APICs */
     bool fLocalApic;
-    /* which the hypervisor emulates */
+    /* which the hypervisor emulates, with x2APIC mode or without */
     bool fApicEmulation;
+    bool fX2Apic = false;
     int fCpuCount;
     int fPhysAddressBits;
     std::vector<X86CpuidLeaf> fCpuid;
@@ -286,12 +287,20 @@ bool WhpX86Hypervisor::Init()
     if (FAILED(hr))
         whp_fail("setting the processor count", hr);
 
+    /* x2APIC mode where this Windows emulates it */
     if (fApicEmulation) {
         WHV_X64_LOCAL_APIC_EMULATION_MODE mode =
-            WHvX64LocalApicEmulationModeXApic;
+            WHvX64LocalApicEmulationModeX2Apic;
         hr = WHvSetPartitionProperty(
             fPartition, WHvPartitionPropertyCodeLocalApicEmulationMode,
             &mode, sizeof(mode));
+        fX2Apic = SUCCEEDED(hr);
+        if (!fX2Apic) {
+            mode = WHvX64LocalApicEmulationModeXApic;
+            hr = WHvSetPartitionProperty(
+                fPartition, WHvPartitionPropertyCodeLocalApicEmulationMode,
+                &mode, sizeof(mode));
+        }
         if (FAILED(hr))
             whp_fail("enabling the local APIC", hr);
     }
@@ -458,6 +467,10 @@ void WhpX86Hypervisor::SendMsi(uint64_t addr, uint32_t data)
         ic.TriggerMode = WHvX64InterruptTriggerModeEdge;
     }
     ic.Destination = get_bits(addr, 12, 8);
+    /* an x2APIC takes physical 0xff as an ID; the broadcast is all ones */
+    if (fX2Apic && ic.Destination == 0xff &&
+        ic.DestinationMode == WHvX64InterruptDestinationModePhysical)
+        ic.Destination = UINT32_MAX;
     ic.Vector = get_bits(data, 0, 8);
     hr = WHvRequestInterrupt(fPartition, &ic, sizeof(ic));
     if (FAILED(hr))
@@ -809,7 +822,12 @@ void WhpX86Vcpu::ExitCpuid(const WHV_RUN_VP_EXIT_CONTEXT &ctx)
         values[3].Reg64 &= ~(uint64_t)CPUID_TSC_DEADLINE;
         values[3].Reg64 |= CPUID_X2APIC;
         values[4].Reg64 |= CPUID_APIC;
-    }    /* the physical address width, with no separate guest width */
+    }
+    /* the hypervisor's, which a processor shown in place of the host's
+       may not report */
+    if (c.Rax == 1 && fOwner.fX2Apic)
+        values[3].Reg64 |= CPUID_X2APIC;
+    /* the physical address width, with no separate guest width */
     if (c.Rax == 0x80000008) {
         values[1].Reg64 = (values[1].Reg64 & ~(uint64_t)0x00ff00ff) |
             fOwner.fPhysAddressBits;

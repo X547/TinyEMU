@@ -177,7 +177,8 @@ what the processor has besides the two 8259s:
                of the 8259s also reaches; the local APIC takes the MSI-X
                messages of the devices behind the pci-host-i440fx. A
                kernel booted without firmware finds both in its ACPI
-               tables
+               tables. The local APIC has x2APIC mode too, WHP's
+               where the host's Windows emulates it
 
 "sbi" chooses who implements the SBI on a RISC-V machine:
 
