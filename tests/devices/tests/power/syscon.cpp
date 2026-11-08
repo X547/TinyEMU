@@ -21,6 +21,7 @@
  */
 #include "mmio.h"
 #include "test.h"
+#include "testctl.h"
 
 /* The Linux bindings power/reset/syscon-poweroff.yaml (a "regmap"
    phandle, "offset" and "value", or "mask") and the SiFive test device
@@ -117,4 +118,40 @@ TEST(syscon, fail_status_too_large)
     t_expect_exit(255);
     mmio_write32(sReg, 0x1234u << 16 | TEST_FAIL);
     arch_halt();
+}
+
+/* The reset value, which the tree offers as a "syscon-reboot" node on the
+   same register. */
+namespace {
+
+uint64_t sRebootReg;
+uint32_t sRebootValue;
+
+void syscon_reboot()
+{
+    mmio_write32(sRebootReg, sRebootValue);
+}
+
+}
+
+FRESH_TEST(syscon, reboot)
+{
+    if (!t_after_reset()) {
+        require_syscon();
+        const HwDevice *d = t_require_device("syscon-reboot");
+        ASSERT_TRUE(d->fdt != nullptr);
+        uint32_t regmap = 0, offset = 0;
+        ASSERT_TRUE(fdt_prop_u32(d->fdt, "regmap", &regmap));
+        ASSERT_TRUE(fdt_prop_u32(d->fdt, "value", &sRebootValue));
+        fdt_prop_u32(d->fdt, "offset", &offset);
+        EXPECT_EQ(sRebootValue, (uint32_t)TEST_RESET);
+        const FdtNode *syscon = fdt_find_phandle(regmap);
+        ASSERT_TRUE(syscon != nullptr);
+        uint64_t base, size;
+        ASSERT_TRUE(fdt_reg(syscon, 0, &base, &size));
+        sRebootReg = base + offset;
+        EXPECT_EQ(sRebootReg, sReg);
+        t_reboot(syscon_reboot);
+    }
+    EXPECT_EQ(tc_resets(), 1u);
 }

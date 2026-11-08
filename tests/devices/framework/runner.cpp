@@ -48,7 +48,11 @@ extern "C" TestCase __devtests_start[], __devtests_end[];
    BEGIN without its END as a test that killed the machine, unless the test
    said with EXIT that it would and temu exited with that status, and
    RERUN as a test that needs a machine of its own. INPUT asks the runner
-   to write the bytes to temu's standard input. */
+   to write the bytes to temu's standard input.
+
+   A test that resets the machine goes on in the same run: HELLO comes
+   again, then the rest of that test, with no BEGIN of its own, and the
+   tests after it. */
 
 namespace {
 
@@ -82,6 +86,13 @@ bool sInTrap;
 int sFailures;
 uint64_t sTestStart;
 char sSkipReason[128];
+/* The current test's place in the run, and whether the machine was reset
+   in it. Test-control's KEEP holds RESUME_MAGIC with the place plus one
+   across the reset. */
+int sCurrentIndex;
+bool sAfterReset;
+#define RESUME_MAGIC 0x52000000u
+#define RESUME_MASK  0xff000000u
 
 /* The value of 'key=' in the command line: start and length. */
 bool option(const char *cmdline, const char *key, const char **val,
@@ -243,6 +254,32 @@ void t_host_input(const void *buf, size_t len)
 void t_expect_exit(int status)
 {
     report("EXIT %d", status);
+}
+
+
+void t_reboot(void (*reset)())
+{
+    if (!tc_present())
+        t_skip("no test-control device to go on with");
+    /* the test starts over with no failures counted */
+    if (sFailures)
+        t_abort();
+    tc_set_keep(RESUME_MAGIC | (sCurrentIndex + 1));
+    if (reset != nullptr)
+        reset();
+    else
+        tc_request_reset();
+    /* the processors stop soon after the request */
+    t_delay_us(1000000);
+    tc_set_keep(0);
+    t_fail(__FILE__, __LINE__, "the machine was not reset");
+    t_abort();
+}
+
+
+bool t_after_reset()
+{
+    return sAfterReset;
 }
 
 
@@ -411,21 +448,35 @@ void run_tests(const char *cmdline)
         order[j] = tc;
     }
 
+    /* After a test reset the machine, the run goes on in that test; the
+       counts start over, the runner having the earlier results. */
+    int resume = -1;
+    uint32_t keep = tc_keep();
+    if ((keep & RESUME_MASK) == RESUME_MAGIC) {
+        resume = (int)(keep & ~RESUME_MASK) - 1;
+        tc_set_keep(0);
+    }
+
     int pass = 0, fail = 0, skip = 0, crash = 0;
     bool touched = false;
     for (int i = 0; i < count; i++) {
         const TestCase *tc = order[i];
-        if (!selected(tc, opt))
+        if (i < resume || !selected(tc, opt))
             continue;
         if (opt.list) {
             report("TEST %s", tc->name);
             continue;
         }
 
-        report("BEGIN %s", tc->name);
-        if ((tc->flags & TEST_FRESH) && touched) {
-            report("END %s RERUN 0", tc->name);
-            continue;
+        sAfterReset = i == resume;
+        if (sAfterReset) {
+            t_log("after reset %u", (unsigned)tc_resets());
+        } else {
+            report("BEGIN %s", tc->name);
+            if ((tc->flags & TEST_FRESH) && touched) {
+                report("END %s RERUN 0", tc->name);
+                continue;
+            }
         }
         touched = true;
         HeapMark mark = heap_mark();
@@ -434,6 +485,7 @@ void run_tests(const char *cmdline)
         sInTrap = false;
         sTestStart = now_us();
         sCurrent = tc;
+        sCurrentIndex = i;
         Outcome outcome = (Outcome)arch_setjmp(&sTestJmp);
         if (outcome == OUTCOME_RUN) {
             tc->fn();

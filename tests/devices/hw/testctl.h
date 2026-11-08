@@ -41,3 +41,11 @@ void tc_block_write(uint32_t reg, uint32_t value);
 /* Between tests: every disk finishes requests at once again, none is to
    fail, and what was held is let go. */
 void tc_block_reset_all();
+
+/* Resets of the machine: whether there is a device to count them, how many
+   there were, the word they leave alone, and asking for one. */
+bool tc_present();
+uint32_t tc_resets();
+uint32_t tc_keep();
+void tc_set_keep(uint32_t value);
+void tc_request_reset();

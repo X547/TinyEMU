@@ -46,10 +46,16 @@
 #define TEST_CONTROL_BLOCK_WRITES  0x38 /* RO: write requests so far */
 #define TEST_CONTROL_BLOCK_CANCELS 0x3c /* RO: requests the device gave up */
 
+/* Resets of the machine. KEEP is the one register a reset leaves, for the
+   guest to tell itself what it was doing. */
+#define TEST_CONTROL_RESETS   0x40 /* RO: machine resets so far */
+#define TEST_CONTROL_KEEP     0x44 /* RW: survives a reset */
+#define TEST_CONTROL_RESET    0x48 /* WO: resets the machine */
+
 #define TEST_CONTROL_MAX_IRQS 8
 
 #define TEST_CONTROL_MAGIC    0x54455354 /* "TEST" */
-#define TEST_CONTROL_REVISION 2
+#define TEST_CONTROL_REVISION 3
 
 /* How a test disk finishes requests: in the call, soon after from the event
    loop, or once RELEASE says so. A failing request returns an error in the

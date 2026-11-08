@@ -62,6 +62,7 @@ unsigned riscv_soft_irq();
 #define SBI_EXT_DBCN 0x4442434e
 
 #define SBI_SRST_SHUTDOWN       0
+#define SBI_SRST_COLD_REBOOT    1
 #define SBI_SRST_REASON_NONE    0
 #define SBI_SRST_REASON_FAILURE 1
 

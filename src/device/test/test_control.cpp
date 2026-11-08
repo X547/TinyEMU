@@ -49,6 +49,9 @@ private:
     uint32_t fIrqLevel = 0;
     /* the test disk the block registers act on */
     uint32_t fBlockSelect = 0;
+    /* what a reset leaves: how many there were, and KEEP */
+    uint32_t fResets = 0;
+    uint32_t fKeep = 0;
     /* the output file, or stderr when the configuration names none */
     FILE *fOutput = stderr;
     bool fOwnsOutput = false;
@@ -140,6 +143,7 @@ public:
         }
         fIrqLevel = 0;
         fBlockSelect = 0;
+        fResets++;
     }
 
     void BuildFDT(FDTContext &ctx) override
@@ -192,6 +196,10 @@ uint32_t TestControlDevice::Read(uint32_t offset, int size_log2)
         return test_block_count();
     case TEST_CONTROL_BLOCK_SELECT:
         return fBlockSelect;
+    case TEST_CONTROL_RESETS:
+        return fResets;
+    case TEST_CONTROL_KEEP:
+        return fKeep;
     default:
         break;
     }
@@ -246,6 +254,12 @@ void TestControlDevice::Write(uint32_t offset, uint32_t val, int size_log2)
         break;
     case TEST_CONTROL_BLOCK_SELECT:
         fBlockSelect = val;
+        break;
+    case TEST_CONTROL_KEEP:
+        fKeep = val;
+        break;
+    case TEST_CONTROL_RESET:
+        fMachine->RequestReset();
         break;
     default:
         if (TestBlockControl *disk = test_block_get(fBlockSelect))

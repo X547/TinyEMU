@@ -104,6 +104,42 @@ void tc_block_write(uint32_t reg, uint32_t value)
 }
 
 
+bool tc_present()
+{
+    return base() != 0;
+}
+
+
+uint32_t tc_resets()
+{
+    uint64_t b = base();
+    return b ? mmio_read32(b + TEST_CONTROL_RESETS) : 0;
+}
+
+
+uint32_t tc_keep()
+{
+    uint64_t b = base();
+    return b ? mmio_read32(b + TEST_CONTROL_KEEP) : 0;
+}
+
+
+void tc_set_keep(uint32_t value)
+{
+    uint64_t b = base();
+    if (b)
+        mmio_write32(b + TEST_CONTROL_KEEP, value);
+}
+
+
+void tc_request_reset()
+{
+    uint64_t b = base();
+    if (b)
+        mmio_write32(b + TEST_CONTROL_RESET, 1);
+}
+
+
 void tc_block_reset_all()
 {
     uint64_t b = base();

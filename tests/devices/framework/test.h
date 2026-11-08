@@ -85,6 +85,14 @@ void t_host_input(const void *buf, size_t len);
    with 'status'. */
 void t_expect_exit(int status);
 
+/* Reset the machine and run the test again from the start, where
+   t_after_reset() is then true; the run goes on after it as before. 'reset'
+   is what resets the machine, or by default the test-control device. Fails
+   the test if the machine is not reset; skipped without a test-control
+   device, which carries the test across. */
+[[noreturn]] void t_reboot(void (*reset)() = nullptr);
+bool t_after_reset();
+
 /* The first device that is 'compat', or the test is skipped. */
 const HwDevice *t_require_device(const char *compat);
 

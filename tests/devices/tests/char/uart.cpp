@@ -640,3 +640,29 @@ TEST(uart, host_input)
     EXPECT_EQ(n, 3);
     EXPECT_EQ(memcmp(got, "xyz", 3), 0);
 }
+
+/* A reset of the machine leaves the registers as the data sheet's master
+   reset does: no interrupts, FIFOs off. The divisor and the scratch
+   register, which it leaves undefined, are cleared as at power on. */
+FRESH_TEST(uart, machine_reset)
+{
+    require_uart();
+    if (!t_after_reset()) {
+        wr(LCR, LCR_8N1);
+        set_divisor(12);
+        wr(IER, IER_RDA | IER_THRE | IER_RLS | IER_MS);
+        wr(MCR, MCR_LOOP | MCR_OUT2);
+        wr(FCR, FCR_ENABLE);
+        wr(SCR, 0x5a);
+        t_reboot();
+    }
+    EXPECT_EQ(rd(IER), 0u);
+    EXPECT_EQ(rd(LCR), 0u);
+    EXPECT_EQ(rd(MCR), 0u);
+    EXPECT_EQ(rd(SCR), 0u);
+    EXPECT_EQ(rd(IIR), IIR_NONE);
+    wr(LCR, LCR_DLAB);
+    EXPECT_EQ(rd(DLL), 0u);
+    EXPECT_EQ(rd(DLM), 0u);
+    wr(LCR, 0);
+}
