@@ -260,6 +260,19 @@ bool Bus::RealizeAll()
 }
 
 
+void Bus::ResetAll()
+{
+    for (int i = 0; i < fDeviceCount; i++) {
+        Device *dev = fDevices[i].get();
+        dev->Reset();
+        Bus *child = dev->ChildBus();
+        if (child != nullptr) {
+            child->ResetAll();
+        }
+    }
+}
+
+
 void Bus::BuildFDTAll(FDTContext &ctx)
 {
     for (int i = 0; i < fDeviceCount; i++) {

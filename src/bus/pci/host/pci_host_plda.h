@@ -82,6 +82,7 @@ private:
     IRQSignal fIntx[4];
     bool fLevel = false;
 
+    void ResetRegisters();
     uint32_t LocalStatus() const;
     void IrqUpdate();
 
@@ -100,6 +101,7 @@ public:
 
     bool Prepare() override;
     bool Realize() override;
+    void Reset() override;
     void BuildFDT(FDTContext &ctx) override;
     Bus *ChildBus() override {return fChildBus.get();}
 

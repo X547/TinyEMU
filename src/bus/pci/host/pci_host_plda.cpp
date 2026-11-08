@@ -90,12 +90,31 @@ PCIHostPLDADevice::PCIHostPLDADevice(const char *name, uint64_t mmio_size,
     if (fBusCount > 256) {
         fBusCount = 256;
     }
+    ResetRegisters();
+}
 
+
+void PCIHostPLDADevice::ResetRegisters()
+{
+    memset(fRegs, 0, sizeof(fRegs));
+    memset(fSyscon, 0, sizeof(fSyscon));
+    fResets = 0;
+    fMsiStatus = 0;
     /* The root port is a PCI to PCI bridge from reset, and this is where it
        says so; the driver rewrites the class code and keeps the revision. */
     fRegs[PLDA_PCIE_PCI_IDS_DW1 / 4] = (uint32_t)PCI_CLASS_BRIDGE_PCI << 16;
     /* Latency tolerance messages are accepted by default. */
     fRegs[PLDA_PMSG_SUPPORT_RX / 4] = PLDA_PMSG_LTR_SUPPORT;
+}
+
+
+/* The INTx bits follow the functions, which lower their pins as they are
+   reset after this. */
+void PCIHostPLDADevice::Reset()
+{
+    ResetRegisters();
+    IrqUpdate();
+    pci_bus_reset(fRootBus.get());
 }
 
 

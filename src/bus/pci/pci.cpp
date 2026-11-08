@@ -51,6 +51,9 @@ struct PCIDevice: public IRQTarget {
     /* The pins the function asserts, before its INTx Disable bit gates them */
     uint8_t irq_request;
     uint8_t config[PCI_EXT_CONFIG_SIZE];
+    /* 'config' before the guest first wrote to it, which a reset puts back;
+       null while it has not */
+    std::unique_ptr<uint8_t[]> reset_config;
     /* The bits of each byte past the header a write may change. Device
        registers there are writable; capabilities are not, but for the
        fields their code opens. */
@@ -663,6 +666,10 @@ static void pci_device_config_write(PCIDevice *d, uint32_t addr,
     printf("pci_config_write: dev=%s addr=0x%03x val=0x%x s=%d\n",
            d->name.c_str(), addr, data, 1 << size_log2);
 #endif
+    if (d->reset_config == nullptr) {
+        d->reset_config = std::make_unique<uint8_t[]>(PCI_EXT_CONFIG_SIZE);
+        memcpy(d->reset_config.get(), d->config, PCI_EXT_CONFIG_SIZE);
+    }
     if (size_log2 == 2 && pci_bar_reg(d, addr) >= 0) {
         if (pci_write_bar(d, addr, data) == 0)
             return;
@@ -913,6 +920,29 @@ void pci_bus_config_write(PCIBus *b, uint32_t addr, uint32_t data,
     pci_data_write(b, addr, data, size_log2);
 }
 
+/* The bridge's windows close before the functions behind it are looked at,
+   so nothing below is mapped even for a moment where it no longer is. */
+void pci_device_reset(PCIDevice *d)
+{
+    if (d->reset_config != nullptr)
+        memcpy(d->config, d->reset_config.get(), PCI_EXT_CONFIG_SIZE);
+    if (d->msix != nullptr)
+        d->msix->Reset();
+    pci_update_mappings(d);
+    pci_update_intx(d);
+    if (d->secondary_bus != nullptr)
+        pci_bus_reset(d->secondary_bus.get());
+}
+
+void pci_bus_reset(PCIBus *b)
+{
+    for (int i = 0; i < 256; i++) {
+        PCIDevice *d = b->device[i].get();
+        if (d != NULL)
+            pci_device_reset(d);
+    }
+}
+
 /* warning: only valid for one DEVIO page. Return NULL if no memory at
    the given address */
 uint8_t *pci_device_get_dma_ptr(PCIDevice *d, uint64_t addr, bool is_rw)
@@ -1123,6 +1153,7 @@ bool PCIMsixState::Init(PCIDevice *dev, int bar_num, int vector_count,
                          PCI_MSIX_FLAGS_ENABLE | PCI_MSIX_FLAGS_MASKALL, 2);
     dev->msix = this;
     fPba = std::make_unique<uint32_t[]>((vector_count + 31) / 32);
+    Reset();
     return true;
 }
 
@@ -1220,6 +1251,15 @@ void PCIMsixState::TableWrite(uint32_t offset, uint32_t val, int size_log2)
         get_bit(fPba[index / 32], index % 32)) {
         Send(index);
     }
+}
+
+void PCIMsixState::Reset()
+{
+    if (fCapOffset < 0)
+        return;
+    for (int i = 0; i < fVectorCount; i++)
+        fTable[i] = {0, 0, 0, PCI_MSIX_ENTRY_CTRL_MASKBIT};
+    memset(fPba.get(), 0, (fVectorCount + 31) / 32 * sizeof(uint32_t));
 }
 
 uint32_t PCIMsixState::PbaRead(uint32_t offset, int size_log2)

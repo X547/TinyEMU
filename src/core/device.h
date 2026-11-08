@@ -109,6 +109,15 @@ public:
        children. */
     virtual bool Realize() = 0;
 
+    /* Puts the device back as it was after Realize(), as a reset of the
+       machine or of the bus it is on does: registers, interrupt lines and
+       work in flight. What outlives a reset stays, such as the medium of a
+       disk and the contents of a non-volatile store. The device lock is
+       held; the processors may be running, so a device reset alone is what
+       the guest sees as one. Children are reset after their parent, by the
+       bus's ResetAll(). */
+    virtual void Reset() {}
+
     /* Emit this device's node. A device that provides a child bus decides
        for itself whether the children appear in the tree: PCI devices are
        enumerated by the guest and so are deliberately not described. */
@@ -178,6 +187,8 @@ public:
     /* Depth-first passes over the whole subtree. */
     bool AllocateAll();
     bool RealizeAll();
+    /* Reset() every device, each before the devices on its child bus. */
+    void ResetAll();
     void BuildFDTAll(FDTContext &ctx);
     void BuildAMLAll(AcpiContext &ctx);
 };

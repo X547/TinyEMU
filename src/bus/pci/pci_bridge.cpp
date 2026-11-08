@@ -124,6 +124,9 @@ public:
 
     bool Realize() override {return true;}
 
+    /* The port is configuration space alone, which its host bridge resets. */
+    void Reset() override {}
+
     Bus *ChildBus() override {return fChildBus.get();}
 };
 
@@ -270,6 +273,10 @@ public:
     }
 
     bool Realize() override {return true;}
+
+    /* The bridge is configuration space alone, which its host bridge
+       resets. */
+    void Reset() override {}
 
     Bus *ChildBus() override {return fChildBus.get();}
 };

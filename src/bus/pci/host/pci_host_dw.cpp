@@ -262,6 +262,23 @@ bool PCIHostDWDevice::Realize()
 }
 
 
+/* The INTx lines follow the functions, which lower their pins as they are
+   reset after this. */
+void PCIHostDWDevice::Reset()
+{
+    fPortLinkCtrl = 0;
+    fGen2Ctrl = 0;
+    fMiscControl1 = 0;
+    fMsiAddrLo = 0;
+    fMsiAddrHi = 0;
+    memset(fMsi, 0, sizeof(fMsi));
+    memset(fAtuOut, 0, sizeof(fAtuOut));
+    memset(fAtuIn, 0, sizeof(fAtuIn));
+    MsiUpdate();
+    pci_bus_reset(fRootBus.get());
+}
+
+
 //#pragma mark - message signalled interrupts
 
 void PCIHostDWDevice::MsiUpdate()

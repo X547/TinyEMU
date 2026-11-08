@@ -90,6 +90,7 @@ public:
 
     bool Prepare() override;
     bool Realize() override;
+    void Reset() override {pci_bus_reset(fPciBus.get());}
     void BuildFDT(FDTContext &ctx) override;
     void BuildAML(AcpiContext &ctx) override;
     Bus *ChildBus() override {return fChildBus.get();}

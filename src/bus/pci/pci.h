@@ -238,6 +238,10 @@ public:
     uint32_t TableRead(uint32_t offset, int size_log2);
     void TableWrite(uint32_t offset, uint32_t val, int size_log2);
     uint32_t PbaRead(uint32_t offset, int size_log2);
+
+    /* Every vector masked and nothing pending, as at reset. The capability
+       itself is reset with the rest of configuration space. */
+    void Reset();
 };
 
 /* MSI capability, as it sits in configuration space. The layout is the one a
@@ -398,6 +402,13 @@ bool pci_bus_has_msi(PCIBus *b);
    derive its FDT "interrupt-map" from the very function that routes the
    interrupt at run time. 'irq_num' and the result are 0-based (INTA = 0). */
 int pci_bus_map_irq(int devfn, int irq_num);
+
+/* Configuration space as a reset leaves it: each function on the bus gets
+   back what it held before the guest first wrote to it, which unmaps its
+   BARs, and its MSI-X table is masked. A bridge's secondary bus follows it.
+   The functions' own state is their devices' Reset() to restore. */
+void pci_bus_reset(PCIBus *b);
+void pci_device_reset(PCIDevice *d);
 
 /* Configuration space access by an arbitrary host bridge. 'addr' is
    PCI_CONFIG_ADDR(bus, devfn, register), and the register is 12 bits wide so

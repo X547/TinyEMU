@@ -338,6 +338,15 @@ public:
         return true;
     }
 
+    /* The PIRQ lines follow the functions, which lower their pins as they
+       are reset after this. */
+    void Reset() override
+    {
+        fState->config_reg = 0;
+        fState->reset_control = 0;
+        pci_bus_reset(fPciBus.get());
+    }
+
     /* Every bus, the port space but for the configuration ports, the VGA
        hole and the apertures. Every slot's INTx pins are swizzled onto
        PIRQA-D the way the root bus does it. */

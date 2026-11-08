@@ -152,6 +152,7 @@ public:
 
     bool Prepare() override;
     bool Realize() override;
+    void Reset() override;
     void BuildFDT(FDTContext &ctx) override;
     Bus *ChildBus() override {return fChildBus.get();}
 
