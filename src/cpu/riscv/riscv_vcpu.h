@@ -167,6 +167,10 @@ public:
     virtual uint64_t TimebaseFrequency() = 0;
     /* Whether the counter follows host time. */
     virtual bool RealTimeClock() = 0;
+
+    /* With the harts' threads joined: every hart as at power on, in M-mode
+       at the reset vector, or without M-mode stopped until Start(). */
+    virtual void Reset() = 0;
 };
 
 

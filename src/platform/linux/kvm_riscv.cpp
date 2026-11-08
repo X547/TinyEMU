@@ -131,7 +131,14 @@ private:
     /* the guest asked for a reset or a shutdown, after which it runs no
        more */
     bool fEnded = false;
+    /* the registers a reset puts back, as created */
+    struct SavedReg {
+        uint64_t id;
+        std::vector<uint8_t> val;
+    };
+    std::vector<SavedReg> fResetRegs;
 
+    void SaveResetState();
     void ExitMmio();
     void ExitSbi();
     void ExitSystemEvent();
@@ -143,6 +150,8 @@ public:
     bool GetReg(uint64_t id, uint64_t *val);
     void SetReg(uint64_t id, uint64_t val);
     void SetMpState(uint32_t state);
+    /* As created, stopped, for a reset of the machine. */
+    void Reset();
 
     /* RISCVVcpu */
     void ThreadStarted() override;
@@ -193,6 +202,11 @@ public:
     void SetTime(uint64_t time) override;
     uint64_t TimebaseFrequency() override {return fTimebaseFrequency;}
     bool RealTimeClock() override {return true;}
+    void Reset() override
+    {
+        for (auto &vcpu : fVcpus)
+            vcpu->Reset();
+    }
 
     /* HostHypervisorRam */
     uint8_t *AllocRam(size_t size) override {return host_ram_alloc(size);}
@@ -385,6 +399,68 @@ KvmRISCVVcpu::KvmRISCVVcpu(KvmRISCVHypervisor &owner, int index):
 
     /* every hart waits for an SBI start, the first for Start() */
     SetMpState(KVM_MP_STATE_STOPPED);
+    SaveResetState();
+}
+
+
+/* Whether a reset puts the register back: the hart's own state does, its
+   configuration does not, nor its timer, which the kernel refuses to have
+   set after an SBI system reset and which the guest sets through the SBI
+   before it relies on it. */
+static bool kvm_reset_reg(uint64_t id)
+{
+    switch (id & KVM_REG_RISCV_TYPE_MASK) {
+    case KVM_REG_RISCV_CORE:
+    case KVM_REG_RISCV_CSR:
+    case KVM_REG_RISCV_FP_F:
+    case KVM_REG_RISCV_FP_D:
+    case KVM_REG_RISCV_VECTOR:
+        return true;
+    default:
+        return false;
+    }
+}
+
+
+void KvmRISCVVcpu::SaveResetState()
+{
+    struct kvm_reg_list probe = {0};
+
+    /* the first call only says how many there are */
+    ioctl(fFd, KVM_GET_REG_LIST, &probe);
+    std::vector<uint64_t> buf(1 + probe.n);
+    struct kvm_reg_list *list = reinterpret_cast<struct kvm_reg_list *>(
+        buf.data());
+    list->n = probe.n;
+    if (ioctl(fFd, KVM_GET_REG_LIST, list) < 0) {
+        perror("KVM_GET_REG_LIST");
+        exit(1);
+    }
+    for (uint64_t i = 0; i < list->n; i++) {
+        uint64_t id = list->reg[i];
+        if (!kvm_reset_reg(id))
+            continue;
+        SavedReg r {id, std::vector<uint8_t>(
+            (size_t)1 << ((id & KVM_REG_SIZE_MASK) >> KVM_REG_SIZE_SHIFT))};
+        struct kvm_one_reg reg = {id, (uint64_t)(uintptr_t)r.val.data()};
+        if (ioctl(fFd, KVM_GET_ONE_REG, &reg) == 0)
+            fResetRegs.push_back(std::move(r));
+    }
+}
+
+
+void KvmRISCVVcpu::Reset()
+{
+    for (SavedReg &r : fResetRegs) {
+        struct kvm_one_reg reg = {r.id, (uint64_t)(uintptr_t)r.val.data()};
+        if (ioctl(fFd, KVM_SET_ONE_REG, &reg) < 0) {
+            fprintf(stderr, "KVM_SET_ONE_REG 0x%" PRIx64 ": %s\n", r.id,
+                    strerror(errno));
+            exit(1);
+        }
+    }
+    SetMpState(KVM_MP_STATE_STOPPED);
+    fEnded = false;
 }
 
 

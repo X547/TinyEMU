@@ -62,6 +62,7 @@ public:
     RISCVInterpVcpu(RISCVCPU *cpu): fCpu(cpu) {}
 
     RISCVCPU *Cpu() {return fCpu.get();}
+    void Replace(RISCVCPU *cpu) {fCpu.reset(cpu);}
 
     /* RISCVVcpu */
     void ThreadStarted() override {}
@@ -87,6 +88,8 @@ class RISCVInterpBackend final:
     public TlbFlushTarget {
 private:
     RISCVCpuTarget &fTarget;
+    DeviceLock *fLock = nullptr;
+    RISCVCpuOptions fOptions;
     RISCVHartIsa fIsa;
     bool fRealTime;
     uint64_t fStartTime = 0;
@@ -94,6 +97,9 @@ private:
     std::atomic<uint64_t> fTimeOffset {0};
 
     uint64_t RawTime();
+    /* A hart as at power on, or null if the XLEN is not one this build
+       has. */
+    RISCVCPU *CreateHart(int hart);
     /* before the harts, which use it until they go */
     PhysMemoryMap fMemoryMap;
     std::vector<std::unique_ptr<RISCVInterpVcpu>> fVcpus;
@@ -114,6 +120,7 @@ public:
     void SetTime(uint64_t time) override;
     uint64_t TimebaseFrequency() override {return RTC_FREQ;}
     bool RealTimeClock() override {return fRealTime;}
+    void Reset() override;
 
     /* RtcTimeSource */
     uint64_t RtcTime() override {return Time();}
@@ -151,18 +158,35 @@ RISCVInterpBackend::RISCVInterpBackend(RISCVCpuTarget &target,
 }
 
 
+RISCVCPU *RISCVInterpBackend::CreateHart(int hart)
+{
+    RISCVCPU *cpu = riscv_cpu_create(&fMemoryMap, fOptions.xlen, hart);
+    if (cpu == nullptr)
+        return nullptr;
+    cpu->SetDeviceLock(fLock);
+    cpu->SetSmp(fOptions.hart_count > 1);
+    if (fOptions.interrupt_arch != RISCV_INTR_BASE)
+        cpu->SetInterruptArch(fOptions.interrupt_arch);
+    /* the 'time' CSR must read the same counter as the machine's timers */
+    cpu->SetRtcTimeSource(this);
+    if (fSbi != nullptr)
+        cpu->SetSbiHandler(fSbi.get());
+    return cpu;
+}
+
+
 bool RISCVInterpBackend::Init(DeviceLock &lock,
                               const RISCVCpuOptions &options)
 {
+    fLock = &lock;
+    fOptions = options;
+    if (!options.machine_mode)
+        fSbi = std::make_unique<RISCVSbi>(*this, fTarget, lock);
     for (int hart = 0; hart < options.hart_count; hart++) {
-        RISCVCPU *cpu = riscv_cpu_create(&fMemoryMap, options.xlen, hart);
+        RISCVCPU *cpu = CreateHart(hart);
         if (cpu == nullptr)
             return false;
         fVcpus.push_back(std::make_unique<RISCVInterpVcpu>(cpu));
-        cpu->SetDeviceLock(&lock);
-        cpu->SetSmp(options.hart_count > 1);
-        if (options.interrupt_arch != RISCV_INTR_BASE)
-            cpu->SetInterruptArch(options.interrupt_arch);
     }
     fIsa.misa = fVcpus[0]->Cpu()->Misa();
     fIsa.extensions = {"zicsr", "zifencei", "zicntr"};
@@ -176,15 +200,19 @@ bool RISCVInterpBackend::Init(DeviceLock &lock,
     fIsa.satp_mode = options.xlen == 32 ? RISCV_SATP_SV32 : RISCV_SATP_SV48;
     if (fRealTime)
         fStartTime = rtc_get_real_time();
-    /* the 'time' CSR must read the same counter as the machine's timers */
-    for (std::unique_ptr<RISCVInterpVcpu> &vcpu : fVcpus)
-        vcpu->Cpu()->SetRtcTimeSource(this);
-    if (!options.machine_mode) {
-        fSbi = std::make_unique<RISCVSbi>(*this, fTarget, lock);
-        for (std::unique_ptr<RISCVInterpVcpu> &vcpu : fVcpus)
-            vcpu->Cpu()->SetSbiHandler(fSbi.get());
-    }
     return true;
+}
+
+
+/* Each hart starts over as a new one. The time counter goes on, as the
+   machine's timers are on it; mtime is the machine's to reset. */
+void RISCVInterpBackend::Reset()
+{
+    uint64_t time = Time();
+
+    for (int hart = 0; hart < (int)fVcpus.size(); hart++)
+        fVcpus[hart]->Replace(CreateHart(hart));
+    SetTime(time);
 }
 
 
