@@ -60,6 +60,7 @@
 #define REG_B_PIE 0x40
 #define REG_B_AIE 0x20
 #define REG_B_UIE 0x10
+#define REG_B_SQWE 0x08
 #define REG_B_DM  0x04  /* binary rather than BCD */
 #define REG_B_24H 0x02
 
@@ -398,6 +399,20 @@ MC146818::MC146818(PhysMemoryMap *port_map, int addr, IRQSignal *irq,
 }
 
 MC146818::~MC146818() = default;
+
+/* What the RESET pin does, by the data sheet: the interrupt enables, the
+   square wave and the flags are cleared. The time, register A and the RAM
+   stay, as on the battery. */
+void MC146818::Reset()
+{
+    CMOSState *s = fState.get();
+
+    s->cmos_index = 0;
+    s->cmos_data[RTC_REG_B] &= ~(REG_B_PIE | REG_B_AIE | REG_B_UIE |
+                                 REG_B_SQWE);
+    s->cmos_data[RTC_REG_C] = 0;
+    s->irq->Set(0);
+}
 
 void MC146818::SetNvram(int index, uint8_t val)
 {

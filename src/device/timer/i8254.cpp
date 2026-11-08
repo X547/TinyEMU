@@ -245,22 +245,33 @@ static void pit_set_gate(PITChannel *s, int level, int64_t now)
 I8254::I8254(PhysMemoryMap *port_map, int addr0, int addr1, IRQSignal *irq)
 {
     std::unique_ptr<PITState> &s = fState;
-    int64_t now = pit_get_time();
 
     s = std::make_unique<PITState>();
     s->irq = irq;
+    Reset();
+
+    port_map->RegisterDevice(addr0, 4, &s->fIo, DEVIO_SIZE8);
+    port_map->RegisterDevice(addr1, 1, &s->fSpeakerIo, DEVIO_SIZE8);
+}
+
+void I8254::Reset()
+{
+    PITState *s = fState.get();
+    int64_t now = pit_get_time();
+
     /* Counting from reset, as firmware leaves them: square waves, the gates
        of channels 0 and 1 tied high, channel 2's on port B. */
     for(int i = 0; i < 3; i++) {
         PITChannel *pc = &s->pit_channels[i];
+        *pc = PITChannel {};
         pc->mode = 3;
         pc->access = ACCESS_WORD;
         pc->gate = i != 2;
         pit_load_count(pc, 0, now);
     }
-
-    port_map->RegisterDevice(addr0, 4, &s->fIo, DEVIO_SIZE8);
-    port_map->RegisterDevice(addr1, 1, &s->fSpeakerIo, DEVIO_SIZE8);
+    s->speaker_data_on = 0;
+    s->port_b_enables = 0;
+    s->irq->Set(0);
 }
 
 I8254::~I8254() = default;

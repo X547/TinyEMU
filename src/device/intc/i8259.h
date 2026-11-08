@@ -68,6 +68,10 @@ public:
     /* Sets both ELCRs, as firmware would. */
     void SetElcr(const uint8_t *elcr);
 
+    /* Both controllers uninitialised and every input edge triggered, as at
+       power on. */
+    void Reset();
+
     /* The vector of the interrupt the processor takes, which the controllers
        then count as in service. */
     int Acknowledge();

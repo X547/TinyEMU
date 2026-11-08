@@ -178,4 +178,6 @@ public:
               int mode, int vector, bool level, bool assert);
     /* LocalApic::RunTimer() for each; the soonest of their results. */
     int64_t RunTimers();
+    /* LocalApic::Reset() for each. */
+    void Reset();
 };

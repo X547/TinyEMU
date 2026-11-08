@@ -49,8 +49,17 @@
 
 
 IOAPIC::IOAPIC(PCIMsiTarget &output, int id):
-    fOutput(output), fId(id)
+    fOutput(output), fResetId(id), fId(id)
 {
+    Reset();
+}
+
+
+/* The inputs' levels are what drives them, not the IOAPIC's. */
+void IOAPIC::Reset()
+{
+    fId = fResetId;
+    fSelect = 0;
     for (int i = 0; i < IOAPIC_PINS; i++)
         fRedirection[i] = RTE_MASKED;
 }

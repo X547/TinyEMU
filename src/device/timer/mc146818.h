@@ -43,6 +43,9 @@ public:
              bool use_local_time);
     ~MC146818();
 
+    /* The interrupts off; the clock and the RAM go on. */
+    void Reset();
+
     /* Sets a byte of CMOS RAM, as firmware would have left it. */
     void SetNvram(int index, uint8_t val);
 

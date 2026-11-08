@@ -54,10 +54,18 @@
 
 
 AcpiPmBlock::AcpiPmBlock(VirtMachine &machine):
-    fMachine(machine),
-    /* there is no SMI command port, so ACPI mode is always on */
-    fControl(PM1_CNT_SCI_EN)
+    fMachine(machine)
 {
+    Reset();
+}
+
+
+void AcpiPmBlock::Reset()
+{
+    fStatus = 0;
+    fEnable = 0;
+    /* there is no SMI command port, so ACPI mode is always on */
+    fControl = PM1_CNT_SCI_EN;
 }
 
 

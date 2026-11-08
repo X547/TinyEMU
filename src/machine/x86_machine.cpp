@@ -29,6 +29,7 @@
 #include <assert.h>
 
 #include <algorithm>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -152,6 +153,15 @@ public:
     };
     std::unique_ptr<CpuStart[]> fCpuStarts;
 
+    /* What is loaded at power on and again at each reset: the firmware, or
+       the kernel the machine boots itself, and the ACPI tables it built for
+       that kernel. */
+    std::vector<uint8_t> fBios;
+    std::vector<uint8_t> fKernel;
+    std::vector<uint8_t> fInitrd;
+    std::string fCmdline;
+    std::vector<uint8_t> fAcpiTables;
+
     void VcpuThread(int index);
     /* On the thread of processor 'index': acts out the IPIs it was sent,
        and false while it waits for a STARTUP. */
@@ -225,6 +235,7 @@ public:
     void JoinProcessors() override;
     int64_t RunTimers() override;
     void InterruptExecution() override;
+    bool Reset() override;
 };
 
 /* The processor the calling thread runs, or -1 on any other thread. */
@@ -249,6 +260,8 @@ static void start_flat_protected_mode(PCMachine *s, uint32_t gdt_addr,
                                       uint32_t reg_val);
 static void map_pci_interrupts(PCMachine *s);
 static bool is_elf(const uint8_t *buf, int buf_len);
+static void pc_load_bios(PCMachine *s);
+static bool pc_load_kernel(PCMachine *s);
 static bool pvh_load(PCMachine *s, const uint8_t *buf, int buf_len,
                      const uint8_t *initrd, int initrd_len,
                      const char *cmd_line, uint32_t bios_size,
@@ -689,24 +702,14 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     s->port_map->RegisterDevice(0x80, 2, &s->fPort80Io, DEVIO_SIZE8);
     s->port_map->RegisterDevice(0x92, 2, &s->fPort92Io, DEVIO_SIZE8);
     
-    /* setup the bios */
-    if (p->files[VM_FILE_BIOS].len > 0) {
-        int bios_size, bios_size1;
-        uint8_t *bios_buf, *ptr;
-        uint32_t bios_addr;
-        
-        bios_size = p->files[VM_FILE_BIOS].len;
-        bios_buf = p->files[VM_FILE_BIOS].buf;
-        assert((bios_size % 65536) == 0 && bios_size != 0);
-        bios_addr = -bios_size;
-        /* at the top of the 4GB memory */
-        s->mem_map->RegisterRam(bios_addr, bios_size, DEVRAM_FLAG_ROM);
-        ptr = get_ram_ptr(s, bios_addr);
-        memcpy(ptr, bios_buf, bios_size);
-        /* in the lower 1MB memory (currently set as RAM) */
-        bios_size1 = min_int(bios_size, 128 * 1024);
-        ptr = get_ram_ptr(s, 0x100000 - bios_size1);
-        memcpy(ptr, bios_buf + bios_size - bios_size1, bios_size1);
+    /* the BIOS at the top of the 4GB memory */
+    const VMFileEntry &bios = p->files[VM_FILE_BIOS];
+    if (bios.len > 0) {
+        assert((bios.len % 65536) == 0);
+        s->fBios.assign(bios.buf, bios.buf + bios.len);
+        s->mem_map->RegisterRam(-(uint32_t)bios.len, bios.len,
+                                DEVRAM_FLAG_ROM);
+        pc_load_bios(s);
 #ifdef DEBUG_BIOS
         s->port_map->RegisterDevice(0x402, 2, &s->fBiosDebugIo, DEVIO_SIZE8);
 #endif
@@ -858,24 +861,88 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
         pc_acpi_setup(s);
     }
 
-    if (p->files[VM_FILE_KERNEL].buf) {
-        const VMFileEntry &kernel = p->files[VM_FILE_KERNEL];
-        const VMFileEntry &initrd = p->files[VM_FILE_INITRD];
-
-        if (is_elf(kernel.buf, kernel.len)) {
-            if (!pvh_load(s, kernel.buf, kernel.len, initrd.buf, initrd.len,
-                          p->cmdline ? p->cmdline : "",
-                          p->files[VM_FILE_BIOS].len, PC_ACPI_ADDR)) {
-                return nullptr;
-            }
-        } else {
-            copy_kernel(s, kernel.buf, kernel.len,
-                        p->cmdline ? p->cmdline : "",
-                        p->files[VM_FILE_BIOS].len);
-        }
+    const VMFileEntry &kernel = p->files[VM_FILE_KERNEL];
+    const VMFileEntry &initrd = p->files[VM_FILE_INITRD];
+    if (kernel.buf != nullptr) {
+        s->fKernel.assign(kernel.buf, kernel.buf + kernel.len);
+        if (initrd.buf != nullptr)
+            s->fInitrd.assign(initrd.buf, initrd.buf + initrd.len);
+        s->fCmdline = p->cmdline ? p->cmdline : "";
+    }
+    if (!pc_load_kernel(s)) {
+        return nullptr;
     }
 
     return owned;
+}
+
+/* The BIOS in its ROM, and its last 128 KB at the top of the first MB as
+   well, where it starts from, in RAM which it may have written. */
+static void pc_load_bios(PCMachine *s)
+{
+    uint32_t size = s->fBios.size();
+    uint32_t low_size;
+
+    if (size == 0)
+        return;
+    memcpy(get_ram_ptr(s, -size), s->fBios.data(), size);
+    low_size = min_int(size, 128 * 1024);
+    memcpy(get_ram_ptr(s, 0x100000 - low_size),
+           s->fBios.data() + size - low_size, low_size);
+}
+
+/* A kernel booted without firmware, and the processor set up to enter
+   it. */
+static bool pc_load_kernel(PCMachine *s)
+{
+    if (s->fKernel.empty())
+        return true;
+    const uint8_t *buf = s->fKernel.data();
+    int len = s->fKernel.size();
+    if (is_elf(buf, len)) {
+        return pvh_load(s, buf, len, s->fInitrd.data(), s->fInitrd.size(),
+                        s->fCmdline.c_str(), s->fBios.size(), PC_ACPI_ADDR);
+    }
+    copy_kernel(s, buf, len, s->fCmdline.c_str(), s->fBios.size());
+    return true;
+}
+
+/* RAM keeps what it holds, as on a warm reset; what the machine loads at
+   power on is loaded again. The processors' threads are joined. */
+bool PCMachine::Reset()
+{
+    fCpus->Reset();
+    fCpuIrq.store(false);
+    for (int i = 0; i < fCpuCount; i++) {
+        if (fApicIrq)
+            fApicIrq[i].store(false);
+        fCpus->Vcpu(i).SetInterruptRequest(false);
+        if (fCpuStarts) {
+            fCpuStarts[i].init.store(false);
+            fCpuStarts[i].startup.store(-1);
+            fCpuStarts[i].waiting = i != 0;
+        }
+    }
+
+    if (pic_state)
+        pic_state->Reset();
+    if (pit_state)
+        pit_state->Reset();
+    cmos_state->Reset();
+    if (fIoApic)
+        fIoApic->Reset();
+    if (fLapics)
+        fLapics->Reset();
+    if (fAcpiPm)
+        fAcpiPm->Reset();
+    bus->ResetAll();
+
+    pc_load_bios(this);
+    if (!fAcpiTables.empty()) {
+        memcpy(get_ram_range_ptr(this, PC_ACPI_ADDR, PC_ACPI_SIZE),
+               fAcpiTables.data(), PC_ACPI_SIZE);
+    }
+    return pc_load_kernel(this);
 }
 
 PCMachine::~PCMachine()
@@ -1193,6 +1260,7 @@ static void pc_acpi_setup(PCMachine *s)
     assert(mem != NULL);
     memset(mem, 0, PC_ACPI_SIZE);
     pc_acpi_build(mem, config);
+    s->fAcpiTables.assign(mem, mem + PC_ACPI_SIZE);
 
     s->fAcpiPm = std::make_unique<AcpiPmBlock>(*s);
     s->port_map->RegisterDevice(ACPI_PM_BASE, ACPI_PM_SIZE, s->fAcpiPm.get(),

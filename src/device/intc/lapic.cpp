@@ -713,6 +713,13 @@ LocalApicBus::LocalApicBus(LocalApicHost &host, int count)
 }
 
 
+void LocalApicBus::Reset()
+{
+    for (auto &apic : fApics)
+        apic->Reset();
+}
+
+
 void LocalApicBus::Deliver(uint64_t addr, uint32_t data)
 {
     bool logical = get_bit(addr, 2);

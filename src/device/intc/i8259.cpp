@@ -360,6 +360,15 @@ I8259Pair::I8259Pair(PhysMemoryMap *port_map, uint32_t addr0, uint32_t addr1,
 
 I8259Pair::~I8259Pair() = default;
 
+void I8259Pair::Reset()
+{
+    for (int i = 0; i < 2; i++) {
+        pic_reset(fPics[i].get());
+        fPics[i]->elcr = 0;
+    }
+    Update();
+}
+
 void I8259Pair::SetElcr(const uint8_t *elcr)
 {
     int i;

@@ -40,6 +40,7 @@ class PCIMsiTarget;
 class IOAPIC final: public IRQTarget, public DeviceIO {
 private:
     PCIMsiTarget &fOutput;
+    uint32_t fResetId;
     uint32_t fId;
     uint8_t fSelect = 0;
     uint64_t fRedirection[IOAPIC_PINS];
@@ -51,6 +52,9 @@ private:
 
 public:
     IOAPIC(PCIMsiTarget &output, int id);
+
+    /* Every input masked, as at power on. */
+    void Reset();
 
     /* IRQTarget */
     void SetIRQ(int pin, int level) override;

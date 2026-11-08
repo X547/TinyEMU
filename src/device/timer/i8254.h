@@ -43,6 +43,9 @@ public:
     I8254(PhysMemoryMap *port_map, int addr0, int addr1, IRQSignal *irq);
     ~I8254();
 
+    /* The counters as at power on. */
+    void Reset();
+
     /* The microseconds until channel 0's next interrupt, or -1. */
     int64_t DelayUs();
 
