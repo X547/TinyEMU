@@ -660,8 +660,14 @@ void VirtMachine::RequestShutdown(int code)
 
 void VirtMachine::RequestReset()
 {
-    printf("\nReset.\n");
-    RequestShutdown(1);
+    if (ShutdownRequested())
+        return;
+    /* in this order, for the machine thread not to join processors that
+       were never told to stop */
+    fProcessorsStopRequested.store(true);
+    fResetRequested.store(true);
+    InterruptExecution();
+    Kick();
 }
 
 
@@ -675,6 +681,8 @@ void VirtMachine::Start()
 {
     assert(!fThread.joinable());
     fStopRequested.store(false);
+    fProcessorsStopRequested.store(false);
+    fResetRequested.store(false);
     fThread = std::thread([this]() {ThreadLoop();});
 }
 
@@ -684,6 +692,7 @@ void VirtMachine::Stop()
     if (!fThread.joinable())
         return;
     fStopRequested.store(true);
+    fProcessorsStopRequested.store(true);
     Kick();
     InterruptExecution();
     fThread.join();
@@ -733,6 +742,31 @@ int64_t VirtMachine::RefreshScreen()
 }
 
 
+/* A request that comes while this runs, from a processor not stopped yet,
+   is taken by the next pass. */
+void VirtMachine::ResetProcessorsAndDevices()
+{
+    if (fProcessorsStarted) {
+        JoinProcessors();
+        fProcessorsStarted = false;
+    }
+    bool reset;
+    {
+        DeviceLocker locker(*fDeviceLock);
+        reset = !ShutdownRequested() && Reset();
+    }
+    if (!reset) {
+        if (!ShutdownRequested()) {
+            printf("\nReset.\n");
+            RequestShutdown(1);
+        }
+        return;
+    }
+    if (!fStopRequested.load())
+        fProcessorsStopRequested.store(false);
+}
+
+
 void VirtMachine::ThreadLoop()
 {
     host_set_thread_name("machine");
@@ -740,7 +774,12 @@ void VirtMachine::ThreadLoop()
     while (!fStopRequested.load()) {
         int64_t delay, refresh_delay;
 
-        if (!fProcessorsStarted && fStartHolds.load() == 0) {
+        if (fResetRequested.exchange(false)) {
+            ResetProcessorsAndDevices();
+            continue;
+        }
+        if (!fProcessorsStarted && !fProcessorsStopRequested.load() &&
+            fStartHolds.load() == 0) {
             StartProcessors();
             fProcessorsStarted = true;
         }

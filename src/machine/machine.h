@@ -137,6 +137,9 @@ class VirtMachine {
 private:
     std::thread fThread;
     std::atomic<bool> fStopRequested {false};
+    /* the processors' threads are to end, for a stop or a reset */
+    std::atomic<bool> fProcessorsStopRequested {false};
+    std::atomic<bool> fResetRequested {false};
     HostWakeup fWakeup;
     /* when the machine thread wakes up next on its own, in
        host_monotonic_us(); UINT64_MAX while it runs the timers or has none */
@@ -150,18 +153,25 @@ private:
     uint64_t fNextRefreshUs = 0;
 
     void ThreadLoop();
+    void ResetProcessorsAndDevices();
     int64_t RefreshScreen();
 
 protected:
     DeviceLock *fDeviceLock = nullptr;
     RunControl *fRunControl = nullptr;
 
-    bool StopRequested() const {return fStopRequested.load();}
+    /* What the processors' threads run until. */
+    bool StopRequested() const {return fProcessorsStopRequested.load();}
 
-    /* On the machine thread, as it starts and as it ends: start the
-       processors' threads, and join them once StopRequested(). */
+    /* On the machine thread, as it starts, as it ends and around a reset:
+       start the processors' threads, and join them once StopRequested(). */
     virtual void StartProcessors() = 0;
     virtual void JoinProcessors() = 0;
+    /* On the machine thread with the device lock held and the processors'
+       threads joined: puts the processors and the devices back as at power
+       on and loads what the machine boots again. False if the machine
+       cannot, which ends the emulator instead. */
+    virtual bool Reset() {return false;}
     /* With the device lock held: runs the timers that are due and returns
        the microseconds until the next one, or -1 if there is none. */
     virtual int64_t RunTimers() = 0;
@@ -181,8 +191,10 @@ public:
 
     /* the first request decides the exit code */
     void RequestShutdown(int code);
-    /* What a guest asks for to reboot. No machine can reset itself, so it
-       ends, with the exit code a failure gives. Any thread. */
+    /* What a guest asks for to reboot: the processors stop soon, and the
+       machine thread resets the machine and starts them again. A machine
+       that cannot reset ends, with the exit code a failure gives. Ignored
+       once a shutdown was requested. Any thread. */
     void RequestReset();
     bool ShutdownRequested() const;
 
