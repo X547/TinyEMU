@@ -37,7 +37,6 @@ private:
     DeviceContext *fCtx;
     VirtMachine *fMachine = nullptr;
     Resource *fMmio = nullptr;
-    bool fResetReported = false;
 
     uint32_t Read(uint32_t offset, int size_log2);
     void Write(uint32_t offset, uint32_t val, int size_log2);
@@ -96,6 +95,13 @@ public:
         fdt->PropU32("offset", 0);
         fdt->PropU32("value", SYSCON_POWEROFF_PASS);
         fdt->EndNode();
+
+        fdt->BeginNode("reboot");
+        fdt->PropStr("compatible", "syscon-reboot");
+        fdt->PropU32("regmap", phandle);
+        fdt->PropU32("offset", 0);
+        fdt->PropU32("value", SYSCON_POWEROFF_RESET);
+        fdt->EndNode();
     }
 };
 
@@ -131,11 +137,7 @@ void SysconPoweroffDevice::Write(uint32_t offset, uint32_t val, int size_log2)
         break;
     }
     case SYSCON_POWEROFF_RESET:
-        /* there is no reset to perform, so the node offers none */
-        if (!fResetReported) {
-            printf("syscon-poweroff: reset is not supported\n");
-            fResetReported = true;
-        }
+        fMachine->RequestReset();
         break;
     default:
         break;
@@ -145,9 +147,9 @@ void SysconPoweroffDevice::Write(uint32_t offset, uint32_t val, int size_log2)
 
 //#pragma mark - class
 
-/* One register on the FDT bus that stops the emulator, described as a
-   "syscon" block together with the "syscon-poweroff" node firmware and
-   kernels look for. */
+/* One register on the FDT bus that stops or resets the machine, described
+   as a "syscon" block together with the "syscon-poweroff" and
+   "syscon-reboot" nodes firmware and kernels look for. */
 class SysconPoweroffClass final: public DeviceClass {
 public:
     SysconPoweroffClass(): DeviceClass("syscon-poweroff") {}

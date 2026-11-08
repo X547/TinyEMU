@@ -48,6 +48,17 @@ PLIC::PLIC(HartIrqTarget *harts, int hart_count):
 }
 
 
+/* The input lines are what drives them, not the PLIC's. */
+void PLIC::Reset()
+{
+    fServed = 0;
+    memset(fPriority, 0, sizeof(fPriority));
+    memset(fEnable, 0, 2 * fHartCount * sizeof(fEnable[0]));
+    memset(fThreshold, 0, 2 * fHartCount * sizeof(fThreshold[0]));
+    Update();
+}
+
+
 PLIC::~PLIC()
 {
     delete[] fEnable;

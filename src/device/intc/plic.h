@@ -56,6 +56,9 @@ public:
     PLIC(HartIrqTarget *harts, int hart_count);
     ~PLIC() override;
 
+    /* Every source disabled, as at power on. */
+    void Reset();
+
     uint64_t DeviceRead(uint32_t offset, int size_log2) override;
     void DeviceWrite(uint32_t offset, uint64_t val, int size_log2) override;
 

@@ -118,6 +118,9 @@ public:
     DeviceIO *DomainIO(bool supervisor)
         {return supervisor ? static_cast<DeviceIO *>(&fIoS) : &fIoM;}
 
+    /* Every source inactive and both domains off, as at power on. */
+    void Reset();
+
     /* Delegates every source to the supervisor level domain, as firmware
        does before it starts a supervisor. */
     void DelegateAll();

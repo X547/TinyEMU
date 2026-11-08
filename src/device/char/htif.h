@@ -51,6 +51,8 @@ public:
     /* 'console' may be nullptr, which drops what is written to it. */
     HTIF(VirtMachine &machine, HostConsole *console);
 
+    void Reset() {fToHost = fFromHost = 0;}
+
     /* DeviceIO */
     uint64_t DeviceRead(uint32_t offset, int size_log2) override;
     void DeviceWrite(uint32_t offset, uint64_t val, int size_log2) override;

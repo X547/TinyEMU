@@ -171,7 +171,7 @@ protected:
        threads joined: puts the processors and the devices back as at power
        on and loads what the machine boots again. False if the machine
        cannot, which ends the emulator instead. */
-    virtual bool Reset() {return false;}
+    virtual bool Reset() = 0;
     /* With the device lock held: runs the timers that are due and returns
        the microseconds until the next one, or -1 if there is none. */
     virtual int64_t RunTimers() = 0;

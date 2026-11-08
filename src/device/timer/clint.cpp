@@ -35,6 +35,17 @@ Clint::Clint(ClintHost &host, int hart_count):
 {
 }
 
+/* mtime keeps counting; the harts are told the levels again, which a hart
+   reset forgets. */
+void Clint::Reset()
+{
+    for (int hart = 0; hart < fHartCount; hart++) {
+        fTimecmp[hart] = 0;
+        SetIrq(hart, false, false);
+        SetIrq(hart, true, false);
+    }
+}
+
 void Clint::SetIrq(int hart, bool timer, bool level)
 {
     (timer ? fTimerIrq : fSoftIrq)[hart] = level;

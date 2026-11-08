@@ -72,16 +72,14 @@ TEST(syscon, nodes)
     SNAP("read", "%#x", mmio_read32(sReg));
 }
 
-/* Other values, and other offsets, leave the machine running. Reset is
-   not offered, and is ignored. */
+/* Other values, and other offsets, leave the machine running. */
 TEST(syscon, ignored_writes)
 {
     require_syscon();
     mmio_write32(sReg, 0x1234);
     mmio_write32(sReg + 4, TEST_PASS);
     mmio_write32(sReg + 8, TEST_FAIL | 2 << 16);
-    mmio_write32(sReg, TEST_RESET);
-    mmio_write32(sReg, TEST_RESET);
+    mmio_write32(sReg + 4, TEST_RESET);
     /* still here */
     EXPECT_EQ(mmio_read32(sReg), 0u);
 }

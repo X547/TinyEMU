@@ -77,6 +77,9 @@ private:
 public:
     Clint(ClintHost &host, int hart_count);
 
+    /* The registers as at power on. */
+    void Reset();
+
     /* Registers the CLINT_SIZE bytes of registers at 'base'. */
     void Map(PhysMemoryMap *map, uint64_t base);
 

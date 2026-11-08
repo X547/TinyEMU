@@ -99,8 +99,19 @@ public:
     std::unique_ptr<HostWakeup[]> fHartWakeups;
     /* the Sstc deadline each hart was last woken for; machine thread */
     uint64_t fSTimerKicked[RISCV_MAX_HARTS] {};
+    /* What is loaded at power on and again at each reset. */
+    std::vector<uint8_t> fBios;
+    std::vector<uint8_t> fKernel;
+    std::vector<uint8_t> fInitrd;
+    std::string fCmdline;
+    bool fHasCmdline = false;
+    /* where S-mode firmware runs in place without a kernel, or 0 */
+    uint64_t fBootFlashBase = 0;
 
     ~RISCVMachine() override;
+
+    /* Loads what the harts boot and sets the first one going. */
+    bool LoadBoot();
 
     void HartThread(int hart);
     /* Wakes the machine thread for a timer due at 'deadline' on the time
@@ -150,6 +161,7 @@ public:
     void JoinProcessors() override;
     int64_t RunTimers() override;
     void InterruptExecution() override;
+    bool Reset() override;
 };
 
 #define LOW_RAM_SIZE   0x00010000 /* 64KB */
@@ -997,30 +1009,59 @@ riscv_machine_init(const VirtMachineParams *p)
         return nullptr;
     }
 
-    if (native_sbi) {
-        /* what firmware would hand the supervisor domain */
-        if (s->aplic)
-            s->aplic->DelegateAll();
-        if (!load_kernel_native(s.get(), ctx.boot_flash_base,
-                                p->files[VM_FILE_KERNEL].buf,
-                                p->files[VM_FILE_KERNEL].len,
-                                p->files[VM_FILE_INITRD].buf,
-                                p->files[VM_FILE_INITRD].len, p->cmdline)) {
-            return nullptr;
-        }
-        return s;
-    }
-
-    if (!p->files[VM_FILE_BIOS].buf) {
+    if (!native_sbi && !p->files[VM_FILE_BIOS].buf) {
         vm_error("No bios found");
     }
+    const VMFileEntry *files = p->files;
+    s->fBios.assign(files[VM_FILE_BIOS].buf,
+                    files[VM_FILE_BIOS].buf + files[VM_FILE_BIOS].len);
+    s->fKernel.assign(files[VM_FILE_KERNEL].buf,
+                      files[VM_FILE_KERNEL].buf + files[VM_FILE_KERNEL].len);
+    s->fInitrd.assign(files[VM_FILE_INITRD].buf,
+                      files[VM_FILE_INITRD].buf + files[VM_FILE_INITRD].len);
+    s->fHasCmdline = p->cmdline != nullptr;
+    if (s->fHasCmdline)
+        s->fCmdline = p->cmdline;
+    s->fBootFlashBase = ctx.boot_flash_base;
 
-    copy_bios(s.get(), p->files[VM_FILE_BIOS].buf, p->files[VM_FILE_BIOS].len,
-              p->files[VM_FILE_KERNEL].buf, p->files[VM_FILE_KERNEL].len,
-              p->files[VM_FILE_INITRD].buf, p->files[VM_FILE_INITRD].len,
-              p->cmdline);
-
+    if (!s->LoadBoot()) {
+        return nullptr;
+    }
     return s;
+}
+
+bool RISCVMachine::LoadBoot()
+{
+    const char *cmdline = fHasCmdline ? fCmdline.c_str() : nullptr;
+
+    if (native_sbi) {
+        /* what firmware would hand the supervisor domain */
+        if (aplic)
+            aplic->DelegateAll();
+        return load_kernel_native(this, fBootFlashBase, fKernel.data(),
+                                  fKernel.size(), fInitrd.data(),
+                                  fInitrd.size(), cmdline);
+    }
+    copy_bios(this, fBios.data(), fBios.size(), fKernel.data(),
+              fKernel.size(), fInitrd.data(), fInitrd.size(), cmdline);
+    return true;
+}
+
+/* RAM keeps what it holds, as on a warm reset; what the machine loads at
+   power on is loaded again. The harts' threads are joined. */
+bool RISCVMachine::Reset()
+{
+    fCpus->Reset();
+    for (int hart = 0; hart < hart_count; hart++)
+        fSTimerKicked[hart] = 0;
+    clint->Reset();
+    htif->Reset();
+    if (plic)
+        plic->Reset();
+    if (aplic)
+        aplic->Reset();
+    bus->ResetAll();
+    return LoadBoot();
 }
 
 RISCVMachine::~RISCVMachine() = default;

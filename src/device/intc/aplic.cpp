@@ -139,6 +139,22 @@ APLIC::APLIC(PhysMemoryMap *mem_map, HartIrqTarget *harts, int hart_count,
 }
 
 
+/* The input wires are what drives them, not the APLIC's. */
+void APLIC::Reset()
+{
+    for (Domain &d: fDomains) {
+        d.ie = false;
+        d.genmsi = 0;
+        memset(d.sourcecfg, 0, (fNumSources + 1) * sizeof(uint32_t));
+        memset(d.target, 0, (fNumSources + 1) * sizeof(uint32_t));
+        memset(d.pending, 0, fWords * sizeof(uint32_t));
+        memset(d.enable, 0, fWords * sizeof(uint32_t));
+        memset(d.idc, 0, fHartCount * sizeof(Idc));
+    }
+    Update();
+}
+
+
 APLIC::~APLIC()
 {
     delete[] fLevel;
