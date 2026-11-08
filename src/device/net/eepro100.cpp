@@ -108,7 +108,8 @@ bool EEPro100Device::Realize()
         return false;
     }
 
-    fPciDev = pci_register_device(bus, Name(), -1, EEPRO100_PCI_VENDOR_ID,
+    fPciDev = pci_register_device(bus, this, Name(), -1,
+                                  EEPRO100_PCI_VENDOR_ID,
                                   EEPRO100_PCI_DEVICE_ID,
                                   EEPRO100_PCI_REVISION, EEPRO100_PCI_CLASS);
     if (fPciDev == nullptr) {

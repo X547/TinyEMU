@@ -202,7 +202,7 @@ bool PCIHostDWDevice::Prepare()
        other bridge uses. Its bus numbers come out of reset as zero and are
        left that way: numbering the hierarchy is the guest's to do, and until
        it has, nothing behind the port answers a configuration cycle. */
-    fDevBus = pci_bridge_init(fRootBus.get(), 0, "dw-root-port",
+    fDevBus = pci_bridge_init(fRootBus.get(), this, 0, "dw-root-port",
                               DW_ROOT_PORT_VENDOR_ID, DW_ROOT_PORT_DEVICE_ID,
                               PCI_EXP_TYPE_ROOT_PORT, nullptr);
     if (fDevBus == nullptr) {

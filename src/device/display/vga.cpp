@@ -1159,8 +1159,8 @@ void VGAState::Reset()
     full_update = true;
 }
 
-static std::unique_ptr<FBDevice> pci_vga_init(PCIBus *bus, int width,
-                                              int height,
+static std::unique_ptr<FBDevice> pci_vga_init(Device *owner, PCIBus *bus,
+                                              int width, int height,
                                               const uint8_t *vga_rom_buf,
                                               int vga_rom_size)
 {
@@ -1168,7 +1168,8 @@ static std::unique_ptr<FBDevice> pci_vga_init(PCIBus *bus, int width,
     uint32_t bar_size;
     PhysMemoryMap *mem_map, *port_map;
 
-    d = pci_register_device(bus, "VGA", -1, 0x1234, 0x1111, 0x00, 0x0300);
+    d = pci_register_device(bus, owner, "VGA", -1, 0x1234, 0x1111, 0x00,
+                            0x0300);
 
     mem_map = pci_device_get_mem_map(d);
     port_map = pci_device_get_port_map(d);
@@ -1296,8 +1297,8 @@ public:
     {
         const VMFileEntry &rom = fCtx->params->files[VM_FILE_VGA_BIOS];
 
-        fFb = pci_vga_init(ParentBus()->AsPCIBus(), fWidth, fHeight, rom.buf,
-                           rom.len);
+        fFb = pci_vga_init(this, ParentBus()->AsPCIBus(), fWidth, fHeight,
+                           rom.buf, rom.len);
         if (fFb == nullptr) {
             return false;
         }

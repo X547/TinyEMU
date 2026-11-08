@@ -163,7 +163,7 @@ bool PCIHostPLDADevice::Prepare()
     /* A real root port, so that the type 1 configuration write mask, the
        capability list and the bus routing all come from the same code every
        other bridge uses. Its bus numbers are the guest's to program. */
-    fDevBus = pci_bridge_init(fRootBus.get(), 0, "plda-root-port",
+    fDevBus = pci_bridge_init(fRootBus.get(), this, 0, "plda-root-port",
                               PLDA_ROOT_PORT_VENDOR_ID,
                               PLDA_ROOT_PORT_DEVICE_ID,
                               PCI_EXP_TYPE_ROOT_PORT, nullptr);

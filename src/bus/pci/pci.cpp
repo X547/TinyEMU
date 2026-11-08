@@ -31,6 +31,7 @@
 
 #include "bits.h"
 #include "cutils.h"
+#include "device.h"
 #include "pci.h"
 
 //#define DEBUG_CONFIG
@@ -45,6 +46,8 @@ typedef struct {
 } PCIIORegion;
 
 struct PCIDevice: public IRQTarget {
+    /* what a function level or secondary bus reset resets */
+    Device *owner;
     PCIBus *bus;
     uint8_t devfn;
     IRQSignal irq[4];
@@ -71,6 +74,7 @@ struct PCIDevice: public IRQTarget {
     /* Non-null on a type 1 function: the bus this bridge forwards to. */
     PCIBusPtr secondary_bus;
     int pcie_type; /* -1 without a PCI Express capability */
+    int pcie_offset; /* where that capability is */
 
     void SetIRQ(int irq_num, int level) override;
 };
@@ -180,8 +184,9 @@ static int devfn_alloc(PCIBus *b)
 }
 
 /* devfn < 0 means to allocate it */
-static PCIDevice *pci_register_device_type(PCIBus *b, const char *name,
-                                           int devfn, uint16_t vendor_id,
+static PCIDevice *pci_register_device_type(PCIBus *b, Device *owner,
+                                           const char *name, int devfn,
+                                           uint16_t vendor_id,
                                            uint16_t device_id,
                                            uint8_t revision, uint16_t class_id,
                                            uint8_t header_type, int port_type,
@@ -201,6 +206,7 @@ static PCIDevice *pci_register_device_type(PCIBus *b, const char *name,
     b->device[devfn] = std::make_unique<PCIDevice>();
     d = b->device[devfn].get();
     d->bus = b;
+    d->owner = owner;
     d->name = name;
     d->devfn = devfn;
 
@@ -212,6 +218,7 @@ static PCIDevice *pci_register_device_type(PCIBus *b, const char *name,
     d->next_cap_offset = first_cap_offset;
     d->next_ext_cap_offset = PCI_EXT_CAP_START;
     d->pcie_type = -1;
+    d->pcie_offset = 0;
     d->msix = nullptr;
     memset(d->wmask + 0x40, 0xff, PCI_CONFIG_SIZE - 0x40);
 
@@ -226,13 +233,14 @@ static PCIDevice *pci_register_device_type(PCIBus *b, const char *name,
     return d;
 }
 
-PCIDevice *pci_register_device(PCIBus *b, const char *name, int devfn,
-                               uint16_t vendor_id, uint16_t device_id,
-                               uint8_t revision, uint16_t class_id,
-                               int first_cap_offset)
+PCIDevice *pci_register_device(PCIBus *b, Device *owner, const char *name,
+                               int devfn, uint16_t vendor_id,
+                               uint16_t device_id, uint8_t revision,
+                               uint16_t class_id, int first_cap_offset)
 {
-    return pci_register_device_type(b, name, devfn, vendor_id, device_id,
-                                    revision, class_id, PCI_HEADER_TYPE_NORMAL,
+    return pci_register_device_type(b, owner, name, devfn, vendor_id,
+                                    device_id, revision, class_id,
+                                    PCI_HEADER_TYPE_NORMAL,
                                     PCI_EXP_TYPE_ENDPOINT, first_cap_offset);
 }
 
@@ -656,6 +664,28 @@ static void pci_device_config_write8(PCIDevice *d, uint32_t addr,
 }
 
 
+/* The function, its device and what that device carries start over, as at
+   power on. */
+static void pci_function_level_reset(PCIDevice *d)
+{
+    pci_device_reset(d);
+    d->owner->Reset();
+    if (Bus *child = d->owner->ChildBus())
+        child->ResetAll();
+}
+
+/* Everything behind the bridge starts over. Nothing is held in reset while
+   the bit stays set: the reset is over once the guest sets it. */
+static void pci_secondary_bus_reset(PCIDevice *br)
+{
+    pci_bus_reset(br->secondary_bus.get());
+    if (br->owner != nullptr) {
+        if (Bus *child = br->owner->ChildBus())
+            child->ResetAll();
+    }
+}
+
+
 static void pci_device_config_write(PCIDevice *d, uint32_t addr,
                                     uint32_t data, int size_log2)
 {
@@ -675,6 +705,8 @@ static void pci_device_config_write(PCIDevice *d, uint32_t addr,
             return;
     }
     bool msix_masked = d->msix != nullptr && d->msix->MaskedAll();
+    bool bus_reset = pci_is_bridge(d) &&
+        (d->config[PCI_BRIDGE_CONTROL] & PCI_BRIDGE_CTL_BUS_RESET) != 0;
     size = 1 << size_log2;
     for(i = 0; i < size; i++) {
         addr1 = addr + i;
@@ -682,6 +714,19 @@ static void pci_device_config_write(PCIDevice *d, uint32_t addr,
             pci_device_config_write8(d, addr1, get_bits(data, i * 8, 8));
         }
     }
+    /* Initiate Function Level Reset reads as 0. */
+    if (d->pcie_offset > 0) {
+        uint32_t devctl = d->pcie_offset + PCI_EXP_DEVCTL;
+        uint16_t val = get_le16(&d->config[devctl]);
+        if (val & PCI_EXP_DEVCTL_BCR_FLR) {
+            put_le16(&d->config[devctl], val & ~PCI_EXP_DEVCTL_BCR_FLR);
+            pci_function_level_reset(d);
+            return;
+        }
+    }
+    if (!bus_reset && pci_is_bridge(d) &&
+        (d->config[PCI_BRIDGE_CONTROL] & PCI_BRIDGE_CTL_BUS_RESET) != 0)
+        pci_secondary_bus_reset(d);
     if (msix_masked && !d->msix->MaskedAll())
         d->msix->FunctionMaskLifted();
     if (pci_config_target_hit(d, addr, size_log2))
@@ -847,16 +892,16 @@ bool pci_bus_has_msi(PCIBus *b)
     return pci_bus_msi_target(b) != NULL;
 }
 
-PCIBus *pci_bridge_init(PCIBus *parent, int devfn, const char *name,
-                        uint16_t vendor_id, uint16_t device_id, int port_type,
-                        PCIDevice **pdev)
+PCIBus *pci_bridge_init(PCIBus *parent, Device *owner, int devfn,
+                        const char *name, uint16_t vendor_id,
+                        uint16_t device_id, int port_type, PCIDevice **pdev)
 {
     PCIDevice *d;
     PCIBus *b;
     int i;
 
-    d = pci_register_device_type(parent, name, devfn, vendor_id, device_id,
-                                 0x00, PCI_CLASS_BRIDGE_PCI,
+    d = pci_register_device_type(parent, owner, name, devfn, vendor_id,
+                                 device_id, 0x00, PCI_CLASS_BRIDGE_PCI,
                                  PCI_HEADER_TYPE_BRIDGE, port_type,
                                  PCI_FIRST_CAP_OFFSET);
     if (d == NULL)
@@ -1094,6 +1139,12 @@ int pci_add_pcie_capability(PCIDevice *d, int port_type)
     /* Role based error reporting, which is what tells a guest this is not a
        function from before the 1.1 revision of the specification. */
     put_le32(cap + 0x04, bit_at(15));
+    /* An endpoint resets its device on a function level reset, which a
+       guest uses to start a driver over. */
+    bool flr = port_type == PCI_EXP_TYPE_ENDPOINT && d->owner != nullptr;
+    if (flr)
+        put_le32(cap + PCI_EXP_DEVCAP,
+                 get_le32(cap + PCI_EXP_DEVCAP) | PCI_EXP_DEVCAP_FLR);
     /* link capabilities and status: one lane at 2.5 GT/s, link up */
     put_le32(cap + 0x0c, bit_at(0) | bit_at(4));
     put_le16(cap + 0x12, bit_at(0) | bit_at(4));
@@ -1101,8 +1152,10 @@ int pci_add_pcie_capability(PCIDevice *d, int port_type)
     if (offset < 0)
         return -1;
     d->pcie_type = port_type;
+    d->pcie_offset = offset;
     /* the control registers: device, link, slot and root, and device 2 */
-    pci_device_set_wmask(d, offset + 0x08, 0x7fff, 2);
+    pci_device_set_wmask(d, offset + PCI_EXP_DEVCTL, flr ? 0xffff : 0x7fff,
+                         2);
     pci_device_set_wmask(d, offset + 0x10, 0x0ffb, 2);
     if (port_type == PCI_EXP_TYPE_ROOT_PORT ||
         port_type == PCI_EXP_TYPE_DOWNSTREAM)

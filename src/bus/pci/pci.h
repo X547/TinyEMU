@@ -31,6 +31,7 @@
 
 typedef struct PCIBus PCIBus;
 typedef struct PCIDevice PCIDevice;
+class Device;
 
 /* A bus owns the functions registered on it, and a bridge function the bus
    behind it, so only a root bus needs an owner of its own. */
@@ -109,6 +110,7 @@ typedef std::unique_ptr<PCIBus, PCIBusDeleter> PCIBusPtr;
 #define PCI_IO_LIMIT_UPPER16	0x32	/* 16 bits */
 #define PCI_ROM_ADDRESS1	0x38	/* type 1 header */
 #define PCI_BRIDGE_CONTROL	0x3e	/* 16 bits */
+#define  PCI_BRIDGE_CTL_BUS_RESET 0x40	/* secondary bus reset */
 
 #define PCI_CLASS_BRIDGE_PCI	0x0604
 
@@ -121,6 +123,10 @@ typedef std::unique_ptr<PCIBus, PCIBusDeleter> PCIBusPtr;
 #define PCI_EXP_TYPE_ROOT_PORT	0x4
 #define PCI_EXP_TYPE_UPSTREAM	0x5
 #define PCI_EXP_TYPE_DOWNSTREAM	0x6
+#define PCI_EXP_DEVCAP		0x04	/* 32 bits */
+#define  PCI_EXP_DEVCAP_FLR	0x10000000 /* function level reset */
+#define PCI_EXP_DEVCTL		0x08	/* 16 bits */
+#define  PCI_EXP_DEVCTL_BCR_FLR	0x8000	/* initiate a function level reset */
 
 /* Extended capabilities live above the conventional 256 bytes and are a
    forward chain starting at this offset. A zero header there is how a guest
@@ -425,10 +431,15 @@ void pci_bus_config_write(PCIBus *b, uint32_t addr, uint32_t data,
 /* 'first_cap_offset' moves the capability list up, for a device whose binding
    puts a register of its own in the way: the PCI SD Host Controller
    specification defines a slot information register at 0x40, which is exactly
-   where the list would otherwise begin. */
-PCIDevice *pci_register_device(PCIBus *b, const char *name, int devfn,
-                               uint16_t vendor_id, uint16_t device_id,
-                               uint8_t revision, uint16_t class_id,
+   where the list would otherwise begin.
+
+   'owner' is the device the function belongs to, which a function level
+   reset of an endpoint on a PCI Express bus resets, together with the
+   devices on its child bus. */
+PCIDevice *pci_register_device(PCIBus *b, Device *owner, const char *name,
+                               int devfn, uint16_t vendor_id,
+                               uint16_t device_id, uint8_t revision,
+                               uint16_t class_id,
                                int first_cap_offset = PCI_FIRST_CAP_OFFSET);
 
 /* The function at 'devfn' of this bus, or null if there is none. Lets a host
@@ -440,10 +451,13 @@ PCIDevice *pci_bus_get_device(PCIBus *b, int devfn);
    the bridge's bus numbers, and its four INTx lines land on the bridge's own
    pins, so each tier applies the swizzle hardware applies. 'port_type' is the
    PCI Express port type to report, and is ignored on a bus that is not PCI
-   Express. */
-PCIBus *pci_bridge_init(PCIBus *parent, int devfn, const char *name,
-                        uint16_t vendor_id, uint16_t device_id, int port_type,
-                        PCIDevice **pdev);
+   Express.
+
+   'owner' is the device whose child bus holds the devices behind the
+   bridge, which a secondary bus reset resets. */
+PCIBus *pci_bridge_init(PCIBus *parent, Device *owner, int devfn,
+                        const char *name, uint16_t vendor_id,
+                        uint16_t device_id, int port_type, PCIDevice **pdev);
 
 /* The port type a bridge added to this bus should report. A bus a host bridge
    owns takes root ports; below one of those the tiers alternate, because a

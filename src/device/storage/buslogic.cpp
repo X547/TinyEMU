@@ -1184,7 +1184,7 @@ bool BusLogicDevice::Realize()
     int devio_flags = DEVIO_SIZE8 | DEVIO_SIZE16 | DEVIO_SIZE32 |
         DEVIO_DISABLED;
 
-    fPciDev = pci_register_device(bus, Name(), -1, BL_PCI_VENDOR_ID,
+    fPciDev = pci_register_device(bus, this, Name(), -1, BL_PCI_VENDOR_ID,
                                   BL_PCI_DEVICE_ID, 0x08, BL_PCI_CLASS);
     if (fPciDev == nullptr) {
         vm_error("%s: could not register the PCI function\n", Name());

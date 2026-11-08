@@ -223,8 +223,9 @@ bool BansheeDevice::Realize()
 {
     PCIBus *pci_bus = ParentBus()->AsPCIBus();
 
-    fPciDev = pci_register_device(pci_bus, Name(), -1, BANSHEE_PCI_VENDOR_ID,
-                                  fDeviceId, 0x01, 0x0300);
+    fPciDev = pci_register_device(pci_bus, this, Name(), -1,
+                                  BANSHEE_PCI_VENDOR_ID, fDeviceId, 0x01,
+                                  0x0300);
     if (fPciDev == nullptr) {
         vm_error("%s: could not register the PCI function\n", Name());
         return false;

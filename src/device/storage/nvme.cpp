@@ -1771,7 +1771,7 @@ bool NVMeDevice::Realize()
 {
     PCIBus *bus = ParentBus()->AsPCIBus();
 
-    fPciDev = pci_register_device(bus, "nvme", -1, 0x1b36, 0x0010, 0x02,
+    fPciDev = pci_register_device(bus, this, "nvme", -1, 0x1b36, 0x0010, 0x02,
                                   0x0108);
     if (fPciDev == nullptr) {
         vm_error("%s: could not register the PCI device\n", Name());

@@ -392,7 +392,7 @@ void VIRTIODevice::RealizePCI(PCIBus *bus)
        not here. */
     pci_device_id = 0x1040 + device_id;
     snprintf(name, sizeof(name), "virtio_%04x", pci_device_id);
-    s->pci_dev = pci_register_device(bus, name, -1,
+    s->pci_dev = pci_register_device(bus, this, name, -1,
                                      0x1af4, pci_device_id, 0x01,
                                      fPciClass);
     pci_device_set_config16(s->pci_dev, 0x2c, 0x1af4);

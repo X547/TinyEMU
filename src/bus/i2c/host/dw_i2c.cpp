@@ -675,7 +675,7 @@ bool DWI2CDevice::Realize()
 
     ResetRegs();
     if (pci_bus != nullptr) {
-        fPciDev = pci_register_device(pci_bus, Name(), -1,
+        fPciDev = pci_register_device(pci_bus, this, Name(), -1,
                                       DW_I2C_PCI_VENDOR_ID,
                                       DW_I2C_PCI_DEVICE_ID, 0x01,
                                       DW_I2C_PCI_CLASS);

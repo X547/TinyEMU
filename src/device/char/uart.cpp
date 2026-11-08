@@ -393,9 +393,9 @@ private:
 
     bool RealizePCI(PCIBus *bus)
     {
-        fPciDev = pci_register_device(bus, Name(), -1, UART_PCI_VENDOR_ID,
-                                      UART_PCI_DEVICE_ID, 0x01,
-                                      UART_PCI_CLASS);
+        fPciDev = pci_register_device(bus, this, Name(), -1,
+                                      UART_PCI_VENDOR_ID, UART_PCI_DEVICE_ID,
+                                      0x01, UART_PCI_CLASS);
         if (fPciDev == nullptr) {
             vm_error("%s: could not register the PCI function\n", Name());
             return false;

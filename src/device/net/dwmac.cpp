@@ -299,7 +299,7 @@ bool DwmacDevice::Prepare()
 
 bool DwmacDevice::RealizePCI(PCIBus *bus)
 {
-    fPciDev = pci_register_device(bus, Name(), -1, DWMAC_PCI_VENDOR_ID,
+    fPciDev = pci_register_device(bus, this, Name(), -1, DWMAC_PCI_VENDOR_ID,
                                   DWMAC_PCI_DEVICE_ID, 0x01, 0x0200);
     if (fPciDev == nullptr) {
         vm_error("%s: could not register the PCI function\n", Name());

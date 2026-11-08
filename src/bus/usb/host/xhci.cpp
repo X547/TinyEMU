@@ -2769,8 +2769,8 @@ bool XHCIDevice::Realize()
            NEC and Intel ones carry driver quirks that would oblige this to
            implement vendor commands or work around errata it does not
            have. */
-        fPciDev = pci_register_device(bus, "xhci", -1, 0x1b36, 0x000d, 0x01,
-                                      0x0c03);
+        fPciDev = pci_register_device(bus, this, "xhci", -1, 0x1b36, 0x000d,
+                                      0x01, 0x0c03);
         if (fPciDev == nullptr) {
             vm_error("%s: could not register the PCI device\n", Name());
             return false;

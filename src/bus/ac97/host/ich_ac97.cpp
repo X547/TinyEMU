@@ -690,8 +690,8 @@ bool ICHAC97Device::Realize()
                       DEVIO_DISABLED;
 
     /* The first ICH's AC'97 function, 82801AA. */
-    fPciDev = pci_register_device(pci_bus, Name(), -1, 0x8086, 0x2415, 0x01,
-                                  0x0401);
+    fPciDev = pci_register_device(pci_bus, this, Name(), -1, 0x8086, 0x2415,
+                                  0x01, 0x0401);
     if (fPciDev == nullptr) {
         vm_error("%s: could not register the PCI device\n", Name());
         return false;

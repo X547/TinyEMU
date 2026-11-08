@@ -109,7 +109,7 @@ public:
     bool Prepare() override
     {
         PCIBus *parent = ParentBus()->AsPCIBus();
-        PCIBus *sec = pci_bridge_init(parent, -1, Name(),
+        PCIBus *sec = pci_bridge_init(parent, this, -1, Name(),
                                       PCI_BRIDGE_VENDOR_ID,
                                       PCI_BRIDGE_DEVICE_ID,
                                       pci_bus_bridge_port_type(parent),
@@ -187,7 +187,8 @@ static std::unique_ptr<Bus> pci_switch_bus_create(Device *owner, PCIBus *bus)
 
     if (pci_bus_bridge_port_type(bus) == PCI_EXP_TYPE_UPSTREAM) {
         snprintf(name, sizeof(name), "%s-up", owner->Name());
-        PCIBus *inner = pci_bridge_init(bus, 0, name, PCI_BRIDGE_VENDOR_ID,
+        PCIBus *inner = pci_bridge_init(bus, owner, 0, name,
+                                        PCI_BRIDGE_VENDOR_ID,
                                         PCI_BRIDGE_DEVICE_ID,
                                         PCI_EXP_TYPE_UPSTREAM, nullptr);
         if (inner == nullptr) {
@@ -258,7 +259,7 @@ public:
             return false;
         }
 
-        PCIBus *inner = pci_bridge_init(parent, -1, Name(),
+        PCIBus *inner = pci_bridge_init(parent, this, -1, Name(),
                                         PCI_BRIDGE_VENDOR_ID,
                                         PCI_BRIDGE_DEVICE_ID,
                                         pci_bus_bridge_port_type(parent),

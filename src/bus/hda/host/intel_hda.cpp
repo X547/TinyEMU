@@ -1072,8 +1072,8 @@ bool IntelHDADevice::Realize()
     /* The ICH6 controller, which every driver knows. Its capabilities start
        at 0x60, leaving the chipset registers below them where drivers
        expect to write. */
-    fPciDev = pci_register_device(pci_bus, Name(), -1, 0x8086, 0x2668, 0x01,
-                                  0x0403, 0x60);
+    fPciDev = pci_register_device(pci_bus, this, Name(), -1, 0x8086, 0x2668,
+                                  0x01, 0x0403, 0x60);
     if (fPciDev == nullptr) {
         vm_error("%s: could not register the PCI device\n", Name());
         return false;

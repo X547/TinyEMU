@@ -1686,8 +1686,9 @@ bool SDHCIDevice::Realize()
            the kind the PCI SD Host Controller specification describes. */
         /* Red Hat's identifiers, and a capability list moved up out of the
            way of the slot information register the binding puts at 0x40. */
-        fPciDev = pci_register_device(pci_bus, "sdhci", -1, 0x1b36, 0x0007,
-                                      0x01, 0x0805, SDHCI_PCI_FIRST_CAP);
+        fPciDev = pci_register_device(pci_bus, this, "sdhci", -1, 0x1b36,
+                                      0x0007, 0x01, 0x0805,
+                                      SDHCI_PCI_FIRST_CAP);
         if (fPciDev == nullptr) {
             vm_error("%s: could not register the PCI device\n", Name());
             return false;

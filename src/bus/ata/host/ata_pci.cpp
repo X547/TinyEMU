@@ -113,8 +113,9 @@ bool ATAPCIController::AttachDevice(ATADevice *dev)
 
 bool ATAPCIController::RegisterPCI(PCIBus *pci_bus, int devfn)
 {
-    fPciDev = pci_register_device(pci_bus, Name(), devfn, ATA_PCI_VENDOR_ID,
-                                  ATA_PCI_DEVICE_ID, 0x00, 0x0101);
+    fPciDev = pci_register_device(pci_bus, this, Name(), devfn,
+                                  ATA_PCI_VENDOR_ID, ATA_PCI_DEVICE_ID, 0x00,
+                                  0x0101);
     if (fPciDev == nullptr) {
         vm_error("%s: could not register the PCI function\n", Name());
         return false;

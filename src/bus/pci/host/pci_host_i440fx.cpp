@@ -304,17 +304,17 @@ public:
 
         uint16_t device_id = fVariant == I440FX_CLOUD_HYPERVISOR ?
             CLOUDHV_DEVICE_ID : 0x1237;
-        fState->pci_dev = pci_register_device(fPciBus.get(), "i440FX", 0,
-                                              0x8086, device_id, 0x02,
-                                              0x0600);
+        fState->pci_dev = pci_register_device(fPciBus.get(), this, "i440FX", 0,
+                                              0x8086, device_id, 0x02, 0x0600);
         /* Red Hat, Inc. / QEMU virtual machine, which is the pair guests
            recognise. */
         pci_device_set_config16(fState->pci_dev, PCI_SUBSYSTEM_VENDOR_ID,
                                 0x1af4);
         pci_device_set_config16(fState->pci_dev, PCI_SUBSYSTEM_ID, 0x1100);
 
-        fState->piix3_dev = pci_register_device(fPciBus.get(), "PIIX3", 8,
-                                                0x8086, 0x7000, 0x00, 0x0601);
+        fState->piix3_dev = pci_register_device(fPciBus.get(), this, "PIIX3",
+                                                8, 0x8086, 0x7000, 0x00,
+                                                0x0601);
         pci_device_set_config8(fState->piix3_dev, PCI_HEADER_TYPE,
                                PCI_HEADER_TYPE_NORMAL |
                                PCI_HEADER_TYPE_MULTI);

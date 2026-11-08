@@ -105,7 +105,7 @@ bool NE2000Device::Realize()
 
     PCIBus *pci_bus = ParentBus()->AsPCIBus();
     if (pci_bus != nullptr) {
-        fPciDev = pci_register_device(pci_bus, Name(), -1,
+        fPciDev = pci_register_device(pci_bus, this, Name(), -1,
                                       NE2000_PCI_VENDOR_ID,
                                       NE2000_PCI_DEVICE_ID, 0x00,
                                       NE2000_PCI_CLASS);

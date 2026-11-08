@@ -151,9 +151,9 @@ bool PCITestDevice::Realize()
 {
     PCIBus *bus = ParentBus()->AsPCIBus();
 
-    fPciDev = pci_register_device(bus, Name(), fDevfn, TEST_PCI_VENDOR_ID,
-                                  TEST_PCI_DEVICE_ID, TEST_PCI_REVISION,
-                                  TEST_PCI_CLASS);
+    fPciDev = pci_register_device(bus, this, Name(), fDevfn,
+                                  TEST_PCI_VENDOR_ID, TEST_PCI_DEVICE_ID,
+                                  TEST_PCI_REVISION, TEST_PCI_CLASS);
     if (fPciDev == nullptr) {
         vm_error("%s: could not register the PCI function\n", Name());
         return false;
