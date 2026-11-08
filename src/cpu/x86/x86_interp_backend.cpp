@@ -121,6 +121,11 @@ public:
     void SetIRQ(int irq, int level) override {abort();}
     void SendMsi(uint64_t addr, uint32_t data) override {abort();}
     X86Vcpu &Vcpu(int index) override {return *fVcpus[index];}
+    void Reset() override
+    {
+        for (auto &vcpu : fVcpus)
+            x86_cpu_reset(vcpu->Cpu());
+    }
 
     /* TlbFlushTarget, for the RAM dirty bits */
     void FlushTlbWriteRange(uint8_t *ram_addr, size_t ram_size) override;

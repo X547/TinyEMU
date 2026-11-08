@@ -87,6 +87,22 @@ private:
     struct kvm_regs fResetRegs;
     struct kvm_sregs fResetSregs;
     struct kvm_fpu fResetFpu;
+    /* and what else a reset of the machine puts back: the extended state,
+       the MSRs an OS programs, pending events, and with the in-kernel
+       local APIC, the APIC and whether the vcpu waits for a STARTUP */
+    struct kvm_xsave fResetXsave;
+    bool fHaveXsave = false;
+    struct kvm_xcrs fResetXcrs;
+    bool fHaveXcrs = false;
+    struct kvm_vcpu_events fResetEvents;
+    struct {
+        struct kvm_msrs hdr;
+        struct kvm_msr_entry entries[64];
+    } fResetMsrs {};
+    struct kvm_lapic_state fResetLapic;
+    struct kvm_mp_state fResetMpState;
+
+    void SaveResetState();
 
     void SetCpuid(int index);
     void SetPat(uint64_t pat);
@@ -116,6 +132,9 @@ public:
        themselves */
     void Init() override;
     void Startup(int vector) override;
+
+    /* As created, for a reset of the machine. */
+    void Reset();
 };
 
 
@@ -145,6 +164,9 @@ private:
     int fVmFd = -1;
     std::vector<std::unique_ptr<KvmX86Vcpu>> fVcpus;
     std::unique_ptr<HypervisorPhysMemoryMap> fMemoryMap;
+    /* the in-kernel 8259s, IOAPIC and 8254 as created */
+    struct kvm_irqchip fResetIrqchips[3];
+    struct kvm_pit_state2 fResetPit;
 
     void SetGsiRouting();
 
@@ -175,6 +197,7 @@ public:
     void SetIRQ(int irq, int level) override;
     void SendMsi(uint64_t addr, uint32_t data) override;
     X86Vcpu &Vcpu(int index) override {return *fVcpus[index];}
+    void Reset() override;
 };
 
 
@@ -310,6 +333,18 @@ void KvmX86Hypervisor::Init()
             perror("KVM_CREATE_PIT2");
             exit(1);
         }
+        for (int i = 0; i < 3; i++) {
+            memset(&fResetIrqchips[i], 0, sizeof(fResetIrqchips[i]));
+            fResetIrqchips[i].chip_id = i;
+            if (ioctl(fVmFd, KVM_GET_IRQCHIP, &fResetIrqchips[i]) < 0) {
+                perror("KVM_GET_IRQCHIP");
+                exit(1);
+            }
+        }
+        if (ioctl(fVmFd, KVM_GET_PIT2, &fResetPit) < 0) {
+            perror("KVM_GET_PIT2");
+            exit(1);
+        }
     }
 
     for (int i = 0; i < fCpuCount; i++)
@@ -421,17 +456,121 @@ KvmX86Vcpu::KvmX86Vcpu(KvmX86Hypervisor &owner, int index):
     }
     fRun = static_cast<struct kvm_run *>(run);
 
-    if (!fOwner.fIrqchip) {
-        if (ioctl(fFd, KVM_GET_REGS, &fResetRegs) < 0) {
-            perror("KVM_GET_REGS");
+    SaveResetState();
+}
+
+
+/* The MSRs an OS sets up, which an INIT leaves and a reset does not. */
+static const uint32_t kResetMsrs[] = {
+    0x174, 0x175, 0x176,                /* SYSENTER_CS, _ESP, _EIP */
+    MSR_IA32_PAT,
+    0x2ff,                              /* MTRR_DEF_TYPE */
+    0x250, 0x258, 0x259,                /* the fixed range MTRRs */
+    0x268, 0x269, 0x26a, 0x26b, 0x26c, 0x26d, 0x26e, 0x26f,
+    0xc0000081, 0xc0000082, 0xc0000083, /* STAR, LSTAR, CSTAR */
+    0xc0000084, 0xc0000102,             /* SFMASK, KERNEL_GS_BASE */
+};
+
+
+void KvmX86Vcpu::SaveResetState()
+{
+    if (ioctl(fFd, KVM_GET_REGS, &fResetRegs) < 0) {
+        perror("KVM_GET_REGS");
+        exit(1);
+    }
+    GetSregs(&fResetSregs);
+    if (ioctl(fFd, KVM_GET_FPU, &fResetFpu) < 0) {
+        perror("KVM_GET_FPU");
+        exit(1);
+    }
+    fHaveXsave = ioctl(fFd, KVM_GET_XSAVE, &fResetXsave) == 0;
+    fHaveXcrs = ioctl(fFd, KVM_GET_XCRS, &fResetXcrs) == 0;
+    if (ioctl(fFd, KVM_GET_VCPU_EVENTS, &fResetEvents) < 0) {
+        perror("KVM_GET_VCPU_EVENTS");
+        exit(1);
+    }
+    /* KVM reads them up to the first it does not have */
+    int n = sizeof(kResetMsrs) / sizeof(kResetMsrs[0]);
+    for (int i = 0; i < n; i++)
+        fResetMsrs.entries[i].index = kResetMsrs[i];
+    fResetMsrs.hdr.nmsrs = n;
+    int got = ioctl(fFd, KVM_GET_MSRS, &fResetMsrs);
+    fResetMsrs.hdr.nmsrs = got > 0 ? got : 0;
+    if (fOwner.fIrqchip) {
+        if (ioctl(fFd, KVM_GET_LAPIC, &fResetLapic) < 0) {
+            perror("KVM_GET_LAPIC");
             exit(1);
         }
-        GetSregs(&fResetSregs);
-        if (ioctl(fFd, KVM_GET_FPU, &fResetFpu) < 0) {
-            perror("KVM_GET_FPU");
+        if (ioctl(fFd, KVM_GET_MP_STATE, &fResetMpState) < 0) {
+            perror("KVM_GET_MP_STATE");
             exit(1);
         }
     }
+}
+
+
+/* IA32_APIC_BASE goes with the special registers, before the APIC that
+   follows it. */
+void KvmX86Vcpu::Reset()
+{
+    SetSregs(fResetSregs);
+    if (ioctl(fFd, KVM_SET_REGS, &fResetRegs) < 0) {
+        perror("KVM_SET_REGS");
+        exit(1);
+    }
+    if (fHaveXsave ? ioctl(fFd, KVM_SET_XSAVE, &fResetXsave) < 0 :
+        ioctl(fFd, KVM_SET_FPU, &fResetFpu) < 0) {
+        perror("KVM_SET_XSAVE");
+        exit(1);
+    }
+    if (fHaveXcrs && ioctl(fFd, KVM_SET_XCRS, &fResetXcrs) < 0) {
+        perror("KVM_SET_XCRS");
+        exit(1);
+    }
+    if (fResetMsrs.hdr.nmsrs > 0 &&
+        ioctl(fFd, KVM_SET_MSRS, &fResetMsrs) != (int)fResetMsrs.hdr.nmsrs) {
+        perror("KVM_SET_MSRS");
+        exit(1);
+    }
+    if (ioctl(fFd, KVM_SET_VCPU_EVENTS, &fResetEvents) < 0) {
+        perror("KVM_SET_VCPU_EVENTS");
+        exit(1);
+    }
+    if (fOwner.fIrqchip) {
+        if (ioctl(fFd, KVM_SET_LAPIC, &fResetLapic) < 0) {
+            perror("KVM_SET_LAPIC");
+            exit(1);
+        }
+        if (ioctl(fFd, KVM_SET_MP_STATE, &fResetMpState) < 0) {
+            perror("KVM_SET_MP_STATE");
+            exit(1);
+        }
+    }
+    fShutdown = false;
+    fHalted = false;
+    fTaskPriority = 0;
+    fApicBaseSet = false;
+    fRun->cr8 = 0;
+    fRun->request_interrupt_window = 0;
+}
+
+
+void KvmX86Hypervisor::Reset()
+{
+    if (fIrqchip) {
+        for (int i = 0; i < 3; i++) {
+            if (ioctl(fVmFd, KVM_SET_IRQCHIP, &fResetIrqchips[i]) < 0) {
+                perror("KVM_SET_IRQCHIP");
+                exit(1);
+            }
+        }
+        if (ioctl(fVmFd, KVM_SET_PIT2, &fResetPit) < 0) {
+            perror("KVM_SET_PIT2");
+            exit(1);
+        }
+    }
+    for (auto &vcpu : fVcpus)
+        vcpu->Reset();
 }
 
 

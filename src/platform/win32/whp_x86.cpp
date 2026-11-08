@@ -144,6 +144,11 @@ private:
     bool fApicBaseSet = false;
     /* the registers as created, for an INIT */
     WHV_REGISTER_VALUE fResetValues[RESET_REGISTER_COUNT];
+    /* and with the hypervisor's local APIC, what else a reset puts back:
+       the APIC itself, and whether the processor waits for a STARTUP */
+    WHV_REGISTER_VALUE fResetApicBase {};
+    WHV_REGISTER_VALUE fResetActivity {};
+    std::vector<uint8_t> fResetApicState;
 
     void GetVpRegisters(const WHV_REGISTER_NAME *names, UINT32 count,
                         WHV_REGISTER_VALUE *values);
@@ -193,6 +198,9 @@ public:
        STARTUP themselves */
     void Init() override;
     void Startup(int vector) override;
+
+    /* As created, for a reset of the machine. */
+    void Reset();
 };
 
 
@@ -257,6 +265,11 @@ public:
     void SetIRQ(int irq, int level) override;
     void SendMsi(uint64_t addr, uint32_t data) override;
     X86Vcpu &Vcpu(int index) override {return *fVcpus[index];}
+    void Reset() override
+    {
+        for (auto &vcpu : fVcpus)
+            vcpu->Reset();
+    }
 };
 
 
@@ -510,6 +523,20 @@ WhpX86Vcpu::WhpX86Vcpu(WhpX86Hypervisor &owner,
         SetVpRegisters(&name, 1, &value);
     }
     GetVpRegisters(kResetNames, RESET_REGISTER_COUNT, fResetValues);
+    if (fOwner.fApicEmulation) {
+        WHV_REGISTER_NAME name = WHvX64RegisterApicBase;
+        GetVpRegisters(&name, 1, &fResetApicBase);
+        name = WHvRegisterInternalActivityState;
+        GetVpRegisters(&name, 1, &fResetActivity);
+        fResetApicState.resize(4096);
+        UINT32 size;
+        hr = WHvGetVirtualProcessorInterruptControllerState2(
+            fPartition, fIndex, fResetApicState.data(),
+            fResetApicState.size(), &size);
+        if (FAILED(hr))
+            whp_fail("WHvGetVirtualProcessorInterruptControllerState2", hr);
+        fResetApicState.resize(size);
+    }
 }
 
 
@@ -970,6 +997,25 @@ void WhpX86Vcpu::Init()
     fWindowRequested = false;
     fHalted = false;
     fTaskPriority = 0;
+}
+
+
+void WhpX86Vcpu::Reset()
+{
+    Init();
+    fShutdown = false;
+    fApicBaseSet = false;
+    if (!fOwner.fApicEmulation)
+        return;
+    WHV_REGISTER_NAME names[2] = {
+        WHvX64RegisterApicBase, WHvRegisterInternalActivityState,
+    };
+    WHV_REGISTER_VALUE values[2] = {fResetApicBase, fResetActivity};
+    SetVpRegisters(names, 2, values);
+    HRESULT hr = WHvSetVirtualProcessorInterruptControllerState2(
+        fPartition, fIndex, fResetApicState.data(), fResetApicState.size());
+    if (FAILED(hr))
+        whp_fail("WHvSetVirtualProcessorInterruptControllerState2", hr);
 }
 
 

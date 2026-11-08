@@ -145,6 +145,14 @@ public:
     void SetInterruptRequest(bool level) override {(void)level;}
     void Init() override;
     void Startup(int vector) override;
+
+    /* As created, for a reset of the machine: an INIT, which also ends a
+       shutdown. */
+    void Reset()
+    {
+        Init();
+        fShutdown = false;
+    }
 };
 
 
@@ -201,6 +209,11 @@ public:
     void SetIRQ(int irq, int level) override;
     void SendMsi(uint64_t addr, uint32_t data) override;
     X86Vcpu &Vcpu(int index) override {return *fVcpus[index];}
+    void Reset() override
+    {
+        for (auto &vcpu : fVcpus)
+            vcpu->Reset();
+    }
 };
 
 

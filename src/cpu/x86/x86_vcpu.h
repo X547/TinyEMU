@@ -191,4 +191,10 @@ public:
 
     /* Processor 'index', below X86CpuOptions::cpu_count. */
     virtual X86Vcpu &Vcpu(int index) = 0;
+
+    /* With the processors' threads joined: every processor as at power on,
+       and the interrupt controllers the back end has. With local APICs of
+       its own, the processors beyond the first wait for a STARTUP; with
+       the machine's, the machine holds them. */
+    virtual void Reset() = 0;
 };
