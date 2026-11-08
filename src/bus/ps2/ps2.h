@@ -179,4 +179,5 @@ public:
     PS2Device *Dev() const {return fDev.get();}
 
     bool Realize() override;
+    void Reset() override {fDev->Reset();}
 };

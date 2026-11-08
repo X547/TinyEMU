@@ -246,6 +246,9 @@ public:
 
     bool Prepare() override;
     bool Realize() override;
+    /* The link stays in reset, as at power on, until the driver takes it
+       out; the codecs are reset after this, by their bus. */
+    void Reset() override {EnterReset();}
     Bus *ChildBus() override {return fChildBus;}
 
     void SetBar(int bar_num, uint64_t addr, bool enabled) override;

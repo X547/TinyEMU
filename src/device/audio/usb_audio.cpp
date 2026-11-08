@@ -191,7 +191,8 @@ public:
     uint8_t FeatureUnitId() const {return 3 * fIndex + 2;}
     uint8_t OutputTerminalId() const {return 3 * fIndex + 3;}
 
-    void Reset();
+    /* also what a reset of the USB device does */
+    void Reset() override;
     void SetStreaming(bool on);
     bool SetRate(uint32_t rate);
     uint32_t Rate() const {return fRate;}

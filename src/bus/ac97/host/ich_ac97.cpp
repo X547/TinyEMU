@@ -171,6 +171,7 @@ public:
 
     bool Prepare() override;
     bool Realize() override;
+    void Reset() override;
     Bus *ChildBus() override {return fChildBus;}
 
     void SetBar(int bar_num, uint64_t addr, bool enabled) override;
@@ -586,6 +587,21 @@ void ICHAC97Device::BoxWritten(ICHBox &b, uint8_t old_cr, uint8_t old_lvi)
     if (changed) {
         fChildBus->StreamsChanged();
     }
+}
+
+
+/* The link goes back into reset, which stops the codecs' streams; the codecs
+   themselves are reset after this, by their bus. */
+void ICHAC97Device::Reset()
+{
+    for (ICHBox &b : fBoxes) {
+        b = ICHBox();
+    }
+    fGlobCnt = 0;
+    fGlobSta = 0;
+    fCas = 0;
+    UpdateIrq();
+    fChildBus->StreamsChanged();
 }
 
 

@@ -206,7 +206,6 @@ private:
 
     uint8_t fMem[NE2000_MEM_SIZE] {};
 
-    void Reset();
     void LoadProm();
     void UpdateIrq();
 
@@ -239,6 +238,8 @@ public:
 
     bool Prepare() override;
     bool Realize() override;
+    /* also what the reset port does */
+    void Reset() override;
 
     /* EthernetTarget */
     bool CanWritePacket() override;

@@ -103,15 +103,26 @@ I8042Controller::I8042Controller(PhysMemoryMap *port_map, IRQSignal *kbd_irq,
         fPorts[i].owner = this;
         fPorts[i].index = i;
     }
+    Reset();
 
+    port_map->RegisterDevice(io_base, 1, &fDataIo, DEVIO_SIZE8);
+    port_map->RegisterDevice(io_base + 4, 1, &fCmdIo, DEVIO_SIZE8);
+}
+
+
+void I8042Controller::Reset()
+{
     /* A PC's controller comes up translating, and the keyboard behind it
        comes up in set 2, so a guest that never writes the mode register
        still reads the set 1 codes its software is written against. */
     fMode = KBD_MODE_KBD_INT | KBD_MODE_MOUSE_INT | KBD_MODE_KCC;
     fStatus = KBD_STAT_CMD | KBD_STAT_UNLOCKED;
-
-    port_map->RegisterDevice(io_base, 1, &fDataIo, DEVIO_SIZE8);
-    port_map->RegisterDevice(io_base + 4, 1, &fCmdIo, DEVIO_SIZE8);
+    fWriteCmd = 0;
+    fReplyFull = false;
+    fReplyTimeout = false;
+    fLastData = 0;
+    fXlateBreak = false;
+    UpdateIRQ();
 }
 
 
@@ -519,6 +530,8 @@ public:
             fCtx->machine);
         return true;
     }
+
+    void Reset() override {fController->Reset();}
 
     /* An OS that has ACPI may look for the controller nowhere else. */
     void BuildAML(AcpiContext &ctx) override

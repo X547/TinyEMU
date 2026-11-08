@@ -97,6 +97,20 @@ HPET::HPET(VirtMachine *machine):
 }
 
 
+void HPET::Reset()
+{
+    for (Timer &t : fTimers) {
+        SetLine(t.raisedLine, 0);
+        t = Timer();
+        t.raisedLine = LINE_NONE;
+    }
+    fConfig = 0;
+    fStatus = 0;
+    fCounterBase = 0;
+    fBaseUs = 0;
+}
+
+
 void HPET::SetOutputs(IRQSignal *irq0, IRQSignal *irq8, IRQTarget *ioapic,
                       uint32_t route_mask)
 {
@@ -457,6 +471,8 @@ public:
                                       DEVIO_SIZE32 | DEVIO_SIZE64);
         return true;
     }
+
+    void Reset() override {fHpet.Reset();}
 
     /* what reserves the registers; the HPET table describes the timer */
     void BuildAML(AcpiContext &ctx) override

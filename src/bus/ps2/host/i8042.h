@@ -120,6 +120,10 @@ public:
     int FindFreePort();
     bool AttachDevice(PS2Device *dev, int port);
 
+    /* The controller as at power on. What its devices have queued is
+       theirs, and goes when they are reset. */
+    void Reset();
+
     DeviceIOAdapter<I8042Controller, &I8042Controller::DataRead,
                     &I8042Controller::DataWrite> fDataIo {*this};
     DeviceIOAdapter<I8042Controller, &I8042Controller::StatusRead,

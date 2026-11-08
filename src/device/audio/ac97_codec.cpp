@@ -223,6 +223,12 @@ public:
         fOut(std::move(out)), fIn(std::move(in)) {}
 
     bool Realize() override;
+    /* The link, reset before this, stopped the streams. */
+    void Reset() override
+    {
+        RegisterReset();
+        UpdateStreams();
+    }
 
     /* AC97Codec */
     uint16_t ReadRegister(int reg) override;

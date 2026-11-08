@@ -120,6 +120,9 @@ public:
         return fFb != nullptr;
     }
 
+    /* memory alone, which a reset leaves as RAM is left */
+    void Reset() override {}
+
     void BuildFDT(FDTContext &ctx) override
     {
         ctx.fdt->BeginNodeNum("framebuffer", fMmio->base);

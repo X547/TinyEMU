@@ -388,6 +388,8 @@ public:
 
     bool Realize() override
         {return fDev.Finalize() && usb_attach_device(this, &fDev, fPort);}
+    /* the functions with it */
+    void Reset() override {fDev.Reset();}
     Bus *ChildBus() override {return &fBus;}
 };
 

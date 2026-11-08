@@ -175,6 +175,7 @@ public:
 
     bool Prepare() override;
     bool Realize() override;
+    void Reset() override;
     Bus *ChildBus() override {return fChildBus;}
 
     /* ATAChannelTarget */

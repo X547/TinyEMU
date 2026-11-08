@@ -195,6 +195,7 @@ public:
 
     bool Prepare() override;
     bool Realize() override;
+    void Reset() override;
     void BuildFDT(FDTContext &ctx) override;
 
     void LoadComplete(int ret);
@@ -284,6 +285,19 @@ bool CFIFlashDevice::Realize()
         fMachine->HoldStart();
     }
     return true;
+}
+
+
+/* The array and its write back to the image go on. */
+void CFIFlashDevice::Reset()
+{
+    SetReadMode(READ_ARRAY);
+    fWriteState = WRITE_COMMAND;
+    fStatus = SR_READY;
+    fLocked.assign(fLocked.size(), false);
+    fBufferBase = 0;
+    fBufferWrites = 0;
+    fBufferError = false;
 }
 
 

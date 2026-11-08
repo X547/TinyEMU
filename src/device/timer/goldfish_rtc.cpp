@@ -104,6 +104,19 @@ public:
         return true;
     }
 
+    /* The clock keeps running as it was set, as on its battery. */
+    void Reset() override
+    {
+        fTimeHigh = 0;
+        fSetHigh = 0;
+        fAlarm = 0;
+        fAlarmArmed = false;
+        fIrqEnabled = false;
+        fIrqPending = false;
+        fTimer->Disarm();
+        UpdateIrq();
+    }
+
     void BuildFDT(FDTContext &ctx) override
     {
         ctx.fdt->BeginNodeNum("rtc", fMmio->base);

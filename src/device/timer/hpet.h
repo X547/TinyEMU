@@ -89,6 +89,9 @@ public:
     void SetOutputs(IRQSignal *irq0, IRQSignal *irq8, IRQTarget *ioapic,
                     uint32_t route_mask);
 
+    /* Halted, with every timer off and its line lowered. */
+    void Reset();
+
     /* Whether the PIT's and the RTC's own interrupts are cut off. */
     bool LegacyReplacement() const;
 

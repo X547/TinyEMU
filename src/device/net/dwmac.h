@@ -132,7 +132,8 @@ private:
        before returning; guard against the ring being drained twice over. */
     bool fTxRunning = false;
 
-    void Reset();
+    /* also what the software reset bit does */
+    void Reset() override;
     bool RealizePCI(PCIBus *bus);
     uint8_t *GuestPtr(uint64_t addr, bool is_rw);
 

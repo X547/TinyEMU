@@ -114,6 +114,18 @@ public:
 
     bool Realize() override;
 
+    void Reset() override
+    {
+        fIntx = 0;
+        if (fIrq != nullptr)
+            fIrq->Set(0);
+        fScratch = 0;
+        fDmaLo = 0;
+        fDmaHi = 0;
+        fDmaStatus = 0;
+        ProbeFill();
+    }
+
     void SetBar(int bar_num, uint64_t addr, bool enabled) override
     {
         if (fRange[bar_num] != nullptr)

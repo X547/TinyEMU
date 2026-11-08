@@ -185,6 +185,9 @@ public:
     void Refresh(HostScreen *screen) override;
     void SetBar(int bar_num, uint64_t addr, bool enabled) override;
 
+    /* The registers as at power on; video memory keeps what it holds. */
+    void Reset();
+
     uint32_t VbeRead(uint32_t offset, int size_log2);
     void VbeWrite(uint32_t offset, uint32_t val, int size_log2);
 
@@ -1128,6 +1131,34 @@ static void vga_build_edid(uint8_t *e, int width, int height)
     e[127] = -sum;
 }
 
+void VGAState::Reset()
+{
+    sr_index = 0;
+    memset(sr, 0, sizeof(sr));
+    gr_index = 0;
+    memset(gr, 0, sizeof(gr));
+    ar_index = 0;
+    memset(ar, 0, sizeof(ar));
+    ar_flip_flop = 0;
+    cr_index = 0;
+    memset(cr, 0, sizeof(cr));
+    msr = 0;
+    fcr = 0;
+    st00 = 0;
+    st01 = 0;
+    dac_state = 0;
+    dac_sub_index = 0;
+    dac_read_index = 0;
+    dac_write_index = 0;
+    memset(dac_cache, 0, sizeof(dac_cache));
+    memset(palette, 0, sizeof(palette));
+    vbe_index = 0;
+    memset(vbe_regs, 0, sizeof(vbe_regs));
+    vbe_regs[VBE_DISPI_INDEX_ID] = VBE_DISPI_ID5;
+    vbe_regs[VBE_DISPI_INDEX_VIDEO_MEMORY_64K] = fb_size >> 16;
+    full_update = true;
+}
+
 static std::unique_ptr<FBDevice> pci_vga_init(PCIBus *bus, int width,
                                               int height,
                                               const uint8_t *vga_rom_buf,
@@ -1276,6 +1307,8 @@ public:
         fCtx->screen_height = fFb->height;
         return true;
     }
+
+    void Reset() override {static_cast<VGAState *>(fFb.get())->Reset();}
 };
 
 

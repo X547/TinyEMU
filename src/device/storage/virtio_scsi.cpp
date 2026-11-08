@@ -160,7 +160,7 @@ public:
     int RecvRequest(int queue_idx, int desc_idx, int read_size,
                     int write_size) override;
     void ConfigWrite() override;
-    void Reset() override;
+    void ResetDeviceType() override;
 
     void CommandDone(VSCSICommand *cmd);
 
@@ -246,7 +246,7 @@ void VIRTIOSCSIDevice::ConfigWrite()
 }
 
 
-void VIRTIOSCSIDevice::Reset()
+void VIRTIOSCSIDevice::ResetDeviceType()
 {
     /* the queues the commands came from are gone */
     for (auto &cmd : fInFlight) {

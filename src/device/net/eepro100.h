@@ -291,6 +291,8 @@ public:
 
     bool Prepare() override;
     bool Realize() override;
+    /* what the PORT software reset does; the EEPROM keeps its words */
+    void Reset() override;
 
     /* EthernetTarget */
     bool CanWritePacket() override;

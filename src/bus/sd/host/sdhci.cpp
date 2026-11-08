@@ -439,6 +439,8 @@ public:
 
     bool Prepare() override;
     bool Realize() override;
+    /* the card goes with the bus power */
+    void Reset() override {SoftReset(SDHCI_RESET_ALL);}
     void BuildFDT(FDTContext &ctx) override;
     void BuildAML(AcpiContext &ctx) override;
     Bus *ChildBus() override {return fChildBus;}

@@ -116,7 +116,7 @@ public:
        held; the processors may be running, so a device reset alone is what
        the guest sees as one. Children are reset after their parent, by the
        bus's ResetAll(). */
-    virtual void Reset() {}
+    virtual void Reset() = 0;
 
     /* Emit this device's node. A device that provides a child bus decides
        for itself whether the children appear in the tree: PCI devices are

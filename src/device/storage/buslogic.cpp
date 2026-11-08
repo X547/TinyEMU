@@ -238,7 +238,7 @@ private:
 
     void RaiseIntr(uint8_t bits);
     void UpdateIrq();
-    void Reset(bool hard);
+    void ResetAdapter(bool hard);
     void ResetBus();
 
     void WriteControl(uint8_t val);
@@ -270,6 +270,7 @@ public:
 
     bool Prepare() override;
     bool Realize() override;
+    void Reset() override {ResetAdapter(true);}
     Bus *ChildBus() override {return fChildBus.get();}
 
     void SetBar(int bar_num, uint64_t addr, bool enabled) override;
@@ -377,7 +378,7 @@ void BusLogicDevice::UpdateIrq()
 
 /* Both leave the adapter waiting for its mailboxes; the commands it had are
    forgotten without an answer. */
-void BusLogicDevice::Reset(bool hard)
+void BusLogicDevice::ResetAdapter(bool hard)
 {
     for (auto &cmd : fInFlight) {
         cmd->unit->Cancel(&cmd->req);
@@ -670,7 +671,7 @@ void BusLogicDevice::CommandDone()
 void BusLogicDevice::WriteControl(uint8_t val)
 {
     if ((val & (BL_CONTROL_RHARD | BL_CONTROL_RSOFT)) != 0) {
-        Reset((val & BL_CONTROL_RHARD) != 0);
+        ResetAdapter((val & BL_CONTROL_RHARD) != 0);
         return;
     }
     if ((val & BL_CONTROL_RINT) != 0) {
@@ -1204,7 +1205,7 @@ bool BusLogicDevice::Realize()
     pci_register_bar(fPciDev, 1, BL_MEM_BAR_SIZE, PCI_ADDRESS_SPACE_MEM, this);
     fIrq = pci_device_get_irq(fPciDev, 0);
 
-    Reset(true);
+    ResetAdapter(true);
     return true;
 }
 

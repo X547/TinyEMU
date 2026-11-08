@@ -145,6 +145,7 @@ public:
 
     void ExecCommand(uint8_t cmd) override;
     void Reset() override;
+    void HardReset() override;
 
     uint32_t DmaMove(uint8_t *mem, uint32_t len) override;
     void DmaComplete(bool ok) override;
@@ -170,6 +171,14 @@ ATADiskDevice::ATADiskDevice(std::unique_ptr<HostBlockDevice> bs, bool read_only
     fMultSectors = 0;
 
     Reset();
+}
+
+
+void ATADiskDevice::HardReset()
+{
+    fMultSectors = 0;
+    fDmaMode = ATA_DISK_DEFAULT_DMA;
+    ATADevice::HardReset();
 }
 
 

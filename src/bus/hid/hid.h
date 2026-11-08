@@ -255,4 +255,6 @@ public:
     ~HIDCollectionNode() override;
 
     bool Realize() override;
+    /* The transport resets the device, and the device its collections. */
+    void Reset() override {}
 };

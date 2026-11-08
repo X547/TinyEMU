@@ -154,6 +154,8 @@ public:
     PHYDevice(int address, uint32_t phy_id);
 
     bool Realize() override {return true;}
+    /* also what BMCR's reset bit does */
+    void Reset() override;
     void BuildFDT(FDTContext &ctx) override;
 
     uint16_t MdioRead(int reg) override;

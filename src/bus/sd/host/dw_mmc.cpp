@@ -295,6 +295,7 @@ public:
 
     bool Prepare() override;
     bool Realize() override;
+    void Reset() override;
     void BuildFDT(FDTContext &ctx) override;
     Bus *ChildBus() override {return fChildBus.get();}
 
@@ -461,6 +462,32 @@ uint32_t DWMMCDevice::Status() const
     status |= fRespIndex << DW_MMC_STATUS_RESP_SHIFT;
     status |= words << DW_MMC_STATUS_FCNT_SHIFT;
     return status;
+}
+
+
+/* The card is reset after this, by its bus. */
+void DWMMCDevice::Reset()
+{
+    TransferStop();
+    ResetRegs();
+    memset(fResp, 0, sizeof(fResp));
+    fRintsts = 0;
+    fIdsts = 0;
+    fDescBase = 0;
+    fRespIndex = 0;
+    fFifoHead = 0;
+    fFifoCount = 0;
+    fBlockLen = SD_BLOCK_SIZE;
+    fTransferIsRead = false;
+    fDataCmd = 0;
+    fTcbcnt = 0;
+    fTbbcnt = 0;
+    fDescCtrl = 0;
+    fSeg = 0;
+    fNextDesc = 0;
+    fBufAddr = 0;
+    DmaReset();
+    UpdateIrq();
 }
 
 

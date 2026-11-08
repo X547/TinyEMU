@@ -106,6 +106,11 @@ public:
     ATAPIDevice();
 
     void Reset() override;
+    void HardReset() override
+    {
+        fDmaMode = ATAPI_DEFAULT_DMA;
+        ATADevice::HardReset();
+    }
     void SetSignature() override;
     void ExecCommand(uint8_t cmd) override;
     uint32_t DmaMove(uint8_t *mem, uint32_t len) override;

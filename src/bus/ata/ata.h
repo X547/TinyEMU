@@ -192,6 +192,9 @@ public:
        answered. */
     virtual void Reset();
     virtual void SetSignature();
+    /* What a power on or the reset line does: a software reset that also
+       forgets what SET FEATURES and SET MULTIPLE chose. */
+    virtual void HardReset();
 
     /* Decode one command. A device aborts what it does not implement. */
     virtual void ExecCommand(uint8_t cmd) = 0;
@@ -261,6 +264,10 @@ public:
     /* Raised by a device whose DMA command is waiting for data. */
     void DmaRequested();
 
+    /* The channel's own registers as at power on, the line lowered. The
+       devices are reset by themselves. */
+    void Reset();
+
     uint32_t CommandRead(uint32_t offset, int size_log2);
     void CommandWrite(uint32_t offset, uint32_t val, int size_log2);
     uint32_t ControlRead(uint32_t offset, int size_log2);
@@ -317,6 +324,7 @@ public:
     Bus *ChildBus() override {return fChildBus.get();}
 
     bool Realize() override;
+    void Reset() override {fDev->HardReset();}
 };
 
 

@@ -338,6 +338,8 @@ public:
     void SetChildBus(Bus *bus) {fChildBus = bus;}
 
     bool Realize() override;
+    /* The controller, reset before this, took back what it had in flight. */
+    void Reset() override {fDev->Reset();}
     Bus *ChildBus() override {return fChildBus;}
 };
 

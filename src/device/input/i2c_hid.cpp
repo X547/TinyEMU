@@ -126,6 +126,7 @@ public:
 
     bool Prepare() override;
     bool Realize() override;
+    void Reset() override;
     void BuildFDT(FDTContext &ctx) override;
     void BuildAML(AcpiContext &ctx) override;
     Bus *ChildBus() override {return fChildBus.get();}
@@ -147,6 +148,22 @@ I2CHID::I2CHID(int address, std::unique_ptr<HostTimer> timer):
     fTimer(std::move(timer))
 {
     fTimer->target = this;
+}
+
+
+/* Unlike the reset command, power on is not announced with an empty
+   report. */
+void I2CHID::Reset()
+{
+    fDev.Reset();
+    fResetPending = false;
+    fWriteLen = 0;
+    fWriting = false;
+    fReadData = nullptr;
+    fReadLen = 0;
+    fReadPos = 0;
+    fTimer->Disarm();
+    UpdateIrq();
 }
 
 

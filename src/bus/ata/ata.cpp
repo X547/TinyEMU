@@ -147,6 +147,14 @@ void ATADevice::Reset()
 }
 
 
+void ATADevice::HardReset()
+{
+    fFeature = 0;
+    fSelect = 0xa0;
+    Reset();
+}
+
+
 uint8_t ATADevice::ReadReg(int reg)
 {
     switch (reg) {
@@ -258,6 +266,14 @@ void ATAChannel::RaiseIrq()
     if (fTarget != nullptr) {
         fTarget->ATASetIrq(fIndex, true);
     }
+}
+
+
+void ATAChannel::Reset()
+{
+    fSelected = 0;
+    fControl = 0;
+    LowerIrq();
 }
 
 

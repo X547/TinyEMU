@@ -87,6 +87,11 @@ struct VIRTIOInputDevice final: public VIRTIODevice, public KeyboardTarget,
     int RecvRequest(int queue_idx, int desc_idx, int read_size,
                     int write_size) override;
     void ConfigWrite() override;
+    void ResetDeviceType() override
+    {
+        buttons_state = 0;
+        memset(config_space, 0, sizeof(config_space));
+    }
 
     /* KeyboardTarget */
     void SendKeyEvent(bool is_down, uint16_t key_code) override;

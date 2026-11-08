@@ -68,7 +68,7 @@ struct VIRTIOBlockDevice final: public VIRTIODevice {
 
     int RecvRequest(int queue_idx, int desc_idx, int read_size,
                     int write_size) override;
-    void Reset() override;
+    void ResetDeviceType() override;
 };
 
 typedef struct {
@@ -171,7 +171,7 @@ void BlockRequest::Complete(int ret)
     s->in_flight.erase(it);
 }
 
-void VIRTIOBlockDevice::Reset()
+void VIRTIOBlockDevice::ResetDeviceType()
 {
     /* the queues the requests came from are gone */
     for (auto &req : in_flight)

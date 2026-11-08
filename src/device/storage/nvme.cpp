@@ -314,6 +314,9 @@ public:
         }
         return bus->Target()->AttachNamespace(fNs.get(), nsid);
     }
+
+    /* The commands are the controller's, which takes them back itself. */
+    void Reset() override {}
 };
 
 
@@ -458,6 +461,7 @@ public:
 
     bool Prepare() override;
     bool Realize() override;
+    void Reset() override;
     Bus *ChildBus() override {return fChildBus.get();}
 
     void SetBar(int bar_num, uint64_t addr, bool enabled) override;
@@ -1525,6 +1529,19 @@ void NVMeDevice::ControllerEnable()
     /* A shutdown reported earlier belongs to the controller that has just
        been replaced, so its state does not carry over. */
     fCsts &= ~(CSTS_CFS | CSTS_SHST_MASK);
+}
+
+
+void NVMeDevice::Reset()
+{
+    ControllerDisable();
+    fCc = 0;
+    fCsts = 0;
+    fAqa = 0;
+    fAsqLo = 0;
+    fAsq = 0;
+    fAcqLo = 0;
+    fAcq = 0;
 }
 
 

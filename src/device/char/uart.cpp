@@ -25,6 +25,32 @@ SerialState::SerialState(IRQSignal *irq, HostConsole *output,
 }
 
 
+void SerialState::Reset()
+{
+    bool was_full = fRxCount >= RxCapacity();
+
+    fDivider = 0;
+    fIer = 0;
+    fLcr = 0;
+    fMcr = 0;
+    fLsrErrors = 0;
+    fMsr = 0;
+    fScr = 0;
+    fFcr = 0;
+    fThrIpending = false;
+    fRxHead = 0;
+    fRxCount = 0;
+    fRbr = 0;
+    fTimeoutPending = false;
+    if (fTimer != nullptr)
+        fTimer->Disarm();
+    UpdateIRQ();
+    /* the host end may have stopped for room */
+    if (was_full && fOutput != nullptr)
+        fOutput->TargetReady();
+}
+
+
 int SerialState::RxTrigger() const
 {
     static const int levels[4] = {1, 4, 8, 14};
@@ -478,6 +504,8 @@ public:
         }
         return true;
     }
+
+    void Reset() override {fSerial->Reset();}
 
     void BuildFDT(FDTContext &ctx) override
     {

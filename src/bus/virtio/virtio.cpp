@@ -197,9 +197,6 @@ static void virtio_write_status(VIRTIODevice *s, uint32_t val)
     uint32_t old = s->status;
 
     if (val == 0) {
-        s->status = 0;
-        s->irq->Set(0);
-        virtio_reset(s);
         s->Reset();
         return;
     }
@@ -212,6 +209,16 @@ static void virtio_write_status(VIRTIODevice *s, uint32_t val)
         for (uint32_t i = 0; i < s->num_queues; i++)
             queue_notify_any(s, i);
     }
+}
+
+
+/* The MSI-X table is the PCI function's, which only a reset of the function
+   puts back. */
+void VIRTIODevice::Reset()
+{
+    irq->Set(0);
+    virtio_reset(this);
+    ResetDeviceType();
 }
 
 

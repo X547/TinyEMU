@@ -150,6 +150,9 @@ public:
     uint32_t Read(uint32_t offset, int size_log2);
     void Write(uint32_t offset, uint32_t val, int size_log2);
 
+    /* The registers as at power on, the FIFO emptied. */
+    void Reset();
+
     /* ConsoleTarget */
     int ReceiveRoom() override;
     void Receive(const uint8_t *buf, int len) override;

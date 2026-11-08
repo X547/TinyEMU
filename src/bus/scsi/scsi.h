@@ -256,6 +256,9 @@ public:
     SCSIDevice *Dev() const {return fDev.get();}
 
     bool Realize() override;
+    /* The initiator, reset before this, already took back what it had in
+       flight. */
+    void Reset() override {fDev->Reset();}
 };
 
 

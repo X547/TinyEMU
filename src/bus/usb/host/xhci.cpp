@@ -484,8 +484,8 @@ private:
     uint32_t ReadDword(uint32_t offset);
     void WriteDword(uint32_t offset, uint32_t val);
 
-    /* controller */
-    void Reset();
+    /* controller: also what HCRST does */
+    void Reset() override;
     void SetRunning(bool running);
     uint64_t Microframe() const;
     uint32_t MfIndex() const {return get_bits(Microframe(), 0, 14);}

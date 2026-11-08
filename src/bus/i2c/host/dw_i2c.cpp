@@ -220,6 +220,7 @@ public:
 
     bool Prepare() override;
     bool Realize() override;
+    void Reset() override;
     void BuildFDT(FDTContext &ctx) override;
     void BuildAML(AcpiContext &ctx) override;
     Bus *ChildBus() override {return fChildBus.get();}
@@ -456,6 +457,25 @@ void DWI2CDevice::SetEnable(uint32_t val)
 
 
 //#pragma mark - register file
+
+/* The targets are reset after this, by their bus, so a transfer in progress
+   is just forgotten. */
+void DWI2CDevice::Reset()
+{
+    ResetRegs();
+    fRawIntr = 0;
+    fAbortSource = 0;
+    fTxHead = 0;
+    fTxCount = 0;
+    fRxHead = 0;
+    fRxCount = 0;
+    fTxFlushed = false;
+    fActive = false;
+    fReading = false;
+    fTarget = nullptr;
+    UpdateIrq();
+}
+
 
 void DWI2CDevice::ResetRegs()
 {

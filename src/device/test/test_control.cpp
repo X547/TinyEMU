@@ -131,6 +131,17 @@ public:
         return true;
     }
 
+    /* The test disks are the host's, and keep their modes and counts. */
+    void Reset() override
+    {
+        for (int i = 0; i < fIrqCount; i++) {
+            if ((fIrqLevel >> i) & 1)
+                fIrq[i]->Set(0);
+        }
+        fIrqLevel = 0;
+        fBlockSelect = 0;
+    }
+
     void BuildFDT(FDTContext &ctx) override
     {
         FDTBuilder *fdt = ctx.fdt;

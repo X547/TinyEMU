@@ -114,11 +114,18 @@ MDIODevice *MDIOBus::MDIODeviceAt(int index)
 
 PHYDevice::PHYDevice(int address, uint32_t phy_id):
     MDIODevice("ethernet-phy", address),
-    fPhyId(phy_id),
-    fBmcr(MII_BMCR_ANEG_ENABLE | MII_BMCR_SPEED1000 | MII_BMCR_FULLDUPLEX),
-    fAnar(0x01e1),  /* 100BASE-TX and 10BASE-T, both duplexes, 802.3 */
-    fGtcr(0x0300)   /* 1000BASE-T, both duplexes */
+    fPhyId(phy_id)
 {
+    Reset();
+}
+
+
+/* The host carrier is not the PHY's to forget. */
+void PHYDevice::Reset()
+{
+    fBmcr = MII_BMCR_ANEG_ENABLE | MII_BMCR_SPEED1000 | MII_BMCR_FULLDUPLEX;
+    fAnar = 0x01e1; /* 100BASE-TX and 10BASE-T, both duplexes, 802.3 */
+    fGtcr = 0x0300; /* 1000BASE-T, both duplexes */
 }
 
 
@@ -198,10 +205,7 @@ void PHYDevice::MdioWrite(int reg, uint16_t val)
     switch (reg) {
     case MII_BMCR:
         if ((val & MII_BMCR_RESET) != 0) {
-            fBmcr = MII_BMCR_ANEG_ENABLE | MII_BMCR_SPEED1000 |
-                MII_BMCR_FULLDUPLEX;
-            fAnar = 0x01e1;
-            fGtcr = 0x0300;
+            Reset();
             return;
         }
         /* Both the reset and the restart bits are self clearing, and a

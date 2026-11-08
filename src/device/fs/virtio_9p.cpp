@@ -51,12 +51,16 @@
 #define P9_MIN_MSIZE 4096
 
 
+struct P9OpenInfo;
+
 struct VIRTIO9PDevice final: public VIRTIODevice {
     /* declared first: the device closes its fids with it */
     std::unique_ptr<HostFileSystem> fs;
     int msize = 0; /* maximum message size */
     std::map<uint32_t, FSFile *> fids;
-    bool req_in_progress = false;
+    /* the lopen the file system has yet to finish, which holds up the
+       queue */
+    P9OpenInfo *open_in_progress = nullptr;
 
     /* 'mount_tag' is the name the guest mounts the directory by. */
     VIRTIO9PDevice(std::unique_ptr<HostFileSystem> fs, const char *mount_tag);
@@ -64,12 +68,45 @@ struct VIRTIO9PDevice final: public VIRTIODevice {
 
     int RecvRequest(int queue_idx, int desc_idx, int read_size,
                     int write_size) override;
+    void ResetDeviceType() override;
+};
+
+/* One per in-flight lopen: it carries the reply context and is itself the
+   completion the filesystem calls back into. */
+struct P9OpenInfo: public FSOpenCompletion {
+    VIRTIO9PDevice *dev;
+    int queue_idx;
+    int desc_idx;
+    uint16_t tag;
+    /* The fid's file, which the file system holds until it finishes. After
+       a reset it is no fid's any more: the completion closes it and does
+       not reply. */
+    FSFile *file;
+    bool orphaned = false;
+
+    void Complete(HostFileSystem *fs, FSQID *qid, int err) override;
 };
 
 VIRTIO9PDevice::~VIRTIO9PDevice()
 {
     for (auto &entry : fids)
         fs->Delete(entry.second);
+}
+
+/* Every fid is clunked, as a new session starts without any. */
+void VIRTIO9PDevice::ResetDeviceType()
+{
+    for (auto &entry : fids) {
+        if (open_in_progress == nullptr ||
+            entry.second != open_in_progress->file)
+            fs->Delete(entry.second);
+    }
+    fids.clear();
+    if (open_in_progress != nullptr) {
+        open_in_progress->orphaned = true;
+        open_in_progress = nullptr;
+    }
+    msize = 0;
 }
 
 static FSFile *fid_find(VIRTIO9PDevice *s, uint32_t fid)
@@ -403,17 +440,6 @@ static bool p9_entry_name_ok(const char *name)
            strcmp(name, "..") != 0;
 }
 
-/* One per in-flight lopen: it carries the reply context and is itself the
-   completion the filesystem calls back into. */
-struct P9OpenInfo: public FSOpenCompletion {
-    VIRTIO9PDevice *dev;
-    int queue_idx;
-    int desc_idx;
-    uint16_t tag;
-
-    void Complete(HostFileSystem *fs, FSQID *qid, int err) override;
-};
-
 static void virtio_9p_open_reply(HostFileSystem *fs, FSQID *qid, int err,
                                  P9OpenInfo *oi)
 {
@@ -437,10 +463,14 @@ void P9OpenInfo::Complete(HostFileSystem *fs, FSQID *qid, int err)
     P9OpenInfo *oi = this;
     VIRTIO9PDevice *s = oi->dev;
     int queue_idx = oi->queue_idx;
-    
-    virtio_9p_open_reply(fs, qid, err, oi);
 
-    s->req_in_progress = false;
+    if (orphaned) {
+        fs->Delete(file);
+        delete this;
+        return;
+    }
+    s->open_in_progress = nullptr;
+    virtio_9p_open_reply(fs, qid, err, oi);
 
     /* handle next requests */
     queue_notify((VIRTIODevice *)s, queue_idx);
@@ -461,7 +491,7 @@ int VIRTIO9PDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
     if (queue_idx != 0)
         return 0;
     
-    if (s->req_in_progress)
+    if (s->open_in_progress != nullptr)
         return -1;
     
     offset = 0;
@@ -526,11 +556,12 @@ int VIRTIO9PDevice::RecvRequest(int queue_idx, int desc_idx, int read_size,
             oi->queue_idx = queue_idx;
             oi->desc_idx = desc_idx;
             oi->tag = tag;
+            oi->file = f;
             err = fs->Open(&qid, f, flags, oi);
             if (err <= 0) {
                 virtio_9p_open_reply(fs, &qid, err, oi);
             } else {
-                s->req_in_progress = true;
+                s->open_in_progress = oi;
             }
         }
         break;

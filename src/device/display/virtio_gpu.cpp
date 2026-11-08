@@ -222,7 +222,7 @@ struct VIRTIOGPUDevice final: public VIRTIODevice, public ScreenSource {
     int RecvRequest(int queue_idx, int desc_idx, int read_size,
                     int write_size) override;
     void ConfigWrite() override;
-    void Reset() override;
+    void ResetDeviceType() override;
 
     /* ScreenSource */
     void SetScreen(HostScreen *screen) override;
@@ -265,7 +265,7 @@ void VIRTIOGPUDevice::ConfigWrite()
 }
 
 
-void VIRTIOGPUDevice::Reset()
+void VIRTIOGPUDevice::ResetDeviceType()
 {
     DisableScanout();
     if (screen != nullptr)

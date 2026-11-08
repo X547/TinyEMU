@@ -498,7 +498,8 @@ private:
     int fHostSpan = 0;
     bool fHostActive = false;
 
-    void Reset();
+    /* The card as at power on. Video memory keeps what it holds. */
+    void Reset() override;
     void UpdateIrq();
 
     /* registers */

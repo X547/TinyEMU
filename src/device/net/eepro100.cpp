@@ -162,6 +162,12 @@ void EEPro100Device::LoadEeprom()
 }
 
 
+void EEPro100Device::Reset()
+{
+    SoftwareReset();
+}
+
+
 /* Everything but PCI configuration and the EEPROM goes back to how power on
    left it. */
 void EEPro100Device::SoftwareReset()

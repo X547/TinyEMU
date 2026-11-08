@@ -195,5 +195,11 @@ public:
 
     bool Prepare() override;
     bool Realize() override;
+    /* A function in a usb-device is reset with that device. */
+    void Reset() override
+    {
+        if (fDev != nullptr)
+            fDev->Reset();
+    }
     Bus *ChildBus() override {return fChildBus;}
 };

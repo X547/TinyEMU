@@ -489,6 +489,7 @@ public:
     SDDevice *Dev() const {return fDev.get();}
 
     bool Realize() override;
+    void Reset() override {fDev->Reset();}
 };
 
 

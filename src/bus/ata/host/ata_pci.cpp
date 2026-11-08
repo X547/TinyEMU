@@ -75,6 +75,21 @@ ATAPCIController::ATAPCIController(const char *name):
 }
 
 
+/* The drives are reset after this, by their bus. */
+void ATAPCIController::Reset()
+{
+    for (int i = 0; i < ATA_PCI_CHANNELS; i++) {
+        ChannelState &c = fChannels[i];
+        c.ata.Reset();
+        c.irq_level = false;
+        c.bm_command = 0;
+        c.bm_status = ATA_BM_STAT_DMA0 | ATA_BM_STAT_DMA1;
+        c.bm_prd = 0;
+    }
+    UpdateIrq();
+}
+
+
 ATAPCIController::~ATAPCIController()
 {
     delete fChildBus;

@@ -249,6 +249,8 @@ public:
                               HDAWidget *widgets) = 0;
     /* The guest changed one of the port's widgets, or the group. */
     virtual void WidgetChanged() = 0;
+    /* A port follows its widgets, which the group resets. */
+    void Reset() override {}
     virtual void StreamOutput(int tag, const uint8_t *data, size_t frames,
                               const AudioFormat &fmt)
         {(void)tag; (void)data; (void)frames; (void)fmt;}
@@ -304,7 +306,8 @@ public:
     HDACodecDevice *Codec() const {return fCodec;}
 
     uint32_t Command(int nid, uint32_t verb);
-    void Reset();
+    /* also what a reset of the link does */
+    void Reset() override;
     void StreamOutput(int tag, const uint8_t *data, size_t frames,
                       const AudioFormat &fmt);
 };
@@ -326,6 +329,8 @@ class HDACodecDevice final: public Device, public HDACodec {
 private:
     int fAddress;
     uint32_t fVendorId;
+    /* what the configuration gave, and what firmware may have written */
+    uint32_t fDefaultSubsystemId;
     uint32_t fSubsystemId;
     uint32_t fRevisionId;
     HDACodecBus *fChildBus = nullptr;
@@ -339,11 +344,14 @@ public:
     HDACodecDevice(const char *name, int address, uint32_t vendor_id,
                    uint32_t subsystem_id, uint32_t revision_id):
         Device(name), fAddress(address), fVendorId(vendor_id),
-        fSubsystemId(subsystem_id), fRevisionId(revision_id) {}
+        fDefaultSubsystemId(subsystem_id), fSubsystemId(subsystem_id),
+        fRevisionId(revision_id) {}
     ~HDACodecDevice() override {delete fChildBus;}
 
     bool Prepare() override;
     bool Realize() override;
+    /* the function groups are reset after this, by their bus */
+    void Reset() override {fSubsystemId = fDefaultSubsystemId;}
     Bus *ChildBus() override {return fChildBus;}
 
     HDALink *Link() const {return fLinkBus->Link();}

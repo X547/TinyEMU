@@ -75,6 +75,9 @@ public:
         return true;
     }
 
+    /* A register that acts, with nothing to keep. */
+    void Reset() override {}
+
     void BuildFDT(FDTContext &ctx) override
     {
         FDTBuilder *fdt = ctx.fdt;
