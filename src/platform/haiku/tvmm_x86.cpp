@@ -134,18 +134,16 @@ public:
     void Init() override;
     void Startup(int vector) override;
 
-    /* As created, for a reset of the machine: an INIT, which also ends a
-       shutdown. */
-    void Reset()
-    {
-        Init();
-        fShutdown = false;
-    }
+    /* As created, for a reset of the machine, which also ends a shutdown. */
+    void Reset();
 };
 
 
-/* The kernel has no interrupt controllers yet, so the machine keeps them all,
-   the local APICs included. */
+/* With the interrupt controllers the hypervisor may have, the kernel has the
+   local APICs: it waits at HLT and starts the processors beyond the first,
+   the 8259s inject around the APIC while LINT0 takes ExtINT, and an EOI of a
+   level triggered vector comes back for the machine's IOAPIC. Otherwise the
+   machine keeps every interrupt controller. */
 class TvmmX86Hypervisor final: public X86CpuBackend, public HostHypervisorRam {
 private:
     friend class TvmmX86Vcpu;
@@ -154,6 +152,8 @@ private:
     DeviceLock &fLock;
     /* the machine has local APICs */
     bool fLocalApic;
+    /* and they are the kernel's */
+    bool fApicEmulation;
     int fCpuCount;
     int fPhysAddressBits;
     std::vector<X86CpuidLeaf> fCpuid;
@@ -182,6 +182,8 @@ public:
     TvmmX86Hypervisor(X86CpuTarget &target, DeviceLock &lock,
                       const X86CpuOptions &options):
         fTarget(target), fLock(lock), fLocalApic(options.local_apic),
+        fApicEmulation(options.local_apic &&
+                       options.hypervisor_interrupt_controllers),
         fCpuCount(options.cpu_count),
         fPhysAddressBits(std::min(host_phys_address_bits(),
                                   options.max_phys_address_bits)),
@@ -191,7 +193,7 @@ public:
     bool Init();
 
     bool HasInterruptControllers() override {return false;}
-    bool HasLocalApics() override {return false;}
+    bool HasLocalApics() override {return fApicEmulation;}
     int PhysAddressBits() override {return fPhysAddressBits;}
     PhysMemoryMap &MemoryMap() override {return *fMemoryMap;}
     uint8_t *AllocRam(size_t size) override;
@@ -242,7 +244,7 @@ bool TvmmX86Hypervisor::Init()
                 info.maxVcpus);
         return false;
     }
-    err = fDevice.CreateVm();
+    err = fDevice.CreateVm(fApicEmulation ? TvmmVmLocalApic : 0);
     if (err < B_OK) {
         fprintf(stderr, "tvmm: cannot create a machine: %s\n", strerror(err));
         return false;
@@ -401,12 +403,10 @@ void TvmmX86Hypervisor::SetIRQ(int irq, int level)
 }
 
 
+/* Only with the kernel's local APICs. */
 void TvmmX86Hypervisor::SendMsi(uint64_t addr, uint32_t data)
 {
-    /* the local APICs are the machine's, so no MSI comes here */
-    (void)addr;
-    (void)data;
-    abort();
+    tvmm_check("sending an MSI", fDevice.SendMsi(addr, data));
 }
 
 
@@ -419,9 +419,9 @@ TvmmX86Vcpu::TvmmX86Vcpu(TvmmX86Hypervisor &owner, int index):
     TvmmDevice &device = fOwner.fDevice;
 
     tvmm_check("creating a vcpu", device.CreateVcpu(index, fRun));
-    /* A write to CR8 exits, for the local APIC to know at once of a priority
-       that lets an interrupt through. */
-    fRun->tprExits = fOwner.fLocalApic;
+    /* A write to CR8 exits, for the machine's local APIC to know at once of
+       a priority that lets an interrupt through. */
+    fRun->tprExits = fOwner.fLocalApic && !fOwner.fApicEmulation;
 
     GetState(TvmmX86StateAll);
     if (fOwner.fPat != 0) {
@@ -515,12 +515,16 @@ void TvmmX86Vcpu::SyncTaskPriority()
 
 
 /* With the lock held, before a run: hands the processor the interrupt the
-   8259s or its local APIC raise when it can take one, and otherwise asks to
-   exit once it can. False while it stays halted. */
+   8259s or the machine's local APIC raise when it can take one, and
+   otherwise asks to exit once it can. False while it stays halted. With the
+   kernel's APIC the 8259s reach only the first processor, through LINT0,
+   and the injection goes around the APIC. */
 bool TvmmX86Vcpu::InjectInterrupt()
 {
     X86CpuTarget &target = fOwner.fTarget;
-    bool intr = target.InterruptRequested();
+    bool emulation = fOwner.fApicEmulation;
+    bool intr = (!emulation || (fIndex == 0 && fRun->extIntAccepted)) &&
+        target.InterruptRequested();
 
     if (intr && !fEventPending && !fInterruptShadow &&
         (fRflags & RFLAGS_IF)) {
@@ -528,7 +532,8 @@ bool TvmmX86Vcpu::InjectInterrupt()
         fRun->injectVector = target.AcknowledgeInterrupt();
         fEventPending = true;
         fHalted = false;
-        intr = target.InterruptRequested();
+        intr = target.InterruptRequested() &&
+            (!emulation || fRun->extIntAccepted);
     }
     if (fHalted)
         return false;
@@ -618,6 +623,29 @@ void TvmmX86Vcpu::Init()
 }
 
 
+/* Without the kernel's APIC an INIT; with it, the kernel resets the vcpu and
+   its APIC, and holds the processors beyond the first until a STARTUP. */
+void TvmmX86Vcpu::Reset()
+{
+    fShutdown = false;
+    if (!fOwner.fApicEmulation) {
+        Init();
+        return;
+    }
+    tvmm_check("resetting a vcpu", fOwner.fDevice.ResetVcpu(fIndex));
+    if (fOwner.fPat != 0) {
+        GetState(TvmmX86StateMsrs);
+        fState->msrs[TvmmX86MsrPat] = fOwner.fPat;
+        SetState(TvmmX86StateMsrs);
+    }
+    fRflags = 0x2;
+    fInterruptShadow = false;
+    fEventPending = false;
+    fTaskPriority = 0;
+    fHalted = false;
+}
+
+
 void TvmmX86Vcpu::Startup(int vector)
 {
     GetState(TvmmX86StateSegs | TvmmX86StateGprs);
@@ -639,9 +667,10 @@ void TvmmX86Vcpu::Run()
     DeviceLock &lock = fOwner.fLock;
     TvmmRun *run = fRun;
 
+    bool machine_apic = fOwner.fLocalApic && !fOwner.fApicEmulation;
     {
         DeviceLocker locker(lock);
-        if (fOwner.fLocalApic)
+        if (machine_apic)
             SyncTaskPriority();
         if (!InjectInterrupt())
             return;
@@ -659,7 +688,7 @@ void TvmmX86Vcpu::Run()
     fEventPending = run->eventPending;
     /* the local APIC learns of a write to CR8 before anything else sees
        it */
-    if (fOwner.fLocalApic && (int)run->cr8 != fTaskPriority) {
+    if (machine_apic && (int)run->cr8 != fTaskPriority) {
         fTaskPriority = run->cr8;
         DeviceLocker locker(lock);
         fOwner.fTarget.SetTaskPriority(fTaskPriority);
@@ -670,6 +699,7 @@ void TvmmX86Vcpu::Run()
     case TvmmExit::Canceled:
     case TvmmExit::InterruptWindow:
     case TvmmExit::TprChanged:
+    case TvmmExit::ExtIntAccepted:
         break;
     case TvmmExit::Io: {
         DeviceLocker locker(lock);
@@ -689,6 +719,11 @@ void TvmmX86Vcpu::Run()
     case TvmmExit::Halted:
         fHalted = true;
         break;
+    case TvmmExit::Eoi: {
+        DeviceLocker locker(lock);
+        fOwner.fTarget.ApicEoi(run->exit.eoi.vector);
+        break;
+    }
     case TvmmExit::Shutdown: {
         DeviceLocker locker(lock);
         fprintf(stderr, "tvmm: the guest shut down (triple fault)\n");
