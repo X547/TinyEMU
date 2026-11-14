@@ -20,6 +20,11 @@ static constexpr uint64 kMaxGpa = 1ull << 48;
 
 status_t SvmVm::Init()
 {
+	uint32 low;
+	uint32 high;
+	asm volatile("rdtsc" : "=a" (low), "=d" (high));
+	fTscOffset = -((uint64(high) << 32) | low);
+
 	CHECK_RET(fNpt.Init());
 
 	CHECK_RET(fIopm.Create("tvmm iopm", kIopmSize, B_CONTIGUOUS));

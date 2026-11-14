@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include <algorithm>
+#include <initializer_list>
 
 #include <KernelExport.h>
 
@@ -43,6 +44,7 @@ static constexpr uint64 kCr4Pse = 1ull << 4;
 static constexpr uint64 kCr4Pae = 1ull << 5;
 static constexpr uint64 kCr4La57 = 1ull << 12;
 static constexpr uint64 kCr4Osxsave = 1ull << 18;
+static constexpr uint64 kCr4Pke = 1ull << 22;
 static constexpr uint64 kEferLma = 1ull << 10;
 static constexpr uint64 kEferSvme = 1ull << 12;
 static constexpr uint64 kRflagsIf = 1ull << 9;
@@ -252,7 +254,8 @@ void SvmVcpu::SetupControl()
 	control.vintr = kSvmVintrMasking;
 	control.npControl = kSvmNpEnable;
 	control.nCr3 = fSvmVm.NptRoot();
-	control.tscOffset = -ReadTsc();
+	// the same for every vcpu, which a guest checks its processors for
+	control.tscOffset = fSvmVm.TscOffset();
 }
 
 
@@ -1226,30 +1229,75 @@ ExitAction SvmVcpu::HandleCr8Write(TvmmRun &run)
 }
 
 
-// What of the host's processor a guest cannot have, as the bits of each
-// register to clear: instructions that are made to raise #UD, and features
-// whose MSRs or state are not virtualized. All bits of a leaf listed as
-// cleared entirely.
-struct CpuidHidden {
+// What of the host's processor a guest can have: instructions that run
+// without help, but not those made to raise #UD, nor features whose MSRs,
+// state or interrupts are not virtualized. A leaf listed keeps only the bits
+// given of each register; the leaves with nothing a guest can have come out
+// as all zero.
+struct CpuidMask {
 	uint32 leaf;
 	uint32 regs[4];
 };
 
-static const CpuidHidden kCpuidHidden[] = {
-	// MONITOR, VMX, SMX, EST, TM2, PDCM, DCA, TSC deadline; ACPI, TM, PBE
-	{1, {0, 0, (1u << 3) | (1u << 5) | (1u << 6) | (1u << 7) | (1u << 8) | (1u << 15) | (1u << 18)
-		| (1u << 24), (1u << 22) | (1u << 29) | (1u << 31)}},
-	// MONITOR and MWAIT, thermal and power management
-	{5, {~0u, ~0u, ~0u, ~0u}},
-	{6, {~0u, ~0u, ~0u, ~0u}},
-	// TSC_ADJUST, SGX; WAITPKG, CET shadow stacks, SGX_LC; CET IBT
-	{7, {0, (1u << 1) | (1u << 2), (1u << 5) | (1u << 7) | (1u << 30), 1u << 20}},
-	// SVM, SKINIT, WDT, LWP, the performance counter extensions, MONITORX
-	{0x80000001, {0, 0, (1u << 2) | (1u << 12) | (1u << 13) | (1u << 15) | (1u << 23)
-		| (1u << 24) | (1u << 28) | (1u << 29), 0}},
-	// SVM's own leaf
-	{0x8000000a, {~0u, ~0u, ~0u, ~0u}},
+static constexpr uint32 Bits(std::initializer_list<int> bits)
+{
+	uint32 value = 0;
+	for (int bit: bits) {
+		value |= 1u << bit;
+	}
+	return value;
+}
+
+static const CpuidMask kCpuidKept[] = {
+	// ECX less MONITOR, VMX, SMX, EST, TM2, PDCM, DCA, TSC deadline; EDX less
+	// ACPI, TM, PBE
+	{1, {~0u, ~0u, ~Bits({3, 5, 6, 7, 8, 15, 18, 24}), ~Bits({22, 29, 31})}},
+	// subleaf 0, as the only one: FSGSBASE, BMI1, HLE, AVX2, FDP_EXCPTN,
+	// SMEP, BMI2, ERMS, INVPCID, RTM, deprecated FPU CS/DS, the AVX-512
+	// sets, RDSEED, ADX, SMAP, CLFLUSHOPT, CLWB, SHA; PREFETCHWT1, VBMI,
+	// UMIP, PKU, VBMI2, GFNI, VAES, VPCLMULQDQ, VNNI, BITALG, VPOPCNTDQ,
+	// RDPID, CLDEMOTE, MOVDIRI, MOVDIR64B; the AVX-512 4VNNIW and 4FMAPS,
+	// FSRM, VP2INTERSECT, MD_CLEAR, SERIALIZE, FP16
+	{7, {0, Bits({0, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 16, 17, 18, 19, 20, 21, 23, 24, 26, 27, 28, 29,
+			30, 31}),
+		Bits({0, 1, 2, 3, 6, 8, 9, 10, 11, 12, 14, 22, 25, 27, 28}),
+		Bits({2, 3, 4, 8, 10, 14, 23})}},
+	// ECX: LAHF in long mode, CmpLegacy, AltMovCr8, ABM, SSE4A, MisAlignSse,
+	// 3DNowPrefetch, XOP, FMA4, TBM, TopologyExtensions
+	{0x80000001, {~0u, ~0u, Bits({0, 1, 4, 5, 6, 7, 8, 11, 16, 21, 22}), ~0u}},
+	// the invariant TSC
+	{0x80000007, {0, 0, 0, Bits({8})}},
+	// EBX: CLZERO, RstrFpErrPtrs, WBNOINVD
+	{0x80000008, {~0u, Bits({0, 2, 9}), ~0u, ~0u}},
+	// NoNestedDataBp, LFenceAlwaysSerializing, NullSelectClearsBase
+	{0x80000021, {Bits({0, 2, 6}), 0, 0, 0}},
 };
+
+// thermal and power, cache QoS monitoring and allocation, SGX, processor
+// trace, SVM, IBS, SEV, platform QoS, performance monitoring
+static const uint32 kCpuidZeroed[] = {
+	5, 6, 0xf, 0x10, 0x12, 0x14, 0x8000000a, 0x8000001b, 0x8000001f, 0x80000020, 0x80000022,
+};
+
+
+// The size of an XSAVEC area for 'xcr0', which compacts the components and
+// aligns some of them to 64 bytes.
+static uint32 CompactedXsaveSize(uint64 xcr0)
+{
+	uint32 size = kXsaveLegacyAndHeader;
+	for (uint32 i = 2; i < 64; i++) {
+		if ((xcr0 & (1ull << i)) == 0) {
+			continue;
+		}
+		uint32 component[4];
+		Cpuid(0xd, i, component);
+		if ((component[2] & 2) != 0) {
+			size = (size + 63) & ~63u;
+		}
+		size += component[0];
+	}
+	return size;
+}
 
 
 // The host's processor as the client's table changes it, less what this
@@ -1266,15 +1314,34 @@ void SvmVcpu::HandleCpuid()
 			regs[i] = (regs[i] & ~entry->del[i]) | entry->set[i];
 		}
 	}
-	for (const CpuidHidden &hidden: kCpuidHidden) {
-		if (hidden.leaf == leaf) {
+	for (const CpuidMask &kept: kCpuidKept) {
+		if (kept.leaf == leaf) {
 			for (int i = 0; i < 4; i++) {
-				regs[i] &= ~hidden.regs[i];
+				regs[i] &= kept.regs[i];
 			}
+		}
+	}
+	for (uint32 zeroed: kCpuidZeroed) {
+		if (zeroed == leaf) {
+			memset(regs, 0, sizeof(regs));
 		}
 	}
 
 	switch (leaf) {
+		case 7:
+			if (subleaf != 0) {
+				memset(regs, 0, sizeof(regs));
+			}
+			// PKU, whose PKRU the world switch keeps apart only as an XSAVE
+			// component the host has
+			if ((SvmHost::HostXcr0() & (1ull << 9)) == 0) {
+				regs[2] &= ~(1u << 3);
+			}
+			// OSPKE
+			if (subleaf == 0 && (save.cr4 & kCr4Pke) != 0 && (regs[2] & (1u << 3)) != 0) {
+				regs[2] |= 1u << 4;
+			}
+			break;
 		case 1:
 			regs[1] = (regs[1] & 0x00ffffff) | (fVcpu.Index() << 24);
 			regs[2] &= ~(1u << 27);                 // OSXSAVE
@@ -1307,7 +1374,13 @@ void SvmVcpu::HandleCpuid()
 				regs[1] = size;
 			} else if (subleaf == 1) {
 				regs[0] &= ~(1u << 3);              // XSAVES, without IA32_XSS
-				regs[1] = 0;
+				// XSAVEC's area for XCR0, IA32_XSS being 0
+				regs[1] = CompactedXsaveSize(fGuestXcr0);
+				regs[2] = 0;
+				regs[3] = 0;
+			} else if (subleaf < 64 && (SvmHost::HostXcr0() & (1ull << subleaf)) == 0) {
+				// components the host does not have, IA32_XSS ones included
+				memset(regs, 0, sizeof(regs));
 			}
 			break;
 		default:

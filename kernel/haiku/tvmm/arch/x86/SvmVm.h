@@ -27,6 +27,8 @@ private:
 	phys_addr_t fMsrpmPhys = 0;
 	TvmmCpuidEntry fCpuid[kTvmmMaxCpuidEntries];
 	uint32 fCpuidCount = 0;
+	// guest TSC minus host TSC, from 0 when the VM was made
+	uint64 fTscOffset = 0;
 
 	void PassThroughMsr(uint32 msr);
 
@@ -43,6 +45,7 @@ public:
 	phys_addr_t NptRoot() const {return fNpt.RootPhys();}
 	phys_addr_t IopmPhys() const {return fIopmPhys;}
 	phys_addr_t MsrpmPhys() const {return fMsrpmPhys;}
+	uint64 TscOffset() const {return fTscOffset;}
 
 	status_t MapPages(uint64 gpa, uint64 size, const RamObject &ram, uint64 offset, uint32 flags) final;
 	void UnmapPages(uint64 gpa, uint64 size) final;
