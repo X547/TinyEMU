@@ -10,6 +10,8 @@
 
 #include <arch/x86/arch_cpu.h>
 #include <smp.h>
+#include <util/AutoLock.h>
+#include <util/atomic.h>
 
 #include "Common.h"
 #include "SvmHost.h"
@@ -43,6 +45,7 @@ static constexpr uint64 kCr4La57 = 1ull << 12;
 static constexpr uint64 kCr4Osxsave = 1ull << 18;
 static constexpr uint64 kEferLma = 1ull << 10;
 static constexpr uint64 kEferSvme = 1ull << 12;
+static constexpr uint64 kRflagsIf = 1ull << 9;
 static constexpr uint64 kRflagsDf = 1ull << 10;
 static constexpr uint64 kRflagsVm = 1ull << 17;
 static constexpr uint16 kSegAttribLong = 1 << 9;
@@ -54,6 +57,7 @@ static constexpr uint64 kPteLarge = 1ull << 7;
 static constexpr uint64 kPteAddressMask = 0x000ffffffffff000ull;
 
 static constexpr uint32 kMsrTsc = 0x10;
+static constexpr uint32 kMsrApicBase = 0x1b;
 static constexpr uint32 kMsrPat = 0x277;
 static constexpr uint32 kMsrEfer = 0xc0000080;
 
@@ -154,6 +158,16 @@ SvmVcpu::SvmVcpu(SvmVm &svmVm, Vcpu &vcpu):
 
 SvmVcpu::~SvmVcpu()
 {
+	if (fApic != nullptr) {
+		// waits for a hook running elsewhere
+		cancel_timer(&fApicTimer);
+		{
+			InterruptsSpinLocker locker(fSvmVm.ApicLock());
+			fSvmVm.Apics().Detach(fVcpu.Index());
+		}
+		cancel_timer(&fApicTimer);
+		delete fApic;
+	}
 	if (fAsid != 0) {
 		SvmHost::FreeAsid(fAsid);
 	}
@@ -181,8 +195,37 @@ status_t SvmVcpu::Init()
 	memset(fHostFpu, 0, fpuSize);
 
 	SetupControl();
-	ResetState();
+	if (fSvmVm.HasLocalApics()) {
+		fApic = new(std::nothrow) LocalApic(fSvmVm.Apics(), *this, fVcpu.Index());
+		if (fApic == nullptr) {
+			return B_NO_MEMORY;
+		}
+		fApicTimer.user_data = this;
+		InterruptsSpinLocker locker(fSvmVm.ApicLock());
+		fSvmVm.Apics().Attach(fVcpu.Index(), fApic);
+	}
+	Reset();
 	return B_OK;
+}
+
+
+void SvmVcpu::Reset()
+{
+	ResetState();
+	fClientWindow = false;
+	if (fApic == nullptr) {
+		return;
+	}
+	{
+		InterruptsSpinLocker locker(fSvmVm.ApicLock());
+		fApic->Reset();
+	}
+	atomic_set(&fTimerExpired, 0);
+	atomic_set(&fInitPending, 0);
+	atomic_set(&fStartupPending, 0);
+	fEoiVector = -1;
+	fMpState = fVcpu.Index() == 0 ? MpState::Running : MpState::WaitStartup;
+	SyncTaskPriority();
 }
 
 
@@ -519,6 +562,8 @@ void SvmVcpu::FillExitState(TvmmRun &run) const
 	run.cr8 = control.vintr & 0xf;
 	run.interruptShadow = (control.interruptShadow & 1) != 0;
 	run.eventPending = (control.eventInj & kSvmEventValid) != 0;
+	// a racy look, which the client takes again before each run anyway
+	run.extIntAccepted = fApic == nullptr || fApic->AcceptsExtInt();
 }
 
 
@@ -713,16 +758,7 @@ status_t SvmVcpu::PrepareRun(TvmmRun &run)
 				return B_BAD_VALUE;
 		}
 	}
-	// An interrupt the guest can never take, which exits as soon as the
-	// guest could take one.
-	const uint64 windowBits = kSvmVintrIrq | kSvmVintrIgnoreTpr | (uint64(0xf) << kSvmVintrPrioShift);
-	if (window) {
-		control.vintr |= windowBits;
-		control.interceptMisc1 |= SvmInterceptVintr;
-	} else {
-		control.vintr &= ~windowBits;
-		control.interceptMisc1 &= ~SvmInterceptVintr;
-	}
+	fClientWindow = window;
 	if (tprExits) {
 		control.interceptCr |= kSvmInterceptCr8Write;
 	} else {
@@ -744,6 +780,13 @@ void SvmVcpu::CancelRun(TvmmRun &run)
 
 ExitAction SvmVcpu::EnterGuest(TvmmRun &run)
 {
+	if (fApic != nullptr) {
+		const ExitAction action = ApicBeforeEntry(run);
+		if (action != ExitAction::Resume) {
+			return action;
+		}
+	}
+
 	const cpu_status state = disable_interrupts();
 	const int32 cpu = smp_get_current_cpu();
 	int64 generation = 0;
@@ -754,6 +797,20 @@ ExitAction SvmVcpu::EnterGuest(TvmmRun &run)
 	}
 
 	VmcbControl &control = fVmcb->control;
+	// After BeginGuestEntry(): an interrupt accepted from now on interrupts
+	// the guest, so none waits for the next exit.
+	const bool apicWindow = fApic != nullptr && InjectApicInterrupt();
+	// An interrupt the guest can never take, which exits as soon as the
+	// guest could take one.
+	const uint64 windowBits = kSvmVintrIrq | kSvmVintrIgnoreTpr | (uint64(0xf) << kSvmVintrPrioShift);
+	if (fClientWindow || apicWindow) {
+		control.vintr |= windowBits;
+		control.interceptMisc1 |= SvmInterceptVintr;
+	} else {
+		control.vintr &= ~windowBits;
+		control.interceptMisc1 &= ~SvmInterceptVintr;
+	}
+
 	control.tlbControl = kSvmTlbNothing;
 	if (cpu != fLastCpu || generation != fTlbGeneration) {
 		control.tlbControl = SvmHost::HasFeature(TvmmSvmFeatureFlushByAsid)
@@ -806,7 +863,11 @@ ExitAction SvmVcpu::HandleExit(TvmmRun &run)
 		case SvmExitVintr:
 			control.vintr &= ~(kSvmVintrIrq | kSvmVintrIgnoreTpr | (uint64(0xf) << kSvmVintrPrioShift));
 			control.interceptMisc1 &= ~SvmInterceptVintr;
-			action = ToClient(run, TvmmExit::InterruptWindow);
+			// the local APIC's own window is taken by the next entry
+			if (fClientWindow) {
+				fClientWindow = false;
+				action = ToClient(run, TvmmExit::InterruptWindow);
+			}
 			break;
 		case SvmExitWriteCr8:
 			action = HandleCr8Write(run);
@@ -816,7 +877,12 @@ ExitAction SvmVcpu::HandleExit(TvmmRun &run)
 			break;
 		case SvmExitHlt:
 			save.rip = control.nextRip;
-			action = ToClient(run, TvmmExit::Halted);
+			if (fApic != nullptr) {
+				// the wait is the kernel's, until an interrupt comes
+				fMpState = MpState::Halted;
+			} else {
+				action = ToClient(run, TvmmExit::Halted);
+			}
 			break;
 		case SvmExitIoio:
 			action = HandleIo(run);
@@ -978,6 +1044,9 @@ ExitAction SvmVcpu::HandleNpf(TvmmRun &run)
 	}
 
 	ExitAction action = ExitAction::ToClient;
+	if (ApicMmio(insn, gpa, run, action)) {
+		return action;
+	}
 	switch (insn.op) {
 		case X86MemOp::Load:
 		case X86MemOp::LoadXmm:
@@ -1061,6 +1130,24 @@ ExitAction SvmVcpu::HandleMsr(TvmmRun &run)
 	const uint32 msr = uint32(fGprs[TvmmX86GprRcx]);
 	const bool write = control.exitInfo1 == 1;
 	const uint64 value = (fGprs[TvmmX86GprRdx] << 32) | uint32(save.rax);
+
+	if (fApic != nullptr) {
+		uint64 apicValue = value;
+		bool apicOk = true;
+		bool extIntBefore = false;
+		if (ApicMsr(msr, write, apicValue, apicOk, extIntBefore)) {
+			if (!apicOk) {
+				InjectException(kExceptionGp, true, 0);
+				return ExitAction::Resume;
+			}
+			if (!write) {
+				save.rax = uint32(apicValue);
+				fGprs[TvmmX86GprRdx] = apicValue >> 32;
+			}
+			save.rip = control.nextRip;
+			return AfterApicAccess(run, extIntBefore);
+		}
+	}
 
 	bool handled = true;
 	bool ok = true;
@@ -1149,9 +1236,9 @@ struct CpuidHidden {
 };
 
 static const CpuidHidden kCpuidHidden[] = {
-	// MONITOR, VMX, SMX, EST, TM2, PDCM, DCA; ACPI, TM, PBE
-	{1, {0, 0, (1u << 3) | (1u << 5) | (1u << 6) | (1u << 7) | (1u << 8) | (1u << 15) | (1u << 18),
-		(1u << 22) | (1u << 29) | (1u << 31)}},
+	// MONITOR, VMX, SMX, EST, TM2, PDCM, DCA, TSC deadline; ACPI, TM, PBE
+	{1, {0, 0, (1u << 3) | (1u << 5) | (1u << 6) | (1u << 7) | (1u << 8) | (1u << 15) | (1u << 18)
+		| (1u << 24), (1u << 22) | (1u << 29) | (1u << 31)}},
 	// MONITOR and MWAIT, thermal and power management
 	{5, {~0u, ~0u, ~0u, ~0u}},
 	{6, {~0u, ~0u, ~0u, ~0u}},
@@ -1193,6 +1280,10 @@ void SvmVcpu::HandleCpuid()
 			regs[2] &= ~(1u << 27);                 // OSXSAVE
 			if ((save.cr4 & kCr4Osxsave) != 0) {
 				regs[2] |= 1u << 27;
+			}
+			// the APIC, while software has not disabled it
+			if (fApic != nullptr && (fApic->Base() & (1u << 11)) == 0) {
+				regs[3] &= ~(1u << 9);
 			}
 			break;
 		case 0xb:
@@ -1273,6 +1364,236 @@ ExitAction SvmVcpu::HandleDr(TvmmRun &run)
 	}
 	fVmcb->save.rip = control.nextRip;
 	return ExitAction::Resume;
+}
+
+
+//#pragma mark - local APIC
+
+// With interrupts enabled, before the guest is entered: what came for the
+// processor, and whether it runs. Resume to enter the guest.
+ExitAction SvmVcpu::ApicBeforeEntry(TvmmRun &run)
+{
+	if (atomic_get_and_set(&fInitPending, 0) != 0) {
+		// the APIC was reset when the INIT came; the time stamp counter runs
+		// on
+		ResetState();
+		SyncTaskPriority();
+		fMpState = fVcpu.Index() == 0 ? MpState::Running : MpState::WaitStartup;
+	}
+	const int32 startup = atomic_get_and_set(&fStartupPending, 0);
+	if (startup != 0 && fMpState == MpState::WaitStartup) {
+		const int vector = startup & 0xff;
+		VmcbSave &save = fVmcb->save;
+		save.cs.selector = uint16(vector << 8);
+		save.cs.base = uint64(vector) << 12;
+		save.rip = 0;
+		fMpState = MpState::Running;
+	}
+	if (atomic_get_and_set(&fTimerExpired, 0) != 0) {
+		InterruptsSpinLocker locker(fSvmVm.ApicLock());
+		fApic->RunTimer(system_time());
+	}
+	if (fMpState == MpState::Halted) {
+		// an interrupt the processor can take ends the wait, as does one the
+		// client injects
+		InterruptsSpinLocker locker(fSvmVm.ApicLock());
+		PullTaskPriority();
+		const bool interruptible = (fVmcb->save.rflags & kRflagsIf) != 0;
+		if ((interruptible && fApic->HasDeliverable()) || (fVmcb->control.eventInj & kSvmEventValid) != 0) {
+			fMpState = MpState::Running;
+		}
+	}
+	if (fMpState == MpState::Running) {
+		return ExitAction::Resume;
+	}
+	if (fVcpu.TakeKick()) {
+		CancelRun(run);
+		return ExitAction::ToClient;
+	}
+	return ExitAction::Wait;
+}
+
+
+// With interrupts disabled, just before the guest is entered: hands it the
+// interrupt the APIC has for it when it can take one. True when it cannot
+// yet, for an exit once it can.
+bool SvmVcpu::InjectApicInterrupt()
+{
+	VmcbControl &control = fVmcb->control;
+	SpinLocker locker(fSvmVm.ApicLock());
+	PullTaskPriority();
+	if (!fApic->HasDeliverable()) {
+		return false;
+	}
+	if ((control.eventInj & kSvmEventValid) != 0 || (fVmcb->save.rflags & kRflagsIf) == 0
+		|| (control.interruptShadow & 1) != 0) {
+		return true;
+	}
+	const int vector = fApic->Acknowledge();
+	control.eventInj = uint32(vector) | (kSvmEventTypeIntr << kSvmEventTypeShift) | kSvmEventValid;
+	return false;
+}
+
+
+// With the APIC's lock held: the guest's writes of CR8 went to the VMCB, and
+// the APIC's task priority follows them.
+void SvmVcpu::PullTaskPriority()
+{
+	const int cr8 = int(fVmcb->control.vintr & 0xf);
+	if (cr8 != fApic->TaskPriority()) {
+		fApic->SetTaskPriority(cr8);
+	}
+}
+
+
+// CR8 as the APIC has it, after a write of its TPR.
+void SvmVcpu::SyncTaskPriority()
+{
+	if (fApic == nullptr) {
+		return;
+	}
+	VmcbControl &control = fVmcb->control;
+	control.vintr = (control.vintr & ~kSvmVintrTprMask) | uint64(fApic->TaskPriority());
+}
+
+
+// An access to the APIC's register page in xAPIC mode, done in the kernel.
+// False for anything else, which the client gets.
+bool SvmVcpu::ApicMmio(const X86MemInsn &insn, uint64 gpa, TvmmRun &run, ExitAction &action)
+{
+	if (fApic == nullptr || gpa < kApicBase || gpa >= kApicBase + kPageSize) {
+		return false;
+	}
+	// String and SSE moves to the page go to the client, which drops them.
+	const bool load = insn.op == X86MemOp::Load || insn.op == X86MemOp::Test
+		|| insn.op == X86MemOp::Cmp || insn.op == X86MemOp::Push;
+	const bool store = insn.op == X86MemOp::Store || insn.op == X86MemOp::StoreImmediate;
+	if (!load && !store) {
+		return false;
+	}
+
+	// The page answers in every mode, as nothing in x2APIC mode.
+	const uint32 offset = uint32(gpa - kApicBase);
+	const uint32 shift = (offset & 3) * 8;
+	uint32 value = 0;
+	if (store) {
+		value = uint32((insn.op == X86MemOp::Store
+			? ReadGpr(insn.reg, insn.size, insn.highByte) : insn.immediate) << shift);
+	}
+	bool extIntBefore;
+	{
+		InterruptsSpinLocker locker(fSvmVm.ApicLock());
+		PullTaskPriority();
+		extIntBefore = fApic->AcceptsExtInt();
+		if (load) {
+			value = fApic->PageRead(offset & ~3u) >> shift;
+		} else {
+			fApic->PageWrite(offset & ~3u, value);
+		}
+	}
+	if (load) {
+		uint8 data[16] {};
+		memcpy(data, &value, sizeof(value));
+		fPendingInsn = insn;
+		CompleteLoad(data);
+	} else {
+		fVmcb->save.rip += insn.length;
+	}
+	SyncTaskPriority();
+	action = AfterApicAccess(run, extIntBefore);
+	return true;
+}
+
+
+// IA32_APIC_BASE and the x2APIC registers. False for another MSR.
+bool SvmVcpu::ApicMsr(uint32 msr, bool write, uint64 &value, bool &ok, bool &extIntBefore)
+{
+	if (msr != kMsrApicBase && (msr < kApicMsrBase || msr >= kApicMsrBase + kApicMsrCount)) {
+		return false;
+	}
+	{
+		InterruptsSpinLocker locker(fSvmVm.ApicLock());
+		PullTaskPriority();
+		extIntBefore = fApic->AcceptsExtInt();
+		if (msr == kMsrApicBase) {
+			if (write) {
+				ok = fApic->SetBase(value);
+			} else {
+				value = fApic->Base();
+			}
+		} else if (write) {
+			ok = fApic->MsrWrite(msr, value);
+		} else {
+			ok = fApic->MsrRead(msr, value);
+		}
+	}
+	SyncTaskPriority();
+	return true;
+}
+
+
+// After an APIC register access: an EOI of a level triggered vector goes to
+// the client, whose IOAPIC sent it, as does a LINT0 that began to take the
+// 8259s' INTR, which the client may have waiting.
+ExitAction SvmVcpu::AfterApicAccess(TvmmRun &run, bool extIntBefore)
+{
+	if (fEoiVector >= 0) {
+		run.exit.eoi.vector = uint32(fEoiVector);
+		fEoiVector = -1;
+		return ToClient(run, TvmmExit::Eoi);
+	}
+	if (!extIntBefore && fApic->AcceptsExtInt()) {
+		return ToClient(run, TvmmExit::ExtIntAccepted);
+	}
+	return ExitAction::Resume;
+}
+
+
+// In interrupt context: the timer's work is the vcpu's.
+int32 SvmVcpu::ApicTimerHook(timer *apicTimer)
+{
+	auto *vcpu = static_cast<SvmVcpu*>(apicTimer->user_data);
+	atomic_set(&vcpu->fTimerExpired, 1);
+	vcpu->fVcpu.Wake();
+	return B_HANDLED_INTERRUPT;
+}
+
+
+void SvmVcpu::ApicInterruptChanged(bool pending)
+{
+	if (pending) {
+		fVcpu.Wake();
+	}
+}
+
+
+// Only from the APIC's own processor, which writes its EOI register.
+void SvmVcpu::ApicEoi(int vector)
+{
+	fEoiVector = vector;
+}
+
+
+void SvmVcpu::ApicInit()
+{
+	atomic_set(&fInitPending, 1);
+	fVcpu.Wake();
+}
+
+
+void SvmVcpu::ApicStartup(int vector)
+{
+	atomic_set(&fStartupPending, 0x100 | vector);
+	fVcpu.Wake();
+}
+
+
+void SvmVcpu::ApicTimerChanged(uint64 due)
+{
+	cancel_timer(&fApicTimer);
+	if (due != UINT64_MAX) {
+		add_timer(&fApicTimer, ApicTimerHook, bigtime_t(due), B_ONE_SHOT_ABSOLUTE_TIMER);
+	}
 }
 
 

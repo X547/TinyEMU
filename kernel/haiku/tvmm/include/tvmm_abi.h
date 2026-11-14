@@ -32,7 +32,7 @@
 // The structures have the same layout in the kernel and in the client, which
 // the static_asserts below hold to.
 
-constexpr uint32 kTvmmAbiVersion = 2;
+constexpr uint32 kTvmmAbiVersion = 3;
 constexpr const char *kTvmmDevicePath = "/dev/misc/tvmm";
 
 
@@ -48,6 +48,8 @@ enum TvmmOp: uint32 {
 	TvmmOpGetState,
 	TvmmOpSetState,
 	TvmmOpSetCpuid,
+	TvmmOpSendMsi,
+	TvmmOpResetVcpu,
 };
 
 
@@ -86,8 +88,27 @@ struct TvmmInfo {
 };
 
 
+// TvmmCreateVm::flags
+enum {
+	// x86: the kernel has a local APIC for each vcpu, which handles HLT and
+	// starts the processors beyond the first with INIT and STARTUP. The
+	// client's 8259s inject around it while it takes ExtINT, and a level
+	// triggered EOI exits for the client's IOAPIC.
+	TvmmVmLocalApic = 1 << 0,
+};
+
+
 struct TvmmCreateVm {
 	uint32 flags;
+};
+
+
+// x86 with TvmmVmLocalApic: the message a write of 'data' to 'address' in
+// the 0xfee00000 page describes. Any thread.
+struct TvmmSendMsi {
+	uint64 address;
+	uint32 data;
+	uint32 reserved;
 };
 
 
@@ -134,6 +155,9 @@ struct TvmmCreateVcpu {
 };
 
 
+// TvmmOpRun, TvmmOpKick, and TvmmOpResetVcpu, which puts the vcpu as at
+// power on, its local APIC included; with TvmmVmLocalApic, a vcpu beyond the
+// first then waits for a STARTUP.
 struct TvmmVcpuOp {
 	uint32 vcpu;
 };
@@ -184,6 +208,11 @@ enum class TvmmExit: uint32 {
 	InterruptWindow,
 	// the guest wrote CR8, with TvmmRun::tprExits; TvmmRun::cr8 has the value
 	TprChanged,
+	// the kernel's local APIC ended a level triggered interrupt
+	Eoi,
+	// the kernel's local APIC began to take the 8259s' INTR, which the client
+	// may have waiting
+	ExtIntAccepted,
 	// triple fault; the state is undefined until it is set again
 	Shutdown,
 	// the processor refused the state
@@ -222,6 +251,11 @@ struct TvmmExitMsr {
 	uint8 reserved[2];
 	// write: the value written; read: the client stores the value read
 	uint64 value;
+};
+
+
+struct TvmmExitEoi {
+	uint32 vector;
 };
 
 
@@ -273,12 +307,16 @@ struct TvmmRun {
 	uint8 interruptShadow;
 	// an event is already queued for delivery
 	uint8 eventPending;
-	uint8 reserved2[6];
+	// with TvmmVmLocalApic: the 8259s' INTR reaches the processor, its APIC
+	// being disabled or taking ExtINT on LINT0
+	uint8 extIntAccepted;
+	uint8 reserved2[5];
 
 	union {
 		TvmmExitIo io;
 		TvmmExitMmio mmio;
 		TvmmExitMsr msr;
+		TvmmExitEoi eoi;
 		TvmmExitFailEntry failEntry;
 		TvmmExitUnhandled unhandled;
 		uint8 raw[256];

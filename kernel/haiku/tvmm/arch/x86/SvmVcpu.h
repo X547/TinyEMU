@@ -1,7 +1,10 @@
 #pragma once
 
+#include <KernelExport.h>
+
 #include "Arch.h"
 #include "KernelArea.h"
+#include "LocalApic.h"
 #include "X86Decoder.h"
 #include "tvmm_abi.h"
 
@@ -11,8 +14,17 @@ class Vm;
 struct Vmcb;
 
 
-class SvmVcpu final: public ArchVcpu {
+class SvmVcpu final: public ArchVcpu, private LocalApicHost {
 private:
+	// with a local APIC: whether the processor runs
+	enum class MpState {
+		Running,
+		// at HLT, until an interrupt it can take
+		Halted,
+		// after INIT, until a STARTUP
+		WaitStartup,
+	};
+
 	// an exit the client handles, which the next run finishes
 	enum class Pending {
 		None,
@@ -59,6 +71,21 @@ private:
 	uint64 fPendingGpa = 0;
 	// the size, string and register details of the pending access
 	X86MemInsn fPendingInsn {};
+	// the client asked to exit once the guest can take an interrupt
+	bool fClientWindow = false;
+
+	// The local APIC, without which HLT and the processors' start are the
+	// client's. Its state is under SvmVm::ApicLock().
+	LocalApic *fApic = nullptr;
+	MpState fMpState = MpState::Running;
+	timer fApicTimer {};
+	// set from any context, taken by the vcpu's thread
+	int32 fTimerExpired = 0;
+	int32 fInitPending = 0;
+	// the STARTUP vector, with bit 8 set while one is pending
+	int32 fStartupPending = 0;
+	// a level triggered vector the APIC ended, for the client
+	int fEoiVector = -1;
 
 	uint64 &Gpr(uint32 index);
 	void WriteGpr(uint8 reg, uint8 size, bool highByte, uint64 value);
@@ -98,6 +125,23 @@ private:
 	bool ValidXcr0(uint64 value) const;
 	bool ValidFpu(const uint8 *area) const;
 
+	// the local APIC
+	ExitAction ApicBeforeEntry(TvmmRun &run);
+	bool InjectApicInterrupt();
+	void PullTaskPriority();
+	void SyncTaskPriority();
+	bool ApicMmio(const X86MemInsn &insn, uint64 gpa, TvmmRun &run, ExitAction &action);
+	bool ApicMsr(uint32 msr, bool write, uint64 &value, bool &ok, bool &extIntBefore);
+	ExitAction AfterApicAccess(TvmmRun &run, bool extIntBefore);
+	static int32 ApicTimerHook(timer *apicTimer);
+
+	// LocalApicHost
+	void ApicInterruptChanged(bool pending) final;
+	void ApicEoi(int vector) final;
+	void ApicInit() final;
+	void ApicStartup(int vector) final;
+	void ApicTimerChanged(uint64 due) final;
+
 public:
 	SvmVcpu(SvmVm &svmVm, Vcpu &vcpu);
 	~SvmVcpu() final;
@@ -107,6 +151,7 @@ public:
 	status_t PrepareRun(TvmmRun &run) final;
 	ExitAction EnterGuest(TvmmRun &run) final;
 	void CancelRun(TvmmRun &run) final;
+	void Reset() final;
 
 	size_t StateSize() const final {return sizeof(TvmmX86State);}
 	void GetState(uint32 classes, void *state) final;

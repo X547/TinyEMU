@@ -38,12 +38,12 @@ Vm::~Vm()
 }
 
 
-status_t Vm::Init()
+status_t Vm::Init(uint32 flags)
 {
 	CHECK_RET(Arch::HostStatus());
 	CHECK_RET(Arch::Acquire());
 	fArchAcquired = true;
-	CHECK_RET(Arch::CreateVm(*this, fArch));
+	CHECK_RET(Arch::CreateVm(*this, flags, fArch));
 	fMemory.SetArch(fArch);
 	return B_OK;
 }

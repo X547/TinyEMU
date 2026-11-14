@@ -53,6 +53,7 @@ arch_sources = []
 if host_machine.cpu_family() == 'x86_64'
 	arch_inc = include_directories('arch/x86')
 	arch_sources = files(
+		'arch/x86/LocalApic.cpp',
 		'arch/x86/Npt.cpp',
 		'arch/x86/SvmEntry.S',
 		'arch/x86/SvmHost.cpp',

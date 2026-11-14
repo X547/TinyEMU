@@ -15,6 +15,8 @@ enum class ExitAction {
 	Resume,
 	// the run page describes an exit for the client
 	ToClient,
+	// the guest waits, at HLT or for a STARTUP: enter again after a wake
+	Wait,
 };
 
 
@@ -30,6 +32,9 @@ public:
 	virtual ExitAction EnterGuest(TvmmRun &run) = 0;
 	// Ends the run without entering: a kick, a signal, or the VM closing.
 	virtual void CancelRun(TvmmRun &run) = 0;
+
+	// As at power on, with what the VM's flags give it.
+	virtual void Reset() = 0;
 
 	// The architecture's state structure, TvmmX86State for x86.
 	virtual size_t StateSize() const = 0;
@@ -52,6 +57,8 @@ public:
 
 	// x86 only
 	virtual status_t SetCpuid(const TvmmCpuidEntry *entries, uint32 count) = 0;
+	// x86 with local APICs; any thread
+	virtual status_t SendMsi(uint64 address, uint32 data) = 0;
 };
 
 
@@ -69,7 +76,8 @@ uint32 MaxVcpus();
 status_t Acquire();
 void Release();
 
-status_t CreateVm(Vm &vm, ArchVm *&arch);
+// 'flags' are TvmmCreateVm::flags.
+status_t CreateVm(Vm &vm, uint32 flags, ArchVm *&arch);
 
 
 } // Arch

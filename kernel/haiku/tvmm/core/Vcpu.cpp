@@ -30,6 +30,7 @@ Vcpu::Vcpu(Vm &vm, uint32 index):
 	fIndex(index)
 {
 	mutex_init(&fLock, "tvmm vcpu");
+	fWakeCondition.Init(this, "tvmm vcpu wake");
 }
 
 
@@ -72,20 +73,57 @@ status_t Vcpu::Run()
 			fArch->CancelRun(run);
 			return B_OK;
 		}
-		if (fArch->EnterGuest(run) == ExitAction::ToClient) {
+		// a wake from now on is for what EnterGuest() looks at next
+		atomic_set(&fWakePending, 0);
+		const ExitAction action = fArch->EnterGuest(run);
+		if (action == ExitAction::ToClient) {
+			return B_OK;
+		}
+		if (action == ExitAction::Wait && !WaitForWake()) {
+			fArch->CancelRun(run);
 			return B_OK;
 		}
 	}
 }
 
 
+// False when a signal or the VM closing ends the wait.
+bool Vcpu::WaitForWake()
+{
+	ConditionVariableEntry entry;
+	fWakeCondition.Add(&entry);
+	// a wake that came before the entry was added is not lost
+	if (atomic_get(&fWakePending) != 0 || atomic_get(&fKickPending) != 0) {
+		return true;
+	}
+	if (fVm.Closing()) {
+		return false;
+	}
+	return entry.Wait(B_CAN_INTERRUPT) != B_INTERRUPTED;
+}
+
+
 void Vcpu::Kick()
 {
 	atomic_set(&fKickPending, 1);
+	Wake();
+}
+
+
+bool Vcpu::TakeKick()
+{
+	return atomic_get_and_set(&fKickPending, 0) != 0;
+}
+
+
+void Vcpu::Wake()
+{
+	atomic_set(&fWakePending, 1);
 	const int32 cpu = atomic_get(&fGuestCpu);
 	if (cpu >= 0) {
 		call_single_cpu(cpu, NoOp, nullptr);
 	}
+	fWakeCondition.NotifyAll();
 }
 
 
@@ -141,6 +179,13 @@ status_t Vcpu::GetState(const TvmmStateOp &op)
 	CHECK_RET(user_memcpy(fStateBuffer, clientState, size));
 	fArch->GetState(op.classes, fStateBuffer);
 	return user_memcpy(clientState, fStateBuffer, size);
+}
+
+
+void Vcpu::Reset()
+{
+	MutexLocker locker(fLock);
+	fArch->Reset();
 }
 
 

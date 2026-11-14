@@ -64,10 +64,27 @@ public:
 		return Op(TvmmOpGetInfo, info);
 	}
 
-	status_t CreateVm() const
+	// 'flags' are TvmmVm* flags.
+	status_t CreateVm(uint32 flags = 0) const
 	{
 		TvmmCreateVm args {};
+		args.flags = flags;
 		return Op(TvmmOpCreateVm, args);
+	}
+
+	status_t SendMsi(uint64 address, uint32 data) const
+	{
+		TvmmSendMsi args {};
+		args.address = address;
+		args.data = data;
+		return Op(TvmmOpSendMsi, args);
+	}
+
+	status_t ResetVcpu(uint32 vcpu) const
+	{
+		TvmmVcpuOp args {};
+		args.vcpu = vcpu;
+		return Op(TvmmOpResetVcpu, args);
 	}
 
 	// 'address' is where the RAM is mapped in this team.

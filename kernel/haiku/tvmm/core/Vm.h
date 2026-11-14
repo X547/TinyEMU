@@ -34,7 +34,7 @@ public:
 	explicit Vm(team_id team);
 	~Vm();
 
-	status_t Init();
+	status_t Init(uint32 flags);
 
 	team_id Team() const {return fTeam;}
 	ArchVm &Arch() const {return *fArch;}

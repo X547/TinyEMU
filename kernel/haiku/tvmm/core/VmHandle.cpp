@@ -108,6 +108,12 @@ status_t VmHandle::Control(uint32 op, void *data, size_t length)
 		case TvmmOpSetCpuid:
 			res = HandleSetCpuid(data, length);
 			break;
+		case TvmmOpSendMsi:
+			res = HandleSendMsi(data, length);
+			break;
+		case TvmmOpResetVcpu:
+			res = HandleResetVcpu(data, length);
+			break;
 		default:
 			break;
 	}
@@ -131,7 +137,7 @@ status_t VmHandle::HandleCreateVm(void *data, size_t length)
 {
 	TvmmCreateVm args;
 	CHECK_RET(CopyArgsIn(args, data, length));
-	if (args.flags != 0) {
+	if ((args.flags & ~uint32(TvmmVmLocalApic)) != 0) {
 		return B_BAD_VALUE;
 	}
 
@@ -143,7 +149,7 @@ status_t VmHandle::HandleCreateVm(void *data, size_t length)
 	if (vm == nullptr) {
 		return B_NO_MEMORY;
 	}
-	const status_t res = vm->Init();
+	const status_t res = vm->Init(args.flags);
 	if (res < B_OK) {
 		delete vm;
 		return res;
@@ -249,6 +255,27 @@ status_t VmHandle::HandleSetCpuid(void *data, size_t length)
 		return B_NO_INIT;
 	}
 	return vm->SetCpuid(args);
+}
+
+
+status_t VmHandle::HandleSendMsi(void *data, size_t length)
+{
+	TvmmSendMsi args;
+	CHECK_RET(CopyArgsIn(args, data, length));
+	Vm *vm = GetVm();
+	if (vm == nullptr) {
+		return B_NO_INIT;
+	}
+	return vm->Arch().SendMsi(args.address, args.data);
+}
+
+
+status_t VmHandle::HandleResetVcpu(void *data, size_t length)
+{
+	Vcpu *vcpu = nullptr;
+	CHECK_RET(GetVcpu(data, length, vcpu));
+	vcpu->Reset();
+	return B_OK;
 }
 
 

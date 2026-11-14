@@ -283,9 +283,9 @@ void Arch::Release()
 }
 
 
-status_t Arch::CreateVm(Vm &vm, ArchVm *&arch)
+status_t Arch::CreateVm(Vm &vm, uint32 flags, ArchVm *&arch)
 {
-	auto *svmVm = new(std::nothrow) SvmVm(vm);
+	auto *svmVm = new(std::nothrow) SvmVm(vm, flags);
 	if (svmVm == nullptr) {
 		return B_NO_MEMORY;
 	}

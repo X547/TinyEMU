@@ -29,6 +29,8 @@ private:
 	status_t HandleGetState(void *data, size_t length);
 	status_t HandleSetState(void *data, size_t length);
 	status_t HandleSetCpuid(void *data, size_t length);
+	status_t HandleSendMsi(void *data, size_t length);
+	status_t HandleResetVcpu(void *data, size_t length);
 
 public:
 	VmHandle();

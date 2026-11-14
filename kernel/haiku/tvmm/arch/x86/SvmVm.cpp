@@ -4,6 +4,8 @@
 
 #include <new>
 
+#include <util/AutoLock.h>
+
 #include "Common.h"
 #include "GuestMemory.h"
 #include "SvmVcpu.h"
@@ -87,6 +89,21 @@ status_t SvmVm::SetCpuid(const TvmmCpuidEntry *entries, uint32 count)
 {
 	memcpy(fCpuid, entries, count * sizeof(TvmmCpuidEntry));
 	fCpuidCount = count;
+	return B_OK;
+}
+
+
+// Only a write to the local APICs' page is an interrupt message.
+status_t SvmVm::SendMsi(uint64 address, uint32 data)
+{
+	if (!HasLocalApics()) {
+		return B_NOT_SUPPORTED;
+	}
+	if ((address >> 20) != (kApicBase >> 20)) {
+		return B_BAD_VALUE;
+	}
+	InterruptsSpinLocker locker(fApicLock);
+	fApicBus.Deliver(address, data);
 	return B_OK;
 }
 
