@@ -9,6 +9,7 @@
 #include <KernelExport.h>
 
 #include <arch/x86/arch_cpu.h>
+#include <cpu.h>
 #include <smp.h>
 #include <util/AutoLock.h>
 
@@ -52,6 +53,21 @@ struct HostCpuState {
 	// what the CPU had before, which Release() puts back
 	bool svmeWasSet;
 	uint64 previousHsavePa;
+	// TSC minus CPU 0's
+	int64 tscSkew;
+};
+
+
+// CPU 0 and one other hand a timestamp back and forth through one cache
+// line. Each one-way time is the line's latency plus or minus the skew, so
+// the skew is half the difference of the fastest each way.
+struct SkewMeasurement {
+	int32 target;
+	int32 turn;
+	uint64 stamp;
+	int64 minThere;
+	int64 minBack;
+	bool timedOut;
 };
 
 
@@ -180,6 +196,101 @@ static void ProbeOnce()
 }
 
 
+static constexpr int kSkewRounds = 1000;
+// how long either CPU waits for the other, in TSC cycles, before giving up
+static constexpr uint64 kSkewTimeout = 1000000000;
+
+
+// rdtscp waits for what came before it, unlike rdtsc.
+static uint64 ReadTscOrdered()
+{
+	uint32 low;
+	uint32 high;
+	uint32 aux;
+	asm volatile("rdtscp" : "=a" (low), "=d" (high), "=c" (aux) :: "memory");
+	return (uint64(high) << 32) | low;
+}
+
+
+// Waits until 'turn' is 'value'; false after kSkewTimeout.
+static bool WaitTurn(SkewMeasurement &measurement, int32 value)
+{
+	const uint64 start = ReadTscOrdered();
+	while (atomic_get(&measurement.turn) != value) {
+		if (ReadTscOrdered() - start > kSkewTimeout) {
+			measurement.timedOut = true;
+			return false;
+		}
+		cpu_pause();
+	}
+	return true;
+}
+
+
+// On every CPU at once, with interrupts disabled; all but two return.
+static void MeasureSkew(void *cookie, int cpu)
+{
+	auto &measurement = *static_cast<SkewMeasurement*>(cookie);
+	if (cpu == 0) {
+		for (int i = 0; i < kSkewRounds && !measurement.timedOut; i++) {
+			const uint64 sent = ReadTscOrdered();
+			atomic_set64(reinterpret_cast<int64*>(&measurement.stamp), int64(sent));
+			atomic_set(&measurement.turn, 1);
+			if (!WaitTurn(measurement, 2)) {
+				break;
+			}
+			const uint64 now = ReadTscOrdered();
+			const int64 back = int64(now - uint64(atomic_get64(reinterpret_cast<int64*>(&measurement.stamp))));
+			const int64 there = int64(now - sent) - back;
+			measurement.minThere = std::min(measurement.minThere, there);
+			measurement.minBack = std::min(measurement.minBack, back);
+		}
+		atomic_set(&measurement.turn, 3);
+	} else if (cpu == measurement.target) {
+		for (;;) {
+			const uint64 start = ReadTscOrdered();
+			int32 turn;
+			while ((turn = atomic_get(&measurement.turn)) != 1 && turn != 3) {
+				if (ReadTscOrdered() - start > kSkewTimeout) {
+					measurement.timedOut = true;
+					return;
+				}
+				cpu_pause();
+			}
+			if (turn == 3) {
+				return;
+			}
+			atomic_set64(reinterpret_cast<int64*>(&measurement.stamp), int64(ReadTscOrdered()));
+			atomic_set(&measurement.turn, 2);
+		}
+	}
+}
+
+
+// Haiku resets every CPU's TSC at boot, one after the other, which leaves
+// them some hundred cycles apart; a guest that sees them so finds its TSC
+// unusable.
+static void MeasureTscSkews(HostCpuState *states, int32 cpuCount)
+{
+	states[0].tscSkew = 0;
+	for (int32 cpu = 1; cpu < cpuCount; cpu++) {
+		SkewMeasurement measurement {};
+		measurement.target = cpu;
+		measurement.minThere = INT64_MAX;
+		measurement.minBack = INT64_MAX;
+		call_all_cpus_sync(MeasureSkew, &measurement);
+		if (measurement.timedOut || measurement.minThere == INT64_MAX) {
+			TVMM_LOG("cannot measure the TSC of CPU %" B_PRId32 "\n", cpu);
+			states[cpu].tscSkew = 0;
+			continue;
+		}
+		// there = latency + skew, back = latency - skew
+		states[cpu].tscSkew = (measurement.minThere - measurement.minBack) / 2;
+		TVMM_LOG("TSC of CPU %" B_PRId32 ": %+" B_PRId64 " cycles against CPU 0\n", cpu, states[cpu].tscSkew);
+	}
+}
+
+
 static void EnableCpu(void *cookie, int cpu)
 {
 	(void)cookie;
@@ -261,6 +372,7 @@ status_t Arch::Acquire()
 		return res;
 	}
 
+	MeasureTscSkews(states, cpuCount);
 	sHostPages = pages;
 	sCpuStates = states;
 	call_all_cpus_sync(EnableCpu, nullptr);
@@ -334,6 +446,21 @@ uint32 SvmHost::MxcsrMask()
 phys_addr_t SvmHost::HostSavePage(int32 cpu)
 {
 	return sCpuStates[cpu].hostSavePage;
+}
+
+
+int64 SvmHost::TscSkew(int32 cpu)
+{
+	return sCpuStates[cpu].tscSkew;
+}
+
+
+uint64 SvmHost::ReadTsc0()
+{
+	const cpu_status state = disable_interrupts();
+	const uint64 tsc = ReadTscOrdered() - uint64(TscSkew(smp_get_current_cpu()));
+	restore_interrupts(state);
+	return tsc;
 }
 
 

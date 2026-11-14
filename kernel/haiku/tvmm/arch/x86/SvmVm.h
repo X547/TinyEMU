@@ -27,7 +27,7 @@ private:
 	phys_addr_t fMsrpmPhys = 0;
 	TvmmCpuidEntry fCpuid[kTvmmMaxCpuidEntries];
 	uint32 fCpuidCount = 0;
-	// guest TSC minus host TSC, from 0 when the VM was made
+	// guest TSC minus CPU 0's TSC, from 0 when the VM was made
 	uint64 fTscOffset = 0;
 
 	void PassThroughMsr(uint32 msr);

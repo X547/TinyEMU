@@ -84,14 +84,6 @@ static T ReadOnce(const T &field)
 }
 
 
-static uint64 ReadTsc()
-{
-	uint32 low;
-	uint32 high;
-	asm volatile("rdtsc" : "=a" (low), "=d" (high));
-	return (uint64(high) << 32) | low;
-}
-
 
 static void Cpuid(uint32 leaf, uint32 subleaf, uint32 regs[4])
 {
@@ -255,7 +247,7 @@ void SvmVcpu::SetupControl()
 	control.npControl = kSvmNpEnable;
 	control.nCr3 = fSvmVm.NptRoot();
 	// the same for every vcpu, which a guest checks its processors for
-	control.tscOffset = fSvmVm.TscOffset();
+	fTscOffset = fSvmVm.TscOffset();
 }
 
 
@@ -821,6 +813,8 @@ ExitAction SvmVcpu::EnterGuest(TvmmRun &run)
 		fLastCpu = cpu;
 		fTlbGeneration = generation;
 	}
+	// the guest's TSC is CPU 0's, whichever CPU it runs on
+	control.tscOffset = fTscOffset - uint64(SvmHost::TscSkew(cpu));
 	control.cleanBits = 0;
 
 	SvmRunContext context = {
@@ -1180,9 +1174,9 @@ ExitAction SvmVcpu::HandleMsr(TvmmRun &run)
 			break;
 		case kMsrTsc:
 			if (write) {
-				fVmcb->control.tscOffset = value - ReadTsc();
+				fTscOffset = value - SvmHost::ReadTsc0();
 			} else {
-				result = ReadTsc() + fVmcb->control.tscOffset;
+				result = SvmHost::ReadTsc0() + fTscOffset;
 			}
 			break;
 		default:
@@ -1734,7 +1728,7 @@ void SvmVcpu::GetState(uint32 classes, void *buffer)
 		state.msrs[TvmmX86MsrSysenterEsp] = save.sysenterEsp;
 		state.msrs[TvmmX86MsrSysenterEip] = save.sysenterEip;
 		state.msrs[TvmmX86MsrPat] = save.gPat;
-		state.msrs[TvmmX86MsrTsc] = ReadTsc() + control.tscOffset;
+		state.msrs[TvmmX86MsrTsc] = SvmHost::ReadTsc0() + fTscOffset;
 		state.msrs[TvmmX86MsrTscAux] = 0;
 	}
 	if ((classes & TvmmX86StateIntr) != 0) {
@@ -1805,7 +1799,7 @@ status_t SvmVcpu::SetState(uint32 classes, const void *buffer)
 		save.sysenterEsp = state.msrs[TvmmX86MsrSysenterEsp];
 		save.sysenterEip = state.msrs[TvmmX86MsrSysenterEip];
 		save.gPat = state.msrs[TvmmX86MsrPat];
-		control.tscOffset = state.msrs[TvmmX86MsrTsc] - ReadTsc();
+		fTscOffset = state.msrs[TvmmX86MsrTsc] - SvmHost::ReadTsc0();
 	}
 	if ((classes & TvmmX86StateIntr) != 0) {
 		control.interruptShadow = state.interruptShadow & 1;

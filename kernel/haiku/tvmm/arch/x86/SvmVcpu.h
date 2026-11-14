@@ -61,6 +61,8 @@ private:
 	void *fHostFpu = nullptr;
 	uint64 fGuestXcr0 = 1;
 	uint64 fDr[4] {};
+	// guest TSC minus CPU 0's TSC; the VMCB's offset is for the CPU entered
+	uint64 fTscOffset = 0;
 
 	// the CPU and VM TLB generation the guest last entered with
 	int32 fLastCpu = -1;

@@ -8,6 +8,7 @@
 
 #include "Common.h"
 #include "GuestMemory.h"
+#include "SvmHost.h"
 #include "SvmVcpu.h"
 #include "tvmm_abi.h"
 
@@ -20,10 +21,7 @@ static constexpr uint64 kMaxGpa = 1ull << 48;
 
 status_t SvmVm::Init()
 {
-	uint32 low;
-	uint32 high;
-	asm volatile("rdtsc" : "=a" (low), "=d" (high));
-	fTscOffset = -((uint64(high) << 32) | low);
+	fTscOffset = -SvmHost::ReadTsc0();
 
 	CHECK_RET(fNpt.Init());
 
