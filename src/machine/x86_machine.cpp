@@ -549,7 +549,9 @@ void PCMachine::MmioRead(uint64_t paddr, uint8_t *data, int len)
     }
     return;
  no_dev:
-    memset(data, 0, len);
+    /* nothing decodes the address: the bus floats, as PhysMemoryMap::IoRead
+       has it for the interpreter */
+    memset(data, 0xff, len);
 }
 
 /* What a host bridge may decode: from the end of low RAM up to the device
