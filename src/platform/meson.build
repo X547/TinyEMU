@@ -77,6 +77,9 @@ elif whp_enabled
   platform_sources += files('win32/whp_x86.cpp',
                             'common/hypervisor_memory_map.cpp',
                             'common/x86_cpuid_topology.cpp')
+elif tvmm_enabled
+  platform_sources += files('haiku/tvmm_x86.cpp',
+                            'common/hypervisor_memory_map.cpp')
 elif nvmm_enabled
   platform_sources += files('haiku/nvmm_x86.cpp',
                             'common/hypervisor_memory_map.cpp')

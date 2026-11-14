@@ -211,10 +211,29 @@ if whp_enabled
   emu_deps += whp_deps
 endif
 
-# The x86 machine's processor on Haiku's NVMM. libnvmm's headers are private
-# ones, so the dependency is put together here.
-nvmm_opt = get_option('nvmm') \
+# The x86 machine's processor on tvmm, TinyEMU's own Haiku kernel add-on in
+# kernel/haiku/tvmm, which is built and installed on its own. Its client
+# interface is a header there.
+tvmm_opt = get_option('tvmm') \
   .disable_auto_if(not x86emu) \
+  .require(platform_os == 'haiku' and
+           host_machine.cpu_family() == 'x86_64',
+           error_message: 'tvmm needs a Haiku x86-64 host')
+tvmm_enabled = tvmm_opt.allowed()
+if tvmm_enabled
+  emu_deps += declare_dependency(include_directories: [
+    include_directories('kernel/haiku/tvmm/include'),
+    include_directories('/boot/system/develop/headers/private/shared',
+                        is_system: true),
+  ])
+endif
+
+# The x86 machine's processor on Haiku's NVMM, where tvmm is not used.
+# libnvmm's headers are private ones, so the dependency is put together here.
+nvmm_opt = get_option('nvmm') \
+  .disable_auto_if(not x86emu or tvmm_enabled) \
+  .require(not tvmm_enabled,
+           error_message: 'NVMM and tvmm cannot both be built in') \
   .require(platform_os == 'haiku' and
            host_machine.cpu_family() == 'x86_64',
            error_message: 'NVMM needs a Haiku x86-64 host')
@@ -401,6 +420,7 @@ summary({
   'Wayland dma-bufs': wayland_dmabuf,
   'x86 emulator': x86emu,
   'Windows Hypervisor Platform': whp_enabled,
+  'tvmm': tvmm_enabled,
   'NVMM': nvmm_enabled,
   'PipeWire audio': pipewire_enabled,
   'slirp': slirp_enabled,
