@@ -250,8 +250,10 @@ public:
 
     bool Init();
 
-    bool HasInterruptControllers() override {return false;}
-    bool HasLocalApics() override {return fApicEmulation;}
+    uint32_t InterruptControllers() override
+    {
+        return fApicEmulation ? X86_INTC_LOCAL_APIC : 0;
+    }
     int PhysAddressBits() override {return fPhysAddressBits;}
     PhysMemoryMap &MemoryMap() override {return *fMemoryMap;}
     uint8_t *AllocRam(size_t size) override {return host_ram_alloc(size);}

@@ -112,8 +112,7 @@ public:
     X86InterpBackend(X86CpuTarget &target, DeviceLock &lock,
                      const X86CpuOptions &options);
 
-    bool HasInterruptControllers() override {return false;}
-    bool HasLocalApics() override {return false;}
+    uint32_t InterruptControllers() override {return 0;}
     int PhysAddressBits() override {return fPhysAddressBits;}
     PhysMemoryMap &MemoryMap() override {return fMemoryMap;}
     /* the machine keeps the 8259s and the local APICs, so nothing comes

@@ -197,8 +197,7 @@ public:
 
     bool Init();
 
-    bool HasInterruptControllers() override {return false;}
-    bool HasLocalApics() override {return false;}
+    uint32_t InterruptControllers() override {return 0;}
     int PhysAddressBits() override {return fPhysAddressBits;}
     PhysMemoryMap &MemoryMap() override {return *fMemoryMap;}
     uint8_t *AllocRam(size_t size) override;

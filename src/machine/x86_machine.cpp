@@ -75,8 +75,8 @@ public:
     void SetIRQ(int irq_num, int level) override;
 };
 
-/* With an IOAPIC, each line reaches both it and the 8259s, as on a PIIX,
-   and the PIT's IRQ 0 is IOAPIC input 2. */
+/* With an IOAPIC, the machine's or the hypervisor's, each line reaches both
+   it and the 8259s, as on a PIIX, and the PIT's IRQ 0 is IOAPIC input 2. */
 class PCIrqFanout final: public IRQTarget {
 private:
     PCMachine &fMachine;
@@ -121,11 +121,16 @@ public:
 
     /* the processors have local APICs, and MSIs go to them */
     bool fLocalApic = false;
-    /* the hypervisor has the 8259s and the 8254 rather than the machine */
+    /* the hypervisor has the 8259s and the 8254 rather than the machine,
+       and the rest too */
     bool fHypervisorIrqchip = false;
     HypervisorIRQTarget fHypervisorIrqTarget {*this};
-    /* the machine's IOAPIC, when the 8259s are the machine's */
+    /* the machine's IOAPIC, when the 8259s are the machine's and the
+       hypervisor has none */
     std::unique_ptr<IOAPIC> fIoApic;
+    /* the IOAPIC's inputs: the machine's IOAPIC or the hypervisor's, or
+       nullptr with no IOAPIC */
+    IRQTarget *fIoApicInputs = nullptr;
     /* the machine's local APICs, when the processors have none of their
        own, and what each requests */
     std::unique_ptr<LocalApicBus> fLapics;
@@ -467,7 +472,7 @@ void PCIrqFanout::SetIRQ(int irq_num, int level)
 {
     fMachine.pic_state->SetIRQ(irq_num, level);
     if (irq_num != 2)
-        fMachine.fIoApic->SetIRQ(irq_num == 0 ? 2 : irq_num, level);
+        fMachine.fIoApicInputs->SetIRQ(irq_num == 0 ? 2 : irq_num, level);
 }
 
 /* A PC resets on a triple fault. */
@@ -667,7 +672,8 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     if (!s->fCpus)
         s->fCpus = x86_interp_open(*s, *p->device_lock, options);
     s->fLocalApic = options.local_apic;
-    bool machine_lapics = s->fLocalApic && !s->fCpus->HasLocalApics();
+    uint32_t intc = s->fCpus->InterruptControllers();
+    bool machine_lapics = s->fLocalApic && !(intc & X86_INTC_LOCAL_APIC);
     s->fCpuCount = options.cpu_count;
     s->fVcpuWakeups = std::make_unique<HostWakeup[]>(s->fCpuCount);
     s->fPhysAddressBits = s->fCpus->PhysAddressBits();
@@ -681,7 +687,7 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     }
 
     s->mem_map = &s->fCpus->MemoryMap();
-    s->fHypervisorIrqchip = s->fCpus->HasInterruptControllers();
+    s->fHypervisorIrqchip = (intc & X86_INTC_PIC_PIT) != 0;
     if (s->fHypervisorIrqchip) {
         for (int i = 0; i < 16; i++) {
             s->irq_lines[i].Init(&s->fHypervisorIrqTarget, i);
@@ -722,9 +728,16 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
                                                    0x4d0, 0x4d1, *s,
                                                    s->irq_lines);
         if (s->fLocalApic) {
-            s->fIoApic = std::make_unique<IOAPIC>(*s, 0);
-            s->mem_map->RegisterDevice(IOAPIC_ADDR, IOAPIC_SIZE,
-                                       s->fIoApic.get(), DEVIO_SIZE32);
+            /* or the hypervisor's, which the lines reach through it */
+            if (!(intc & X86_INTC_IOAPIC)) {
+                s->fIoApic = std::make_unique<IOAPIC>(*s, 0);
+                s->mem_map->RegisterDevice(IOAPIC_ADDR, IOAPIC_SIZE,
+                                           s->fIoApic.get(), DEVIO_SIZE32);
+                s->fIoApicInputs = s->fIoApic.get();
+            } else {
+                s->fIoApicInputs = &s->fHypervisorIrqTarget;
+            }
+            /* before the 8254 below sets its line */
             for (int i = 0; i < PC_IRQ_COUNT; i++)
                 s->irq_lines[i].Init(&s->fIrqFanout, i);
         }
@@ -741,7 +754,7 @@ static std::unique_ptr<VirtMachine> pc_machine_init(const VirtMachineParams *p)
     IRQTarget *ioapic = nullptr;
     if (s->fIoApic)
         ioapic = s->fIoApic.get();
-    else if (s->fHypervisorIrqchip && s->fLocalApic)
+    else if (s->fLocalApic && (intc & X86_INTC_IOAPIC))
         ioapic = &s->fHypervisorIrqTarget;
     for (int i = PC_IRQ_COUNT; ioapic != nullptr && i < IOAPIC_PINS; i++)
         s->irq_lines[i].Init(ioapic, i);

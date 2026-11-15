@@ -158,21 +158,31 @@ public:
 };
 
 
+/* The interrupt controllers a back end may have; the machine has the rest. */
+enum X86IntcFlags: uint32_t {
+    /* the local APICs X86CpuOptions::local_apic asks for, which MSIs reach
+       through SendMsi(); without, the processors reach the machine's
+       through the target */
+    X86_INTC_LOCAL_APIC = 1 << 0,
+    /* the IOAPIC, whose inputs SetIRQ() drives */
+    X86_INTC_IOAPIC = 1 << 1,
+    /* the 8259s and the 8254, whose ISA lines SetIRQ() drives, and which
+       route IRQ 0 to IOAPIC input 2 themselves; it has the other two too */
+    X86_INTC_PIC_PIT = 1 << 2,
+};
+
+
 /* What runs the machine's processors: a host hypervisor or the interpreter.
 
-   One with interrupt controllers of its own provides the 8259s and the 8254
-   and takes the lines through SetIRQ(). One without them takes interrupts
-   from the target, and a processor waits while its Idle() says so. These
-   methods are called with the device lock held. */
+   One without the 8259s takes their interrupts from the target, and a
+   processor waits while its Idle() says so. These methods are called with
+   the device lock held. */
 class X86CpuBackend {
 public:
     virtual ~X86CpuBackend() = default;
 
-    virtual bool HasInterruptControllers() = 0;
-    /* Whether it emulates the local APICs X86CpuOptions::local_apic asks
-       for; if not, the machine has them and the processors reach them
-       through the target. */
-    virtual bool HasLocalApics() = 0;
+    /* X86IntcFlags */
+    virtual uint32_t InterruptControllers() = 0;
     /* The physical address width the processors report: their own, cut to
        X86CpuOptions::max_phys_address_bits. */
     virtual int PhysAddressBits() = 0;
@@ -183,7 +193,8 @@ public:
        the interpreter caches it. */
     virtual PhysMemoryMap &MemoryMap() = 0;
 
-    /* Only with interrupt controllers of its own. */
+    /* Only with X86_INTC_PIC_PIT, ISA line or IOAPIC input 'irq'; with
+       X86_INTC_IOAPIC alone, IOAPIC input 'irq'. */
     virtual void SetIRQ(int irq, int level) = 0;
     /* Only with local APICs: delivers the interrupt message a write of
        'data' to 'addr' in the 0xfee00000 page describes. Any thread. */

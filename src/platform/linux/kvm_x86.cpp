@@ -182,8 +182,11 @@ public:
 
     void Init();
 
-    bool HasInterruptControllers() override {return fIrqchip;}
-    bool HasLocalApics() override {return fIrqchip;}
+    uint32_t InterruptControllers() override
+    {
+        return fIrqchip ? X86_INTC_LOCAL_APIC | X86_INTC_IOAPIC |
+            X86_INTC_PIC_PIT : 0;
+    }
     int PhysAddressBits() override {return fPhysAddressBits;}
     PhysMemoryMap &MemoryMap() override {return *fMemoryMap;}
     uint8_t *AllocRam(size_t size) override {return host_ram_alloc(size);}
