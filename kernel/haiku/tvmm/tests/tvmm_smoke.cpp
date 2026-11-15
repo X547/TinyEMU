@@ -368,6 +368,52 @@ static void TestKick(Guest &guest)
 }
 
 
+// After the tests above: what they made the vcpu do.
+static void TestStats(Guest &guest)
+{
+	printf("== statistics\n");
+	TvmmVcpuStats stats {};
+	CHECK_OK(guest.device.GetStats(0, stats));
+	CHECK(guest.device.GetStats(1, stats) == B_BAD_VALUE);
+	CHECK_OK(guest.device.GetStats(0, stats));
+
+	const TvmmStat &io = stats.archExits[TvmmX86StatIo];
+	const TvmmStat &clientIo = stats.clientExits[uint32(TvmmExit::Io)];
+	printf("%" B_PRIu64 " runs, %" B_PRIu64 " entries, %" B_PRIu64 " waits\n",
+		stats.runs.count, stats.entries.count, stats.waits.count);
+	printf("port exits: %" B_PRIu64 ", %.0f cycles in the guest and back, "
+		"%.0f handling, %.0f in the client\n",
+		io.count, double(stats.entries.cycles) / stats.entries.count,
+		double(io.cycles) / io.count, double(clientIo.cycles) / clientIo.count);
+
+	// the FPU test alone ran a million
+	CHECK(io.count >= 1000000);
+	CHECK(clientIo.count >= io.count);
+	CHECK(stats.archExits[TvmmX86StatStringIo].count >= 5);
+	CHECK(stats.archExits[TvmmX86StatMmioClient].count >= 5);
+	CHECK(stats.archExits[TvmmX86StatMsrClient].count >= 1);
+	CHECK(stats.archExits[TvmmX86StatCpuid].count >= 2);
+	CHECK(stats.archExits[TvmmX86StatHlt].count >= 6);
+	// the kick of the spinning guest, if no timer came first
+	CHECK(stats.archExits[TvmmX86StatIntr].count >= 1);
+	CHECK(stats.clientExits[uint32(TvmmExit::Canceled)].count == 2);
+	CHECK(stats.clientExits[uint32(TvmmExit::Halted)].count >= 6);
+	CHECK(stats.runs.cycles > stats.entries.cycles);
+	CHECK(stats.waits.count == 0);
+
+	uint64 archCount = 0;
+	for (const TvmmStat &stat: stats.archExits) {
+		archCount += stat.count;
+	}
+	CHECK(archCount == stats.entries.count);
+	uint64 clientCount = 0;
+	for (const TvmmStat &stat: stats.clientExits) {
+		clientCount += stat.count;
+	}
+	CHECK(clientCount == stats.runs.count);
+}
+
+
 int main()
 {
 	// Each line gets out before whatever comes next can hang the host.
@@ -404,6 +450,7 @@ int main()
 	TestStringIo(guest);
 	TestCpuidTableAndCr8(guest);
 	TestKick(guest);
+	TestStats(guest);
 
 	CHECK_OK(guest.device.MapRam(0, 0, 0, 0, 0, 0));
 	CHECK_OK(guest.device.FreeRam(ramId, guest.ram));

@@ -23,6 +23,14 @@ inline constexpr uint64 RoundUpToPage(uint64 value)
 }
 
 
+// A field of the run page the client may change at any time, read once.
+template <typename T>
+inline T ReadOnce(const T &field)
+{
+	return *static_cast<const volatile T*>(&field);
+}
+
+
 // Copies an operation's argument structure in from the client, requiring the
 // size the client passed to be the structure's.
 template <typename Args>

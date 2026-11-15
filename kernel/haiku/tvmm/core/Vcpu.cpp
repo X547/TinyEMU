@@ -59,6 +59,27 @@ status_t Vcpu::Init(team_id team, uint64 &runAddress)
 status_t Vcpu::Run()
 {
 	MutexLocker locker(fLock);
+	const uint64 start = Arch::Cycles();
+	if (fClientSince != 0) {
+		AddStatCycles(fStats.clientExits[fClientExit], ElapsedCycles(fClientSince, start));
+		fClientSince = 0;
+	}
+	const status_t res = RunLoop();
+	const uint64 end = Arch::Cycles();
+	AddStat(fStats.runs, ElapsedCycles(start, end));
+	if (res == B_OK) {
+		// the client may change the page; a reason out of range goes as None
+		const uint32 exit = uint32(ReadOnce(fRun->exitReason));
+		fClientExit = exit < kTvmmExitCount ? exit : 0;
+		AddStatCount(fStats.clientExits[fClientExit]);
+		fClientSince = end;
+	}
+	return res;
+}
+
+
+status_t Vcpu::RunLoop()
+{
 	TvmmRun &run = *fRun;
 	if (fVm.Closing()) {
 		fArch->CancelRun(run);
@@ -79,9 +100,14 @@ status_t Vcpu::Run()
 		if (action == ExitAction::ToClient) {
 			return B_OK;
 		}
-		if (action == ExitAction::Wait && !WaitForWake()) {
-			fArch->CancelRun(run);
-			return B_OK;
+		if (action == ExitAction::Wait) {
+			const uint64 start = Arch::Cycles();
+			const bool woken = WaitForWake();
+			AddStat(fStats.waits, ElapsedCycles(start, Arch::Cycles()));
+			if (!woken) {
+				fArch->CancelRun(run);
+				return B_OK;
+			}
 		}
 	}
 }
@@ -179,6 +205,30 @@ status_t Vcpu::GetState(const TvmmStateOp &op)
 	CHECK_RET(user_memcpy(fStateBuffer, clientState, size));
 	fArch->GetState(op.classes, fStateBuffer);
 	return user_memcpy(clientState, fStateBuffer, size);
+}
+
+
+static void ReadStats(const TvmmStat *from, TvmmStat *to, size_t count)
+{
+	for (size_t i = 0; i < count; i++) {
+		to[i].count = __atomic_load_n(&from[i].count, __ATOMIC_RELAXED);
+		to[i].cycles = __atomic_load_n(&from[i].cycles, __ATOMIC_RELAXED);
+	}
+}
+
+
+void Vcpu::GetStats(TvmmVcpuStats &stats) const
+{
+	ReadStats(&fStats.runs, &stats.runs, 1);
+	ReadStats(&fStats.entries, &stats.entries, 1);
+	ReadStats(&fStats.waits, &stats.waits, 1);
+	ReadStats(fStats.clientExits, stats.clientExits, kTvmmMaxClientExits);
+	ReadStats(fStats.archExits, stats.archExits, kTvmmMaxArchExits);
+	ReadStats(fStats.apicReads, stats.apicReads, kTvmmApicRegCount);
+	ReadStats(fStats.apicWrites, stats.apicWrites, kTvmmApicRegCount);
+	ReadStats(&fStats.apicLock, &stats.apicLock, 1);
+	ReadStats(&fStats.guestMemory, &stats.guestMemory, 1);
+	ReadStats(&fStats.insnFetches, &stats.insnFetches, 1);
 }
 
 

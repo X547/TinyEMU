@@ -166,6 +166,19 @@ public:
 		return Op(TvmmOpGetState, args);
 	}
 
+	// Any thread, while the vcpu runs too.
+	status_t GetStats(uint32 vcpu, TvmmVcpuStats &stats) const
+	{
+		TvmmGetStats args {};
+		args.vcpu = vcpu;
+		const status_t res = Op(TvmmOpGetStats, args);
+		if (res < B_OK) {
+			return res;
+		}
+		stats = args.stats;
+		return B_OK;
+	}
+
 	status_t SetCpuid(const TvmmCpuidEntry *entries, uint32 count) const
 	{
 		TvmmSetCpuid args {};

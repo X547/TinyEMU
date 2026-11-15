@@ -32,7 +32,7 @@
 // The structures have the same layout in the kernel and in the client, which
 // the static_asserts below hold to.
 
-constexpr uint32 kTvmmAbiVersion = 3;
+constexpr uint32 kTvmmAbiVersion = 6;
 constexpr const char *kTvmmDevicePath = "/dev/misc/tvmm";
 
 
@@ -50,6 +50,7 @@ enum TvmmOp: uint32 {
 	TvmmOpSetCpuid,
 	TvmmOpSendMsi,
 	TvmmOpResetVcpu,
+	TvmmOpGetStats,
 };
 
 
@@ -326,6 +327,107 @@ struct TvmmRun {
 static_assert(offsetof(TvmmRun, exitReason) == 8);
 static_assert(offsetof(TvmmRun, exit) == 40);
 static_assert(sizeof(TvmmRun) == 296);
+
+
+//#pragma mark - statistics
+
+
+// How often something happened, and the host TSC cycles it took.
+struct TvmmStat {
+	uint64 count;
+	uint64 cycles;
+};
+
+
+// TvmmVcpuStats::archExits, x86 SVM: the processor's exits by kind
+enum {
+	// a host interrupt, NMI, SMI or INIT, kicks and timers included
+	TvmmX86StatIntr,
+	TvmmX86StatInterruptWindow,
+	TvmmX86StatPause,
+	TvmmX86StatHlt,
+	TvmmX86StatCpuid,
+	TvmmX86StatXsetbv,
+	TvmmX86StatCr8,
+	TvmmX86StatDr,
+	// IN and OUT
+	TvmmX86StatIo,
+	// INS and OUTS, one element each
+	TvmmX86StatStringIo,
+	// an MSR the kernel has: EFER, PAT, TSC
+	TvmmX86StatMsr,
+	// IA32_APIC_BASE and the x2APIC registers of the kernel's local APIC
+	TvmmX86StatMsrApic,
+	TvmmX86StatMsrClient,
+	// the register page of the kernel's local APIC
+	TvmmX86StatMmioApic,
+	TvmmX86StatMmioClient,
+	// a nested page fault on what is RAM by now, which the guest retries
+	TvmmX86StatNpfRam,
+	// an instruction the guest gets #UD or #AC for
+	TvmmX86StatException,
+	TvmmX86StatShutdown,
+	TvmmX86StatFailEntry,
+	// anything else, the exits the client gets as Unhandled included
+	TvmmX86StatOther,
+	TvmmX86StatCount
+};
+
+
+constexpr uint32 kTvmmExitCount = uint32(TvmmExit::Unhandled) + 1;
+constexpr uint32 kTvmmMaxClientExits = 16;
+constexpr uint32 kTvmmMaxArchExits = 32;
+// x86: the local APIC's registers, by xAPIC offset / 16 (x2APIC MSR - 0x800)
+constexpr uint32 kTvmmApicRegCount = 64;
+static_assert(kTvmmExitCount <= kTvmmMaxClientExits);
+static_assert(TvmmX86StatCount <= kTvmmMaxArchExits);
+
+
+// What a vcpu did since it was created. A run's cycles are counted when it
+// returns, the cycles of what the client does when the next run starts.
+struct TvmmVcpuStats {
+	// TvmmOpRun, from the start of the operation to its return
+	TvmmStat runs;
+	// in the guest, from just before the guest is entered to just after it
+	// exits, the switch of the FPU state included
+	TvmmStat entries;
+	// waits in the kernel, at HLT or for a STARTUP
+	TvmmStat waits;
+	// the returns to the client by TvmmRun::exitReason, and the cycles the
+	// client took until the next TvmmOpRun
+	TvmmStat clientExits[kTvmmMaxClientExits];
+	// the processor's exits by kind, TvmmX86Stat* on x86, and the cycles from
+	// the exit to the end of its handling in the kernel; the host interrupt
+	// that made an exit is taken in that time
+	TvmmStat archExits[kTvmmMaxArchExits];
+	// x86 with TvmmVmLocalApic: the guest's accesses to its local APIC's
+	// registers, through the page or the x2APIC MSRs, and the cycles of each
+	// exit as in archExits
+	TvmmStat apicReads[kTvmmApicRegCount];
+	TvmmStat apicWrites[kTvmmApicRegCount];
+	// x86 with TvmmVmLocalApic: those accesses taking the VM's lock of the
+	// APICs, and the cycles until they had it
+	TvmmStat apicLock;
+	// the kernel's reads and writes of guest memory, and its looks at what is
+	// RAM, for exits: each under the VM's lock
+	TvmmStat guestMemory;
+	// x86: instructions read from guest memory, as the processor gave no
+	// bytes of them, page table walk included
+	TvmmStat insnFetches;
+};
+
+
+// Any thread, while the vcpu runs too. Each counter is read whole; the
+// counters together may be of moments apart.
+struct TvmmGetStats {
+	uint32 vcpu;
+	uint32 reserved;
+	// out
+	TvmmVcpuStats stats;
+};
+
+static_assert(sizeof(TvmmGetStats)
+	== 8 + 16 * (6 + kTvmmMaxClientExits + kTvmmMaxArchExits + 2 * kTvmmApicRegCount));
 
 
 //#pragma mark - x86 state

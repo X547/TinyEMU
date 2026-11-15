@@ -25,6 +25,7 @@
 #include <inttypes.h>
 
 #include <algorithm>
+#include <iterator>
 #include <memory>
 #include <vector>
 
@@ -175,8 +176,14 @@ private:
     };
     std::vector<Slot> fSlots;
     std::unique_ptr<HypervisorPhysMemoryMap> fMemoryMap;
+    /* with TVMM_STATS in the environment: the statistics are printed at the
+       end, the TSC timed against the clock from the start */
+    bool fPrintStats = false;
+    uint64_t fStartTsc = 0;
+    bigtime_t fStartTime = 0;
 
     void SetCpuid();
+    void PrintStats();
 
 public:
     TvmmX86Hypervisor(X86CpuTarget &target, DeviceLock &lock,
@@ -214,6 +221,8 @@ public:
 
 TvmmX86Hypervisor::~TvmmX86Hypervisor()
 {
+    if (fPrintStats)
+        PrintStats();
     fMemoryMap.reset();
     fVcpus.clear();
     /* closing the device ends the VM and gives the RAM back */
@@ -254,7 +263,147 @@ bool TvmmX86Hypervisor::Init()
     for (int i = 0; i < fCpuCount; i++)
         fVcpus.push_back(std::make_unique<TvmmX86Vcpu>(*this, i));
     fMemoryMap = std::make_unique<HypervisorPhysMemoryMap>(*this);
+
+    fPrintStats = getenv("TVMM_STATS") != nullptr;
+    fStartTsc = __builtin_ia32_rdtsc();
+    fStartTime = system_time();
     return true;
+}
+
+
+static void add_stat(TvmmStat &sum, const TvmmStat &stat)
+{
+    sum.count += stat.count;
+    sum.cycles += stat.cycles;
+}
+
+static void print_stat(const char *name, const TvmmStat &stat,
+                       double ns_per_cycle, double seconds)
+{
+    if (stat.count == 0)
+        return;
+    double ns = stat.cycles * ns_per_cycle;
+    fprintf(stderr, "  %-18s %12" PRIu64 " %10.0f/s %10.3f s %9.2f us\n",
+            name, (uint64_t)stat.count, stat.count / seconds, ns / 1e9,
+            ns / stat.count / 1e3);
+}
+
+
+/* A local APIC register by its xAPIC offset / 16. */
+static const char *apic_reg_name(uint32 index)
+{
+    static char other[16];
+    switch (index) {
+    case 0x02: return "id";
+    case 0x03: return "version";
+    case 0x08: return "tpr";
+    case 0x09: return "apr";
+    case 0x0a: return "ppr";
+    case 0x0b: return "eoi";
+    case 0x0d: return "ldr";
+    case 0x0e: return "dfr";
+    case 0x0f: return "svr";
+    case 0x28: return "esr";
+    case 0x2f: return "lvt cmci";
+    case 0x30: return "icr";
+    case 0x31: return "icr high";
+    case 0x32: return "lvt timer";
+    case 0x33: return "lvt thermal";
+    case 0x34: return "lvt perf";
+    case 0x35: return "lvt lint0";
+    case 0x36: return "lvt lint1";
+    case 0x37: return "lvt error";
+    case 0x38: return "timer initial";
+    case 0x39: return "timer current";
+    case 0x3e: return "timer divide";
+    case 0x3f: return "self ipi";
+    }
+    if (index >= 0x10 && index < 0x18)
+        snprintf(other, sizeof(other), "isr %u", index - 0x10);
+    else if (index >= 0x18 && index < 0x20)
+        snprintf(other, sizeof(other), "tmr %u", index - 0x18);
+    else if (index >= 0x20 && index < 0x28)
+        snprintf(other, sizeof(other), "irr %u", index - 0x20);
+    else
+        snprintf(other, sizeof(other), "0x%03x", index << 4);
+    return other;
+}
+
+
+/* What the processors did, summed over them: how often, and the time it
+   took, in total and each time. */
+void TvmmX86Hypervisor::PrintStats()
+{
+    static const char *const arch_names[] = {
+        "interrupt", "interrupt window", "pause", "hlt", "cpuid", "xsetbv",
+        "cr8 write", "debug register", "port", "string port", "msr",
+        "apic msr", "client msr", "apic mmio", "client mmio", "npf on ram",
+        "exception", "shutdown", "failed entry", "other",
+    };
+    static const char *const client_names[] = {
+        "none", "canceled", "port", "mmio", "msr", "halted",
+        "interrupt window", "tpr changed", "eoi", "extint accepted",
+        "shutdown", "failed entry", "unhandled",
+    };
+    static_assert(std::size(arch_names) == TvmmX86StatCount);
+    static_assert(std::size(client_names) == kTvmmExitCount);
+
+    TvmmVcpuStats sum {};
+    for (int i = 0; i < fCpuCount; i++) {
+        TvmmVcpuStats stats;
+        status_t err = fDevice.GetStats(i, stats);
+        if (err < B_OK) {
+            fprintf(stderr, "tvmm: reading the statistics failed: %s\n",
+                    strerror(err));
+            return;
+        }
+        add_stat(sum.runs, stats.runs);
+        add_stat(sum.entries, stats.entries);
+        add_stat(sum.waits, stats.waits);
+        for (uint32 j = 0; j < kTvmmMaxClientExits; j++)
+            add_stat(sum.clientExits[j], stats.clientExits[j]);
+        for (uint32 j = 0; j < kTvmmMaxArchExits; j++)
+            add_stat(sum.archExits[j], stats.archExits[j]);
+        for (uint32 j = 0; j < kTvmmApicRegCount; j++) {
+            add_stat(sum.apicReads[j], stats.apicReads[j]);
+            add_stat(sum.apicWrites[j], stats.apicWrites[j]);
+        }
+        add_stat(sum.apicLock, stats.apicLock);
+        add_stat(sum.guestMemory, stats.guestMemory);
+        add_stat(sum.insnFetches, stats.insnFetches);
+    }
+
+    double seconds = (system_time() - fStartTime) / 1e6;
+    if (seconds <= 0)
+        return;
+    double hz = (__builtin_ia32_rdtsc() - fStartTsc) / seconds;
+    double ns_per_cycle = 1e9 / hz;
+    fprintf(stderr, "tvmm: %d processors, %.1f s, TSC at %.3f GHz\n",
+            fCpuCount, seconds, hz / 1e9);
+    fprintf(stderr, "  %-18s %12s %12s %12s %12s\n", "", "count", "rate",
+            "total", "each");
+    print_stat("runs", sum.runs, ns_per_cycle, seconds);
+    print_stat("in the guest", sum.entries, ns_per_cycle, seconds);
+    print_stat("kernel waits", sum.waits, ns_per_cycle, seconds);
+    print_stat("guest memory", sum.guestMemory, ns_per_cycle, seconds);
+    print_stat("insn fetches", sum.insnFetches, ns_per_cycle, seconds);
+    fprintf(stderr, " exits, handled in the kernel:\n");
+    for (uint32 i = 0; i < TvmmX86StatCount; i++)
+        print_stat(arch_names[i], sum.archExits[i], ns_per_cycle, seconds);
+    fprintf(stderr, " to the client, and the time there:\n");
+    for (uint32 i = 0; i < kTvmmExitCount; i++)
+        print_stat(client_names[i], sum.clientExits[i], ns_per_cycle, seconds);
+    if (sum.apicLock.count == 0)
+        return;
+    fprintf(stderr, " local APIC registers, the exit each:\n");
+    for (uint32 i = 0; i < kTvmmApicRegCount; i++) {
+        char name[32];
+        snprintf(name, sizeof(name), "%s read", apic_reg_name(i));
+        print_stat(name, sum.apicReads[i], ns_per_cycle, seconds);
+        snprintf(name, sizeof(name), "%s write", apic_reg_name(i));
+        print_stat(name, sum.apicWrites[i], ns_per_cycle, seconds);
+    }
+    print_stat("waits for the lock", sum.apicLock, ns_per_cycle, seconds);
 }
 
 

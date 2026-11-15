@@ -2,6 +2,8 @@
 
 #include <new>
 
+#include <AutoDeleter.h>
+
 #include <team.h>
 #include <util/AutoLock.h>
 #include <util/atomic.h>
@@ -113,6 +115,9 @@ status_t VmHandle::Control(uint32 op, void *data, size_t length)
 			break;
 		case TvmmOpResetVcpu:
 			res = HandleResetVcpu(data, length);
+			break;
+		case TvmmOpGetStats:
+			res = HandleGetStats(data, length);
 			break;
 		default:
 			break;
@@ -276,6 +281,28 @@ status_t VmHandle::HandleResetVcpu(void *data, size_t length)
 	CHECK_RET(GetVcpu(data, length, vcpu));
 	vcpu->Reset();
 	return B_OK;
+}
+
+
+status_t VmHandle::HandleGetStats(void *data, size_t length)
+{
+	// too large for the kernel stack
+	ObjectDeleter<TvmmGetStats> deleter(new(std::nothrow) TvmmGetStats);
+	if (!deleter.IsSet()) {
+		return B_NO_MEMORY;
+	}
+	TvmmGetStats &args = *deleter.Get();
+	CHECK_RET(CopyArgsIn(args, data, length));
+	Vm *vm = GetVm();
+	if (vm == nullptr) {
+		return B_NO_INIT;
+	}
+	Vcpu *vcpu = vm->GetVcpu(args.vcpu);
+	if (vcpu == nullptr) {
+		return B_BAD_VALUE;
+	}
+	vcpu->GetStats(args.stats);
+	return CopyArgsOut(data, args);
 }
 
 

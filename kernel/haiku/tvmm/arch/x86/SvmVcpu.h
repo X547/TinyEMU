@@ -75,6 +75,11 @@ private:
 	X86MemInsn fPendingInsn {};
 	// the client asked to exit once the guest can take an interrupt
 	bool fClientWindow = false;
+	// what the exit being handled counts as, TvmmX86Stat*
+	uint32 fExitStat = TvmmX86StatOther;
+	// the APIC register it accessed, -1 for none
+	int32 fExitApicReg = -1;
+	bool fExitApicWrite = false;
 
 	// The local APIC, without which HLT and the processors' start are the
 	// client's. Its state is under SvmVm::ApicLock().
@@ -99,10 +104,16 @@ private:
 	void ResetState();
 	void ResetFpu();
 
+	// the VM's, timed
+	bool GuestIsRam(uint64 gpa, bool write);
+	bool GuestRead(uint64 gpa, void *buffer, size_t size);
+	bool GuestWrite(uint64 gpa, const void *buffer, size_t size);
+
 	X86CpuMode CpuMode() const;
 	uint64 Linear(int segment, uint64 offset, uint8 addressSize) const;
 	Walk Translate(uint64 linear, bool write, uint64 &gpa);
 	bool FetchInstruction(uint8 *bytes, uint32 &count);
+	bool FetchInstructionBytes(uint8 *bytes, uint32 &count);
 	void AdvanceString(const X86MemInsn &insn, bool source, bool destination);
 
 	void InjectException(uint8 vector, bool hasError = false, uint32 error = 0);

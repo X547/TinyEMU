@@ -76,15 +76,6 @@ static constexpr size_t kXsaveLegacyAndHeader = 576;
 static constexpr uint64 kXstateSse = 1ull << 1;
 
 
-// A field of the run page the client may change at any time, read once.
-template <typename T>
-static T ReadOnce(const T &field)
-{
-	return *static_cast<const volatile T*>(&field);
-}
-
-
-
 static void Cpuid(uint32 leaf, uint32 subleaf, uint32 regs[4])
 {
 	asm volatile(
@@ -428,7 +419,7 @@ SvmVcpu::Walk SvmVcpu::Translate(uint64 linear, bool write, uint64 &gpa)
 		for (int level = levels; level >= 1; level--) {
 			const uint32 shift = 12 + 9 * (level - 1);
 			uint64 entry;
-			if (!fVm.ReadGuest(table + ((linear >> shift) & 511) * 8, &entry, sizeof(entry))) {
+			if (!GuestRead(table + ((linear >> shift) & 511) * 8, &entry, sizeof(entry))) {
 				return Walk::Error;
 			}
 			if ((entry & kPtePresent) == 0) {
@@ -450,7 +441,7 @@ SvmVcpu::Walk SvmVcpu::Translate(uint64 linear, bool write, uint64 &gpa)
 	linear &= 0xffffffff;
 	if ((save.cr4 & kCr4Pae) != 0) {
 		uint64 pdpte;
-		if (!fVm.ReadGuest((save.cr3 & 0xffffffe0) + ((linear >> 30) & 3) * 8, &pdpte, sizeof(pdpte))) {
+		if (!GuestRead((save.cr3 & 0xffffffe0) + ((linear >> 30) & 3) * 8, &pdpte, sizeof(pdpte))) {
 			return Walk::Error;
 		}
 		if ((pdpte & kPtePresent) == 0) {
@@ -460,7 +451,7 @@ SvmVcpu::Walk SvmVcpu::Translate(uint64 linear, bool write, uint64 &gpa)
 	}
 
 	uint32 pde;
-	if (!fVm.ReadGuest((save.cr3 & 0xfffff000) + ((linear >> 22) & 1023) * 4, &pde, sizeof(pde))) {
+	if (!GuestRead((save.cr3 & 0xfffff000) + ((linear >> 22) & 1023) * 4, &pde, sizeof(pde))) {
 		return Walk::Error;
 	}
 	if ((pde & kPtePresent) == 0) {
@@ -471,7 +462,7 @@ SvmVcpu::Walk SvmVcpu::Translate(uint64 linear, bool write, uint64 &gpa)
 		return Walk::Ok;
 	}
 	uint32 pte;
-	if (!fVm.ReadGuest((pde & 0xfffff000) + ((linear >> 12) & 1023) * 4, &pte, sizeof(pte))) {
+	if (!GuestRead((pde & 0xfffff000) + ((linear >> 12) & 1023) * 4, &pte, sizeof(pte))) {
 		return Walk::Error;
 	}
 	if ((pte & kPtePresent) == 0) {
@@ -482,8 +473,44 @@ SvmVcpu::Walk SvmVcpu::Translate(uint64 linear, bool write, uint64 &gpa)
 }
 
 
+bool SvmVcpu::GuestIsRam(uint64 gpa, bool write)
+{
+	const uint64 start = Arch::Cycles();
+	const bool res = fVm.IsRam(gpa, write);
+	AddStat(fVcpu.Stats().guestMemory, ElapsedCycles(start, Arch::Cycles()));
+	return res;
+}
+
+
+bool SvmVcpu::GuestRead(uint64 gpa, void *buffer, size_t size)
+{
+	const uint64 start = Arch::Cycles();
+	const bool res = fVm.ReadGuest(gpa, buffer, size);
+	AddStat(fVcpu.Stats().guestMemory, ElapsedCycles(start, Arch::Cycles()));
+	return res;
+}
+
+
+bool SvmVcpu::GuestWrite(uint64 gpa, const void *buffer, size_t size)
+{
+	const uint64 start = Arch::Cycles();
+	const bool res = fVm.WriteGuest(gpa, buffer, size);
+	AddStat(fVcpu.Stats().guestMemory, ElapsedCycles(start, Arch::Cycles()));
+	return res;
+}
+
+
 // For an exit without the instruction bytes: they are read from guest RAM.
 bool SvmVcpu::FetchInstruction(uint8 *bytes, uint32 &count)
+{
+	const uint64 start = Arch::Cycles();
+	const bool res = FetchInstructionBytes(bytes, count);
+	AddStat(fVcpu.Stats().insnFetches, ElapsedCycles(start, Arch::Cycles()));
+	return res;
+}
+
+
+bool SvmVcpu::FetchInstructionBytes(uint8 *bytes, uint32 &count)
 {
 	const uint8 addressSize = CpuMode() == X86CpuMode::Long64 ? 8 : 4;
 	const uint64 linear = Linear(X86SegCs, fVmcb->save.rip, addressSize);
@@ -501,7 +528,7 @@ bool SvmVcpu::FetchInstruction(uint8 *bytes, uint32 &count)
 			fVmcb->save.cr2 = savedCr2;
 			break;
 		}
-		if (!fVm.ReadGuest(gpa, bytes + done, chunk)) {
+		if (!GuestRead(gpa, bytes + done, chunk)) {
 			break;
 		}
 		done += chunk;
@@ -573,6 +600,7 @@ ExitAction SvmVcpu::ToClient(TvmmRun &run, TvmmExit reason)
 ExitAction SvmVcpu::Unhandled(TvmmRun &run)
 {
 	const VmcbControl &control = fVmcb->control;
+	fExitStat = TvmmX86StatOther;
 	TvmmExitUnhandled &exit = run.exit.unhandled;
 	exit.code = control.exitCode;
 	exit.info1 = control.exitInfo1;
@@ -670,7 +698,7 @@ bool SvmVcpu::Push(uint64 value, uint8 size)
 	if (Translate(linear, true, gpa) != Walk::Ok) {
 		return false;
 	}
-	if ((linear & (kPageSize - 1)) + size > kPageSize || !fVm.WriteGuest(gpa, &value, size)) {
+	if ((linear & (kPageSize - 1)) + size > kPageSize || !GuestWrite(gpa, &value, size)) {
 		// a stack that is not RAM, or across pages: the push is lost
 		TVMM_LOG("push to %#" B_PRIx64 " not done\n", linear);
 	}
@@ -693,7 +721,7 @@ status_t SvmVcpu::PrepareRun(TvmmRun &run)
 		}
 		case Pending::InsIn: {
 			const uint32 value = ReadOnce(run.exit.io.data);
-			fVm.WriteGuest(fPendingGpa, &value, fPendingInsn.size);
+			GuestWrite(fPendingGpa, &value, fPendingInsn.size);
 			AdvanceString(fPendingInsn, false, true);
 			break;
 		}
@@ -724,7 +752,7 @@ status_t SvmVcpu::PrepareRun(TvmmRun &run)
 		case Pending::MovsLoad: {
 			uint8 data[8];
 			memcpy(data, run.exit.mmio.data, sizeof(data));
-			fVm.WriteGuest(fPendingGpa, data, fPendingInsn.size);
+			GuestWrite(fPendingGpa, data, fPendingInsn.size);
 			AdvanceString(fPendingInsn, true, true);
 			break;
 		}
@@ -826,11 +854,79 @@ ExitAction SvmVcpu::EnterGuest(TvmmRun &run)
 		SvmHost::HostXcr0(),
 		fGuestXcr0
 	};
+	const uint64 entered = __builtin_ia32_rdtsc();
 	tvmm_svm_run(&context);
+	const uint64 exited = __builtin_ia32_rdtsc();
 
 	fVcpu.EndGuestEntry();
 	restore_interrupts(state);
-	return HandleExit(run);
+
+	TvmmVcpuStats &stats = fVcpu.Stats();
+	AddStat(stats.entries, ElapsedCycles(entered, exited));
+	const ExitAction action = HandleExit(run);
+	// as CPU 0's TSC, for the thread may have moved since
+	const uint64 exitedTsc0 = exited - uint64(SvmHost::TscSkew(cpu));
+	const uint64 handling = ElapsedCycles(exitedTsc0, SvmHost::ReadTsc0());
+	AddStat(stats.archExits[fExitStat], handling);
+	if (fExitApicReg >= 0) {
+		AddStat((fExitApicWrite ? stats.apicWrites : stats.apicReads)[fExitApicReg], handling);
+		fExitApicReg = -1;
+	}
+	return action;
+}
+
+
+// What an exit counts as before its handling looks closer.
+static uint32 ExitStat(uint64 code)
+{
+	if (code >= SvmExitReadDr0 && code < SvmExitWriteDr0 + 0x10) {
+		return TvmmX86StatDr;
+	}
+	switch (code) {
+		case SvmExitIntr:
+		case SvmExitNmi:
+		case SvmExitSmi:
+		case SvmExitInit:
+			return TvmmX86StatIntr;
+		case SvmExitPause:
+			return TvmmX86StatPause;
+		case SvmExitVintr:
+			return TvmmX86StatInterruptWindow;
+		case SvmExitWriteCr8:
+			return TvmmX86StatCr8;
+		case SvmExitCpuid:
+			return TvmmX86StatCpuid;
+		case SvmExitHlt:
+			return TvmmX86StatHlt;
+		case SvmExitIoio:
+			return TvmmX86StatIo;
+		case SvmExitNpf:
+			return TvmmX86StatMmioClient;
+		case SvmExitMsr:
+			return TvmmX86StatMsrClient;
+		case SvmExitXsetbv:
+			return TvmmX86StatXsetbv;
+		case SvmExitShutdown:
+			return TvmmX86StatShutdown;
+		case SvmExitVmrun:
+		case SvmExitVmmcall:
+		case SvmExitVmload:
+		case SvmExitVmsave:
+		case SvmExitStgi:
+		case SvmExitClgi:
+		case SvmExitSkinit:
+		case SvmExitInvlpga:
+		case SvmExitMonitor:
+		case SvmExitMwait:
+		case SvmExitMwaitCond:
+		case SvmExitRdpru:
+		case SvmExitException0 + kExceptionAc:
+			return TvmmX86StatException;
+		case SvmExitInvalid:
+			return TvmmX86StatFailEntry;
+		default:
+			return TvmmX86StatOther;
+	}
 }
 
 
@@ -845,6 +941,7 @@ ExitAction SvmVcpu::HandleExit(TvmmRun &run)
 	}
 
 	const uint64 code = control.exitCode;
+	fExitStat = ExitStat(code);
 	if (code >= SvmExitReadDr0 && code < SvmExitWriteDr0 + 0x10) {
 		return HandleDr(run);
 	}
@@ -965,6 +1062,7 @@ ExitAction SvmVcpu::HandleStringIo(TvmmRun &run)
 	VmcbSave &save = fVmcb->save;
 	const uint64 info = control.exitInfo1;
 	const bool in = (info & kSvmIoioIn) != 0;
+	fExitStat = TvmmX86StatStringIo;
 
 	X86MemInsn insn {};
 	insn.size = (info >> kSvmIoioSizeShift) & 7;
@@ -996,7 +1094,7 @@ ExitAction SvmVcpu::HandleStringIo(TvmmRun &run)
 	exit.size = insn.size;
 	exit.in = in;
 	if (in) {
-		if (!fVm.IsRam(gpa, true)) {
+		if (!GuestIsRam(gpa, true)) {
 			return Unhandled(run);
 		}
 		exit.data = 0;
@@ -1005,7 +1103,7 @@ ExitAction SvmVcpu::HandleStringIo(TvmmRun &run)
 		fPendingInsn = insn;
 	} else {
 		uint32 value = 0;
-		if (!fVm.ReadGuest(gpa, &value, insn.size)) {
+		if (!GuestRead(gpa, &value, insn.size)) {
 			return Unhandled(run);
 		}
 		exit.data = value;
@@ -1024,8 +1122,9 @@ ExitAction SvmVcpu::HandleNpf(TvmmRun &run)
 	VmcbSave &save = fVmcb->save;
 	const uint64 gpa = control.exitInfo2;
 	const bool write = (control.exitInfo1 & 2) != 0;
-	if (fVm.IsRam(gpa, write)) {
+	if (GuestIsRam(gpa, write)) {
 		// the mapping changed while the guest ran; it tries again
+		fExitStat = TvmmX86StatNpfRam;
 		return ExitAction::Resume;
 	}
 
@@ -1042,6 +1141,7 @@ ExitAction SvmVcpu::HandleNpf(TvmmRun &run)
 
 	ExitAction action = ExitAction::ToClient;
 	if (ApicMmio(insn, gpa, run, action)) {
+		fExitStat = TvmmX86StatMmioApic;
 		return action;
 	}
 	switch (insn.op) {
@@ -1096,7 +1196,7 @@ ExitAction SvmVcpu::HandleNpf(TvmmRun &run)
 			if (write) {
 				// from RAM to the device
 				uint64 value = 0;
-				if (!fVm.ReadGuest(other, &value, insn.size)) {
+				if (!GuestRead(other, &value, insn.size)) {
 					action = Unhandled(run);
 					break;
 				}
@@ -1104,7 +1204,7 @@ ExitAction SvmVcpu::HandleNpf(TvmmRun &run)
 				action = MmioWrite(run, gpa, insn.size, &value);
 			} else {
 				// from the device to RAM
-				if (!fVm.IsRam(other, true)) {
+				if (!GuestIsRam(other, true)) {
 					action = Unhandled(run);
 					break;
 				}
@@ -1133,6 +1233,7 @@ ExitAction SvmVcpu::HandleMsr(TvmmRun &run)
 		bool apicOk = true;
 		bool extIntBefore = false;
 		if (ApicMsr(msr, write, apicValue, apicOk, extIntBefore)) {
+			fExitStat = TvmmX86StatMsrApic;
 			if (!apicOk) {
 				InjectException(kExceptionGp, true, 0);
 				return ExitAction::Resume;
@@ -1185,6 +1286,7 @@ ExitAction SvmVcpu::HandleMsr(TvmmRun &run)
 	}
 
 	if (handled) {
+		fExitStat = TvmmX86StatMsr;
 		if (!ok) {
 			InjectException(kExceptionGp, true, 0);
 			return ExitAction::Resume;
@@ -1547,9 +1649,13 @@ bool SvmVcpu::ApicMmio(const X86MemInsn &insn, uint64 gpa, TvmmRun &run, ExitAct
 		value = uint32((insn.op == X86MemOp::Store
 			? ReadGpr(insn.reg, insn.size, insn.highByte) : insn.immediate) << shift);
 	}
+	fExitApicReg = int32((offset >> 4) & (kTvmmApicRegCount - 1));
+	fExitApicWrite = store;
 	bool extIntBefore;
 	{
+		const uint64 lockStart = __builtin_ia32_rdtsc();
 		InterruptsSpinLocker locker(fSvmVm.ApicLock());
+		AddStat(fVcpu.Stats().apicLock, ElapsedCycles(lockStart, __builtin_ia32_rdtsc()));
 		PullTaskPriority();
 		extIntBefore = fApic->AcceptsExtInt();
 		if (load) {
@@ -1578,8 +1684,14 @@ bool SvmVcpu::ApicMsr(uint32 msr, bool write, uint64 &value, bool &ok, bool &ext
 	if (msr != kMsrApicBase && (msr < kApicMsrBase || msr >= kApicMsrBase + kApicMsrCount)) {
 		return false;
 	}
+	if (msr != kMsrApicBase) {
+		fExitApicReg = int32(msr - kApicMsrBase) & int32(kTvmmApicRegCount - 1);
+		fExitApicWrite = write;
+	}
 	{
+		const uint64 lockStart = __builtin_ia32_rdtsc();
 		InterruptsSpinLocker locker(fSvmVm.ApicLock());
+		AddStat(fVcpu.Stats().apicLock, ElapsedCycles(lockStart, __builtin_ia32_rdtsc()));
 		PullTaskPriority();
 		extIntBefore = fApic->AcceptsExtInt();
 		if (msr == kMsrApicBase) {

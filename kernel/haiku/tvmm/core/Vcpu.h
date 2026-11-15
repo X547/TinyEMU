@@ -6,11 +6,39 @@
 #include <lock.h>
 
 #include "KernelArea.h"
+#include "tvmm_abi.h"
 
 class ArchVcpu;
 class Vm;
-struct TvmmRun;
-struct TvmmStateOp;
+
+
+// The statistics have one writer, the vcpu's run, and readers on any thread:
+// each value is stored and loaded whole.
+inline void AddStatCount(TvmmStat &stat)
+{
+	__atomic_store_n(&stat.count, stat.count + 1, __ATOMIC_RELAXED);
+}
+
+
+inline void AddStatCycles(TvmmStat &stat, uint64 cycles)
+{
+	__atomic_store_n(&stat.cycles, stat.cycles + cycles, __ATOMIC_RELAXED);
+}
+
+
+inline void AddStat(TvmmStat &stat, uint64 cycles)
+{
+	AddStatCount(stat);
+	AddStatCycles(stat, cycles);
+}
+
+
+// The cycles from 'start' to 'end', none when a CPU change put them out of
+// order.
+inline uint64 ElapsedCycles(uint64 start, uint64 end)
+{
+	return end > start ? end - start : 0;
+}
 
 
 // One virtual processor. Its client runs it on a thread of its own with
@@ -35,6 +63,13 @@ private:
 	int32 fWakePending = 0;
 	ConditionVariable fWakeCondition;
 
+	TvmmVcpuStats fStats {};
+	// when the last run returned to the client, 0 before the first, and with
+	// which exit
+	uint64 fClientSince = 0;
+	uint32 fClientExit = 0;
+
+	status_t RunLoop();
 	bool WaitForWake();
 
 public:
@@ -59,6 +94,11 @@ public:
 	status_t GetState(const TvmmStateOp &op);
 	status_t SetState(const TvmmStateOp &op);
 	void Reset();
+
+	// For the architecture's run, which counts the processor's exits.
+	TvmmVcpuStats &Stats() {return fStats;}
+	// Any thread, without the vcpu's lock.
+	void GetStats(TvmmVcpuStats &stats) const;
 
 	// Waits until the guest no longer runs with a TLB generation older than
 	// 'generation'. Any thread.

@@ -395,6 +395,12 @@ void Arch::Release()
 }
 
 
+uint64 Arch::Cycles()
+{
+	return SvmHost::ReadTsc0();
+}
+
+
 status_t Arch::CreateVm(Vm &vm, uint32 flags, ArchVm *&arch)
 {
 	auto *svmVm = new(std::nothrow) SvmVm(vm, flags);

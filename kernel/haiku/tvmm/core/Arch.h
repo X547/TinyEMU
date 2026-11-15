@@ -79,5 +79,8 @@ void Release();
 // 'flags' are TvmmCreateVm::flags.
 status_t CreateVm(Vm &vm, uint32 flags, ArchVm *&arch);
 
+// Host cycles, which agree between the CPUs; while a VM is held.
+uint64 Cycles();
+
 
 } // Arch
