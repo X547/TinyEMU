@@ -7,6 +7,8 @@
 
 #include <KernelExport.h>
 
+#include <util/AutoLock.h>
+
 #include "Arch.h"
 #include "Common.h"
 #include "tvmm_abi.h"
@@ -152,15 +154,22 @@ status_t GuestMemory::FreeRam(uint32 id)
 }
 
 
+// Readers see the slot no more once this takes it for writing; none is left
+// using its RAM then, which the slot's removal lets go.
 void GuestMemory::UnmapSlot(Slot &slot)
 {
 	if (slot.size == 0) {
 		return;
 	}
-	fArch->UnmapPages(slot.gpa, slot.size);
-	slot.ram->RemoveMapping();
-	free(slot.written);
-	slot = Slot();
+	Slot old;
+	{
+		InterruptsWriteSpinLocker locker(fSlotLock);
+		old = slot;
+		slot = Slot();
+	}
+	fArch->UnmapPages(old.gpa, old.size);
+	old.ram->RemoveMapping();
+	free(old.written);
 }
 
 
@@ -218,36 +227,40 @@ status_t GuestMemory::MapRam(const TvmmMapRam &args, bool &unmapped)
 		return B_OK;
 	}
 
+	// The slot is there before its pages: a nested page fault on one of them
+	// meanwhile finds RAM, and the guest tries again until it is mapped.
+	Slot mapped;
+	mapped.gpa = args.gpa;
+	mapped.size = args.size;
+	mapped.offset = args.offset;
+	mapped.ram = ram;
+	mapped.flags = args.flags;
+	mapped.written = written;
+	ram->AddMapping();
+	{
+		InterruptsWriteSpinLocker locker(fSlotLock);
+		slot = mapped;
+	}
 	const status_t res = fArch->MapPages(args.gpa, args.size, *ram, args.offset, args.flags);
 	if (res < B_OK) {
-		fArch->UnmapPages(args.gpa, args.size);
-		free(written);
+		UnmapSlot(slot);
 		unmapped = true;
 		return res;
 	}
-	ram->AddMapping();
-	slot.gpa = args.gpa;
-	slot.size = args.size;
-	slot.offset = args.offset;
-	slot.ram = ram;
-	slot.flags = args.flags;
-	slot.written = written;
 	return B_OK;
 }
 
 
-void GuestMemory::MarkWritten(uint64 gpa, uint64 size)
+// Logged with a locked update, as TakeDirtyLog() takes the words.
+void GuestMemory::MarkWritten(const Slot &slot, uint64 gpa, uint64 size)
 {
-	for (Slot &slot: fSlots) {
-		if (slot.written == nullptr || gpa < slot.gpa || gpa - slot.gpa >= slot.size) {
-			continue;
-		}
-		const uint64 first = (gpa - slot.gpa) / kPageSize;
-		const uint64 last = (gpa - slot.gpa + size - 1) / kPageSize;
-		for (uint64 page = first; page <= last; page++) {
-			slot.written[page / 64] |= 1ull << (page % 64);
-		}
+	if (slot.written == nullptr) {
 		return;
+	}
+	const uint64 first = (gpa - slot.gpa) / kPageSize;
+	const uint64 last = (gpa - slot.gpa + size - 1) / kPageSize;
+	for (uint64 page = first; page <= last; page++) {
+		atomic_or64(reinterpret_cast<int64*>(&slot.written[page / 64]), int64(1ull << (page % 64)));
 	}
 }
 
@@ -258,18 +271,21 @@ status_t GuestMemory::TakeDirtyLog(uint32 index, uint64 *bitmap, uint64 words, b
 	if (index >= kMaxSlots) {
 		return B_BAD_VALUE;
 	}
-	Slot &slot = fSlots[index];
+	// with the VM's lock, the slot stays as it is
+	const Slot &slot = fSlots[index];
 	if (slot.written == nullptr || words != BitmapWords(slot.size)) {
 		return B_BAD_VALUE;
 	}
-	memcpy(bitmap, slot.written, words * sizeof(uint64));
-	memset(slot.written, 0, words * sizeof(uint64));
+	for (uint64 i = 0; i < words; i++) {
+		bitmap[i] = uint64(atomic_get_and_set64(reinterpret_cast<int64*>(&slot.written[i]), 0));
+	}
 	flush = fArch->TakeDirty(slot.gpa, slot.size, bitmap);
 	return B_OK;
 }
 
 
-uint8 *GuestMemory::KernelAddress(uint64 gpa, uint64 size, bool write) const
+// With the slots' lock held.
+const GuestMemory::Slot *GuestMemory::FindSlot(uint64 gpa, uint64 size, bool write) const
 {
 	for (const Slot &slot: fSlots) {
 		if (slot.size == 0 || gpa < slot.gpa || gpa - slot.gpa >= slot.size) {
@@ -281,7 +297,46 @@ uint8 *GuestMemory::KernelAddress(uint64 gpa, uint64 size, bool write) const
 		if (write && (slot.flags & TvmmMapReadOnly) != 0) {
 			return nullptr;
 		}
-		return slot.ram->KernelAddress() + slot.offset + (gpa - slot.gpa);
+		return &slot;
 	}
 	return nullptr;
+}
+
+
+uint8 *GuestMemory::KernelAddress(const Slot &slot, uint64 gpa)
+{
+	return slot.ram->KernelAddress() + slot.offset + (gpa - slot.gpa);
+}
+
+
+bool GuestMemory::IsRam(uint64 gpa, bool write)
+{
+	InterruptsReadSpinLocker locker(fSlotLock);
+	return FindSlot(gpa, 1, write) != nullptr;
+}
+
+
+// The RAM is wired, so the copy faults on nothing.
+bool GuestMemory::Read(uint64 gpa, void *buffer, size_t size)
+{
+	InterruptsReadSpinLocker locker(fSlotLock);
+	const Slot *slot = FindSlot(gpa, size, false);
+	if (slot == nullptr) {
+		return false;
+	}
+	memcpy(buffer, KernelAddress(*slot, gpa), size);
+	return true;
+}
+
+
+bool GuestMemory::Write(uint64 gpa, const void *buffer, size_t size)
+{
+	InterruptsReadSpinLocker locker(fSlotLock);
+	const Slot *slot = FindSlot(gpa, size, true);
+	if (slot == nullptr) {
+		return false;
+	}
+	memcpy(KernelAddress(*slot, gpa), buffer, size);
+	MarkWritten(*slot, gpa, size);
+	return true;
 }

@@ -192,35 +192,22 @@ status_t Vm::SetCpuid(const TvmmSetCpuid &args)
 }
 
 
+// Without the VM's lock, which every vcpu's exits would contend for.
 bool Vm::IsRam(uint64 gpa, bool write)
 {
-	MutexLocker locker(fLock);
-	return fMemory.KernelAddress(gpa, 1, write) != nullptr;
+	return fMemory.IsRam(gpa, write);
 }
 
 
 bool Vm::ReadGuest(uint64 gpa, void *buffer, size_t size)
 {
-	MutexLocker locker(fLock);
-	const uint8 *address = fMemory.KernelAddress(gpa, size, false);
-	if (address == nullptr) {
-		return false;
-	}
-	memcpy(buffer, address, size);
-	return true;
+	return fMemory.Read(gpa, buffer, size);
 }
 
 
 bool Vm::WriteGuest(uint64 gpa, const void *buffer, size_t size)
 {
-	MutexLocker locker(fLock);
-	uint8 *address = fMemory.KernelAddress(gpa, size, true);
-	if (address == nullptr) {
-		return false;
-	}
-	memcpy(address, buffer, size);
-	fMemory.MarkWritten(gpa, size);
-	return true;
+	return fMemory.Write(gpa, buffer, size);
 }
 
 

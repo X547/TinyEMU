@@ -2,6 +2,8 @@
 
 #include <SupportDefs.h>
 
+#include <KernelExport.h>
+
 #include <util/DoublyLinkedList.h>
 
 #include "KernelArea.h"
@@ -49,8 +51,9 @@ public:
 };
 
 
-// The guest physical address space: which RAM backs which range. Called with
-// the VM's lock held.
+// The guest physical address space: which RAM backs which range. Changed with
+// the VM's lock held; the vcpus' exits read it without, under a spinlock the
+// changes of the slots take for writing.
 class GuestMemory {
 public:
 	static constexpr uint32 kMaxSlots = 256;
@@ -72,10 +75,17 @@ private:
 	ArchVm *fArch = nullptr;
 	DoublyLinkedList<RamObject> fRam;
 	uint32 fNextRamId = 1;
+	// the slots, which readers use with interrupts disabled for no longer
+	// than a copy of a page
+	rw_spinlock fSlotLock = B_RW_SPINLOCK_INITIALIZER;
 	Slot fSlots[kMaxSlots];
 
 	RamObject *FindRam(uint32 id) const;
 	void UnmapSlot(Slot &slot);
+	// The slot of 'size' bytes at 'gpa', nullptr where there is none
+	const Slot *FindSlot(uint64 gpa, uint64 size, bool write) const;
+	static uint8 *KernelAddress(const Slot &slot, uint64 gpa);
+	static void MarkWritten(const Slot &slot, uint64 gpa, uint64 size);
 
 public:
 	~GuestMemory();
@@ -87,11 +97,12 @@ public:
 	// The caller flushes the guest TLBs once it returns.
 	status_t MapRam(const TvmmMapRam &args, bool &unmapped);
 
-	// The kernel's address of guest RAM at 'gpa', for 'size' bytes that stay
-	// within one slot; nullptr where there is none.
-	uint8 *KernelAddress(uint64 gpa, uint64 size, bool write) const;
-	// The kernel wrote guest RAM at 'gpa', as KernelAddress() gave it.
-	void MarkWritten(uint64 gpa, uint64 size);
+	// Guest RAM, for what the kernel emulates; any thread, without the VM's
+	// lock. False where the range is not within one slot, or for a write,
+	// not writable RAM.
+	bool IsRam(uint64 gpa, bool write);
+	bool Read(uint64 gpa, void *buffer, size_t size);
+	bool Write(uint64 gpa, const void *buffer, size_t size);
 
 	// TvmmOpGetDirtyLog into 'bitmap', of 'words' 64 bit words, which must
 	// be the slot's. 'flush' tells the caller to flush the guest TLBs.
