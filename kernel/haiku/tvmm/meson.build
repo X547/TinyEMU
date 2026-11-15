@@ -4,6 +4,8 @@
 project('tvmm', 'cpp', 'c',
 	version: '0.1',
 	default_options: [
+		# the run loop's cost is what is measured
+		'buildtype=debugoptimized',
 		'cpp_std=c++20',
 		'warning_level=2',
 		'werror=true',
