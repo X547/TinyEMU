@@ -83,6 +83,20 @@ public:
 		return Op(TvmmOpSendMsi, args);
 	}
 
+	status_t SetIrqLine(uint32 pin, bool level) const
+	{
+		TvmmSetIrqLine args {};
+		args.pin = pin;
+		args.level = level;
+		return Op(TvmmOpSetIrqLine, args);
+	}
+
+	status_t ResetIoApic() const
+	{
+		TvmmResetIoApic args {};
+		return Op(TvmmOpResetIoApic, args);
+	}
+
 	status_t ResetVcpu(uint32 vcpu) const
 	{
 		TvmmVcpuOp args {};

@@ -341,7 +341,7 @@ void TvmmX86Hypervisor::PrintStats()
         "interrupt", "interrupt window", "pause", "hlt", "cpuid", "xsetbv",
         "cr8 write", "debug register", "port", "string port", "msr",
         "apic msr", "client msr", "apic mmio", "client mmio", "npf on ram",
-        "exception", "shutdown", "failed entry", "other",
+        "exception", "shutdown", "failed entry", "other", "ioapic mmio",
     };
     static const char *const client_names[] = {
         "none", "canceled", "port", "mmio", "msr", "halted",

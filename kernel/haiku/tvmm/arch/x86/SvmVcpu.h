@@ -150,6 +150,7 @@ private:
 	void SyncTaskPriority();
 	bool ApicMmio(const X86MemInsn &insn, uint64 gpa, TvmmRun &run, ExitAction &action);
 	bool ApicMsr(uint32 msr, bool write, uint64 &value, bool &ok, bool &extIntBefore);
+	bool IoApicMmio(const X86MemInsn &insn, uint64 gpa);
 	ExitAction AfterApicAccess(TvmmRun &run, bool extIntBefore);
 	static int32 ApicTimerHook(timer *apicTimer);
 

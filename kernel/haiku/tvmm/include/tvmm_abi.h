@@ -32,7 +32,7 @@
 // The structures have the same layout in the kernel and in the client, which
 // the static_asserts below hold to.
 
-constexpr uint32 kTvmmAbiVersion = 8;
+constexpr uint32 kTvmmAbiVersion = 9;
 constexpr const char *kTvmmDevicePath = "/dev/misc/tvmm";
 
 
@@ -52,6 +52,8 @@ enum TvmmOp: uint32 {
 	TvmmOpResetVcpu,
 	TvmmOpGetStats,
 	TvmmOpGetDirtyLog,
+	TvmmOpSetIrqLine,
+	TvmmOpResetIoApic,
 };
 
 
@@ -97,11 +99,30 @@ enum {
 	// client's 8259s inject around it while it takes ExtINT, and a level
 	// triggered EOI exits for the client's IOAPIC.
 	TvmmVmLocalApic = 1 << 0,
+	// x86, with TvmmVmLocalApic: the kernel has the IOAPIC, at 0xfec00000,
+	// whose inputs the client sets with TvmmOpSetIrqLine. Level triggered
+	// EOIs then end in the kernel rather than exit.
+	TvmmVmIoApic = 1 << 1,
 };
 
 
 struct TvmmCreateVm {
 	uint32 flags;
+};
+
+
+// x86 with TvmmVmIoApic: input 'pin' of the IOAPIC, below 24, at 'level'.
+// Any thread.
+struct TvmmSetIrqLine {
+	uint32 pin;
+	uint32 level;
+};
+
+
+// x86 with TvmmVmIoApic: its registers as at power on. The inputs keep their
+// levels, which the client drives.
+struct TvmmResetIoApic {
+	uint32 reserved;
 };
 
 
@@ -397,6 +418,8 @@ enum {
 	TvmmX86StatFailEntry,
 	// anything else, the exits the client gets as Unhandled included
 	TvmmX86StatOther,
+	// the kernel's IOAPIC's page
+	TvmmX86StatMmioIoApic,
 	TvmmX86StatCount
 };
 

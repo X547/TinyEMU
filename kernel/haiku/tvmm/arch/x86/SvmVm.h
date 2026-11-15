@@ -3,6 +3,7 @@
 #include <lock.h>
 
 #include "Arch.h"
+#include "IoApic.h"
 #include "KernelArea.h"
 #include "LocalApic.h"
 #include "Npt.h"
@@ -18,6 +19,8 @@ private:
 	// every local APIC of the VM, and the messages between them
 	spinlock fApicLock = B_SPINLOCK_INITIALIZER;
 	ApicBus fApicBus;
+	// used with TvmmVmIoApic, under the same lock
+	IoApic fIoApic {fApicBus};
 	Npt fNpt;
 	// every port access exits
 	KernelArea fIopm;
@@ -39,9 +42,12 @@ public:
 
 	Vm &GetVm() const {return fVm;}
 	bool HasLocalApics() const {return (fFlags & TvmmVmLocalApic) != 0;}
-	// held, with interrupts disabled, around every use of a local APIC
+	bool HasIoApic() const {return (fFlags & TvmmVmIoApic) != 0;}
+	// held, with interrupts disabled, around every use of a local APIC or the
+	// IOAPIC
 	spinlock &ApicLock() {return fApicLock;}
 	ApicBus &Apics() {return fApicBus;}
+	IoApic &GetIoApic() {return fIoApic;}
 	phys_addr_t NptRoot() const {return fNpt.RootPhys();}
 	phys_addr_t IopmPhys() const {return fIopmPhys;}
 	phys_addr_t MsrpmPhys() const {return fMsrpmPhys;}
@@ -53,6 +59,8 @@ public:
 	status_t CreateVcpu(Vcpu &vcpu, ArchVcpu *&arch) final;
 	status_t SetCpuid(const TvmmCpuidEntry *entries, uint32 count) final;
 	status_t SendMsi(uint64 address, uint32 data) final;
+	status_t SetIrqLine(uint32 pin, bool level) final;
+	status_t ResetIoApic() final;
 
 	// nullptr when the leaf is the host's
 	const TvmmCpuidEntry *CpuidEntry(uint32 leaf) const;

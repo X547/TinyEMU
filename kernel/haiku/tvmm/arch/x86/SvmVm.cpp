@@ -117,6 +117,31 @@ status_t SvmVm::SendMsi(uint64 address, uint32 data)
 }
 
 
+status_t SvmVm::SetIrqLine(uint32 pin, bool level)
+{
+	if (!HasIoApic()) {
+		return B_NOT_SUPPORTED;
+	}
+	if (pin >= kIoApicPins) {
+		return B_BAD_VALUE;
+	}
+	InterruptsSpinLocker locker(fApicLock);
+	fIoApic.SetLine(pin, level);
+	return B_OK;
+}
+
+
+status_t SvmVm::ResetIoApic()
+{
+	if (!HasIoApic()) {
+		return B_NOT_SUPPORTED;
+	}
+	InterruptsSpinLocker locker(fApicLock);
+	fIoApic.Reset();
+	return B_OK;
+}
+
+
 const TvmmCpuidEntry *SvmVm::CpuidEntry(uint32 leaf) const
 {
 	for (uint32 i = 0; i < fCpuidCount; i++) {

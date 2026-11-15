@@ -33,6 +33,8 @@ private:
 	status_t HandleResetVcpu(void *data, size_t length);
 	status_t HandleGetStats(void *data, size_t length);
 	status_t HandleGetDirtyLog(void *data, size_t length);
+	status_t HandleSetIrqLine(void *data, size_t length);
+	status_t HandleResetIoApic(void *data, size_t length);
 
 public:
 	VmHandle();

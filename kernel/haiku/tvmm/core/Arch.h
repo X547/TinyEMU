@@ -64,6 +64,9 @@ public:
 	virtual status_t SetCpuid(const TvmmCpuidEntry *entries, uint32 count) = 0;
 	// x86 with local APICs; any thread
 	virtual status_t SendMsi(uint64 address, uint32 data) = 0;
+	// x86 with the IOAPIC; any thread
+	virtual status_t SetIrqLine(uint32 pin, bool level) = 0;
+	virtual status_t ResetIoApic() = 0;
 };
 
 

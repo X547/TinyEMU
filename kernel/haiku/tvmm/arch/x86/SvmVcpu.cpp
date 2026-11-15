@@ -1149,10 +1149,10 @@ ExitAction SvmVcpu::HandleNpf(TvmmRun &run)
 	VmcbSave &save = fVmcb->save;
 	const uint64 gpa = control.exitInfo2;
 	const bool write = (control.exitInfo1 & 2) != 0;
-	// The local APIC's page is never the client's RAM, which spares its many
-	// accesses the VM's lock: every vcpu contends for that.
+	// The local APIC's and the IOAPIC's pages are never the client's RAM.
 	const bool apicPage = fApic != nullptr && gpa >= kApicBase && gpa < kApicBase + kPageSize;
-	if (!apicPage && GuestIsRam(gpa, write)) {
+	const bool ioApicPage = fSvmVm.HasIoApic() && gpa >= kIoApicBase && gpa < kIoApicBase + kPageSize;
+	if (!apicPage && !ioApicPage && GuestIsRam(gpa, write)) {
 		// the mapping changed while the guest ran; it tries again
 		fExitStat = TvmmX86StatNpfRam;
 		return ExitAction::Resume;
@@ -1173,6 +1173,10 @@ ExitAction SvmVcpu::HandleNpf(TvmmRun &run)
 	if (ApicMmio(insn, gpa, run, action)) {
 		fExitStat = TvmmX86StatMmioApic;
 		return action;
+	}
+	if (ioApicPage && IoApicMmio(insn, gpa)) {
+		fExitStat = TvmmX86StatMmioIoApic;
+		return ExitAction::Resume;
 	}
 	switch (insn.op) {
 		case X86MemOp::Load:
@@ -1708,6 +1712,43 @@ bool SvmVcpu::ApicMmio(const X86MemInsn &insn, uint64 gpa, TvmmRun &run, ExitAct
 }
 
 
+// An access to the IOAPIC's page, done in the kernel. False for string and
+// SSE moves, which the client gets and drops.
+bool SvmVcpu::IoApicMmio(const X86MemInsn &insn, uint64 gpa)
+{
+	const bool load = insn.op == X86MemOp::Load || insn.op == X86MemOp::Test
+		|| insn.op == X86MemOp::Cmp || insn.op == X86MemOp::Push;
+	const bool store = insn.op == X86MemOp::Store || insn.op == X86MemOp::StoreImmediate;
+	if (!load && !store) {
+		return false;
+	}
+	const uint32 offset = uint32(gpa - kIoApicBase);
+	const uint32 shift = (offset & 3) * 8;
+	uint32 value = 0;
+	if (store) {
+		value = uint32((insn.op == X86MemOp::Store
+			? ReadGpr(insn.reg, insn.size, insn.highByte) : insn.immediate) << shift);
+	}
+	{
+		InterruptsSpinLocker locker(fSvmVm.ApicLock());
+		if (load) {
+			value = fSvmVm.GetIoApic().PageRead(offset & ~3u) >> shift;
+		} else {
+			fSvmVm.GetIoApic().PageWrite(offset & ~3u, value);
+		}
+	}
+	if (load) {
+		uint8 data[16] {};
+		memcpy(data, &value, sizeof(value));
+		fPendingInsn = insn;
+		CompleteLoad(data);
+	} else {
+		fVmcb->save.rip += insn.length;
+	}
+	return true;
+}
+
+
 // IA32_APIC_BASE and the x2APIC registers. False for another MSR.
 bool SvmVcpu::ApicMsr(uint32 msr, bool write, uint64 &value, bool &ok, bool &extIntBefore)
 {
@@ -1776,9 +1817,15 @@ void SvmVcpu::ApicInterruptChanged(bool pending)
 }
 
 
-// Only from the APIC's own processor, which writes its EOI register.
+// Only from the APIC's own processor, which writes its EOI register, with
+// the APICs' lock held: the kernel's IOAPIC takes it there, the client's
+// in an exit.
 void SvmVcpu::ApicEoi(int vector)
 {
+	if (fSvmVm.HasIoApic()) {
+		fSvmVm.GetIoApic().Eoi(vector);
+		return;
+	}
 	fEoiVector = vector;
 }
 

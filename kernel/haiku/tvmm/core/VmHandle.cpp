@@ -122,6 +122,12 @@ status_t VmHandle::Control(uint32 op, void *data, size_t length)
 		case TvmmOpGetDirtyLog:
 			res = HandleGetDirtyLog(data, length);
 			break;
+		case TvmmOpSetIrqLine:
+			res = HandleSetIrqLine(data, length);
+			break;
+		case TvmmOpResetIoApic:
+			res = HandleResetIoApic(data, length);
+			break;
 		default:
 			break;
 	}
@@ -145,7 +151,11 @@ status_t VmHandle::HandleCreateVm(void *data, size_t length)
 {
 	TvmmCreateVm args;
 	CHECK_RET(CopyArgsIn(args, data, length));
-	if ((args.flags & ~uint32(TvmmVmLocalApic)) != 0) {
+	if ((args.flags & ~uint32(TvmmVmLocalApic | TvmmVmIoApic)) != 0) {
+		return B_BAD_VALUE;
+	}
+	// the IOAPIC's messages go to the kernel's local APICs
+	if ((args.flags & TvmmVmIoApic) != 0 && (args.flags & TvmmVmLocalApic) == 0) {
 		return B_BAD_VALUE;
 	}
 
@@ -287,6 +297,30 @@ status_t VmHandle::HandleSendMsi(void *data, size_t length)
 		return B_NO_INIT;
 	}
 	return vm->Arch().SendMsi(args.address, args.data);
+}
+
+
+status_t VmHandle::HandleSetIrqLine(void *data, size_t length)
+{
+	TvmmSetIrqLine args;
+	CHECK_RET(CopyArgsIn(args, data, length));
+	Vm *vm = GetVm();
+	if (vm == nullptr) {
+		return B_NO_INIT;
+	}
+	return vm->Arch().SetIrqLine(args.pin, args.level != 0);
+}
+
+
+status_t VmHandle::HandleResetIoApic(void *data, size_t length)
+{
+	TvmmResetIoApic args;
+	CHECK_RET(CopyArgsIn(args, data, length));
+	Vm *vm = GetVm();
+	if (vm == nullptr) {
+		return B_NO_INIT;
+	}
+	return vm->Arch().ResetIoApic();
 }
 
 
