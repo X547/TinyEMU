@@ -3,6 +3,8 @@
 
 project('tvmm', 'cpp', 'c',
 	version: '0.1',
+	# install_symlink()
+	meson_version: '>=0.61',
 	default_options: [
 		# the run loop's cost is what is measured
 		'buildtype=debugoptimized',
@@ -68,6 +70,18 @@ else
 	error('tvmm has no back end for ' + host_machine.cpu_family())
 endif
 
+# `meson install` puts the driver among the add-ons of the prefix, which is
+# one of Haiku's directories that have them: /boot/system or ~/config, or
+# non-packaged in either. It goes in as add-ons/kernel/drivers/bin/tvmm, with
+# the link devfs publishes it by, add-ons/kernel/drivers/dev/misc/tvmm.
+#
+# Nothing may use the device while it installs, nor until devfs has settled
+# afterwards; see README.md. devfs takes a changed binary of a loaded driver
+# later, from a kernel daemon, and the link is made again at each install,
+# which drops the driver and adds it back, also later. An open of the device
+# meanwhile can panic the system.
+drivers_dir = 'add-ons/kernel/drivers'
+
 shared_module('tvmm',
 	'core/Driver.cpp',
 	'core/GuestMemory.cpp',
@@ -76,11 +90,20 @@ shared_module('tvmm',
 	'core/Vm.cpp',
 	'core/VmHandle.cpp',
 	arch_sources,
+	# a driver's binary has no prefix or suffix
 	name_prefix: '',
+	name_suffix: '',
 	include_directories: [tvmm_inc, arch_inc, kernel_inc],
 	cpp_args: kernel_cpp_args,
 	c_args: ['-D_KERNEL_MODE'],
 	link_args: kernel_link_args,
+	install: true,
+	install_dir: drivers_dir / 'bin',
+)
+
+install_symlink('tvmm',
+	pointing_to: '../../bin/tvmm',
+	install_dir: drivers_dir / 'dev/misc',
 )
 
 foreach test: ['tvmm_smoke', 'tvmm_stress']
