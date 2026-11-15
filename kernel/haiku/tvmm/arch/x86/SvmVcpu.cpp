@@ -1122,7 +1122,10 @@ ExitAction SvmVcpu::HandleNpf(TvmmRun &run)
 	VmcbSave &save = fVmcb->save;
 	const uint64 gpa = control.exitInfo2;
 	const bool write = (control.exitInfo1 & 2) != 0;
-	if (GuestIsRam(gpa, write)) {
+	// The local APIC's page is never the client's RAM, which spares its many
+	// accesses the VM's lock: every vcpu contends for that.
+	const bool apicPage = fApic != nullptr && gpa >= kApicBase && gpa < kApicBase + kPageSize;
+	if (!apicPage && GuestIsRam(gpa, write)) {
 		// the mapping changed while the guest ran; it tries again
 		fExitStat = TvmmX86StatNpfRam;
 		return ExitAction::Resume;
