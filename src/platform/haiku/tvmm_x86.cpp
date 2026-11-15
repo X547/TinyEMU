@@ -42,6 +42,7 @@
 #define CPUID_APIC bit_at(9)
 #define CPUID_ACPI bit_at(22)
 #define CPUID_X2APIC bit_at(21) /* 1 ECX */
+#define CPUID_HYPERVISOR bit_at(31) /* 1 ECX */
 #define CPUID_TOPOEXT bit_at(22) /* 0x80000001 ECX */
 #define RFLAGS_IF bit_at(9)
 #define MSR_IA32_APIC_BASE 0x1b
@@ -450,6 +451,10 @@ void TvmmX86Hypervisor::SetCpuid()
         }
         /* the machine's local APIC has x2APIC mode */
         if (leaf == 1) {
+            /* a processor under a hypervisor says so, which some guests
+               wait for before they use x2APIC mode, Haiku among them */
+            c.del[2] &= ~CPUID_HYPERVISOR;
+            c.set[2] |= CPUID_HYPERVISOR;
             if (fLocalApic) {
                 c.del[2] &= ~CPUID_X2APIC;
                 c.set[2] |= CPUID_X2APIC;
