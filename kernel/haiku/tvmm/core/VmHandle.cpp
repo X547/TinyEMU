@@ -119,6 +119,9 @@ status_t VmHandle::Control(uint32 op, void *data, size_t length)
 		case TvmmOpGetStats:
 			res = HandleGetStats(data, length);
 			break;
+		case TvmmOpGetDirtyLog:
+			res = HandleGetDirtyLog(data, length);
+			break;
 		default:
 			break;
 	}
@@ -202,6 +205,18 @@ status_t VmHandle::HandleMapRam(void *data, size_t length)
 		return B_NO_INIT;
 	}
 	return vm->MapRam(args);
+}
+
+
+status_t VmHandle::HandleGetDirtyLog(void *data, size_t length)
+{
+	TvmmGetDirtyLog args;
+	CHECK_RET(CopyArgsIn(args, data, length));
+	Vm *vm = GetVm();
+	if (vm == nullptr) {
+		return B_NO_INIT;
+	}
+	return vm->GetDirtyLog(args);
 }
 
 

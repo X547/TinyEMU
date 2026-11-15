@@ -32,7 +32,7 @@
 // The structures have the same layout in the kernel and in the client, which
 // the static_asserts below hold to.
 
-constexpr uint32 kTvmmAbiVersion = 6;
+constexpr uint32 kTvmmAbiVersion = 7;
 constexpr const char *kTvmmDevicePath = "/dev/misc/tvmm";
 
 
@@ -51,6 +51,7 @@ enum TvmmOp: uint32 {
 	TvmmOpSendMsi,
 	TvmmOpResetVcpu,
 	TvmmOpGetStats,
+	TvmmOpGetDirtyLog,
 };
 
 
@@ -130,6 +131,8 @@ struct TvmmFreeRam {
 
 enum {
 	TvmmMapReadOnly = 1 << 0,
+	// the slot keeps a log of the pages written, which TvmmOpGetDirtyLog
+	// takes; it starts with every page written
 	TvmmMapLogDirty = 1 << 1,
 };
 
@@ -144,6 +147,19 @@ struct TvmmMapRam {
 	uint32 ramId;
 	uint32 reserved;
 	uint64 offset;
+};
+
+
+// The pages of a TvmmMapLogDirty slot written since the last call, by the
+// guest or by what the kernel emulates for it, and the log starts over: one
+// bit per page, from the slot's first, in 64 bit words. 'bitmapSize' is the
+// size of those words for the slot's pages. Any thread; the guest's writes
+// before the call returns are in this log or the next.
+struct TvmmGetDirtyLog {
+	uint32 slot;
+	uint32 reserved;
+	uint64 bitmapAddress;
+	uint64 bitmapSize;
 };
 
 

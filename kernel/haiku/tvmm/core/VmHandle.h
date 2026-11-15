@@ -32,6 +32,7 @@ private:
 	status_t HandleSendMsi(void *data, size_t length);
 	status_t HandleResetVcpu(void *data, size_t length);
 	status_t HandleGetStats(void *data, size_t length);
+	status_t HandleGetDirtyLog(void *data, size_t length);
 
 public:
 	VmHandle();

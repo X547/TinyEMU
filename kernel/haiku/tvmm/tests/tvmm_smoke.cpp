@@ -86,12 +86,30 @@ static const uint8 kMsr[] = {
 	0xf4,
 };
 
+// to the logged slot at 0x10000: pages 1 and 3 by the guest, 2 by INS
+static const uint8 kDirty[] = {
+	0xfc,                                   // cld
+	0xb8, 0x00, 0x10,                       // mov ax, 0x1000
+	0x8e, 0xc0,                             // mov es, ax
+	0x26, 0xc6, 0x06, 0x00, 0x10, 0x01,     // mov byte es:[0x1000], 1
+	0x26, 0xc6, 0x06, 0x00, 0x30, 0x02,     // mov byte es:[0x3000], 2
+	0xbf, 0x00, 0x20,                       // mov di, 0x2000
+	0xba, 0x80, 0x00,                       // mov dx, 0x80
+	0x6c,                                   // insb
+	0xf4,                                   // hlt
+	// page 1 again, its translation remembered as written
+	0x26, 0xc6, 0x06, 0x00, 0x10, 0x03,     // mov byte es:[0x1000], 3
+	0xf4,                                   // hlt
+};
+
 static const uint32 kSpinAt = 0x1100;
 static const uint32 kHaltAt = 0x1110;
 static const uint32 kCpuidAt = 0x1120;
 static const uint32 kMmioAt = 0x11c0;
 static const uint32 kMsrAt = 0x1140;
 static const uint32 kStringIoAt = 0x1180;
+static const uint32 kDirtyAt = 0x1200;
+static const uint32 kDirtyAgainAt = kDirtyAt + 26;
 
 
 struct Guest {
@@ -368,6 +386,53 @@ static void TestKick(Guest &guest)
 }
 
 
+static uint64 DirtyLog(Guest &guest)
+{
+	uint64 bitmap = 0;
+	CHECK_OK(guest.device.GetDirtyLog(1, &bitmap, 1));
+	return bitmap;
+}
+
+
+static void TestDirtyLog(Guest &guest)
+{
+	printf("== dirty log\n");
+	constexpr uint64 size = 4 * 4096;
+	uint32 ramId = 0;
+	uint8 *ram = nullptr;
+	CHECK_OK(guest.device.AllocRam(size, ramId, ram));
+	CHECK_OK(guest.device.MapRam(1, 0x10000, size, ramId, 0, TvmmMapLogDirty));
+
+	uint64 bitmap = 0;
+	CHECK(guest.device.GetDirtyLog(0, &bitmap, 1) == B_BAD_VALUE);
+	CHECK(guest.device.GetDirtyLog(1, &bitmap, 2) == B_BAD_VALUE);
+	// a slot newly logged was written all over
+	CHECK(DirtyLog(guest) == 0xf);
+	CHECK(DirtyLog(guest) == 0);
+
+	Jump(guest, kDirtyAt);
+	CHECK(Run(guest) == TvmmExit::Io);
+	CHECK(guest.run->exit.io.in && guest.run->exit.io.port == 0x80);
+	guest.run->exit.io.data = 0x5a;
+	CHECK(Run(guest) == TvmmExit::Halted);
+	const uint64 written = DirtyLog(guest);
+	printf("dirty pages %#" B_PRIx64 "\n", written);
+	CHECK(written == 0xe);
+	CHECK(ram[0x1000] == 1 && ram[0x2000] == 0x5a && ram[0x3000] == 2);
+	CHECK(DirtyLog(guest) == 0);
+
+	// The same page again: the log's flush made the processor note it.
+	Jump(guest, kDirtyAgainAt);
+	CHECK(Run(guest) == TvmmExit::Halted);
+	CHECK(DirtyLog(guest) == 0x2);
+	CHECK(ram[0x1000] == 3);
+
+	CHECK_OK(guest.device.MapRam(1, 0, 0, 0, 0, 0));
+	CHECK(guest.device.GetDirtyLog(1, &bitmap, 1) == B_BAD_VALUE);
+	CHECK_OK(guest.device.FreeRam(ramId, ram));
+}
+
+
 // After the tests above: what they made the vcpu do.
 static void TestStats(Guest &guest)
 {
@@ -439,6 +504,7 @@ int main()
 	memcpy(guest.ram + kMmioAt, kMmio, sizeof(kMmio));
 	memcpy(guest.ram + kMsrAt, kMsr, sizeof(kMsr));
 	memcpy(guest.ram + kStringIoAt, kStringIo, sizeof(kStringIo));
+	memcpy(guest.ram + kDirtyAt, kDirty, sizeof(kDirty));
 	CHECK_OK(guest.device.MapRam(0, 0, kRamSize, ramId, 0, 0));
 	CHECK(guest.device.FreeRam(ramId, guest.ram) == B_BUSY);
 	CHECK_OK(guest.device.CreateVcpu(0, guest.run));
@@ -451,6 +517,7 @@ int main()
 	TestCpuidTableAndCr8(guest);
 	TestKick(guest);
 	TestStats(guest);
+	TestDirtyLog(guest);
 
 	CHECK_OK(guest.device.MapRam(0, 0, 0, 0, 0, 0));
 	CHECK_OK(guest.device.FreeRam(ramId, guest.ram));

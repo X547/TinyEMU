@@ -54,6 +54,8 @@ public:
 class GuestMemory {
 public:
 	static constexpr uint32 kMaxSlots = 256;
+	// a dirty log of 64 GB
+	static constexpr uint64 kMaxBitmapSize = 2 * 1024 * 1024;
 
 private:
 	struct Slot {
@@ -62,6 +64,9 @@ private:
 		uint64 offset = 0;
 		RamObject *ram = nullptr;
 		uint32 flags = 0;
+		// with TvmmMapLogDirty: the pages written other than through the
+		// nested page tables, by the kernel's emulation, one bit each
+		uint64 *written = nullptr;
 	};
 
 	ArchVm *fArch = nullptr;
@@ -85,4 +90,10 @@ public:
 	// The kernel's address of guest RAM at 'gpa', for 'size' bytes that stay
 	// within one slot; nullptr where there is none.
 	uint8 *KernelAddress(uint64 gpa, uint64 size, bool write) const;
+	// The kernel wrote guest RAM at 'gpa', as KernelAddress() gave it.
+	void MarkWritten(uint64 gpa, uint64 size);
+
+	// TvmmOpGetDirtyLog into 'bitmap', of 'words' 64 bit words, which must
+	// be the slot's. 'flush' tells the caller to flush the guest TLBs.
+	status_t TakeDirtyLog(uint32 slot, uint64 *bitmap, uint64 words, bool &flush);
 };

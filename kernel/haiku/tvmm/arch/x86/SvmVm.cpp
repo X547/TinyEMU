@@ -88,6 +88,12 @@ void SvmVm::UnmapPages(uint64 gpa, uint64 size)
 }
 
 
+bool SvmVm::TakeDirty(uint64 gpa, uint64 size, uint64 *bitmap)
+{
+	return fNpt.TakeDirty(gpa, size / kPageSize, bitmap);
+}
+
+
 status_t SvmVm::SetCpuid(const TvmmCpuidEntry *entries, uint32 count)
 {
 	memcpy(fCpuid, entries, count * sizeof(TvmmCpuidEntry));

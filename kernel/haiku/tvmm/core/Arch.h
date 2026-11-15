@@ -52,6 +52,11 @@ public:
 	virtual status_t MapPages(uint64 gpa, uint64 size, const RamObject &ram, uint64 offset, uint32 flags) = 0;
 	// The caller flushes the guest TLBs before the pages can be reused.
 	virtual void UnmapPages(uint64 gpa, uint64 size) = 0;
+	// Sets the bits of the pages from 'gpa' the guest wrote since they were
+	// mapped or last looked at here, one per page in 64 bit words, and starts
+	// over. True when there were any; the caller then flushes the guest TLBs
+	// before the guest's next writes are to be seen.
+	virtual bool TakeDirty(uint64 gpa, uint64 size, uint64 *bitmap) = 0;
 
 	virtual status_t CreateVcpu(Vcpu &vcpu, ArchVcpu *&arch) = 0;
 

@@ -129,6 +129,16 @@ public:
 		return Op(TvmmOpMapRam, args);
 	}
 
+	// 'words' 64 bit words, one bit per page of the slot.
+	status_t GetDirtyLog(uint32 slot, uint64 *bitmap, size_t words) const
+	{
+		TvmmGetDirtyLog args {};
+		args.slot = slot;
+		args.bitmapAddress = addr_t(bitmap);
+		args.bitmapSize = words * sizeof(uint64);
+		return Op(TvmmOpGetDirtyLog, args);
+	}
+
 	status_t CreateVcpu(uint32 index, TvmmRun *&run) const
 	{
 		TvmmCreateVcpu args {};

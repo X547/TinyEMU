@@ -15,6 +15,7 @@ static constexpr uint64 kPteWritable = 1ull << 1;
 // The processor walks nested tables as user accesses.
 static constexpr uint64 kPteUser = 1ull << 2;
 static constexpr uint64 kPteAccessed = 1ull << 5;
+static constexpr uint64 kPteDirty = 1ull << 6;
 static constexpr uint64 kPteAddressMask = 0x000ffffffffff000ull;
 
 static constexpr int kLevels = 4;
@@ -149,4 +150,27 @@ void Npt::Unmap(uint64 gpa)
 		return;
 	}
 	atomic_set64(reinterpret_cast<int64*>(entry), 0);
+}
+
+
+// The processor sets the dirty bit with a locked update, so clearing it the
+// same way loses no write that comes meanwhile.
+bool Npt::TakeDirty(uint64 gpa, uint64 pages, uint64 *bitmap)
+{
+	bool any = false;
+	for (uint64 i = 0; i < pages; i++) {
+		uint64 *entry = nullptr;
+		if (Walk(gpa + i * kPageSize, false, entry) < B_OK) {
+			continue;
+		}
+		auto *value = reinterpret_cast<int64*>(entry);
+		if ((uint64(atomic_get64(value)) & kPteDirty) == 0) {
+			continue;
+		}
+		if ((uint64(atomic_and64(value, ~int64(kPteDirty))) & kPteDirty) != 0) {
+			bitmap[i / 64] |= 1ull << (i % 64);
+			any = true;
+		}
+	}
+	return any;
 }

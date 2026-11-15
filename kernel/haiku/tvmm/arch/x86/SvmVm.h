@@ -49,6 +49,7 @@ public:
 
 	status_t MapPages(uint64 gpa, uint64 size, const RamObject &ram, uint64 offset, uint32 flags) final;
 	void UnmapPages(uint64 gpa, uint64 size) final;
+	bool TakeDirty(uint64 gpa, uint64 size, uint64 *bitmap) final;
 	status_t CreateVcpu(Vcpu &vcpu, ArchVcpu *&arch) final;
 	status_t SetCpuid(const TvmmCpuidEntry *entries, uint32 count) final;
 	status_t SendMsi(uint64 address, uint32 data) final;

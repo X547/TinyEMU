@@ -43,4 +43,8 @@ public:
 
 	status_t Map(uint64 gpa, phys_addr_t hpa, bool writable);
 	void Unmap(uint64 gpa);
+	// Sets the bit of each of 'pages' pages from 'gpa' the guest wrote since
+	// it was mapped or last looked at here, and clears its dirty bit. True
+	// when one was; the guest's TLBs may then remember it written.
+	bool TakeDirty(uint64 gpa, uint64 pages, uint64 *bitmap);
 };

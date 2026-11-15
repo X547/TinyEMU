@@ -10,6 +10,7 @@ class ArchVm;
 class Vcpu;
 struct TvmmAllocRam;
 struct TvmmCreateVcpu;
+struct TvmmGetDirtyLog;
 struct TvmmMapRam;
 struct TvmmSetCpuid;
 
@@ -44,6 +45,7 @@ public:
 	status_t AllocRam(TvmmAllocRam &args);
 	status_t FreeRam(uint32 id);
 	status_t MapRam(const TvmmMapRam &args);
+	status_t GetDirtyLog(const TvmmGetDirtyLog &args);
 	status_t CreateVcpu(TvmmCreateVcpu &args);
 	// nullptr for an index with no vcpu
 	Vcpu *GetVcpu(uint32 index);

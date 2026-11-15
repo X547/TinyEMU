@@ -1,8 +1,11 @@
 #include "Vm.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include <new>
+
+#include <AutoDeleter.h>
 
 #include <util/AutoLock.h>
 #include <util/atomic.h>
@@ -109,6 +112,36 @@ status_t Vm::MapRam(const TvmmMapRam &args)
 }
 
 
+// The guest's TLBs may remember the pages the log had as written, and write
+// them without saying so again: they are flushed before the client, told of
+// the pages, reads them.
+status_t Vm::GetDirtyLog(const TvmmGetDirtyLog &args)
+{
+	void *clientBitmap = reinterpret_cast<void*>(addr_t(args.bitmapAddress));
+	if (args.bitmapSize == 0 || args.bitmapSize % sizeof(uint64) != 0
+		|| args.bitmapSize > GuestMemory::kMaxBitmapSize) {
+		return B_BAD_VALUE;
+	}
+	if (!IS_USER_ADDRESS(clientBitmap)) {
+		return B_BAD_ADDRESS;
+	}
+	MemoryDeleter bitmap(malloc(args.bitmapSize));
+	if (!bitmap.IsSet()) {
+		return B_NO_MEMORY;
+	}
+	{
+		MutexLocker locker(fLock);
+		bool flush = false;
+		CHECK_RET(fMemory.TakeDirtyLog(args.slot, static_cast<uint64*>(bitmap.Get()),
+			args.bitmapSize / sizeof(uint64), flush));
+		if (flush) {
+			FlushGuestTlbs();
+		}
+	}
+	return user_memcpy(clientBitmap, bitmap.Get(), args.bitmapSize);
+}
+
+
 status_t Vm::CreateVcpu(TvmmCreateVcpu &args)
 {
 	if (args.index >= kMaxVcpus || args.index >= Arch::MaxVcpus()) {
@@ -186,6 +219,7 @@ bool Vm::WriteGuest(uint64 gpa, const void *buffer, size_t size)
 		return false;
 	}
 	memcpy(address, buffer, size);
+	fMemory.MarkWritten(gpa, size);
 	return true;
 }
 

@@ -1,6 +1,7 @@
 #include "GuestMemory.h"
 
 #include <stdlib.h>
+#include <string.h>
 
 #include <new>
 
@@ -89,8 +90,18 @@ phys_addr_t RamObject::PhysicalPage(uint64 offset) const
 
 //#pragma mark - GuestMemory
 
+// A dirty log's size: one bit per page, in 64 bit words.
+static uint64 BitmapWords(uint64 size)
+{
+	return (size / kPageSize + 63) / 64;
+}
+
+
 GuestMemory::~GuestMemory()
 {
+	for (Slot &slot: fSlots) {
+		free(slot.written);
+	}
 	while (RamObject *ram = fRam.RemoveHead()) {
 		delete ram;
 	}
@@ -148,6 +159,7 @@ void GuestMemory::UnmapSlot(Slot &slot)
 	}
 	fArch->UnmapPages(slot.gpa, slot.size);
 	slot.ram->RemoveMapping();
+	free(slot.written);
 	slot = Slot();
 }
 
@@ -159,8 +171,12 @@ status_t GuestMemory::MapRam(const TvmmMapRam &args, bool &unmapped)
 		return B_BAD_VALUE;
 	}
 	Slot &slot = fSlots[args.slot];
+	if ((args.flags & ~uint32(TvmmMapReadOnly | TvmmMapLogDirty)) != 0) {
+		return B_BAD_VALUE;
+	}
 
 	RamObject *ram = nullptr;
+	uint64 *written = nullptr;
 	if (args.size != 0) {
 		ram = FindRam(args.ramId);
 		if (ram == nullptr) {
@@ -178,6 +194,20 @@ status_t GuestMemory::MapRam(const TvmmMapRam &args, bool &unmapped)
 				return B_BAD_VALUE;
 			}
 		}
+		if ((args.flags & TvmmMapLogDirty) != 0) {
+			// a slot logged from now on was written as far as anyone knows
+			const uint64 words = BitmapWords(args.size);
+			written = static_cast<uint64*>(malloc(words * sizeof(uint64)));
+			if (written == nullptr) {
+				return B_NO_MEMORY;
+			}
+			// the bits of the slot's pages, none past them
+			memset(written, 0xff, words * sizeof(uint64));
+			const uint64 pages = args.size / kPageSize;
+			if (pages % 64 != 0) {
+				written[words - 1] = (1ull << (pages % 64)) - 1;
+			}
+		}
 	}
 
 	if (slot.size != 0) {
@@ -191,6 +221,7 @@ status_t GuestMemory::MapRam(const TvmmMapRam &args, bool &unmapped)
 	const status_t res = fArch->MapPages(args.gpa, args.size, *ram, args.offset, args.flags);
 	if (res < B_OK) {
 		fArch->UnmapPages(args.gpa, args.size);
+		free(written);
 		unmapped = true;
 		return res;
 	}
@@ -200,6 +231,40 @@ status_t GuestMemory::MapRam(const TvmmMapRam &args, bool &unmapped)
 	slot.offset = args.offset;
 	slot.ram = ram;
 	slot.flags = args.flags;
+	slot.written = written;
+	return B_OK;
+}
+
+
+void GuestMemory::MarkWritten(uint64 gpa, uint64 size)
+{
+	for (Slot &slot: fSlots) {
+		if (slot.written == nullptr || gpa < slot.gpa || gpa - slot.gpa >= slot.size) {
+			continue;
+		}
+		const uint64 first = (gpa - slot.gpa) / kPageSize;
+		const uint64 last = (gpa - slot.gpa + size - 1) / kPageSize;
+		for (uint64 page = first; page <= last; page++) {
+			slot.written[page / 64] |= 1ull << (page % 64);
+		}
+		return;
+	}
+}
+
+
+status_t GuestMemory::TakeDirtyLog(uint32 index, uint64 *bitmap, uint64 words, bool &flush)
+{
+	flush = false;
+	if (index >= kMaxSlots) {
+		return B_BAD_VALUE;
+	}
+	Slot &slot = fSlots[index];
+	if (slot.written == nullptr || words != BitmapWords(slot.size)) {
+		return B_BAD_VALUE;
+	}
+	memcpy(bitmap, slot.written, words * sizeof(uint64));
+	memset(slot.written, 0, words * sizeof(uint64));
+	flush = fArch->TakeDirty(slot.gpa, slot.size, bitmap);
 	return B_OK;
 }
 
