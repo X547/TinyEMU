@@ -30,6 +30,7 @@
 #include <vector>
 
 #include <cpuid.h>
+#include <sys/resource.h>
 
 #include <TvmmClient.h>
 
@@ -174,6 +175,7 @@ private:
     struct Slot {
         uint64_t size;
         uint32 ram_id;
+        bool log_dirty;
     };
     std::vector<Slot> fSlots;
     std::unique_ptr<HypervisorPhysMemoryMap> fMemoryMap;
@@ -381,6 +383,12 @@ void TvmmX86Hypervisor::PrintStats()
     double ns_per_cycle = 1e9 / hz;
     fprintf(stderr, "tvmm: %d processors, %.1f s, TSC at %.3f GHz\n",
             fCpuCount, seconds, hz / 1e9);
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+        fprintf(stderr, "  temu used %.1f s user, %.1f s system\n",
+                usage.ru_utime.tv_sec + usage.ru_utime.tv_usec / 1e6,
+                usage.ru_stime.tv_sec + usage.ru_stime.tv_usec / 1e6);
+    }
     fprintf(stderr, "  %-18s %12s %12s %12s %12s\n", "", "count", "rate",
             "total", "each");
     print_stat("runs", sum.runs, ns_per_cycle, seconds);
@@ -515,23 +523,25 @@ void TvmmX86Hypervisor::MapRam(int slot, uint64_t addr, uint64_t size,
                                uint8_t *host_mem, bool read_only,
                                bool log_dirty)
 {
-    (void)log_dirty;
-
     if (slot >= (int)fSlots.size())
-        fSlots.resize(slot + 1, Slot {0, 0});
+        fSlots.resize(slot + 1, Slot {0, 0, false});
     if (size == 0) {
         tvmm_check("unmapping RAM", fDevice.MapRam(slot, 0, 0, 0, 0, 0));
-        fSlots[slot] = Slot {0, 0};
+        fSlots[slot] = Slot {0, 0, false};
         return;
     }
+    uint32 flags = 0;
+    if (read_only)
+        flags |= TvmmMapReadOnly;
+    if (log_dirty)
+        flags |= TvmmMapLogDirty;
     for (const Ram &ram: fRam) {
         if (host_mem >= ram.ptr && host_mem < ram.ptr + ram.size) {
             uint64_t offset = host_mem - ram.ptr;
             tvmm_check("mapping RAM",
                        fDevice.MapRam(slot, addr, round_to_page(size), ram.id,
-                                      offset,
-                                      read_only ? TvmmMapReadOnly : 0));
-            fSlots[slot] = Slot {size, ram.id};
+                                      offset, flags));
+            fSlots[slot] = Slot {size, ram.id, log_dirty};
             return;
         }
     }
@@ -540,11 +550,19 @@ void TvmmX86Hypervisor::MapRam(int slot, uint64_t addr, uint64_t size,
 }
 
 
-/* tvmm keeps no dirty log yet, so every page counts as written. */
+/* From the kernel for a slot mapped with its log; a slot without one counts
+   as written all over. */
 void TvmmX86Hypervisor::GetDirtyLog(int slot, uint32_t *bitmap)
 {
-    uint64_t pages = fSlots[slot].size >> 12;
-    memset(bitmap, 0xff, ((pages + 63) / 64) * 8);
+    uint64_t pages = round_to_page(fSlots[slot].size) / TVMM_PAGE_SIZE;
+    size_t words = (pages + 63) / 64;
+    if (!fSlots[slot].log_dirty) {
+        memset(bitmap, 0xff, words * 8);
+        return;
+    }
+    tvmm_check("reading the dirty log",
+               fDevice.GetDirtyLog(slot, reinterpret_cast<uint64 *>(bitmap),
+                                   words));
 }
 
 
