@@ -44,8 +44,8 @@ Vcpu::~Vcpu()
 
 status_t Vcpu::Init(team_id team, uint64 &runAddress)
 {
-	static_assert(sizeof(TvmmRun) <= kPageSize);
-	CHECK_RET(fRunArea.Create("tvmm vcpu run", kPageSize, B_FULL_LOCK));
+	static_assert(sizeof(TvmmRun) <= kTvmmRunDataOffset);
+	CHECK_RET(fRunArea.Create("tvmm vcpu run", kTvmmRunAreaSize, B_FULL_LOCK));
 	fRun = static_cast<TvmmRun*>(fRunArea.Address());
 	CHECK_RET(fVm.Arch().CreateVcpu(*this, fArch));
 	fStateBuffer = memalign(64, fArch->StateSize());

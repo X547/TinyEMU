@@ -540,7 +540,7 @@ bool SvmVcpu::FetchInstructionBytes(uint8 *bytes, uint32 &count)
 
 // One element of a string instruction done: the index registers move on, and
 // with REP the count goes down, the instruction running again until it is 0.
-void SvmVcpu::AdvanceString(const X86MemInsn &insn, bool source, bool destination)
+void SvmVcpu::AdvanceString(const X86MemInsn &insn, bool source, bool destination, uint32 count)
 {
 	const uint64 mask = SizeMask(insn.addressSize);
 	auto update = [&](uint32 reg, int64 delta) {
@@ -548,7 +548,8 @@ void SvmVcpu::AdvanceString(const X86MemInsn &insn, bool source, bool destinatio
 		const uint64 value = (target + delta) & mask;
 		target = insn.addressSize == 2 ? (target & ~0xffffull) | value : value;
 	};
-	const int64 step = (fVmcb->save.rflags & kRflagsDf) != 0 ? -int64(insn.size) : int64(insn.size);
+	const int64 size = int64(insn.size) * count;
+	const int64 step = (fVmcb->save.rflags & kRflagsDf) != 0 ? -size : size;
 	if (source) {
 		update(TvmmX86GprRsi, step);
 	}
@@ -556,7 +557,7 @@ void SvmVcpu::AdvanceString(const X86MemInsn &insn, bool source, bool destinatio
 		update(TvmmX86GprRdi, step);
 	}
 	if (insn.rep) {
-		update(TvmmX86GprRcx, -1);
+		update(TvmmX86GprRcx, -int64(count));
 		if ((Gpr(TvmmX86GprRcx) & mask) != 0) {
 			return;
 		}
@@ -720,9 +721,10 @@ status_t SvmVcpu::PrepareRun(TvmmRun &run)
 			break;
 		}
 		case Pending::InsIn: {
-			const uint32 value = ReadOnce(run.exit.io.data);
-			GuestWrite(fPendingGpa, &value, fPendingInsn.size);
-			AdvanceString(fPendingInsn, false, true);
+			// the client's values, read once each as they are copied
+			const uint8 *data = reinterpret_cast<const uint8*>(&run) + kTvmmRunDataOffset;
+			GuestWrite(fPendingGpa, data, fPendingCount * fPendingInsn.size);
+			AdvanceString(fPendingInsn, false, true, fPendingCount);
 			break;
 		}
 		case Pending::MsrRead: {
@@ -1040,6 +1042,7 @@ ExitAction SvmVcpu::HandleIo(TvmmRun &run)
 	exit.port = uint16(info >> kSvmIoioPortShift);
 	exit.size = size;
 	exit.in = in;
+	exit.count = 0;
 	if (in) {
 		exit.data = 0;
 		fPending = Pending::IoIn;
@@ -1054,8 +1057,29 @@ ExitAction SvmVcpu::HandleIo(TvmmRun &run)
 }
 
 
-// INS and OUTS, one element each time; with REP the instruction runs again
-// for the next.
+// How many elements of INS or OUTS one exit takes, from 'linear' on: with
+// REP and the addresses going up, as many as RCX asks for within the guest
+// page, without the index register wrapping, and as fit in the run area's
+// data. One otherwise.
+uint32 SvmVcpu::StringIoCount(const X86MemInsn &insn, bool in, uint64 linear)
+{
+	if (!insn.rep || (fVmcb->save.rflags & kRflagsDf) != 0) {
+		return 1;
+	}
+	const uint64 mask = SizeMask(insn.addressSize);
+	const uint64 index = Gpr(in ? TvmmX86GprRdi : TvmmX86GprRsi) & mask;
+	uint64 count = Gpr(TvmmX86GprRcx) & mask;
+	count = std::min<uint64>(count, (kPageSize - (linear & (kPageSize - 1))) / insn.size);
+	count = std::min<uint64>(count, kTvmmRunDataSize / insn.size);
+	if (insn.addressSize < 8) {
+		count = std::min<uint64>(count, (mask - index) / insn.size + 1);
+	}
+	return uint32(std::max<uint64>(count, 1));
+}
+
+
+// INS and OUTS through the run area's data, up to a page of them at a time;
+// with REP the instruction runs again for the rest.
 ExitAction SvmVcpu::HandleStringIo(TvmmRun &run)
 {
 	const VmcbControl &control = fVmcb->control;
@@ -1089,25 +1113,28 @@ ExitAction SvmVcpu::HandleStringIo(TvmmRun &run)
 		return Unhandled(run);
 	}
 
+	// the elements stay within the page, so within one slot of RAM
+	const uint32 count = StringIoCount(insn, in, linear);
+	uint8 *data = reinterpret_cast<uint8*>(&run) + kTvmmRunDataOffset;
 	TvmmExitIo &exit = run.exit.io;
 	exit.port = uint16(info >> kSvmIoioPortShift);
 	exit.size = insn.size;
 	exit.in = in;
+	exit.data = 0;
+	exit.count = count;
 	if (in) {
 		if (!GuestIsRam(gpa, true)) {
 			return Unhandled(run);
 		}
-		exit.data = 0;
 		fPending = Pending::InsIn;
 		fPendingGpa = gpa;
 		fPendingInsn = insn;
+		fPendingCount = count;
 	} else {
-		uint32 value = 0;
-		if (!GuestRead(gpa, &value, insn.size)) {
+		if (!GuestRead(gpa, data, count * insn.size)) {
 			return Unhandled(run);
 		}
-		exit.data = value;
-		AdvanceString(insn, true, false);
+		AdvanceString(insn, true, false, count);
 	}
 	return ToClient(run, TvmmExit::Io);
 }

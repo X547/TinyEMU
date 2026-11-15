@@ -76,6 +76,11 @@ static const uint8 kStringIo[] = {
 	0xb9, 0x02, 0x00,                       // mov cx, 2
 	0xf3, 0x6c,                             // rep insb
 	0xf4,
+	// words from 16 bytes before a page's end into the next
+	0xbe, 0xf0, 0x4f,                       // mov si, 0x4ff0
+	0xb9, 0x14, 0x00,                       // mov cx, 20
+	0xf3, 0x6f,                             // rep outsw
+	0xf4,
 };
 static const uint8 kMsr[] = {
 	0x66, 0xb9, 0x77, 0x02, 0x00, 0x00,     // mov ecx, 0x277
@@ -102,6 +107,33 @@ static const uint8 kDirty[] = {
 	0xf4,                                   // hlt
 };
 
+// 4096 sectors of 256 words from port 0x1f0 into 0x6000, as ATA PIO reads
+// them: by REP INSW, and by INSW one word at a time
+static const uint8 kPioRep[] = {
+	0xfc,                                   // cld
+	0xba, 0xf0, 0x01,                       // mov dx, 0x1f0
+	0xbb, 0x00, 0x10,                       // mov bx, 4096
+	0xbf, 0x00, 0x60,                       // mov di, 0x6000
+	0xb9, 0x00, 0x01,                       // mov cx, 256
+	0xf3, 0x6d,                             // rep insw
+	0x4b,                                   // dec bx
+	0x75, 0xf5,                             // jnz mov di
+	0xf4,                                   // hlt
+};
+static const uint8 kPioSingle[] = {
+	0xfc,                                   // cld
+	0xba, 0xf0, 0x01,                       // mov dx, 0x1f0
+	0xbb, 0x00, 0x10,                       // mov bx, 4096
+	0xbf, 0x00, 0x60,                       // mov di, 0x6000
+	0xb9, 0x00, 0x01,                       // mov cx, 256
+	0x6d,                                   // insw
+	0xe2, 0xfd,                             // loop insw
+	0x4b,                                   // dec bx
+	0x75, 0xf4,                             // jnz mov di
+	0xf4,                                   // hlt
+};
+static constexpr uint64 kPioBytes = 4096 * 512;
+
 static const uint32 kSpinAt = 0x1100;
 static const uint32 kHaltAt = 0x1110;
 static const uint32 kCpuidAt = 0x1120;
@@ -110,6 +142,8 @@ static const uint32 kMsrAt = 0x1140;
 static const uint32 kStringIoAt = 0x1180;
 static const uint32 kDirtyAt = 0x1200;
 static const uint32 kDirtyAgainAt = kDirtyAt + 26;
+static const uint32 kPioRepAt = 0x1240;
+static const uint32 kPioSingleAt = 0x1260;
 
 
 struct Guest {
@@ -304,24 +338,86 @@ static void TestMmio(Guest &guest)
 }
 
 
+static uint8 *RunData(Guest &guest)
+{
+	return reinterpret_cast<uint8*>(guest.run) + kTvmmRunDataOffset;
+}
+
+
 static void TestStringIo(Guest &guest)
 {
 	printf("== string I/O\n");
 	memcpy(guest.ram + 0x3100, "abc", 3);
 	Jump(guest, kStringIoAt);
-	for (int i = 0; i < 3; i++) {
-		CHECK(Run(guest) == TvmmExit::Io);
-		CHECK(!guest.run->exit.io.in && guest.run->exit.io.size == 1 && guest.run->exit.io.data == uint32('a' + i));
-	}
-	for (int i = 0; i < 2; i++) {
-		CHECK(Run(guest) == TvmmExit::Io);
-		CHECK(guest.run->exit.io.in && guest.run->exit.io.size == 1);
-		guest.run->exit.io.data = 0x11 * (i + 1);
-	}
+	const TvmmExitIo &io = guest.run->exit.io;
+	// REP OUTSB and REP INSB, each in one exit
+	CHECK(Run(guest) == TvmmExit::Io);
+	CHECK(!io.in && io.size == 1 && io.count == 3 && memcmp(RunData(guest), "abc", 3) == 0);
+	CHECK(Run(guest) == TvmmExit::Io);
+	CHECK(io.in && io.size == 1 && io.count == 2);
+	RunData(guest)[0] = 0x11;
+	RunData(guest)[1] = 0x22;
 	CHECK(Run(guest) == TvmmExit::Halted);
 	CHECK(guest.ram[0x3110] == 0x11 && guest.ram[0x3111] == 0x22);
 	CHECK_OK(guest.device.GetState(0, TvmmX86StateGprs, guest.state));
 	CHECK((guest.state.gprs[TvmmX86GprRcx] & 0xffff) == 0);
+
+	// REP OUTSW across a page: up to its end, then the rest
+	for (int i = 0; i < 40; i++) {
+		guest.ram[0x4ff0 + i] = uint8(i);
+	}
+	CHECK(Run(guest) == TvmmExit::Io);
+	CHECK(!io.in && io.size == 2 && io.count == 8 && memcmp(RunData(guest), guest.ram + 0x4ff0, 16) == 0);
+	CHECK(Run(guest) == TvmmExit::Io);
+	CHECK(!io.in && io.size == 2 && io.count == 12 && memcmp(RunData(guest), guest.ram + 0x5000, 24) == 0);
+	CHECK(Run(guest) == TvmmExit::Halted);
+	CHECK_OK(guest.device.GetState(0, TvmmX86StateGprs, guest.state));
+	CHECK((guest.state.gprs[TvmmX86GprRsi] & 0xffff) == 0x5018);
+	CHECK((guest.state.gprs[TvmmX86GprRcx] & 0xffff) == 0);
+}
+
+
+// The words of a PIO read, each the count of those read so far; the guest
+// reads 'kPioBytes'. False when it stops for anything else.
+static bool RunPio(Guest &guest, uint32 ip, uint32 &exits, bigtime_t &elapsed)
+{
+	Jump(guest, ip);
+	const TvmmExitIo &io = guest.run->exit.io;
+	uint16 word = 0;
+	exits = 0;
+	const bigtime_t start = system_time();
+	for (;;) {
+		const TvmmExit exit = Run(guest);
+		if (exit == TvmmExit::Halted) {
+			break;
+		}
+		if (exit != TvmmExit::Io || !io.in || io.port != 0x1f0 || io.size != 2 || io.count == 0) {
+			return false;
+		}
+		auto *data = reinterpret_cast<uint16*>(RunData(guest));
+		for (uint32 i = 0; i < io.count; i++) {
+			data[i] = word++;
+		}
+		exits++;
+	}
+	elapsed = system_time() - start;
+	return uint64(word) == (kPioBytes / 2) % 65536;
+}
+
+
+static void TestPioThroughput(Guest &guest)
+{
+	printf("== PIO throughput\n");
+	uint32 exits = 0;
+	bigtime_t elapsed = 0;
+	CHECK(RunPio(guest, kPioRepAt, exits, elapsed));
+	printf("REP INSW: %u exits, %.1f MB/s\n", exits, double(kPioBytes) / elapsed);
+	// a sector an exit
+	CHECK(exits == 4096);
+	CHECK(guest.ram[0x6000] == 0x00 && guest.ram[0x6001] == 0xff && guest.ram[0x61fe] == 0xff);
+	CHECK(RunPio(guest, kPioSingleAt, exits, elapsed));
+	printf("INSW one at a time: %u exits, %.1f MB/s\n", exits, double(kPioBytes) / elapsed);
+	CHECK(exits == kPioBytes / 2);
 }
 
 
@@ -412,8 +508,8 @@ static void TestDirtyLog(Guest &guest)
 
 	Jump(guest, kDirtyAt);
 	CHECK(Run(guest) == TvmmExit::Io);
-	CHECK(guest.run->exit.io.in && guest.run->exit.io.port == 0x80);
-	guest.run->exit.io.data = 0x5a;
+	CHECK(guest.run->exit.io.in && guest.run->exit.io.port == 0x80 && guest.run->exit.io.count == 1);
+	RunData(guest)[0] = 0x5a;
 	CHECK(Run(guest) == TvmmExit::Halted);
 	const uint64 written = DirtyLog(guest);
 	printf("dirty pages %#" B_PRIx64 "\n", written);
@@ -454,7 +550,7 @@ static void TestStats(Guest &guest)
 	// the FPU test alone ran a million
 	CHECK(io.count >= 1000000);
 	CHECK(clientIo.count >= io.count);
-	CHECK(stats.archExits[TvmmX86StatStringIo].count >= 5);
+	CHECK(stats.archExits[TvmmX86StatStringIo].count >= 4);
 	CHECK(stats.archExits[TvmmX86StatMmioClient].count >= 5);
 	CHECK(stats.archExits[TvmmX86StatMsrClient].count >= 1);
 	CHECK(stats.archExits[TvmmX86StatCpuid].count >= 2);
@@ -505,6 +601,8 @@ int main()
 	memcpy(guest.ram + kMsrAt, kMsr, sizeof(kMsr));
 	memcpy(guest.ram + kStringIoAt, kStringIo, sizeof(kStringIo));
 	memcpy(guest.ram + kDirtyAt, kDirty, sizeof(kDirty));
+	memcpy(guest.ram + kPioRepAt, kPioRep, sizeof(kPioRep));
+	memcpy(guest.ram + kPioSingleAt, kPioSingle, sizeof(kPioSingle));
 	CHECK_OK(guest.device.MapRam(0, 0, kRamSize, ramId, 0, 0));
 	CHECK(guest.device.FreeRam(ramId, guest.ram) == B_BUSY);
 	CHECK_OK(guest.device.CreateVcpu(0, guest.run));
@@ -514,6 +612,7 @@ int main()
 	TestHaltCpuidMsr(guest);
 	TestMmio(guest);
 	TestStringIo(guest);
+	TestPioThroughput(guest);
 	TestCpuidTableAndCr8(guest);
 	TestKick(guest);
 	TestStats(guest);

@@ -71,6 +71,8 @@ private:
 	Pending fPending = Pending::None;
 	uint64 fPendingNextRip = 0;
 	uint64 fPendingGpa = 0;
+	// INS: the elements
+	uint32 fPendingCount = 0;
 	// the size, string and register details of the pending access
 	X86MemInsn fPendingInsn {};
 	// the client asked to exit once the guest can take an interrupt
@@ -114,7 +116,10 @@ private:
 	Walk Translate(uint64 linear, bool write, uint64 &gpa);
 	bool FetchInstruction(uint8 *bytes, uint32 &count);
 	bool FetchInstructionBytes(uint8 *bytes, uint32 &count);
-	void AdvanceString(const X86MemInsn &insn, bool source, bool destination);
+	// 'count' elements done; with REP the instruction runs again until RCX
+	// is 0
+	void AdvanceString(const X86MemInsn &insn, bool source, bool destination, uint32 count = 1);
+	uint32 StringIoCount(const X86MemInsn &insn, bool in, uint64 linear);
 
 	void InjectException(uint8 vector, bool hasError = false, uint32 error = 0);
 	void FillExitState(TvmmRun &run) const;

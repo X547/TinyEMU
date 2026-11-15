@@ -32,7 +32,7 @@
 // The structures have the same layout in the kernel and in the client, which
 // the static_asserts below hold to.
 
-constexpr uint32 kTvmmAbiVersion = 7;
+constexpr uint32 kTvmmAbiVersion = 8;
 constexpr const char *kTvmmDevicePath = "/dev/misc/tvmm";
 
 
@@ -244,8 +244,13 @@ struct TvmmExitIo {
 	// 1, 2 or 4
 	uint8 size;
 	uint8 in;
-	// out: the value written; in: the client stores the value read
+	// IN and OUT: out, the value written; in, the client stores the value read
 	uint32 data;
+	// INS and OUTS: the elements, which are in the run area's data, in the
+	// order of the accesses; out, the values written; in, the client stores
+	// the values read. 0 for IN and OUT.
+	uint32 count;
+	uint32 reserved;
 };
 
 
@@ -298,6 +303,12 @@ enum {
 	TvmmInjectInterrupt = 1,
 	TvmmInjectNmi = 2,
 };
+
+
+// The run area: TvmmRun, then the data of string I/O.
+constexpr size_t kTvmmRunAreaSize = 8192;
+constexpr size_t kTvmmRunDataOffset = 4096;
+constexpr size_t kTvmmRunDataSize = kTvmmRunAreaSize - kTvmmRunDataOffset;
 
 
 // Shared between the kernel and the client. The client fills in the request
