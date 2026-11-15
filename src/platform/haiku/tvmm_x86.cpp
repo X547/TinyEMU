@@ -726,10 +726,27 @@ void TvmmX86Vcpu::ExitIo()
     case 4: size_log2 = 2; break;
     default: abort();
     }
-    if (io.in)
-        io.data = target.PortRead(io.port, size_log2);
-    else
-        target.PortWrite(io.port, io.data, size_log2);
+    if (io.count == 0) {
+        if (io.in)
+            io.data = target.PortRead(io.port, size_log2);
+        else
+            target.PortWrite(io.port, io.data, size_log2);
+        return;
+    }
+    /* string I/O: the elements, in order, in the run area's data */
+    uint8_t *data = reinterpret_cast<uint8_t *>(fRun) + kTvmmRunDataOffset;
+    uint32_t count = std::min<uint32_t>(io.count, kTvmmRunDataSize / io.size);
+    for (uint32_t i = 0; i < count; i++) {
+        uint8_t *element = data + i * io.size;
+        if (io.in) {
+            uint32_t value = target.PortRead(io.port, size_log2);
+            memcpy(element, &value, io.size);
+        } else {
+            uint32_t value = 0;
+            memcpy(&value, element, io.size);
+            target.PortWrite(io.port, value, size_log2);
+        }
+    }
 }
 
 
