@@ -58,6 +58,9 @@ public:
 
 	bool IsOpen() const {return fFd.IsSet();}
 
+	// Ends the VM; runs under way on other threads return soon.
+	void Close() {fFd.Unset();}
+
 	status_t GetInfo(TvmmInfo &info) const
 	{
 		info = {};

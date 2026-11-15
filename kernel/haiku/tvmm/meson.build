@@ -82,10 +82,12 @@ shared_module('tvmm',
 	link_args: kernel_link_args,
 )
 
-executable('tvmm_smoke',
-	'tests/tvmm_smoke.cpp',
-	include_directories: [
-		include_directories('include'),
-		include_directories(kernel_headers / 'shared', is_system: true),
-	],
-)
+foreach test: ['tvmm_smoke', 'tvmm_stress']
+	executable(test,
+		'tests' / test + '.cpp',
+		include_directories: [
+			include_directories('include'),
+			include_directories(kernel_headers / 'shared', is_system: true),
+		],
+	)
+endforeach
