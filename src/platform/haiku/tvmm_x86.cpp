@@ -143,10 +143,11 @@ public:
 
 
 /* With the interrupt controllers the hypervisor may have, the kernel has the
-   local APICs: it waits at HLT and starts the processors beyond the first,
-   the 8259s inject around the APIC while LINT0 takes ExtINT, and an EOI of a
-   level triggered vector comes back for the machine's IOAPIC. Otherwise the
-   machine keeps every interrupt controller. */
+   local APICs and the IOAPIC: it waits at HLT and starts the processors
+   beyond the first, level triggered EOIs end there, and the machine drives
+   the IOAPIC's inputs; the machine's 8259s inject around the APIC while
+   LINT0 takes ExtINT. Otherwise the machine keeps every interrupt
+   controller. */
 class TvmmX86Hypervisor final: public X86CpuBackend, public HostHypervisorRam {
 private:
     friend class TvmmX86Vcpu;
@@ -204,7 +205,7 @@ public:
 
     uint32_t InterruptControllers() override
     {
-        return fApicEmulation ? X86_INTC_LOCAL_APIC : 0;
+        return fApicEmulation ? X86_INTC_LOCAL_APIC | X86_INTC_IOAPIC : 0;
     }
     int PhysAddressBits() override {return fPhysAddressBits;}
     PhysMemoryMap &MemoryMap() override {return *fMemoryMap;}
@@ -220,6 +221,8 @@ public:
     {
         for (auto &vcpu : fVcpus)
             vcpu->Reset();
+        if (fApicEmulation)
+            tvmm_check("resetting the IOAPIC", fDevice.ResetIoApic());
     }
 };
 
@@ -258,7 +261,8 @@ bool TvmmX86Hypervisor::Init()
                 info.maxVcpus);
         return false;
     }
-    err = fDevice.CreateVm(fApicEmulation ? TvmmVmLocalApic : 0);
+    err = fDevice.CreateVm(fApicEmulation ? TvmmVmLocalApic | TvmmVmIoApic
+                                          : 0);
     if (err < B_OK) {
         fprintf(stderr, "tvmm: cannot create a machine: %s\n", strerror(err));
         return false;
@@ -568,12 +572,10 @@ void TvmmX86Hypervisor::GetDirtyLog(int slot, uint32_t *bitmap)
 }
 
 
+/* An input of the kernel's IOAPIC; the machine keeps the 8259s. */
 void TvmmX86Hypervisor::SetIRQ(int irq, int level)
 {
-    /* the machine keeps the 8259s, so no line comes here */
-    (void)irq;
-    (void)level;
-    abort();
+    tvmm_check("setting an IOAPIC input", fDevice.SetIrqLine(irq, level != 0));
 }
 
 
