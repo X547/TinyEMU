@@ -128,7 +128,7 @@ FDT bus -> pci-host-ecam-generic -> PCI bus -> xhci -> USB bus
 | `usb` | `xhci`, `usb-hub` | `usb-hub`, `usb-device`, `usb-storage`, `usb-hid`, `usb-audio` |
 | `usb-function` | `usb-device` | `usb-storage`, `usb-hid`, `usb-audio` |
 | `hid` | `usb-hid`, `i2c-hid` | `hid-keyboard`, `hid-tablet` |
-| `i2c` | `dw-i2c` | `i2c-hid` |
+| `i2c` | `dw-i2c` | `i2c-hid`, `m41t11` |
 | `mdio` | `dwmac` | `ethernet-phy` |
 | `hda` | `intel-hda` | `hda-codec` |
 | `hda-codec` | `hda-codec` | `hda-audio-group` |
@@ -377,6 +377,25 @@ an offset from it, until the emulator exits.
 
 ```js
 { type: "goldfish-rtc" }
+```
+
+#### `m41t11` — ST M41T11 serial real-time clock
+
+Placement: `i2c` bus. A battery backed clock: `st,m41t11` in the device
+tree, as boards such as the Milk-V Titan have it at `0x68`, and a `PRP0001`
+device with that compatible string in ACPI. The time is in BCD, with the century bit that Linux reads as 2000-2099
+when clear and 2100-2199 when set, followed by a control register and 56
+bytes of RAM. It counts from the host's clock in UTC; a time the guest sets,
+and what it writes to the RAM, are kept until the emulator exits. It has no
+alarm and no interrupt line.
+
+| Property | Default | Meaning |
+| --- | --- | --- |
+| `reg` | first free from `0x08` | 7-bit address, `0x08`-`0x77`; the part's own is `0x68`. |
+
+```js
+/* i2c bus */
+{ type: "m41t11", reg: 0x68 }
 ```
 
 ### PCI host bridges and switches
