@@ -183,12 +183,13 @@ public:
    exist. */
 #define RISCV_IRQ_LINES PLIC_NUM_SOURCES
 
-/* Everything the configuration adds is placed in here. It is the one hole in
-   the architectural layout large enough for an ECAM window and a PCI aperture
-   as well as the MMIO devices, and it stays below 4 GB because that is where
-   anything a 32 bit BAR must reach has to live. */
+/* Everything the configuration adds is placed in here: whatever of it the
+   fixed ranges claimed above leave free, which is everything below RAM above
+   the interrupt controllers, split where HTIF and the PLIC sit. It stays below
+   4 GB because that is where anything a 32 bit BAR must reach has to live, and
+   starts at 256 MB so that what used to fit lands where it always did. */
 #define DEVICE_WINDOW_BASE 0x10000000
-#define DEVICE_WINDOW_SIZE 0x30000000
+#define DEVICE_WINDOW_SIZE (RAM_BASE_ADDR - DEVICE_WINDOW_BASE)
 
 /* And a second window for the few things that may sit above 4 GB: a PCI host
    bridge's 64 bit aperture is the only one. It starts far enough up that no
