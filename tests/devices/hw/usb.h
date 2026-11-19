@@ -175,6 +175,21 @@
 #define TRB_TRT_NONE 0
 #define TRB_TRT_OUT  (2u << 16)
 #define TRB_TRT_IN   (3u << 16)
+/* in the status dword of a Transfer TRB */
+#define TRB_TD_SIZE(s) ((uint32_t)(s) << 17)
+
+/* The TD Size of a Transfer TRB (4.11.2.4): the packets of a TD of 'total'
+   bytes still to schedule once its first 'through' bytes, up to and
+   including this TRB's, have gone, at most 31; 0 in the TD's last Transfer
+   TRB. */
+inline uint32_t usb_td_size(uint64_t total, uint64_t through, uint32_t mps,
+                            bool last)
+{
+    if (last || mps == 0)
+        return 0;
+    uint64_t left = (total + mps - 1) / mps - through / mps;
+    return left > 31 ? 31 : (uint32_t)left;
+}
 
 /* completion codes (6.4.5) */
 #define CC_INVALID         0
@@ -449,6 +464,8 @@ struct UsbDevice {
     uint8_t *OutEp(int dci) {return out + hc->ctx_size * dci;}
     uint32_t SlotState();
     uint32_t EpState(int dci);
+    /* The endpoint's Max Packet Size, from the output context. */
+    uint32_t MaxPacket(int dci);
 
     /* Enable a slot and address the device on it (4.3.2-4.3.4), BSR as
        given; the endpoint 0 ring and the contexts come from the heap. */
@@ -472,7 +489,8 @@ struct UsbDevice {
     void SetupEpContext(const UsbEndpoint &ep);
 
     /* Queue a TD of Normal TRBs on endpoint 'dci' and ring it, and the
-       first TRB's address; WaitTransfer() takes its event. */
+       first TRB's address; WaitTransfer() takes its event. The TRBs keep
+       within 64 KB boundaries and carry their TD Size. */
     uint64_t Queue(int dci, void *buf, uint32_t len,
                    uint32_t flags = TRB_ISP | TRB_IOC);
     uint32_t WaitTransfer(int dci, uint32_t *residual = nullptr,

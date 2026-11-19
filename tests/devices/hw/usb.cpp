@@ -418,6 +418,11 @@ uint32_t UsbDevice::EpState(int dci)
     return le32(OutEp(dci)) & 7;
 }
 
+uint32_t UsbDevice::MaxPacket(int dci)
+{
+    return le32(OutEp(dci) + 4) >> 16;
+}
+
 static uint32_t default_mps0(uint32_t speed)
 {
     switch (speed) {
@@ -469,12 +474,28 @@ uint32_t UsbDevice::Control(uint8_t type, uint8_t req, uint16_t value,
     r.Push(type | req << 8 | (uint32_t)value << 16,
            index | (uint32_t)len << 16, 8,
            TRB_TYPE(TRB_SETUP) | TRB_IDT | trt);
-    uint64_t data = 0;
-    if (len) {
-        data = r.Push((uint32_t)(uintptr_t)buf,
-                      (uint32_t)((uint64_t)(uintptr_t)buf >> 32), len,
-                      TRB_TYPE(TRB_DATA) | TRB_ISP |
-                      (in_dir ? TRB_DIR_IN : 0));
+    /* The Data Stage TD: a Data TRB, and a Normal TRB chained to it where
+       the buffer crosses a 64 KB boundary (6.4.1); 'len' fits in two. */
+    uint64_t data[2] = {};
+    uint32_t data_off[2] = {};
+    int data_count = 0;
+    uint64_t addr = (uintptr_t)buf;
+    uint32_t left = len, mps = MaxPacket(1);
+    while (left > 0) {
+        uint32_t n = min<uint64_t>(left, 0x10000 - (addr & 0xffff));
+        bool last = n == left;
+        uint32_t control = TRB_ISP | (last ? 0 : TRB_CH);
+        if (data_count == 0)
+            control |= TRB_TYPE(TRB_DATA) | (in_dir ? TRB_DIR_IN : 0);
+        else
+            control |= TRB_TYPE(TRB_NORMAL);
+        data_off[data_count] = len - left;
+        data[data_count++] = r.Push(
+            (uint32_t)addr, (uint32_t)(addr >> 32),
+            n | TRB_TD_SIZE(usb_td_size(len, len - left + n, mps, last)),
+            control);
+        addr += n;
+        left -= n;
     }
     uint64_t status = r.Push(0, 0, 0, TRB_TYPE(TRB_STATUS) | TRB_IOC |
                              (len && in_dir ? 0 : TRB_DIR_IN));
@@ -490,8 +511,14 @@ uint32_t UsbDevice::Control(uint8_t type, uint8_t req, uint16_t value,
             }, &ev, 2000000))
             return CC_TIMEOUT;
         uint32_t cc = ev.Cc();
-        if (len && ev.Param() == data && cc == CC_SHORT_PACKET) {
-            moved = len - ev.Residual();
+        int i = 0;
+        while (i < data_count && ev.Param() != data[i])
+            i++;
+        if (i < data_count && cc == CC_SHORT_PACKET) {
+            /* what the TRBs before it moved, and this one short */
+            uint32_t trb_len = (i + 1 < data_count ? data_off[i + 1] : len) -
+                               data_off[i];
+            moved = data_off[i] + trb_len - ev.Residual();
             continue;
         }
         if (ev.Param() == status || cc != CC_SUCCESS) {
@@ -639,16 +666,19 @@ uint32_t UsbDevice::Configure(uint8_t value)
 
 uint64_t UsbDevice::Queue(int dci, void *buf, uint32_t len, uint32_t flags)
 {
-    /* no TRB's buffer crosses a 64 KB boundary (6.4.1.1); all but the
-       last are chained, and only the last interrupts on completion */
+    /* no TRB's buffer crosses a 64 KB boundary (6.4.1); all but the last
+       are chained, and only the last interrupts on completion */
     XhciRing &r = rings[dci];
     uint64_t addr = (uintptr_t)buf;
     uint64_t first = r.Enqueue();
+    uint32_t total = len, mps = MaxPacket(dci);
     td_count[dci] = 0;
     do {
         uint32_t n = min<uint64_t>(len, 0x10000 - (addr & 0xffff));
         bool last = n == len;
-        uint64_t trb = r.Push((uint32_t)addr, (uint32_t)(addr >> 32), n,
+        uint32_t td_size = usb_td_size(total, total - len + n, mps, last);
+        uint64_t trb = r.Push((uint32_t)addr, (uint32_t)(addr >> 32),
+                              n | TRB_TD_SIZE(td_size),
                               TRB_TYPE(TRB_NORMAL) |
                               (last ? flags : (flags & ~TRB_IOC) | TRB_CH));
         if (td_count[dci] < USB_MAX_TD_TRBS) {

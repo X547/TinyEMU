@@ -215,6 +215,12 @@
 #define TRB_ISOCH_FRAME_ID(c) get_bits(c, 20, 11)
 
 #define TRB_LEN_MASK    0x1ffff
+#define TRB_TD_SIZE(s)  get_bits(s, 17, 5)
+
+/* The longest data buffer a Transfer TRB may describe, and the boundary it may
+   not cross (6.4.1). */
+#define XHCI_TRB_MAX_LENGTH 0x10000
+#define XHCI_TRB_BOUNDARY   0x10000
 
 /* Completion codes. */
 #define CC_SUCCESS      1
@@ -275,6 +281,10 @@
 #define XHCI_EVENT_FIFO_SIZE 256
 
 #define XHCI_DCI_COUNT 32
+
+/* How many malformed TDs are reported on standard error; a guest that keeps
+   queueing them would otherwise flood it. */
+#define XHCI_MAX_TD_WARNINGS 16
 
 /* How late an isochronous service opportunity may still be taken, in
    microframes. The scheduler runs from a host timer that can be late by a
@@ -465,6 +475,8 @@ private:
 
     uint64_t fStartUs = 0;
 
+    int fTdWarnings = 0;
+
     /* The bus clock that services the isochronous endpoints. */
     std::unique_ptr<HostTimer> fTimer;
     std::vector<XHCIEndpoint *> fIsochEps;
@@ -541,9 +553,13 @@ private:
 
     /* transfers */
     int FetchTD(XHCIEndpoint *ep);
+    int CheckTDSize(XHCIEndpoint *ep, int first, int end, char *why,
+                    size_t size);
+    int FindTDError(XHCIEndpoint *ep, char *why, size_t size);
+    bool CheckTD(XHCIEndpoint *ep);
     void PrepareURB(XHCIEndpoint *ep);
     void XferReport(XHCIEndpoint *ep);
-    void HaltEndpoint(XHCIEndpoint *ep);
+    void HaltEndpoint(XHCIEndpoint *ep, int state = EP_HALTED);
 
     /* isochronous schedule */
     uint64_t IsochTarget(XHCIEndpoint *ep, uint64_t now);
@@ -1249,6 +1265,158 @@ int XHCIDevice::FetchTD(XHCIEndpoint *ep)
 }
 
 
+static bool xhci_is_transfer_trb(int type)
+{
+    return type == TR_NORMAL || type == TR_DATA || type == TR_ISOCH;
+}
+
+
+/* The TD Size of each Transfer TRB in trbs[first, end) of the fetched
+   descriptor, which form one TD: the packets still to schedule after it,
+   at most 31, and 0 in the last (4.11.2.4, the rule of xHCI 1.0 and later).
+   Returns the index of the first TRB that has it wrong, or -1. */
+int XHCIDevice::CheckTDSize(XHCIEndpoint *ep, int first, int end, char *why,
+                            size_t size)
+{
+    const XHCITransfer *x = &ep->xfer;
+    uint32_t mps = ep->max_packet;
+    if (mps == 0) {
+        return -1;
+    }
+
+    uint64_t total = 0;
+    int last = -1;
+    for (int i = first; i < end; i++) {
+        if (xhci_is_transfer_trb(TRB_TYPE(x->trbs[i].control))) {
+            total += x->trbs[i].status & TRB_LEN_MASK;
+            last = i;
+        }
+    }
+    uint64_t packets = (total + mps - 1) / mps;
+
+    uint64_t sum = 0;
+    for (int i = first; i < end; i++) {
+        const XHCITRB &trb = x->trbs[i];
+        if (!xhci_is_transfer_trb(TRB_TYPE(trb.control))) {
+            continue;
+        }
+        sum += trb.status & TRB_LEN_MASK;
+        uint32_t expect = 0;
+        if (i != last) {
+            expect = (uint32_t)std::min<uint64_t>(31, packets - sum / mps);
+        }
+        uint32_t td_size = TRB_TD_SIZE(trb.status);
+        if (td_size != expect) {
+            snprintf(why, size,
+                     "TD Size %u, expected %u (TD of %llu bytes, %llu before "
+                     "the end of this TRB, max packet %u; 4.11.2.4)",
+                     td_size, expect, (unsigned long long)total,
+                     (unsigned long long)sum, mps);
+            return i;
+        }
+    }
+    return -1;
+}
+
+
+/* The rules a guest's Transfer TRBs must keep, which a controller may answer
+   with anything up to a Host Controller Error (4.10.2.2): a Transfer Length of
+   0 to 64K and a data buffer that does not cross a 64 KB boundary (6.4.1),
+   and the TD Size of every TD (4.11.2.4). The fetched descriptor can hold
+   several TDs: a control transfer's Setup, Data and Status stages each are
+   one, and Event Data TRBs belong to the TD they are chained into. Returns
+   the index of the first TRB at fault, or -1. */
+int XHCIDevice::FindTDError(XHCIEndpoint *ep, char *why, size_t size)
+{
+    const XHCITransfer *x = &ep->xfer;
+    int first = -1;
+
+    for (int i = 0; i < x->trb_count; i++) {
+        const XHCITRB &trb = x->trbs[i];
+        int type = TRB_TYPE(trb.control);
+
+        if (type == TR_SETUP || type == TR_STATUS) {
+            /* a stage of its own: whatever came before ended there */
+            if (first >= 0) {
+                int bad = CheckTDSize(ep, first, i, why, size);
+                if (bad >= 0) {
+                    return bad;
+                }
+                first = -1;
+            }
+            continue;
+        }
+
+        if (xhci_is_transfer_trb(type)) {
+            uint32_t len = trb.status & TRB_LEN_MASK;
+            if (len > XHCI_TRB_MAX_LENGTH) {
+                snprintf(why, size,
+                         "Transfer Length %u, more than 64K (6.4.1.1)", len);
+                return i;
+            }
+            /* zero-length or immediate data has no buffer (6.4.1) */
+            if (len > 0 && (trb.control & TRB_TR_IDT) == 0 &&
+                (trb.parameter % XHCI_TRB_BOUNDARY) + len >
+                    XHCI_TRB_BOUNDARY) {
+                snprintf(why, size,
+                         "data buffer %#llx of %u bytes crosses a 64 KB "
+                         "boundary (6.4.1)",
+                         (unsigned long long)trb.parameter, len);
+                return i;
+            }
+            if (first < 0) {
+                first = i;
+            }
+        }
+
+        if ((trb.control & TRB_TR_CH) == 0 && first >= 0) {
+            int bad = CheckTDSize(ep, first, i + 1, why, size);
+            if (bad >= 0) {
+                return bad;
+            }
+            first = -1;
+        }
+    }
+    if (first >= 0) {
+        return CheckTDSize(ep, first, x->trb_count, why, size);
+    }
+    return -1;
+}
+
+
+/* Check the fetched descriptor before anything of it is moved. One that
+   breaks the rules ends in a TRB Error on the TRB at fault, and the endpoint
+   goes to the Error state (4.10.2.2), from which only Set TR Dequeue Pointer
+   takes it (4.8.3). Returns false then. */
+bool XHCIDevice::CheckTD(XHCIEndpoint *ep)
+{
+    char why[160];
+    int bad = FindTDError(ep, why, sizeof(why));
+    if (bad < 0) {
+        return true;
+    }
+
+    const XHCITRB &trb = ep->xfer.trbs[bad];
+    if (fTdWarnings < XHCI_MAX_TD_WARNINGS) {
+        vm_error("xhci: slot %d endpoint %d: TRB at %#llx: %s; TRB Error\n",
+                 ep->slot_id, ep->dci, (unsigned long long)trb.addr, why);
+        if (++fTdWarnings == XHCI_MAX_TD_WARNINGS) {
+            vm_error("xhci: further malformed TDs are not reported\n");
+        }
+    }
+
+    /* nothing moved: the whole length is left */
+    XHCIEvent ev;
+    ev.parameter = trb.addr;
+    ev.status = set_bits(trb.status & TRB_LEN_MASK, 24, 8, CC_TRB_ERROR);
+    ev.control = (ER_TRANSFER << TRB_TYPE_SHIFT) |
+                 ((uint32_t)ep->dci << 16) | ((uint32_t)ep->slot_id << 24);
+    PostEvent(ev, false);
+    HaltEndpoint(ep, EP_ERROR);
+    return false;
+}
+
+
 /* Post the Transfer Events one finished descriptor calls for. An event is
    produced only for a TRB that asked for one -- Interrupt On Completion, or
    Interrupt on Short Packet when the transfer came up short -- because a host
@@ -1332,10 +1500,12 @@ void XHCIDevice::XferReport(XHCIEndpoint *ep)
 }
 
 
-void XHCIDevice::HaltEndpoint(XHCIEndpoint *ep)
+/* Stop the ring in 'state', Halted or Error, with the dequeue pointer past the
+   descriptor at fault saved in the context. */
+void XHCIDevice::HaltEndpoint(XHCIEndpoint *ep, int state)
 {
-    ep->state = EP_HALTED;
-    SetEpState(ep->slot_id, ep->dci, EP_HALTED);
+    ep->state = state;
+    SetEpState(ep->slot_id, ep->dci, state);
     uint64_t addr = EpCtxAddr(ep->slot_id, ep->dci);
     CtxWrite(addr, 2, set_bits((uint32_t)ep->ring.deq, 0, 4, ep->ring.ccs));
     CtxWrite(addr, 3, (uint32_t)(ep->ring.deq >> 32));
@@ -1426,6 +1596,9 @@ void XHCIDevice::KickEndpoint(XHCIEndpoint *ep)
     while (ep->state == EP_RUNNING && !ep->busy) {
         int count = FetchTD(ep);
         if (count <= 0) {
+            break;
+        }
+        if (!CheckTD(ep)) {
             break;
         }
 
@@ -1593,6 +1766,10 @@ void XHCIDevice::ServiceIsoch(XHCIEndpoint *ep, uint64_t now)
                 if (ep->scheduled && ep->next_uframe <= now) {
                     IsochRingEmpty(ep);
                 }
+                return;
+            }
+            if (!CheckTD(ep)) {
+                ep->scheduled = false;
                 return;
             }
             ep->td_pending = true;
@@ -2062,6 +2239,11 @@ int XHCIDevice::CmdSetTrDequeue(int slot_id, int dci, const XHCITRB &trb)
 
     ep->ring.deq = trb.parameter & ~0xfULL;
     ep->ring.ccs = (trb.parameter & 1) != 0;
+    /* the way out of the Error state (4.8.3) */
+    if (ep->state == EP_ERROR) {
+        ep->state = EP_STOPPED;
+        SetEpState(slot_id, dci, EP_STOPPED);
+    }
     uint64_t addr = EpCtxAddr(slot_id, dci);
     CtxWrite(addr, 2,
              set_bits((uint32_t)ep->ring.deq, 0, 4, ep->ring.ccs));

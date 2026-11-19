@@ -1154,6 +1154,132 @@ TEST(xhci, td_not_starting_with_setup)
 }
 
 
+//#pragma mark - malformed transfer descriptors
+
+namespace {
+
+const uint8_t kInquiry[6] = {0x12, 0, 0, 0, 36, 0};
+
+/* The mass storage device, configured, or the test is skipped. Its bulk IN
+   endpoint has nothing to send while no command is pending, so a TD queued
+   there moves nothing unless the controller acts on it by itself. */
+void open_storage(UsbBot *bot)
+{
+    if (!bot->Open(0))
+        t_skip("no mass storage device");
+}
+
+/* A TD that breaks the rules of 6.4.1 or 4.11.2.4: a TRB Error on the TRB
+   at fault with all of its length left, and nothing else; the endpoint goes
+   to the Error state, where Stop Endpoint and doorbells have no effect,
+   until Set TR Dequeue Pointer takes it to Stopped (4.10.2.2, 4.8.3). The
+   device has seen nothing and still answers. */
+void expect_trb_error(UsbBot &bot, uint64_t bad, uint32_t bad_len)
+{
+    UsbDevice &d = bot.dev;
+    Trb ev;
+    ASSERT_EQ(d.WaitTransfer(bot.in, nullptr, 200000, &ev),
+              (uint32_t)CC_TRB);
+    EXPECT_EQ(ev.Param(), bad);
+    EXPECT_EQ(ev.Residual(), bad_len);
+    EXPECT_EQ(d.EpState(bot.in), (uint32_t)EP_ERROR);
+    EXPECT_EQ(d.WaitTransfer(bot.in, nullptr, 20000), (uint32_t)CC_TIMEOUT);
+    EXPECT_EQ(d.StopEndpoint(bot.in), (uint32_t)CC_CONTEXT_STATE);
+    d.hc->Doorbell(d.slot, bot.in);
+    EXPECT_EQ(d.EpState(bot.in), (uint32_t)EP_ERROR);
+    EXPECT_EQ(d.WaitTransfer(bot.in, nullptr, 20000), (uint32_t)CC_TIMEOUT);
+    ASSERT_EQ(d.SkipQueued(bot.in), (uint32_t)CC_SUCCESS);
+    EXPECT_EQ(d.EpState(bot.in), (uint32_t)EP_STOPPED);
+
+    uint8_t *buf = (uint8_t *)usb_alloc(36);
+    EXPECT_EQ(bot.Command(0, kInquiry, 6, true, buf, 36),
+              (uint32_t)BOT_PASS);
+}
+
+}
+
+TEST(xhci, trb_error_td_size)
+{
+    UsbBot bot;
+    open_storage(&bot);
+    UsbDevice &d = bot.dev;
+    XhciRing &r = d.rings[bot.in];
+    uint32_t mps = d.MaxPacket(bot.in);
+    ASSERT_NE(mps, 0u);
+    uint8_t *buf = (uint8_t *)usb_alloc(8192, 4096);
+
+    /* a TD of two pages whose first TRB claims to be the last (4.11.2.4) */
+    uint64_t first = r.Push((uint32_t)(uintptr_t)buf, 0, 4096,
+                            TRB_TYPE(TRB_NORMAL) | TRB_CH);
+    r.Push((uint32_t)(uintptr_t)(buf + 4096), 0, 4096,
+           TRB_TYPE(TRB_NORMAL) | TRB_IOC);
+    d.hc->Doorbell(d.slot, bot.in);
+    expect_trb_error(bot, first, 4096);
+
+    /* a TD of one TRB with packets said to follow it */
+    uint64_t only = r.Push((uint32_t)(uintptr_t)buf, 0,
+                           512 | TRB_TD_SIZE(1),
+                           TRB_TYPE(TRB_NORMAL) | TRB_IOC);
+    d.hc->Doorbell(d.slot, bot.in);
+    expect_trb_error(bot, only, 512);
+
+    /* the TD Size saturates at 31 with 32 or more packets left; here 33,
+       cut to five bits instead. The buffer stays within one 64 KB block,
+       so that only the TD Size is wrong. */
+    uint32_t total = 34 * mps;
+    uint8_t *big = (uint8_t *)usb_alloc(total, 0x10000);
+    uint64_t wrong = r.Push((uint32_t)(uintptr_t)big, 0,
+                            mps | TRB_TD_SIZE(33 & 31),
+                            TRB_TYPE(TRB_NORMAL) | TRB_CH);
+    r.Push((uint32_t)(uintptr_t)(big + mps), 0, total - mps,
+           TRB_TYPE(TRB_NORMAL) | TRB_IOC);
+    d.hc->Doorbell(d.slot, bot.in);
+    expect_trb_error(bot, wrong, mps);
+}
+
+TEST(xhci, trb_error_64k_boundary)
+{
+    UsbBot bot;
+    open_storage(&bot);
+    UsbDevice &d = bot.dev;
+    XhciRing &r = d.rings[bot.in];
+    uint8_t *buf = (uint8_t *)usb_alloc(0x20000, 0x10000);
+    uint8_t *edge = buf + 0x10000 - 16;
+
+    /* one TRB over the boundary (6.4.1) */
+    uint64_t bad = r.Push((uint32_t)(uintptr_t)edge,
+                          (uint32_t)((uint64_t)(uintptr_t)edge >> 32), 36,
+                          TRB_TYPE(TRB_NORMAL) | TRB_IOC);
+    d.hc->Doorbell(d.slot, bot.in);
+    expect_trb_error(bot, bad, 36);
+
+    /* the same buffer as two TRBs, split at the boundary, is fine:
+       Queue() does that, and the data lands on both sides */
+    memset(edge, 0, 36);
+    ASSERT_EQ(bot.Command(0, kInquiry, 6, true, edge, 36),
+              (uint32_t)BOT_PASS);
+    EXPECT_EQ(edge[0] & 0x1f, 0u);   /* direct access block device */
+    EXPECT_NE(edge[4], 0u);          /* additional length */
+    EXPECT_NE(edge[8], 0u);          /* vendor identification */
+}
+
+TEST(xhci, trb_error_length)
+{
+    UsbBot bot;
+    open_storage(&bot);
+    UsbDevice &d = bot.dev;
+    XhciRing &r = d.rings[bot.in];
+    uint8_t *buf = (uint8_t *)usb_alloc(0x20000, 0x10000);
+
+    /* a Transfer Length over 64K (6.4.1.1), even from a boundary */
+    uint64_t bad = r.Push((uint32_t)(uintptr_t)buf,
+                          (uint32_t)((uint64_t)(uintptr_t)buf >> 32),
+                          0x10001, TRB_TYPE(TRB_NORMAL) | TRB_IOC);
+    d.hc->Doorbell(d.slot, bot.in);
+    expect_trb_error(bot, bad, 0x10001);
+}
+
+
 //#pragma mark - events and interrupts
 
 TEST(xhci, event_ring_wrap)

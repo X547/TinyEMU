@@ -411,7 +411,8 @@ TEST(usb_storage, held_command)
 }
 
 /* A data stage over many TRBs: chained, each within a 64 KB boundary
-   (4.11.7.1), with an Event Data TRB reporting the total. */
+   (6.4.1) and with its TD Size (4.11.2.4), with an Event Data TRB reporting
+   the total. */
 TEST(usb_storage, chained_transfer)
 {
     open_bot();
@@ -431,10 +432,12 @@ TEST(usb_storage, chained_transfer)
     ASSERT_EQ(d.Transfer(sBot.out, sBot.cbw, 31), (uint32_t)CC_SUCCESS);
     /* in 4 KB pieces, a page each, as a scatter list would come */
     XhciRing &r = d.rings[sBot.in];
+    uint32_t mps = d.MaxPacket(sBot.in);
     for (uint32_t off = 0; off < len; off += 4096) {
         uint32_t n = min(4096u, len - off);
-        r.Push((uint32_t)(uintptr_t)(buf + off), 0, n,
-               TRB_TYPE(TRB_NORMAL) | TRB_CH);
+        uint32_t td_size = usb_td_size(len, off + n, mps, off + n == len);
+        r.Push((uint32_t)(uintptr_t)(buf + off), 0,
+               n | TRB_TD_SIZE(td_size), TRB_TYPE(TRB_NORMAL) | TRB_CH);
     }
     r.Push(0x5555, 0x6666, 0, TRB_TYPE(TRB_EVENT_DATA) | TRB_IOC);
     d.hc->Doorbell(d.slot, sBot.in);
@@ -457,7 +460,9 @@ TEST(usb_storage, chained_transfer)
     put_le32(sBot.cbw + 8, 2 * BLOCK);
     memcpy(sBot.cbw + 15, cdb, 10);
     ASSERT_EQ(d.Transfer(sBot.out, sBot.cbw, 31), (uint32_t)CC_SUCCESS);
-    uint64_t first = r.Push((uint32_t)(uintptr_t)buf, 0, 4096,
+    uint64_t first = r.Push((uint32_t)(uintptr_t)buf, 0,
+                            4096 | TRB_TD_SIZE(usb_td_size(8192, 4096, mps,
+                                                           false)),
                             TRB_TYPE(TRB_NORMAL) | TRB_CH | TRB_ISP);
     r.Push((uint32_t)(uintptr_t)(buf + 4096), 0, 4096,
            TRB_TYPE(TRB_NORMAL) | TRB_ISP | TRB_IOC);

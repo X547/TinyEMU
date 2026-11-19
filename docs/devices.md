@@ -1043,6 +1043,16 @@ device models are full or high speed, so they use the USB 2.0 ports. Off PCI
 it is `generic-xhci` in the device tree and `PNP0D10` in the DSDT, with a
 register window and an interrupt line of its own, and it has no MSI-X.
 
+Before it moves any data of a transfer descriptor, the controller checks its
+Transfer TRBs against the xHCI specification: a Transfer Length of at most
+64K, a data buffer that does not cross a 64 KB boundary, and the TD Size of
+each TRB. Real controllers may answer such a descriptor with anything up to
+a Host Controller Error. Here it ends in a TRB Error on the TRB at fault, the
+endpoint goes to the Error state until the guest's driver sets a new
+dequeue pointer, and the first 16 such descriptors are reported on standard
+error, naming the slot, the endpoint, the TRB and the rule it breaks. This
+helps find bugs in a guest's xHCI driver.
+
 | Property | Default | Meaning |
 | --- | --- | --- |
 | `usb2_ports` | `4` | Number of USB 2.0 root ports. |
