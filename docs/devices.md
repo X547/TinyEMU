@@ -231,9 +231,11 @@ is used.
 host: { driver: "wav", file: "guest-audio.wav" }
 ```
 
-On Windows an input that captures from `"host"` records from the input
-device. The other hosts cannot record yet, so there it hears silence. Use
-`"wav"` to feed the guest a file.
+An input that captures from `"host"` records from the input device on
+Windows, and from the system's audio input on Haiku, at whatever rate the
+guest asks for. Linux cannot record yet, and neither can a host with no
+input, so there an input hears silence. Use `"wav"` to feed the guest a
+file.
 
 ### Serial back end: `output`, `path`, `server`
 

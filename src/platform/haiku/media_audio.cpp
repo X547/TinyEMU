@@ -23,6 +23,7 @@
 #include <BufferGroup.h>
 #include <BufferProducer.h>
 #include <MediaEventLooper.h>
+#include <MediaRecorder.h>
 #include <MediaRoster.h>
 #include <TimeSource.h>
 
@@ -30,7 +31,10 @@
 #include <string.h>
 
 #include <atomic>
+#include <mutex>
+#include <vector>
 
+#include "host_time.h"
 #include "paced_audio.h"
 #include "platform_backends.h"
 
@@ -779,13 +783,363 @@ void MediaAudio::Fill(uint8_t *out, size_t frames)
 }
 
 
+//#pragma mark - MediaCapture
+
+/* How far behind what arrived the guest is kept, beyond the latency asked
+   for: a couple of the input's buffers. */
+#define MEDIA_CAPTURE_SLACK_MS 20
+
+
+/* One capture stream from the system's audio input, through a
+   BMediaRecorder. What it records goes into the ring in the guest's format,
+   resampled when the guest asked for a rate the input does not run at; the
+   frames that went in are the clock, held back so that what the device asks
+   for has arrived. */
+class MediaCapture final: public PacedAudio {
+private:
+    int fLatencyMs;
+    AudioCaps fCaps;
+    BMediaRecorder *fRecorder = nullptr;
+    AudioRing fRing;
+
+    /* The recorder's thread writes the ring only while this is set, which
+       a restart clears first. */
+    std::mutex fLock;
+    bool fAccepting = false;
+
+    /* The frames that went into the ring and when, for the device thread:
+       a sequence lock, odd while the recorder's thread updates them. */
+    std::atomic<uint32_t> fClockSeq {0};
+    std::atomic<uint64_t> fClockFrames {0};
+    std::atomic<uint64_t> fClockUs {0};
+    uint64_t fMaxExtrapolate = 0;
+    uint64_t fLead = 0;
+
+    /* the recorder thread's own */
+    uint64_t fWritten = 0;
+    bool fHaveLast = false;
+    double fPos = 0.0;
+    int32_t fLast[8] = {};
+    std::vector<uint8_t> fScratch;
+
+    /* the device thread's own */
+    unsigned fUnderruns = 0;
+
+    static void ProcessHook(void *cookie, bigtime_t timestamp, void *data,
+                            size_t size, const media_format &format);
+    void Process(const uint8_t *data, size_t size,
+                 const media_raw_audio_format &in);
+    void Emit(const int32_t *frame);
+    void Publish();
+
+protected:
+    uint64_t ClockFrames() override;
+    bool StartStream() override;
+    void StopStream() override;
+
+public:
+    MediaCapture(EventLoop &loop, const AudioSettings &settings);
+    ~MediaCapture() override;
+
+    bool Init();
+
+    AudioCaps Caps() override {return fCaps;}
+    void Write(const uint8_t *buf, size_t frames) override
+        {(void)buf; (void)frames;}
+    void Read(uint8_t *buf, size_t frames) override;
+};
+
+
+MediaCapture::MediaCapture(EventLoop &loop, const AudioSettings &settings):
+    PacedAudio(loop, settings.direction),
+    fLatencyMs(settings.latency_ms)
+{
+    if (settings.device != nullptr) {
+        fprintf(stderr, "audio: input devices are not chosen by name on "
+                "this host; recording from the system's input\n");
+    }
+}
+
+
+MediaCapture::~MediaCapture()
+{
+    Stop();
+    if (fRecorder != nullptr) {
+        if (fRecorder->IsConnected()) {
+            fRecorder->Disconnect();
+        }
+        delete fRecorder;
+    }
+}
+
+
+/* Connected to the system's audio input once and for all, whose format is
+   what the guest is offered. */
+bool MediaCapture::Init()
+{
+    fRecorder = new BMediaRecorder("TinyEMU input", B_MEDIA_RAW_AUDIO);
+    status_t err = fRecorder->InitCheck();
+    if (err != B_OK) {
+        fprintf(stderr, "audio: no media recorder: %s\n", strerror(err));
+        return false;
+    }
+    fRecorder->SetHooks(ProcessHook, nullptr, this);
+
+    media_format format;
+    format.type = B_MEDIA_RAW_AUDIO;
+    format.u.raw_audio = media_raw_audio_format::wildcard;
+    fRecorder->SetAcceptedFormat(format);
+    if ((err = fRecorder->Connect(format)) != B_OK) {
+        fprintf(stderr, "audio: no input to record from: %s\n",
+                strerror(err));
+        return false;
+    }
+    const media_raw_audio_format &f = fRecorder->Format().u.raw_audio;
+    if (f.frame_rate > 0 && f.channel_count > 0) {
+        fCaps.rate = (uint32_t)f.frame_rate;
+        fCaps.channels = (int)f.channel_count;
+    }
+    return true;
+}
+
+
+bool MediaCapture::StartStream()
+{
+    {
+        std::lock_guard<std::mutex> locker(fLock);
+        fMaxExtrapolate = (uint64_t)fFormat.rate * MEDIA_CAPTURE_SLACK_MS /
+                          1000;
+        fLead = (uint64_t)fFormat.rate * fLatencyMs / 1000 + fMaxExtrapolate;
+        fRing.Reset(fFormat.FrameBytes(),
+                    (size_t)fLead + (size_t)fFormat.rate * MEDIA_RING_MS /
+                                        1000);
+        fClockSeq.store(0);
+        fClockFrames.store(0);
+        fClockUs.store(0);
+        fWritten = 0;
+        fHaveLast = false;
+        fPos = 0.0;
+        fUnderruns = 0;
+        fAccepting = true;
+    }
+    if (!fRecorder->IsRunning()) {
+        status_t err = fRecorder->Start();
+        if (err != B_OK) {
+            fprintf(stderr, "audio: the input did not start: %s\n",
+                    strerror(err));
+        }
+    }
+    return true;
+}
+
+
+void MediaCapture::StopStream()
+{
+    {
+        std::lock_guard<std::mutex> locker(fLock);
+        fAccepting = false;
+    }
+    if (fRecorder->IsRunning()) {
+        fRecorder->Stop();
+    }
+    if (fUnderruns != 0) {
+        fprintf(stderr, "audio: the input ran dry %u times\n", fUnderruns);
+    }
+}
+
+
+uint64_t MediaCapture::ClockFrames()
+{
+    uint64_t frames, us;
+    uint32_t seq;
+
+    do {
+        seq = fClockSeq.load(std::memory_order_acquire);
+        frames = fClockFrames.load(std::memory_order_relaxed);
+        us = fClockUs.load(std::memory_order_relaxed);
+    } while ((seq & 1) != 0 ||
+             seq != fClockSeq.load(std::memory_order_acquire));
+
+    if (us != 0) {
+        /* Between two buffers the input records on at its rate. */
+        uint64_t now = host_monotonic_us();
+        uint64_t ahead = now > us ? (now - us) * fFormat.rate / 1000000 : 0;
+        frames += ahead < fMaxExtrapolate ? ahead : fMaxExtrapolate;
+    }
+    return frames > fLead ? frames - fLead : 0;
+}
+
+
+/* What the input recorded, the lead behind it. Whatever the ring holds
+   beyond the lead and a little slack is dropped, so that the latency comes
+   back to what it was after the device stalled; a ring that runs dry is
+   made up for with silence. */
+void MediaCapture::Read(uint8_t *buf, size_t frames)
+{
+    size_t fb = fFormat.FrameBytes();
+
+    if (!Running()) {
+        memset(buf, 0, frames * fb);
+        return;
+    }
+    size_t keep = frames + (size_t)fLead + (size_t)fMaxExtrapolate;
+    size_t avail = fRing.Available();
+    if (avail > keep) {
+        fRing.Read(nullptr, avail - keep);
+    }
+    size_t got = fRing.Read(buf, frames);
+    if (got < frames) {
+        memset(buf + got * fb, 0, (frames - got) * fb);
+        fUnderruns++;
+    }
+}
+
+
+//#pragma mark - recorder thread
+
+void MediaCapture::ProcessHook(void *cookie, bigtime_t timestamp, void *data,
+                               size_t size, const media_format &format)
+{
+    (void)timestamp;
+    if (format.type == B_MEDIA_RAW_AUDIO) {
+        static_cast<MediaCapture *>(cookie)->Process(
+            (const uint8_t *)data, size, format.u.raw_audio);
+    }
+}
+
+
+void MediaCapture::Publish()
+{
+    uint32_t seq = fClockSeq.load(std::memory_order_relaxed);
+    fClockSeq.store(seq + 1, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    fClockFrames.store(fWritten, std::memory_order_relaxed);
+    fClockUs.store(host_monotonic_us(), std::memory_order_relaxed);
+    fClockSeq.store(seq + 2, std::memory_order_release);
+}
+
+
+/* One frame in the guest's format, its channels already the guest's. */
+void MediaCapture::Emit(const int32_t *frame)
+{
+    int cb = fFormat.ContainerBytes();
+    size_t at = fScratch.size();
+
+    fScratch.resize(at + fFormat.FrameBytes());
+    for (int c = 0; c < fFormat.channels; c++) {
+        audio_sample_put(&fScratch[at + c * cb], cb, frame[c]);
+    }
+}
+
+
+/* A buffer from the input: each sample left justified, the channels made
+   the guest's (one channel to all of them, two averaged into one, others
+   taken in order and the rest silent), and the rate made the guest's by
+   linear interpolation when it is not already. */
+void MediaCapture::Process(const uint8_t *data, size_t size,
+                           const media_raw_audio_format &in)
+{
+    std::lock_guard<std::mutex> locker(fLock);
+
+    if (!fAccepting) {
+        return;
+    }
+    size_t sample = in.format & media_raw_audio_format::B_AUDIO_SIZE_MASK;
+    int in_ch = (int)in.channel_count;
+    if (sample == 0 || in_ch < 1 || in.frame_rate <= 0) {
+        return;
+    }
+    size_t frames = size / (sample * in_ch);
+    int out_ch = fFormat.channels;
+    bool resample = (uint32_t)in.frame_rate != fFormat.rate;
+    double step = in.frame_rate / (double)fFormat.rate;
+
+    fScratch.clear();
+    for (size_t i = 0; i < frames; i++) {
+        const uint8_t *p = data + i * sample * in_ch;
+        int32_t s[8];
+        int n = in_ch < 8 ? in_ch : 8;
+        for (int c = 0; c < n; c++, p += sample) {
+            switch (in.format) {
+            case media_raw_audio_format::B_AUDIO_FLOAT: {
+                float v;
+                memcpy(&v, p, 4);
+                s[c] = v >= 1.0f ? INT32_MAX
+                       : v <= -1.0f ? INT32_MIN
+                                    : (int32_t)(v * 2147483648.0f);
+                break;
+            }
+            case media_raw_audio_format::B_AUDIO_INT:
+                memcpy(&s[c], p, 4);
+                break;
+            case media_raw_audio_format::B_AUDIO_SHORT: {
+                int16_t v;
+                memcpy(&v, p, 2);
+                s[c] = (int32_t)((uint32_t)(uint16_t)v << 16);
+                break;
+            }
+            case media_raw_audio_format::B_AUDIO_CHAR:
+                s[c] = (int32_t)((uint32_t)p[0] << 24);
+                break;
+            case media_raw_audio_format::B_AUDIO_UCHAR:
+                s[c] = (int32_t)((uint32_t)(p[0] ^ 0x80) << 24);
+                break;
+            default:
+                s[c] = 0;
+                break;
+            }
+        }
+
+        int32_t g[8];
+        for (int c = 0; c < out_ch; c++) {
+            if (out_ch == 1 && n > 1) {
+                g[c] = (int32_t)(((int64_t)s[0] + s[1]) / 2);
+            } else if (n == 1) {
+                g[c] = s[0];
+            } else {
+                g[c] = c < n ? s[c] : 0;
+            }
+        }
+
+        if (!resample) {
+            Emit(g);
+            continue;
+        }
+        if (!fHaveLast) {
+            memcpy(fLast, g, sizeof(g));
+            fHaveLast = true;
+            fPos = 0.0;
+        }
+        /* the guest's frames that fall from the last frame up to this */
+        while (fPos < 1.0) {
+            int32_t o[8];
+            for (int c = 0; c < out_ch; c++) {
+                o[c] = (int32_t)((double)fLast[c] +
+                                 ((double)g[c] - (double)fLast[c]) * fPos);
+            }
+            Emit(o);
+            fPos += step;
+        }
+        fPos -= 1.0;
+        memcpy(fLast, g, sizeof(g));
+    }
+
+    size_t out_frames = fScratch.size() / fFormat.FrameBytes();
+    fRing.Write(fScratch.data(), out_frames);
+    fWritten += out_frames;
+    Publish();
+}
+
+
 std::unique_ptr<HostAudio> host_audio_open(EventLoop &loop,
                                            const AudioSettings &settings)
 {
-    if (settings.direction != AUDIO_RENDER) {
-        fprintf(stderr, "audio: capture from the host is not supported "
-                "yet\n");
-        return nullptr;
+    if (settings.direction == AUDIO_CAPTURE) {
+        auto audio = std::make_unique<MediaCapture>(loop, settings);
+        if (!audio->Init()) {
+            return nullptr;
+        }
+        return audio;
     }
     auto audio = std::make_unique<MediaAudio>(loop, settings);
     if (!audio->Init()) {
