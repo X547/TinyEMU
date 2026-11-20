@@ -579,12 +579,27 @@ const uint8_t *usb_find_interface(const UsbDevice *dev, int n)
     return nullptr;
 }
 
-bool UsbDevice::FindEndpoint(int iface, int n, UsbEndpoint *ep)
+const uint8_t *usb_find_alt(const UsbDevice *dev, uint8_t number, uint8_t alt)
 {
-    const uint8_t *id = usb_find_interface(this, iface);
+    for (uint32_t off = 0; off + 4 <= dev->config_len;) {
+        const uint8_t *d = dev->config + off;
+        if (d[0] < 2)
+            break;
+        if (d[1] == USB_DT_INTERFACE && d[2] == number && d[3] == alt)
+            return d;
+        off += d[0];
+    }
+    return nullptr;
+}
+
+/* The 'n'th endpoint descriptor after interface descriptor 'id', before the
+   next interface's. */
+static bool endpoint_of(const UsbDevice *dev, const uint8_t *id, int n,
+                        UsbEndpoint *ep)
+{
     if (id == nullptr)
         return false;
-    const uint8_t *end = config + config_len;
+    const uint8_t *end = dev->config + dev->config_len;
     for (const uint8_t *d = id + id[0]; d + 2 <= end && d[0] >= 2;
          d += d[0]) {
         if (d[1] == USB_DT_INTERFACE)
@@ -595,6 +610,17 @@ bool UsbDevice::FindEndpoint(int iface, int n, UsbEndpoint *ep)
         }
     }
     return false;
+}
+
+bool UsbDevice::FindEndpoint(int iface, int n, UsbEndpoint *ep)
+{
+    return endpoint_of(this, usb_find_interface(this, iface), n, ep);
+}
+
+bool UsbDevice::FindAltEndpoint(uint8_t number, uint8_t alt, int n,
+                                UsbEndpoint *ep)
+{
+    return endpoint_of(this, usb_find_alt(this, number, alt), n, ep);
 }
 
 static uint32_t ilog2(uint32_t v)
@@ -662,6 +688,90 @@ uint32_t UsbDevice::Configure(uint8_t value)
     return hc->Command((uint32_t)(uintptr_t)in,
                        (uint32_t)((uint64_t)(uintptr_t)in >> 32), 0,
                        TRB_TYPE(TRB_CONFIGURE_EP) | TRB_SLOT(slot));
+}
+
+uint32_t UsbDevice::SetInterface(uint8_t number, uint8_t alt)
+{
+    /* A setting the device does not have goes to the device alone, which
+       is for it to refuse. */
+    if (usb_find_alt(this, number, alt) != nullptr) {
+        memset(in, 0, (XHCI_DCIS + 1) * hc->ctx_size);
+        memcpy(InSlot(), OutSlot(), hc->ctx_size);
+        put_le32(InCtl() + 4, 1);
+        uint32_t drop = 0;
+        for (uint32_t off = 0; off + 4 <= config_len;) {
+            const uint8_t *d = config + off;
+            if (d[0] < 2)
+                break;
+            off += d[0];
+            if (d[1] != USB_DT_INTERFACE || d[2] != number)
+                continue;
+            UsbEndpoint ep;
+            for (int n = 0; endpoint_of(this, d, n, &ep); n++) {
+                int dci = usb_dci(ep.address);
+                if (EpState(dci) != EP_DISABLED)
+                    drop |= 1u << dci;
+                if (d[3] == alt)
+                    SetupEpContext(ep);
+            }
+        }
+        put_le32(InCtl(), drop);
+        /* the last context left enabled */
+        uint32_t enabled = le32(InCtl() + 4);
+        for (int dci = 2; dci < XHCI_DCIS; dci++) {
+            if (EpState(dci) != EP_DISABLED && !(drop & (1u << dci)))
+                enabled |= 1u << dci;
+        }
+        int last = 1;
+        for (int dci = 2; dci < XHCI_DCIS; dci++) {
+            if (enabled & (1u << dci))
+                last = dci;
+        }
+        put_le32(InSlot(), (le32(InSlot()) & ~(0x1fu << 27)) |
+                 (uint32_t)last << 27);
+        put_le32(InSlot() + 12, 0);
+        fence();
+        uint32_t cc = hc->Command((uint32_t)(uintptr_t)in,
+                                  (uint32_t)((uint64_t)(uintptr_t)in >> 32),
+                                  0, TRB_TYPE(TRB_CONFIGURE_EP) |
+                                  TRB_SLOT(slot));
+        if (cc != CC_SUCCESS)
+            return cc;
+    }
+    return Control(USB_RECIP_INTERFACE, USB_REQ_SET_INTERFACE, alt, number, 0,
+                   nullptr);
+}
+
+uint64_t UsbDevice::QueueIsoch(int dci, void *buf, uint32_t len, int frame_id,
+                               bool ring)
+{
+    uint64_t addr = (uintptr_t)buf;
+    uint32_t control = TRB_TYPE(TRB_ISOCH) | TRB_ISP | TRB_IOC |
+                       (frame_id < 0 ? TRB_SIA : TRB_FRAME_ID(frame_id));
+    uint64_t trb = rings[dci].Push((uint32_t)addr, (uint32_t)(addr >> 32),
+                                   len, control);
+    if (ring)
+        hc->Doorbell(slot, dci);
+    return trb;
+}
+
+uint32_t UsbDevice::WaitIsoch(int dci, uint32_t len, uint32_t *actual,
+                              int *empty, uint64_t timeout_us)
+{
+    for (;;) {
+        uint32_t residual = 0;
+        uint32_t cc = WaitTransfer(dci, &residual, timeout_us);
+        if (cc == CC_RING_UNDERRUN || cc == CC_RING_OVERRUN) {
+            if (empty)
+                (*empty)++;
+            continue;
+        }
+        if (actual) {
+            bool moved = cc == CC_SUCCESS || cc == CC_SHORT_PACKET;
+            *actual = moved && residual <= len ? len - residual : 0;
+        }
+        return cc;
+    }
 }
 
 uint64_t UsbDevice::Queue(int dci, void *buf, uint32_t len, uint32_t flags)

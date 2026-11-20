@@ -175,6 +175,9 @@
 #define TRB_TRT_NONE 0
 #define TRB_TRT_OUT  (2u << 16)
 #define TRB_TRT_IN   (3u << 16)
+/* in an Isoch TRB (6.4.1.3) */
+#define TRB_FRAME_ID(f) (((uint32_t)(f) & 0x7ff) << 20)
+#define TRB_SIA      (1u << 31)
 /* in the status dword of a Transfer TRB */
 #define TRB_TD_SIZE(s) ((uint32_t)(s) << 17)
 
@@ -379,6 +382,8 @@ public:
     uint32_t DisableSlot(uint32_t slot);
 
     uint32_t Portsc(uint32_t port) {return OpRd(XHCI_PORTSC(port));}
+    /* The microframe index (5.5.1), 14 bits. */
+    uint32_t Mfindex() {return RtRd(XHCI_MFINDEX) & 0x3fff;}
     /* Write PORTSC leaving everything else as it is, plus 'set'. */
     void PortSet(uint32_t port, uint32_t set);
     /* Reset a port with something attached (4.3.1), clearing the change
@@ -482,11 +487,19 @@ struct UsbDevice {
     bool ReadDescriptors();
     /* The 'n'th endpoint of interface 'iface', or false. */
     bool FindEndpoint(int iface, int n, UsbEndpoint *ep);
+    /* The 'n'th endpoint of alternate setting 'alt' of the interface
+       numbered 'number', or false. */
+    bool FindAltEndpoint(uint8_t number, uint8_t alt, int n, UsbEndpoint *ep);
     /* SET_CONFIGURATION and a Configure Endpoint command adding every
        endpoint of the configuration's interfaces (alternate setting 0). */
     uint32_t Configure(uint8_t value = 1);
     /* Fill in the input context for one endpoint, with a new ring. */
     void SetupEpContext(const UsbEndpoint &ep);
+    /* Alternate setting 'alt' of the interface numbered 'number' (4.6.6):
+       a Configure Endpoint command dropping the interface's endpoints that
+       are enabled and adding this setting's, then
+       SET_INTERFACE. The completion code of whichever failed. */
+    uint32_t SetInterface(uint8_t number, uint8_t alt);
 
     /* Queue a TD of Normal TRBs on endpoint 'dci' and ring it, and the
        first TRB's address; WaitTransfer() takes its event. The TRBs keep
@@ -499,6 +512,19 @@ struct UsbDevice {
     uint32_t Transfer(int dci, void *buf, uint32_t len,
                       uint32_t *actual = nullptr,
                       uint64_t timeout_us = 2000000);
+
+    /* Queue an isochronous TD of one Isoch TRB (6.4.1.3) on endpoint
+       'dci', in the frame 'frame_id' gives or, when it is negative, as soon
+       as possible; the TRB's address. The doorbell rings only when 'ring'
+       is true, so that several TDs can go at once. */
+    uint64_t QueueIsoch(int dci, void *buf, uint32_t len, int frame_id = -1,
+                        bool ring = true);
+    /* The event of the next isochronous TD on 'dci' to finish, passing
+       over the Ring Underrun and Ring Overrun events of a schedule that ran
+       dry, which 'empty' counts. The completion code, and 'actual' the
+       bytes moved. */
+    uint32_t WaitIsoch(int dci, uint32_t len, uint32_t *actual = nullptr,
+                       int *empty = nullptr, uint64_t timeout_us = 2000000);
 
     uint32_t StopEndpoint(int dci, Trb *ev = nullptr);
     uint32_t ResetEndpoint(int dci);
@@ -528,6 +554,9 @@ void usb_require_device(uint8_t cls, int index, UsbDevice *dev,
                         int host = -1);
 /* The 'n'th interface descriptor in a configuration, or nullptr. */
 const uint8_t *usb_find_interface(const UsbDevice *dev, int n);
+/* The descriptor of alternate setting 'alt' of the interface numbered
+   'number', or nullptr. */
+const uint8_t *usb_find_alt(const UsbDevice *dev, uint8_t number, uint8_t alt);
 
 /* Under 4 GB, where a controller without 64 bit addressing reaches. */
 void *usb_alloc(size_t size, size_t align = 64);

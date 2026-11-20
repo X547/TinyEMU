@@ -186,7 +186,7 @@ every test and reset after it. `xhci_require()` gives a running host with
 its command and event rings, polled; `usb_find_device(class, index, &dev)`
 resets the root ports, addresses what is on them and walks through hubs,
 and `UsbDevice` does control transfers, Configure Endpoint and transfers
-on the other endpoints. `UsbBot` speaks the mass storage Bulk-Only
+on the other endpoints, alternate settings among them, and isochronous TDs. `UsbBot` speaks the mass storage Bulk-Only
 Transport, which `hw/scsi.cpp` uses too, so the SCSI unit tests also run
 over USB.
 
