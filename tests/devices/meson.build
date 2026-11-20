@@ -137,6 +137,7 @@ sources = files(
   'tests/timer/i8254.cpp',
   'tests/timer/m41t11.cpp',
   'tests/timer/mc146818.cpp',
+  'tests/usb/audio.cpp',
   'tests/usb/hid.cpp',
   'tests/usb/hub.cpp',
   'tests/usb/storage.cpp',
