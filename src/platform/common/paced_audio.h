@@ -97,3 +97,5 @@ public:
 
 /* Samples as left justified 32 bit integers, whatever their container. */
 int32_t audio_sample_get(const uint8_t *p, int container_bytes);
+/* The top bytes of 'v' into the container. */
+void audio_sample_put(uint8_t *p, int container_bytes, int32_t v);

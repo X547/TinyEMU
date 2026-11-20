@@ -56,6 +56,8 @@ static const IID kIidAudioClient3 = {0x7ed4ee07, 0x8e67, 0x4cd4,
     {0x8c, 0x1a, 0x2b, 0x7a, 0x59, 0x87, 0xad, 0x42}};
 static const IID kIidAudioRenderClient = {0xf294acfc, 0x3146, 0x4483,
     {0xa7, 0xbf, 0xad, 0xdc, 0xa7, 0xc2, 0x60, 0xe2}};
+static const IID kIidAudioCaptureClient = {0xc8adbd64, 0xe71e, 0x48a0,
+    {0xa4, 0xde, 0x18, 0x5c, 0x39, 0x5c, 0xd3, 0x17}};
 static const IID kIidMMNotificationClient = {0x7991eec9, 0x7e89, 0x4d85,
     {0x83, 0x90, 0x6c, 0x70, 0x3c, 0xec, 0x60, 0xc0}};
 static const IID kIidUnknown = {0x00000000, 0x0000, 0x0000,
@@ -108,17 +110,17 @@ static std::wstring lower(std::wstring s)
 }
 
 
-/* The render endpoint whose name contains 'name', or the default one when
-   'name' is empty or matches nothing. */
-static IMMDevice *find_device(IMMDeviceEnumerator *en, const std::wstring &name,
-                              bool *warned)
+/* The render or capture endpoint whose name contains 'name', or the default
+   one when 'name' is empty or matches nothing. */
+static IMMDevice *find_device(IMMDeviceEnumerator *en, EDataFlow flow,
+                              const std::wstring &name, bool *warned)
 {
     IMMDevice *dev = nullptr;
 
     if (!name.empty()) {
         IMMDeviceCollection *coll = nullptr;
         UINT count = 0;
-        if (SUCCEEDED(en->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE,
+        if (SUCCEEDED(en->EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE,
                                              &coll)) &&
             SUCCEEDED(coll->GetCount(&count))) {
             std::wstring want = lower(name);
@@ -145,12 +147,13 @@ static IMMDevice *find_device(IMMDeviceEnumerator *en, const std::wstring &name,
             return dev;
         }
         if (!*warned) {
-            fprintf(stderr, "audio: no output device matches '%ls', using the "
-                    "default one\n", name.c_str());
+            fprintf(stderr, "audio: no %s device matches '%ls', using the "
+                    "default one\n", flow == eCapture ? "input" : "output",
+                    name.c_str());
             *warned = true;
         }
     }
-    if (FAILED(en->GetDefaultAudioEndpoint(eRender, eConsole, &dev))) {
+    if (FAILED(en->GetDefaultAudioEndpoint(flow, eConsole, &dev))) {
         return nullptr;
     }
     return dev;
@@ -205,11 +208,15 @@ public:
 };
 
 
-/* One render stream. The guest's frames go into a ring from the event loop;
-   a thread of its own takes them out as the endpoint asks for them, and
-   what it has handed over is the clock the device runs by. */
+/* One render or capture stream. To render, the guest's frames go into a
+   ring from the event loop, a thread of its own takes them out as the
+   endpoint asks for them, and what it has handed over is the clock the
+   device runs by. To capture, the thread puts what the endpoint recorded
+   into the ring, and what it has taken is the clock, held back by a lead so
+   that what the device asks for has arrived. */
 class WasapiAudio final: public PacedAudio {
 private:
+    EDataFlow fFlow;
     std::wstring fDeviceName;
     int fLatencyMs;
     AudioCaps fCaps;
@@ -228,10 +235,13 @@ private:
     std::atomic<uint64_t> fClockFrames {0};
     std::atomic<uint64_t> fClockUs {0};
     std::atomic<uint64_t> fMaxExtrapolate {0};
+    /* capture: how far behind what was recorded the device is kept */
+    std::atomic<uint64_t> fCaptureLead {0};
 
-    /* the render thread's own */
+    /* the stream thread's own */
     IAudioClient *fClient = nullptr;
     IAudioRenderClient *fRender = nullptr;
+    IAudioCaptureClient *fCapture = nullptr;
     OutKindEnum fOutKind = OUT_COPY;
     int fOutFrameBytes = 0;
     UINT32 fTargetPadding = 0;
@@ -244,12 +254,18 @@ private:
     bool fWarned = false;
     std::vector<uint8_t> fScratch;
 
+    /* the device thread's own, for capture */
+    unsigned fReadUnderruns = 0;
+
+    bool IsCapture() const {return fFlow == eCapture;}
     void ThreadMain();
     bool OpenClient(IMMDeviceEnumerator *en);
     void CloseClient();
     bool Render();
+    bool Capture();
     void Fill(uint8_t *out, size_t frames);
     void Convert(const uint8_t *in, uint8_t *out, size_t frames);
+    void ConvertIn(const uint8_t *in, uint8_t *out, size_t frames);
     void FallbackTick();
     void Publish();
 
@@ -269,10 +285,11 @@ public:
         SetEvent(fWakeEvent);
     }
 
+    EDataFlow Flow() const {return fFlow;}
+
     AudioCaps Caps() override {return fCaps;}
     void Write(const uint8_t *buf, size_t frames) override;
-    void Read(uint8_t *buf, size_t frames) override
-        {memset(buf, 0, frames * fFormat.FrameBytes());}
+    void Read(uint8_t *buf, size_t frames) override;
 };
 
 
@@ -280,7 +297,7 @@ HRESULT STDMETHODCALLTYPE WasapiNotifier::OnDefaultDeviceChanged(
     EDataFlow flow, ERole role, LPCWSTR id)
 {
     (void)id;
-    if (flow == eRender && role == eConsole) {
+    if (flow == fOwner->Flow() && role == eConsole) {
         fOwner->RequestReopen();
     }
     return S_OK;
@@ -289,6 +306,7 @@ HRESULT STDMETHODCALLTYPE WasapiNotifier::OnDefaultDeviceChanged(
 
 WasapiAudio::WasapiAudio(EventLoop &loop, const AudioSettings &settings):
     PacedAudio(loop, settings.direction),
+    fFlow(settings.direction == AUDIO_CAPTURE ? eCapture : eRender),
     fLatencyMs(settings.latency_ms)
 {
     if (settings.device != nullptr) {
@@ -323,7 +341,8 @@ void WasapiAudio::QueryCaps()
         if (SUCCEEDED(CoCreateInstance(kClsidMMDeviceEnumerator, nullptr,
                                        CLSCTX_ALL, kIidMMDeviceEnumerator,
                                        (void **)&en)) &&
-            (dev = find_device(en, fDeviceName, &fWarned)) != nullptr &&
+            (dev = find_device(en, fFlow, fDeviceName, &fWarned)) !=
+                nullptr &&
             SUCCEEDED(dev->Activate(kIidAudioClient, CLSCTX_ALL, nullptr,
                                     (void **)&client)) &&
             SUCCEEDED(client->GetMixFormat(&mix))) {
@@ -332,7 +351,8 @@ void WasapiAudio::QueryCaps()
             fCaps.channels = mix->nChannels;
             fCaps.any_rate = false;
         } else {
-            fprintf(stderr, "audio: no output device yet\n");
+            fprintf(stderr, "audio: no %s device yet\n",
+                    IsCapture() ? "input" : "output");
         }
         if (mix != nullptr) {
             CoTaskMemFree(mix);
@@ -359,15 +379,19 @@ uint64_t WasapiAudio::ClockFrames()
     } while ((seq & 1) != 0 ||
              seq != fClockSeq.load(std::memory_order_acquire));
 
-    if (us == 0) {
-        return frames;
+    if (us != 0) {
+        /* Between two buffers the endpoint plays or records on at its
+           rate; past two periods without word from it, the guest waits. */
+        uint64_t now = host_monotonic_us();
+        uint64_t ahead = now > us ? (now - us) * fFormat.rate / 1000000 : 0;
+        uint64_t max_ahead = fMaxExtrapolate.load(std::memory_order_relaxed);
+        frames += ahead < max_ahead ? ahead : max_ahead;
     }
-    /* Between two buffers the endpoint plays on at its rate; past two
-       periods without word from it, the guest waits. */
-    uint64_t now = host_monotonic_us();
-    uint64_t ahead = now > us ? (now - us) * fFormat.rate / 1000000 : 0;
-    uint64_t max_ahead = fMaxExtrapolate.load(std::memory_order_relaxed);
-    return frames + (ahead < max_ahead ? ahead : max_ahead);
+    if (IsCapture()) {
+        uint64_t lead = fCaptureLead.load(std::memory_order_relaxed);
+        frames = frames > lead ? frames - lead : 0;
+    }
+    return frames;
 }
 
 
@@ -382,6 +406,9 @@ bool WasapiAudio::StartStream()
     fClockFrames.store(0);
     fClockUs.store(0);
     fMaxExtrapolate.store((uint64_t)fFormat.rate * 20 / 1000);
+    fCaptureLead.store((uint64_t)fFormat.rate * fLatencyMs / 1000 +
+                       fMaxExtrapolate.load());
+    fReadUnderruns = 0;
     fConsumed = 0;
     fLeadDone = false;
     fFallbackUs = 0;
@@ -402,18 +429,48 @@ void WasapiAudio::StopStream()
     if (fUnderruns != 0) {
         fprintf(stderr, "audio: the output ran dry %u times\n", fUnderruns);
     }
+    if (fReadUnderruns != 0) {
+        fprintf(stderr, "audio: the input ran dry %u times\n",
+                fReadUnderruns);
+    }
 }
 
 
 void WasapiAudio::Write(const uint8_t *buf, size_t frames)
 {
-    if (Running()) {
+    if (Running() && !IsCapture()) {
         fRing.Write(buf, frames);
     }
 }
 
 
-//#pragma mark - render thread
+/* What the endpoint recorded, the lead behind it. Whatever the ring holds
+   beyond the lead and a little slack is dropped, so that the latency comes
+   back to what it was after the device stalled; a ring that runs dry is
+   made up for with silence. */
+void WasapiAudio::Read(uint8_t *buf, size_t frames)
+{
+    size_t fb = fFormat.FrameBytes();
+
+    if (!Running() || !IsCapture()) {
+        memset(buf, 0, frames * fb);
+        return;
+    }
+    size_t keep = frames + (size_t)fCaptureLead.load() +
+                  (size_t)fMaxExtrapolate.load();
+    size_t avail = fRing.Available();
+    if (avail > keep) {
+        fRing.Read(nullptr, avail - keep);
+    }
+    size_t got = fRing.Read(buf, frames);
+    if (got < frames) {
+        memset(buf + got * fb, 0, (frames - got) * fb);
+        fReadUnderruns++;
+    }
+}
+
+
+//#pragma mark - stream thread
 
 void WasapiAudio::Publish()
 {
@@ -445,8 +502,8 @@ void WasapiAudio::ThreadMain()
 
     while (!fQuit.load()) {
         if (fClient == nullptr && (en == nullptr || !OpenClient(en))) {
-            /* No endpoint to play on: the guest keeps its time by the host's
-               clock until there is one. */
+            /* No endpoint: the guest keeps its time by the host's clock
+               until there is one. */
             FallbackTick();
             WaitForSingleObject(fWakeEvent, 10);
             fReopen.store(false);
@@ -457,7 +514,8 @@ void WasapiAudio::ThreadMain()
         if (fQuit.load()) {
             break;
         }
-        if (r == WAIT_TIMEOUT || fReopen.exchange(false) || !Render()) {
+        if (r == WAIT_TIMEOUT || fReopen.exchange(false) ||
+            !(IsCapture() ? Capture() : Render())) {
             CloseClient();
         }
     }
@@ -476,7 +534,7 @@ void WasapiAudio::ThreadMain()
 
 bool WasapiAudio::OpenClient(IMMDeviceEnumerator *en)
 {
-    IMMDevice *dev = find_device(en, fDeviceName, &fWarned);
+    IMMDevice *dev = find_device(en, fFlow, fDeviceName, &fWarned);
     WAVEFORMATEX *mix = nullptr;
     WAVEFORMATEXTENSIBLE ext = {};
     const WAVEFORMATEX *wfx;
@@ -491,9 +549,9 @@ bool WasapiAudio::OpenClient(IMMDeviceEnumerator *en)
         goto out;
     }
 
-    /* At the endpoint's own rate and width the samples only need widening,
-       which is done here, and the engine's smallest period may be had. Any
-       other format the engine converts. */
+    /* At the endpoint's own rate and width the samples only need widening
+       or narrowing, which is done here, and the engine's smallest period
+       may be had. Any other format the engine converts. */
     fOutKind = OUT_COPY;
     if (mix->nSamplesPerSec == fFormat.rate &&
         mix->nChannels == fFormat.channels) {
@@ -583,14 +641,27 @@ bool WasapiAudio::OpenClient(IMMDeviceEnumerator *en)
     }
     if (FAILED(fClient->GetBufferSize(&buffer_frames)) ||
         FAILED(fClient->SetEventHandle(fBufferEvent)) ||
-        FAILED(fClient->GetService(kIidAudioRenderClient,
-                                   (void **)&fRender))) {
+        (IsCapture()
+             ? FAILED(fClient->GetService(kIidAudioCaptureClient,
+                                          (void **)&fCapture))
+             : FAILED(fClient->GetService(kIidAudioRenderClient,
+                                          (void **)&fRender)))) {
         goto out;
     }
 
-    /* Two periods in the endpoint's buffer, so that one late wakeup is not
-       heard; the rest of the latency asked for is the guest's lead. */
-    {
+    if (IsCapture()) {
+        /* What arrives comes a period at a time: the device is kept the
+           latency asked for, and two periods, behind it. */
+        fMaxExtrapolate.store(2 * period);
+        if (!fLeadDone) {
+            fCaptureLead.store((uint64_t)fFormat.rate * fLatencyMs / 1000 +
+                               2 * period);
+            fLeadDone = true;
+        }
+    } else {
+        /* Two periods in the endpoint's buffer, so that one late wakeup is
+           not heard; the rest of the latency asked for is the guest's
+           lead. */
         UINT32 min_padding = fFormat.rate * WASAPI_MIN_PADDING_MS / 1000;
         fTargetPadding = 2 * period > min_padding ? 2 * period : min_padding;
         if (fTargetPadding > buffer_frames) {
@@ -607,8 +678,8 @@ bool WasapiAudio::OpenClient(IMMDeviceEnumerator *en)
         fMaxExtrapolate.store(2 * period);
     }
 
-    /* The buffer starts out silent rather than empty. */
-    {
+    /* A render buffer starts out silent rather than empty. */
+    if (!IsCapture()) {
         BYTE *data;
         if (SUCCEEDED(fRender->GetBuffer(fTargetPadding, &data))) {
             fRender->ReleaseBuffer(fTargetPadding, AUDCLNT_BUFFERFLAGS_SILENT);
@@ -638,7 +709,51 @@ void WasapiAudio::CloseClient()
         fClient->Stop();
     }
     com_release(fRender);
+    com_release(fCapture);
     com_release(fClient);
+}
+
+
+/* Whatever the endpoint has recorded, into the ring in the guest's format;
+   what the ring has no room for is lost. */
+bool WasapiAudio::Capture()
+{
+    UINT32 packet;
+
+    for (;;) {
+        if (FAILED(fCapture->GetNextPacketSize(&packet))) {
+            return false;
+        }
+        if (packet == 0) {
+            return true;
+        }
+        BYTE *data;
+        UINT32 frames;
+        DWORD flags;
+        if (FAILED(fCapture->GetBuffer(&data, &frames, &flags, nullptr,
+                                       nullptr))) {
+            return false;
+        }
+        size_t in_bytes = fFormat.FrameBytes();
+        for (UINT32 done = 0; done < frames;) {
+            size_t n = frames - done;
+            if (n > 256) {
+                n = 256;
+            }
+            if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0) {
+                fRing.Write(nullptr, n);
+            } else {
+                fScratch.resize(n * in_bytes);
+                ConvertIn(data + (size_t)done * fOutFrameBytes,
+                          fScratch.data(), n);
+                fRing.Write(fScratch.data(), n);
+            }
+            done += n;
+        }
+        fCapture->ReleaseBuffer(frames);
+        fConsumed += frames;
+        Publish();
+    }
 }
 
 
@@ -741,8 +856,47 @@ void WasapiAudio::Convert(const uint8_t *in, uint8_t *out, size_t frames)
 }
 
 
+/* From the endpoint's samples into the guest's. */
+void WasapiAudio::ConvertIn(const uint8_t *in, uint8_t *out, size_t frames)
+{
+    size_t samples = frames * fFormat.channels;
+    int out_bytes = fFormat.ContainerBytes();
+
+    switch (fOutKind) {
+    case OUT_COPY:
+        memcpy(out, in, frames * fFormat.FrameBytes());
+        break;
+    case OUT_FLOAT32:
+        for (size_t i = 0; i < samples; i++) {
+            float v;
+            memcpy(&v, in + i * 4, 4);
+            int32_t s = v >= 1.0f ? INT32_MAX
+                        : v <= -1.0f ? INT32_MIN
+                                     : (int32_t)(v * 2147483648.0f);
+            audio_sample_put(out + i * out_bytes, out_bytes, s);
+        }
+        break;
+    case OUT_INT16:
+        for (size_t i = 0; i < samples; i++) {
+            int16_t v;
+            memcpy(&v, in + i * 2, 2);
+            audio_sample_put(out + i * out_bytes, out_bytes,
+                             (int32_t)((uint32_t)(uint16_t)v << 16));
+        }
+        break;
+    case OUT_INT32:
+        for (size_t i = 0; i < samples; i++) {
+            int32_t v;
+            memcpy(&v, in + i * 4, 4);
+            audio_sample_put(out + i * out_bytes, out_bytes, v);
+        }
+        break;
+    }
+}
+
+
 /* Keeps time by the host's clock while there is no endpoint, dropping what
-   the guest plays. */
+   the guest plays, or recording silence. */
 void WasapiAudio::FallbackTick()
 {
     uint64_t now = host_monotonic_us();
@@ -756,8 +910,12 @@ void WasapiAudio::FallbackTick()
         return;
     }
     fFallbackUs += frames * 1000000 / fFormat.rate;
-    size_t avail = fRing.Available();
-    fRing.Read(nullptr, frames < avail ? frames : avail);
+    if (IsCapture()) {
+        fRing.Write(nullptr, frames);
+    } else {
+        size_t avail = fRing.Available();
+        fRing.Read(nullptr, frames < avail ? frames : avail);
+    }
     fConsumed += frames;
     Publish();
 }
@@ -766,11 +924,6 @@ void WasapiAudio::FallbackTick()
 std::unique_ptr<HostAudio> host_audio_open(EventLoop &loop,
                                            const AudioSettings &settings)
 {
-    if (settings.direction != AUDIO_RENDER) {
-        fprintf(stderr, "audio: capture from the host is not supported "
-                "yet\n");
-        return nullptr;
-    }
     auto audio = std::make_unique<WasapiAudio>(loop, settings);
     audio->QueryCaps();
     return audio;

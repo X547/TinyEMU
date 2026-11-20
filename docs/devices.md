@@ -222,7 +222,7 @@ is used.
 | Key | Meaning |
 | --- | --- |
 | `driver` | `"host"` (default): WASAPI on Windows, PipeWire on Linux, the Media Kit on Haiku; on a host without an audio back end it behaves as `"none"`. `"wav"` writes to a WAV file. `"none"` produces no sound, but the guest's streams still play in real time. |
-| `device` | `"host"` on Windows and Linux: part of the output device's name. Without it, the default output is used, and followed when the user changes it. |
+| `device` | `"host"` on Windows and Linux: part of the output device's name, or for a capture input the input device's. Without it, the default device is used, and followed when the user changes it. |
 | `file` | `"wav"`: the WAV file to write, or for a capture input the file to read. |
 | `loop` | `"wav"` capture only: `1` restarts the file when it ends. |
 | `latency` | How far ahead of the listener, in ms, the guest may run. 1-1000, default 20. |
@@ -231,8 +231,9 @@ is used.
 host: { driver: "wav", file: "guest-audio.wav" }
 ```
 
-Host back ends cannot record yet, so an input that captures from `"host"`
-hears silence. Use `"wav"` to feed the guest a file.
+On Windows an input that captures from `"host"` records from the input
+device. The other hosts cannot record yet, so there it hears silence. Use
+`"wav"` to feed the guest a file.
 
 ### Serial back end: `output`, `path`, `server`
 

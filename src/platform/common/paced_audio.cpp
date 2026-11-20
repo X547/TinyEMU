@@ -191,6 +191,15 @@ int32_t audio_sample_get(const uint8_t *p, int container_bytes)
 }
 
 
+void audio_sample_put(uint8_t *p, int container_bytes, int32_t v)
+{
+    uint32_t u = (uint32_t)v;
+    for (int i = 0; i < container_bytes; i++) {
+        p[i] = (uint8_t)(u >> (8 * (4 - container_bytes + i)));
+    }
+}
+
+
 //#pragma mark - NullAudio
 
 /* Moves nothing, but keeps time, so that the guest sees a device that plays
