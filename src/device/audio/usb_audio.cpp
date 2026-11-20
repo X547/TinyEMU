@@ -67,6 +67,7 @@
 
 /* Terminal types. */
 #define UAC_TERMINAL_STREAMING   0x0101
+#define UAC_TERMINAL_MICROPHONE  0x0201
 #define UAC_TERMINAL_SPEAKER     0x0301
 #define UAC_TERMINAL_HEADPHONE   0x0302
 #define UAC_TERMINAL_LINE        0x0603
@@ -605,6 +606,133 @@ void USBAudioOutput::AudioTick()
 }
 
 
+//#pragma mark - USBAudioInput
+
+/* A recording path: the input terminal its "kind" names, the feature unit,
+   the USB streaming output terminal, and a streaming interface with an
+   asynchronous IN endpoint. The host clock fills the FIFO, and each packet
+   takes as many frames as that clock made in a frame of the bus, nudged so
+   that the FIFO settles at its target; the host follows the packets' sizes
+   (UAC 1.0 3.7.2.2). */
+class USBAudioInput final: public USBAudioPort {
+private:
+    double fOwed = 0.0;       /* the fraction of a frame the packets owe */
+    std::vector<uint8_t> fPacket;
+
+public:
+    using USBAudioPort::USBAudioPort;
+
+    bool IsInput() const override {return true;}
+
+    USBStatusEnum DataPacket(URB *urb) override;
+
+    /* AudioTarget */
+    void AudioTick() override;
+};
+
+
+/* Until the FIFO has filled, and again when it runs dry, a packet carries
+   silence of the nominal size, so that the stream never stops. */
+USBStatusEnum USBAudioInput::DataPacket(URB *urb)
+{
+    if (!fStreaming || !urb->is_in) {
+        return USB_STATUS_STALL;
+    }
+    if (!fStarted) {
+        StartStream();
+        fOwed = 0.0;
+    }
+
+    double nominal = fRate / 1000.0;
+    double rate = nominal;
+    if (fClockRunning) {
+        RecordRate(urb->microframe);
+        fLevelAvg += ((double)fFifoLevel - fLevelAvg) / 8.0;
+        double correction =
+            (fLevelAvg - (double)fFifoTarget) / USB_AUDIO_SERVO_MS;
+        if (correction > nominal / 100.0) {
+            correction = nominal / 100.0;
+        } else if (correction < -nominal / 100.0) {
+            correction = -nominal / 100.0;
+        }
+        rate = MeasuredRate() + correction;
+        if (rate > nominal * 1.02) {
+            rate = nominal * 1.02;
+        } else if (rate < nominal * 0.98) {
+            rate = nominal * 0.98;
+        }
+    }
+
+    size_t fb = FrameBytes();
+    /* so that ten packets at 44.1 come to 441 frames, not 440.99999 */
+    fOwed += rate;
+    size_t frames = (size_t)(fOwed + 1e-6);
+    fOwed -= (double)frames;
+    size_t room = urb->buffer != nullptr ? urb->buffer->Length() / fb : 0;
+    size_t max_frames = MaxPacket() / fb;
+    if (frames > max_frames) {
+        frames = max_frames;
+    }
+    if (frames > room) {
+        frames = room;
+    }
+
+    if (!fPlaying && fFifoLevel >= fFifoTarget) {
+        fPlaying = true;
+    }
+    fPacket.assign(frames * fb, 0);
+    if (fPlaying) {
+        size_t take = frames < fFifoLevel ? frames : fFifoLevel;
+        FifoPop(fPacket.data(), take);
+        if (take < frames) {
+            fUnderruns++;
+            fPlaying = false;
+            usb_audio_debug("%s: underrun, %zu of %zu frames\n", Name(), take,
+                            frames);
+        }
+    }
+    ApplyGain(fPacket.data(), frames);
+    if ((urb->microframe & 0x1fff) < 8) {
+        usb_audio_debug("%s: %zu frames at %.4f (measured %.4f), fifo %zu\n",
+                        Name(), frames, rate, MeasuredRate(), fFifoLevel);
+    }
+    urb->actual_length =
+        frames > 0 ? urb->buffer->Write(0, fPacket.data(), frames * fb) : 0;
+    return USB_STATUS_OK;
+}
+
+
+/* The host clock moved on: take as many frames from it. A FIFO that is full
+   makes room by dropping its oldest, so that what the host gets is never
+   late by more than the FIFO holds. */
+void USBAudioInput::AudioTick()
+{
+    if (!fStarted) {
+        return;
+    }
+    uint64_t due = fAudio->FramesDue();
+    if (due <= fMoved) {
+        return;
+    }
+    fClockRunning = true;
+    size_t max_frames = fFifoCap;
+    if (due - fMoved > max_frames) {
+        fMoved = due - max_frames;
+    }
+    size_t frames = due - fMoved;
+
+    fBuf.resize(frames * FrameBytes());
+    fAudio->Read(fBuf.data(), frames);
+    if (frames > fFifoCap - fFifoLevel) {
+        size_t drop = frames - (fFifoCap - fFifoLevel);
+        FifoPop(nullptr, drop);
+        fOverruns++;
+    }
+    FifoPush(fBuf.data(), frames);
+    fMoved += frames;
+}
+
+
 //#pragma mark - USBAudio
 
 /* The spatial positions of the first channels, as a cluster describes them;
@@ -1123,6 +1251,12 @@ static const USBAudioKind sOutputKinds[] = {
     {nullptr, 0},
 };
 
+static const USBAudioKind sInputKinds[] = {
+    {"microphone", UAC_TERMINAL_MICROPHONE},
+    {"line-in", UAC_TERMINAL_LINE},
+    {nullptr, 0},
+};
+
 
 /* "kind" among 'kinds', the first of them by default; "channels"; "rates",
    only the host end's own by default. */
@@ -1220,3 +1354,28 @@ public:
 };
 
 static const USBAudioOutputClass sUSBAudioOutputClass;
+
+
+/* A recording path, recording from the host. */
+class USBAudioInputClass final: public DeviceClass {
+public:
+    USBAudioInputClass(): DeviceClass("usb-audio-input") {}
+
+    Device *Create(const DeviceConfig &cfg, DeviceContext *ctx) const override
+    {
+        USBAudioPortConfig config;
+        const char *name = cfg.IdOr("usb-audio-input");
+
+        auto audio = config_open_audio(cfg, ctx, AUDIO_CAPTURE);
+        if (audio == nullptr) {
+            return nullptr;
+        }
+        AudioCaps caps = audio->Caps();
+        if (!parse_port_config(cfg, sInputKinds, &config, caps.rate)) {
+            return nullptr;
+        }
+        return new USBAudioInput(name, config, std::move(audio));
+    }
+};
+
+static const USBAudioInputClass sUSBAudioInputClass;

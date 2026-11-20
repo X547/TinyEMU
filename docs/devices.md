@@ -134,7 +134,7 @@ FDT bus -> pci-host-ecam-generic -> PCI bus -> xhci -> USB bus
 | `hda-codec` | `hda-codec` | `hda-audio-group` |
 | `hda-audio-group` | `hda-audio-group` | `hda-output` |
 | `ac97` | `ich-ac97` | `ac97-codec` |
-| `usb-audio` | `usb-audio` | `usb-audio-output` |
+| `usb-audio` | `usb-audio` | `usb-audio-output`, `usb-audio-input` |
 
 ### Addresses and interrupts
 
@@ -215,7 +215,8 @@ Only one network device may be declared per machine.
 ### Audio back end: `host`
 
 Audio outputs (`hda-output`, `usb-audio-output`, `ac97-codec`) read a `host`
-object that says where the sound goes. Without one, the host's audio system
+object that says where the sound goes, and inputs (`usb-audio-input`, the
+`ac97-codec`'s `input`) one that says where it comes from. Without one, the host's audio system
 is used.
 
 | Key | Meaning |
@@ -1389,7 +1390,8 @@ rates from 8000 to 48000 Hz.
 #### `usb-audio` — USB Audio Class 1.0 device
 
 Placement: `usb` or `usb-function` bus. A full-speed function that provides
-a `usb-audio` bus with up to four outputs, and needs at least one.
+a `usb-audio` bus with up to four outputs and inputs in all, and needs at
+least one.
 
 | Property | Default | Meaning |
 | --- | --- | --- |
@@ -1408,6 +1410,7 @@ a `usb-audio` bus with up to four outputs, and needs at least one.
                 kind: "headphone",
                 host: { driver: "wav", file: "usb-phones.wav" },
             },
+            { type: "usb-audio-input" },
         ],
     },
 }
@@ -1428,6 +1431,27 @@ guest, with a master mute and volume control.
 ```js
 /* usb-audio bus */
 { type: "usb-audio-output", channels: 2, rates: [44100, 48000] }
+```
+
+#### `usb-audio-input` — USB audio recording interface
+
+Placement: `usb-audio` bus. Each input is a separate recording device in the
+guest, with a master mute and volume control.
+
+| Property | Default | Meaning |
+| --- | --- | --- |
+| `kind` | `"microphone"` | `"microphone"` or `"line-in"`. |
+| `channels` | `2` | 1-8, 16-bit samples. |
+| `rates` | the host rate | Sample rates offered, 8000-96000. |
+| `host` | host audio | Where the sound comes from. See [audio back end](#audio-back-end-host). |
+
+```js
+/* usb-audio bus */
+{
+    type: "usb-audio-input",
+    channels: 1,
+    host: { driver: "wav", file: "mic.wav", loop: 1 },
+}
 ```
 
 ### Filesystem

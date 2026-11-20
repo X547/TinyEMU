@@ -410,21 +410,24 @@ emulator's: the host device asks for frames and the controller fetches them
 from the guest's buffers as it does, so the two never drift apart and nothing
 is resampled.
 
-USB audio nests like the other USB devices, with its outputs on a bus of its
-own:
+USB audio nests like the other USB devices, with its outputs and inputs on a
+bus of its own:
 
     PCI bus -> xhci -> USB bus -> usb-audio -> USB audio bus
-            -> usb-audio-output
+            -> usb-audio-output, usb-audio-input
 
 A "usb-audio" is a full speed USB Audio Class 1.0 device carrying up to four
-outputs, each a streaming interface the guest sees as a playback device of
-its own.
+outputs and inputs, each a streaming interface the guest sees as a playback
+or recording device of its own.
 
-The output has a master mute and volume, and works as real asynchronous
-hardware does. The controller delivers the guest's packets in the USB frames
-they are scheduled for, the host end's clock drains them from a FIFO, and a
-feedback endpoint reports how many frames per USB frame that clock takes, so
-the guest sends exactly what the host plays and nothing is resampled.
+Each has a master mute and volume, and works as real asynchronous hardware
+does. For an output, the controller delivers the guest's packets in the USB
+frames they are scheduled for, the host end's clock drains them from a FIFO,
+and a feedback endpoint reports how many frames per USB frame that clock
+takes, so the guest sends exactly what the host plays and nothing is
+resampled. An input works the other way round: the host end's clock fills
+the FIFO, and each packet carries as many frames as that clock made in a USB
+frame, which the guest follows.
 
 The Banshee is the display to reach for when a guest is old enough to have a
 driver for it and new enough to want its drawing accelerated. Where the
