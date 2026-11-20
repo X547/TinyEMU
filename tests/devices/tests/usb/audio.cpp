@@ -32,7 +32,8 @@
    (5.2) and isochronous streaming. The host ends are temu's "test" audio
    driver, whose clock the test moves, so what a stream plays does not
    depend on how fast anything runs. The machines tag the streams: 1 and 2
-   are the first device's outputs, 3 the composite device's. */
+   are the first device's outputs and 3 and 4 its inputs, 9 the composite
+   device's output. */
 
 #define USB_CLASS_AUDIO 0x01
 #define UAC_SUBCLASS_CONTROL   0x01
@@ -71,6 +72,7 @@ namespace {
 
 /* One streaming interface and the entities behind it. */
 struct Port {
+    bool input;           /* recording: its data endpoint is IN */
     uint8_t iface;        /* the streaming interface's number */
     uint8_t terminal;     /* the USB streaming terminal it links to */
     uint8_t unit;         /* the feature unit on that terminal */
@@ -151,15 +153,24 @@ void open_audio(Audio *a, int index, uint32_t first_tag)
         UsbEndpoint ep;
         ASSERT_TRUE(a->d.FindAltEndpoint(p.iface, 1, 0, &ep));
         p.data_ep = ep.address;
+        p.input = (ep.address & USB_DIR_IN) != 0;
         p.max_packet = ep.max_packet;
         p.sync_ep = a->d.FindAltEndpoint(p.iface, 1, 1, &ep) ? ep.address : 0;
+        /* the feature unit the streaming terminal feeds, or is fed by */
         p.unit = 0;
-        for (int n = 0;; n++) {
+        for (int n = 0; !p.input; n++) {
             const uint8_t *fu = cs_desc(a->d, ac, UAC_FEATURE_UNIT, n);
             if (fu == nullptr)
                 break;
             if (fu[4] == p.terminal)
                 p.unit = fu[3];
+        }
+        for (int n = 0; p.input; n++) {
+            const uint8_t *ot = cs_desc(a->d, ac, UAC_OUTPUT_TERMINAL, n);
+            if (ot == nullptr)
+                break;
+            if (ot[3] == p.terminal)
+                p.unit = ot[7];
         }
     }
     ASSERT_EQ(a->d.Configure(), CC_SUCCESS);
@@ -365,6 +376,86 @@ void start(Audio &a, const Port &p)
     select_stream(p);
 }
 
+/* 'n' packets from an input, their frames one after another into 'out'
+   and how many each had into 'counts'; how many frames in all. */
+uint32_t record(Audio &a, const Port &p, int n, uint8_t *out,
+                uint32_t *counts = nullptr)
+{
+    int dci = usb_dci(p.data_ep);
+    uint32_t fb = frame_bytes(p);
+    /* a page, so that no packet's buffer crosses a 64 KB boundary */
+    ASSERT_LE(BATCH * p.max_packet, 4096u);
+    uint8_t *buf = (uint8_t *)usb_alloc(4096, 4096);
+    uint32_t total = 0;
+
+    for (int done = 0; done < n;) {
+        int k = min(BATCH, n - done);
+        for (int i = 0; i < k; i++)
+            a.d.QueueIsoch(dci, buf + i * p.max_packet, p.max_packet, -1,
+                           i == k - 1);
+        for (int i = 0; i < k; i++) {
+            uint32_t actual = 0;
+            uint32_t cc = a.d.WaitIsoch(dci, p.max_packet, &actual);
+            EXPECT_TRUE(cc == CC_SUCCESS || cc == CC_SHORT_PACKET);
+            EXPECT_EQ(actual % fb, 0u);
+            if (out != nullptr)
+                memcpy(out + total * fb, buf + i * p.max_packet, actual);
+            if (counts != nullptr)
+                counts[done + i] = actual / fb;
+            total += actual / fb;
+        }
+        done += k;
+    }
+    return total;
+}
+
+/* Frames of 'data' that are not frames 'first' on of what the test driver
+   records. */
+uint32_t mismatches(const Port &p, const uint8_t *data, uint32_t first,
+                    uint32_t frames)
+{
+    uint32_t fb = frame_bytes(p);
+    uint8_t want[16];
+    uint32_t bad = 0;
+    for (uint32_t f = 0; f < frames; f++) {
+        make_frames(p, first + f, 1, want);
+        if (memcmp(data + f * fb, want, fb) != 0) {
+            if (bad == 0)
+                t_log("frame %u differs", first + f);
+            bad++;
+        }
+    }
+    return bad;
+}
+
+bool zero_frame(const Port &p, const uint8_t *frame)
+{
+    for (int i = 0; i < frame_bytes(p); i++) {
+        if (frame[i] != 0)
+            return false;
+    }
+    return true;
+}
+
+/* Records a packet a frame of the bus, the host end's clock moving on by
+   about as much before each: 'per' frames, and one more every 'extra_every'
+   packets when that is not 0. */
+uint32_t record_steady(Audio &a, const Port &p, int n, uint8_t *out,
+                       uint32_t per, int extra_every = 0,
+                       uint32_t *counts = nullptr)
+{
+    uint32_t total = 0;
+    for (int i = 0; i < n; i++) {
+        bool extra = extra_every != 0 && i % extra_every == extra_every - 1;
+        tc_audio_advance(per + (extra ? 1 : 0));
+        total += record(a, p, 1,
+                        out != nullptr ? out + total * frame_bytes(p)
+                                       : nullptr,
+                        counts != nullptr ? counts + i : nullptr);
+    }
+    return total;
+}
+
 }
 
 
@@ -397,7 +488,7 @@ TEST(usb_audio, descriptors)
         total += p[0];
     EXPECT_EQ(le16(hdr + 5), total);
     EXPECT_EQ(hdr[0], 8 + hdr[7]);
-    EXPECT_EQ(a.nports, 2);
+    EXPECT_EQ(a.nports, 4);
 
     for (int i = 0; i < a.nports; i++) {
         Port &p = a.ports[i];
@@ -408,31 +499,57 @@ TEST(usb_audio, descriptors)
         EXPECT_EQ(zero[5], USB_CLASS_AUDIO);
         EXPECT_EQ(zero[6], UAC_SUBCLASS_STREAMING);
         const uint8_t *one = usb_find_alt(&d, p.iface, 1);
-        EXPECT_EQ(one[4], 2);
-        /* the terminal it links to is a USB streaming input terminal */
-        bool linked = false;
+        EXPECT_EQ(one[4], p.input ? 1 : 2);
+        /* The terminal it links to is a USB streaming terminal: an input
+           terminal for playback, feeding the unit; an output terminal for
+           recording, fed by it (4.3.2.1, 4.3.2.2). */
+        const uint8_t *term = nullptr;
+        uint8_t subtype = p.input ? UAC_OUTPUT_TERMINAL : UAC_INPUT_TERMINAL;
         for (int k = 0;; k++) {
-            const uint8_t *it = cs_desc(d, ac, UAC_INPUT_TERMINAL, k);
-            if (it == nullptr)
+            const uint8_t *t = cs_desc(d, ac, subtype, k);
+            if (t == nullptr)
                 break;
-            if (it[3] == p.terminal) {
-                EXPECT_EQ(le16(it + 4), 0x0101u);
-                EXPECT_EQ(it[7], p.channels);
-                linked = true;
-            }
+            if (t[3] == p.terminal)
+                term = t;
         }
-        EXPECT_TRUE(linked);
-        EXPECT_NE(p.unit, 0);
+        ASSERT_TRUE(term != nullptr);
+        EXPECT_EQ(le16(term + 4), 0x0101u);
+        if (p.input)
+            EXPECT_EQ(term[7], p.unit);
+        else
+            EXPECT_EQ(term[7], p.channels);
+        ASSERT_NE(p.unit, 0);
+        const uint8_t *fu = nullptr;
+        for (int k = 0; (fu = cs_desc(d, ac, UAC_FEATURE_UNIT, k)); k++) {
+            if (fu[3] == p.unit)
+                break;
+        }
+        ASSERT_TRUE(fu != nullptr);
+        if (p.input) {
+            /* the unit's source is the terminal the sound comes in at */
+            const uint8_t *it = nullptr;
+            for (int k = 0; (it = cs_desc(d, ac, UAC_INPUT_TERMINAL, k));
+                 k++) {
+                if (it[3] == fu[4])
+                    break;
+            }
+            ASSERT_TRUE(it != nullptr);
+            EXPECT_NE(le16(it + 4), 0x0101u);
+            EXPECT_EQ(it[7], p.channels);
+            SNAP(i == 2 ? "in0_terminal" : "in1_terminal", "%#x",
+                 le16(it + 4));
+        }
         /* Type I PCM (Audio Data Formats 2.2.5) */
         EXPECT_EQ(p.subframe, 2);
         EXPECT_EQ(cs_desc(d, one, UAC_FORMAT_TYPE)[6], 16);
 
-        /* the data endpoint: OUT, isochronous and asynchronous, with the
-           audio class's two extra bytes and its feedback endpoint named
-           (4.6.1.1) */
+        /* the data endpoint: isochronous and asynchronous, with the audio
+           class's two extra bytes; an OUT one names its feedback endpoint
+           (4.6.1.1), an IN one has none, its packets' sizes telling the
+           host the rate (3.7.2.2) */
         UsbEndpoint ep;
         ASSERT_TRUE(d.FindAltEndpoint(p.iface, 1, 0, &ep));
-        EXPECT_EQ(ep.address & USB_DIR_IN, 0);
+        EXPECT_EQ(ep.address & USB_DIR_IN, p.input ? USB_DIR_IN : 0);
         EXPECT_EQ(ep.attributes & 0xf, 0x05);
         EXPECT_EQ(ep.interval, 1);
         const uint8_t *e = one;
@@ -451,6 +568,10 @@ TEST(usb_audio, descriptors)
         EXPECT_EQ(cs[1], UAC_CS_ENDPOINT);
         EXPECT_EQ(cs[2], 0x01);     /* EP_GENERAL */
         EXPECT_TRUE(cs[3] & 1);     /* sampling frequency control */
+        if (p.input) {
+            EXPECT_EQ(p.sync_ep, 0);
+            continue;
+        }
 
         /* the feedback endpoint: IN, isochronous, three bytes, with
            bRefresh giving how often it reports (4.6.2.1) */
@@ -469,6 +590,9 @@ TEST(usb_audio, descriptors)
     SNAP("rates0", "%u %u", a.ports[0].rates[0],
          a.ports[0].nrates > 1 ? a.ports[0].rates[1] : 0);
     SNAP("rates1", "%u", a.ports[1].rates[0]);
+    SNAP("rates2", "%u %u", a.ports[2].rates[0],
+         a.ports[2].nrates > 1 ? a.ports[2].rates[1] : 0);
+    SNAP("rates3", "%u", a.ports[3].rates[0]);
 }
 
 TEST(usb_audio, composite)
@@ -477,7 +601,7 @@ TEST(usb_audio, composite)
        association covers its control and streaming interfaces (Interface
        Association Descriptor ECN), and the device says so. */
     Audio a;
-    open_audio(&a, 1, 3);
+    open_audio(&a, 1, 9);
     UsbDevice &d = a.d;
     EXPECT_EQ(d.desc[4], 0xef);
     EXPECT_EQ(d.desc[5], 0x02);
@@ -837,4 +961,252 @@ TEST(usb_audio, feedback)
     /* in setting 0 the endpoint is gone */
     EXPECT_EQ(a.d.SetInterface(p.iface, 0), CC_SUCCESS);
     EXPECT_EQ(a.d.EpState(usb_dci(p.sync_ep)), (uint32_t)EP_DISABLED);
+}
+
+TEST(usb_audio, capture)
+{
+    Audio a;
+    open_audio(&a, 0, 1);
+    Port &p = a.ports[2];
+    ASSERT_TRUE(p.input);
+    uint32_t fb = frame_bytes(p);
+    uint32_t counts[100];
+    uint8_t *data = (uint8_t *)heap_alloc(100 * p.max_packet);
+    start(a, p);
+
+    /* Until the host end's clock runs, the packets carry silence of the
+       nominal size, so that the host's stream runs from the start. */
+    EXPECT_EQ(record(a, p, 5, data, counts), 240u);
+    for (int i = 0; i < 5; i++)
+        EXPECT_EQ(counts[i], 48u);
+    bool silence = true;
+    for (uint32_t f = 0; f < 240; f++)
+        silence = silence && zero_frame(p, data + f * fb);
+    EXPECT_TRUE(silence);
+    EXPECT_EQ(tc_audio_read(TEST_CONTROL_AUDIO_RUNNING), 1u);
+    EXPECT_EQ(tc_audio_read(TEST_CONTROL_AUDIO_DIRECTION),
+              (uint32_t)TEST_AUDIO_DIR_CAPTURE);
+    EXPECT_EQ(tc_audio_read(TEST_CONTROL_AUDIO_RATE), 48000u);
+    EXPECT_EQ(tc_audio_read(TEST_CONTROL_AUDIO_CHANNELS), 2u);
+
+    /* Then what the host end recorded, in order, with nothing lost or said
+       twice, a packet holding about what its clock made in a frame. */
+    tc_audio_advance(480);
+    uint32_t total = record_steady(a, p, 100, data, 48, 0, counts);
+    for (int i = 0; i < 100; i++) {
+        EXPECT_GE(counts[i], 47u);
+        EXPECT_LE(counts[i], 49u);
+    }
+    EXPECT_EQ(mismatches(p, data, 0, total), 0u);
+    uint32_t moved = tc_audio_read(TEST_CONTROL_AUDIO_FRAMES);
+    EXPECT_EQ(moved, 5280u);
+    /* and the device holds about the 10 ms it filled first */
+    EXPECT_GE(moved - total, 240u);
+    EXPECT_LE(moved - total, 960u);
+    uint8_t *got = (uint8_t *)heap_alloc(total * fb);
+    tc_audio_data(0, got, total * fb);
+    EXPECT_EQ(memcmp(got, data, total * fb), 0);
+}
+
+TEST(usb_audio, capture_44k)
+{
+    /* the mono line input at 44.1 kHz: 44 frames a packet, and 45 every
+       tenth */
+    Audio a;
+    open_audio(&a, 0, 1);
+    Port &p = a.ports[3];
+    ASSERT_TRUE(p.input);
+    ASSERT_EQ(p.channels, 1);
+    uint32_t counts[100];
+    uint8_t *data = (uint8_t *)heap_alloc(100 * p.max_packet);
+    start(a, p);
+    record(a, p, 1, nullptr);
+    tc_audio_advance(441);
+    uint32_t total = record_steady(a, p, 100, data, 44, 10, counts);
+    for (int i = 0; i < 100; i++) {
+        EXPECT_GE(counts[i], 43u);
+        EXPECT_LE(counts[i], 46u);
+    }
+    EXPECT_EQ(mismatches(p, data, 0, total), 0u);
+    EXPECT_EQ(tc_audio_read(TEST_CONTROL_AUDIO_RATE), 44100u);
+    uint32_t moved = tc_audio_read(TEST_CONTROL_AUDIO_FRAMES);
+    EXPECT_EQ(moved, 441u + 4410u);
+    EXPECT_GE(moved - total, 220u);
+    EXPECT_LE(moved - total, 882u);
+}
+
+TEST(usb_audio, capture_mute)
+{
+    Audio a;
+    open_audio(&a, 0, 1);
+    Port &p = a.ports[2];
+    uint32_t fb = frame_bytes(p);
+    uint8_t *data = (uint8_t *)heap_alloc(60 * p.max_packet);
+
+    /* muted from the start, nothing but silence */
+    EXPECT_EQ(fu_set(a, p, UAC_FU_MUTE, 1), CC_SUCCESS);
+    start(a, p);
+    record(a, p, 1, nullptr);
+    tc_audio_advance(480);
+    uint32_t muted = record_steady(a, p, 20, data, 48);
+    bool silence = true;
+    for (uint32_t f = 0; f < muted; f++)
+        silence = silence && zero_frame(p, data + f * fb);
+    EXPECT_TRUE(silence);
+
+    /* unmuted, the gain comes up over a few milliseconds, then all of it */
+    EXPECT_EQ(fu_set(a, p, UAC_FU_MUTE, 0), CC_SUCCESS);
+    uint32_t total = muted + record_steady(a, p, 40, data + muted * fb, 48);
+    EXPECT_FALSE(zero_frame(p, data + (muted + 8) * fb));
+    EXPECT_EQ(mismatches(p, data + (muted + 241) * fb, muted + 241,
+                         total - muted - 241), 0u);
+
+    /* -6 dB scales what is recorded */
+    EXPECT_EQ(fu_set(a, p, UAC_FU_VOLUME, -6 * 256), CC_SUCCESS);
+    uint32_t n = record_steady(a, p, 20, data, 48);
+    uint8_t want[4];
+    uint32_t bad = 0;
+    for (uint32_t f = 241; f < n; f++) {
+        make_frames(p, total + f, 1, want);
+        for (int ch = 0; ch < 2; ch++) {
+            int64_t g = (int16_t)le16(data + f * fb + 2 * ch);
+            int64_t w = (int64_t)(int16_t)le16(want + 2 * ch) * 501187 /
+                        1000000;
+            if (g < w - 1 || g > w + 1)
+                bad++;
+        }
+    }
+    EXPECT_EQ(bad, 0u);
+}
+
+TEST(usb_audio, capture_underrun)
+{
+    Audio a;
+    open_audio(&a, 0, 1);
+    Port &p = a.ports[2];
+    uint32_t fb = frame_bytes(p);
+    uint8_t *data = (uint8_t *)heap_alloc(60 * p.max_packet);
+    start(a, p);
+    record(a, p, 1, nullptr);
+    tc_audio_advance(480);
+    uint32_t total = record_steady(a, p, 10, data, 48);
+
+    /* With the host end's clock standing still the device runs dry, sends
+       silence in its place until it has its 10 ms again, then carries on
+       where it stopped. */
+    total += record(a, p, 20, data + total * fb);
+    tc_audio_advance(480);
+    total += record_steady(a, p, 20, data + total * fb, 48);
+    uint32_t silent_frames = 0, next = 0, bad = 0;
+    for (uint32_t f = 0; f < total; f++) {
+        if (zero_frame(p, data + f * fb)) {
+            silent_frames++;
+            continue;
+        }
+        bad += mismatches(p, data + f * fb, next++, 1);
+    }
+    EXPECT_EQ(bad, 0u);
+    EXPECT_GE(silent_frames, 240u);
+    EXPECT_GE(next, 960u);
+}
+
+TEST(usb_audio, capture_overrun)
+{
+    Audio a;
+    open_audio(&a, 0, 1);
+    Port &p = a.ports[2];
+    uint8_t *data = (uint8_t *)heap_alloc(20 * p.max_packet);
+    start(a, p);
+    record(a, p, 1, nullptr);
+    tc_audio_advance(480);
+    uint32_t total = record_steady(a, p, 10, data, 48);
+    EXPECT_EQ(mismatches(p, data, 0, total), 0u);
+
+    /* More than the device holds: it keeps the newest, and goes on from
+       there. */
+    tc_audio_advance(4800);
+    tc_audio_advance(4800);
+    uint32_t moved = tc_audio_read(TEST_CONTROL_AUDIO_FRAMES);
+    EXPECT_EQ(moved, 480u + 480u + 9600u);
+    uint32_t n = record(a, p, 10, data);
+    ASSERT_GT(n, 0u);
+    uint32_t first = total;
+    uint8_t want[16];
+    for (; first < moved; first++) {
+        make_frames(p, first, 1, want);
+        if (memcmp(data, want, frame_bytes(p)) == 0)
+            break;
+    }
+    ASSERT_LT(first, moved);
+    EXPECT_GT(first, total);
+    SNAP("held", "%u", moved - first);
+    EXPECT_EQ(mismatches(p, data, first, n), 0u);
+}
+
+TEST(usb_audio, capture_rate)
+{
+    Audio a;
+    open_audio(&a, 0, 1);
+    Port &p = a.ports[2];
+    uint32_t counts[40];
+    uint8_t *data = (uint8_t *)heap_alloc(40 * p.max_packet);
+
+    EXPECT_EQ(rate_set(a, p, 44100), CC_SUCCESS);
+    start(a, p);
+    EXPECT_EQ(record(a, p, 10, nullptr, counts), 441u);
+    uint32_t starts = tc_audio_read(TEST_CONTROL_AUDIO_STARTS);
+    tc_audio_advance(441);
+    uint32_t total = record_steady(a, p, 40, data, 44, 10, counts);
+    for (int i = 0; i < 40; i++) {
+        EXPECT_GE(counts[i], 43u);
+        EXPECT_LE(counts[i], 46u);
+    }
+    EXPECT_EQ(mismatches(p, data, 0, total), 0u);
+    EXPECT_EQ(tc_audio_read(TEST_CONTROL_AUDIO_RATE), 44100u);
+
+    /* a new rate starts the host end again, and the stream with it */
+    EXPECT_EQ(rate_set(a, p, 48000), CC_SUCCESS);
+    EXPECT_EQ(tc_audio_read(TEST_CONTROL_AUDIO_STARTS), starts + 1);
+    EXPECT_EQ(tc_audio_read(TEST_CONTROL_AUDIO_RATE), 48000u);
+    tc_audio_advance(480);
+    uint32_t n = record_steady(a, p, 40, data, 48, 0, counts);
+    uint32_t first = 0;
+    while (first < n && zero_frame(p, data + first * frame_bytes(p)))
+        first++;
+    EXPECT_EQ(mismatches(p, data + first * frame_bytes(p), 0, n - first), 0u);
+    for (int i = 0; i < 40; i++) {
+        EXPECT_GE(counts[i], 47u);
+        EXPECT_LE(counts[i], 49u);
+    }
+}
+
+TEST(usb_audio, duplex)
+{
+    /* an output and an input of one device at once, each on its own
+       clock */
+    Audio a;
+    open_audio(&a, 0, 1);
+    Port &out = a.ports[0];
+    Port &in = a.ports[2];
+    uint8_t *data = (uint8_t *)heap_alloc(30 * in.max_packet);
+    start(a, out);
+    start(a, in);
+    ASSERT_TRUE(play(a, out, 0, 480, 48));
+    record(a, in, 1, nullptr);
+    select_stream(out);
+    tc_audio_advance(480);
+    select_stream(in);
+    tc_audio_advance(480);
+    uint32_t total = 0;
+    for (int i = 0; i < 30; i++) {
+        ASSERT_TRUE(play(a, out, 480 + 48 * i, 48, 48));
+        select_stream(out);
+        tc_audio_advance(48);
+        select_stream(in);
+        total += record_steady(a, in, 1, data + total * frame_bytes(in), 48);
+    }
+    EXPECT_EQ(mismatches(in, data, 0, total), 0u);
+    select_stream(out);
+    EXPECT_EQ(tc_audio_read(TEST_CONTROL_AUDIO_FRAMES), 480u + 1440u);
+    EXPECT_EQ(compare(out, 0, 0, 1920), 0u);
 }
