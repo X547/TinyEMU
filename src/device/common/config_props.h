@@ -66,6 +66,28 @@ bool config_get_quirks(const DeviceConfig &cfg,
                        uint32_t (*from_name)(const char *name),
                        uint32_t *out);
 
+/* An audio end a "host" object names by "driver" that the host platform does
+   not provide, which the class opens from the object's other properties. */
+class AudioDriverClass {
+private:
+    const char *fName;
+    const AudioDriverClass *fNext = nullptr;
+
+public:
+    explicit AudioDriverClass(const char *name);
+    virtual ~AudioDriverClass() = default;
+
+    const char *Name() const {return fName;}
+    static const AudioDriverClass *Find(const char *name);
+
+    /* 'host' is the "host" object. Reports and returns nullptr on
+       failure. */
+    virtual std::unique_ptr<HostAudio> Open(const DeviceConfig &cfg,
+                                            JSONValue host,
+                                            const AudioSettings &settings,
+                                            DeviceContext *ctx) const = 0;
+};
+
 /* The device's "host" object, or the one 'key' names: where its sound goes to
    or comes from. Without one it is the host's own audio system. Reports and
    returns nullptr on failure. */

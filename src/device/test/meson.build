@@ -1,6 +1,7 @@
 emu_libs += static_library('device_test',
   files(
     'pci_test.cpp',
+    'test_audio.cpp',
     'test_block.cpp',
     'test_control.cpp',
   ),

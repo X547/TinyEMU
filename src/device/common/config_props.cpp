@@ -56,6 +56,32 @@ const BlockDriverClass *BlockDriverClass::Find(const char *name)
 }
 
 
+static const AudioDriverClass *&audio_drivers()
+{
+    static const AudioDriverClass *sFirst = nullptr;
+    return sFirst;
+}
+
+
+AudioDriverClass::AudioDriverClass(const char *name):
+    fName(name)
+{
+    fNext = audio_drivers();
+    audio_drivers() = this;
+}
+
+
+const AudioDriverClass *AudioDriverClass::Find(const char *name)
+{
+    for (const AudioDriverClass *cls = audio_drivers(); cls != nullptr;
+         cls = cls->fNext) {
+        if (strcmp(cls->Name(), name) == 0)
+            return cls;
+    }
+    return nullptr;
+}
+
+
 std::unique_ptr<HostBlockDevice> config_open_block(const DeviceConfig &cfg,
                                                    DeviceContext *ctx,
                                                    bool read_only)
@@ -156,6 +182,10 @@ std::unique_ptr<HostAudio> config_open_audio(const DeviceConfig &cfg,
     settings.device = device;
     settings.loop = loop != 0;
     settings.latency_ms = latency;
+
+    if (const AudioDriverClass *cls = AudioDriverClass::Find(settings.driver)) {
+        return cls->Open(cfg, host, settings, ctx);
+    }
 
     char *path = nullptr;
     if (file != nullptr) {

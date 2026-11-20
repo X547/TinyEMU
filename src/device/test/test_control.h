@@ -52,10 +52,31 @@
 #define TEST_CONTROL_KEEP     0x44 /* RW: survives a reset */
 #define TEST_CONTROL_RESET    0x48 /* WO: resets the machine */
 
+/* The streams of the "test" audio driver, in the order they were opened. The
+   registers after SELECT act on the stream it names. Its clock runs only
+   when ADVANCE moves it, which also has the device move the frames that
+   became due. Counts start again with each start of the stream. */
+#define TEST_CONTROL_AUDIO_COUNT     0x80 /* RO */
+#define TEST_CONTROL_AUDIO_SELECT    0x84 /* RW */
+#define TEST_CONTROL_AUDIO_TAG       0x88 /* RO: its "tag" in the machine */
+#define TEST_CONTROL_AUDIO_DIRECTION 0x8c /* RO: TEST_AUDIO_DIR_* */
+#define TEST_CONTROL_AUDIO_RUNNING   0x90 /* RO: 1 while started */
+#define TEST_CONTROL_AUDIO_STARTS    0x94 /* RO: starts so far */
+#define TEST_CONTROL_AUDIO_RATE      0x98 /* RO: the format of the last start */
+#define TEST_CONTROL_AUDIO_CHANNELS  0x9c /* RO */
+#define TEST_CONTROL_AUDIO_BITS      0xa0 /* RO */
+#define TEST_CONTROL_AUDIO_ADVANCE   0xa4 /* WO: frames the clock moves on */
+#define TEST_CONTROL_AUDIO_CLOCK     0xa8 /* RO: frames due since the start */
+#define TEST_CONTROL_AUDIO_FRAMES    0xac /* RO: frames moved since the start */
+#define TEST_CONTROL_AUDIO_CRC       0xb0 /* RO: CRC-32 of the bytes moved */
+#define TEST_CONTROL_AUDIO_DATA_POS  0xb4 /* RW: byte offset into the stream */
+#define TEST_CONTROL_AUDIO_DATA      0xb8 /* RO: 4 bytes moved at DATA_POS,
+                                             which moves on by 4 */
+
 #define TEST_CONTROL_MAX_IRQS 8
 
 #define TEST_CONTROL_MAGIC    0x54455354 /* "TEST" */
-#define TEST_CONTROL_REVISION 3
+#define TEST_CONTROL_REVISION 4
 
 /* How a test disk finishes requests: in the call, soon after from the event
    loop, or once RELEASE says so. A failing request returns an error in the
@@ -67,6 +88,18 @@
 /* RELEASE finishes the oldest held requests, or with this bit the newest
    first. */
 #define TEST_BLOCK_RELEASE_NEWEST 0x80000000u
+
+#define TEST_AUDIO_DIR_RENDER  0 /* the device plays to it */
+#define TEST_AUDIO_DIR_CAPTURE 1 /* the device records from it */
+
+/* The bytes of what was moved, either way, that DATA reaches back over;
+   older ones read as 0. */
+#define TEST_AUDIO_HISTORY 65536
+
+/* What a capture stream records: sample 'ch' of frame 'f' since the start,
+   left justified, of which a container of n bytes takes the top n. */
+#define TEST_AUDIO_SAMPLE(f, ch) \
+    ((uint32_t)(((uint32_t)(f) << 4 | (uint32_t)(ch)) * 0x9e3779b1u))
 
 /* What byte 'i' of sector 's' of a test disk holds until it is written. */
 #define TEST_BLOCK_PATTERN(s, i) \

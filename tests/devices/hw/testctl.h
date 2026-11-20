@@ -42,6 +42,20 @@ void tc_block_write(uint32_t reg, uint32_t value);
    fail, and what was held is let go. */
 void tc_block_reset_all();
 
+/* The streams of temu's "test" audio driver. A machine gives each a "tag"
+   of its own, by which a test finds the one behind the device it drives:
+   tc_audio_find() selects it for the audio registers, or gives -1. */
+int tc_audio_find(uint32_t tag);
+uint32_t tc_audio_read(uint32_t reg);
+void tc_audio_write(uint32_t reg, uint32_t value);
+/* The selected stream's clock moves on by 'frames', and its device moves
+   what became due. */
+void tc_audio_advance(uint32_t frames);
+/* 'len' bytes the selected stream moved, from byte 'pos' of it on. */
+void tc_audio_data(uint32_t pos, void *buf, uint32_t len);
+/* The CRC-32 that TEST_CONTROL_AUDIO_CRC keeps, carried on from 'crc'. */
+uint32_t tc_crc32(uint32_t crc, const void *buf, size_t len);
+
 /* Resets of the machine: whether there is a device to count them, how many
    there were, the word they leave alone, and asking for one. */
 bool tc_present();

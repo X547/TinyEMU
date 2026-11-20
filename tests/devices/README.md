@@ -110,6 +110,13 @@ The fixtures, in temu's `src/device/test`:
   and fails the next ones on request. A machine gives each disk a size of
   its own, by which `tc_block_find()` tells them apart; the runner puts
   every disk back between tests.
+* The `test` audio driver: `host: { driver: "test", tag: 1 }` gives an
+  audio device a host end whose clock only moves when the guest advances
+  it through test-control, which also has the device move the frames that
+  became due. A playback stream keeps a CRC-32 and the last 64 KB of what
+  it was given; a capture stream records `TEST_AUDIO_SAMPLE`. `rate`,
+  `channels` and `any_rate` say what the host end runs at. A machine gives
+  each stream a tag of its own, by which `tc_audio_find()` selects it.
 
 ## Writing tests
 

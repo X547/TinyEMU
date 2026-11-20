@@ -29,6 +29,7 @@
 #include "devices.h"
 #include "fdt.h"
 #include "machine.h"
+#include "test_audio.h"
 #include "test_block.h"
 
 #define TEST_CONTROL_SIZE 0x1000
@@ -49,6 +50,9 @@ private:
     uint32_t fIrqLevel = 0;
     /* the test disk the block registers act on */
     uint32_t fBlockSelect = 0;
+    /* the test audio stream the audio registers act on */
+    uint32_t fAudioSelect = 0;
+    uint32_t fAudioPos = 0;
     /* what a reset leaves: how many there were, and KEEP */
     uint32_t fResets = 0;
     uint32_t fKeep = 0;
@@ -59,6 +63,8 @@ private:
     uint32_t Read(uint32_t offset, int size_log2);
     void Write(uint32_t offset, uint32_t val, int size_log2);
     void BlockWrite(TestBlockControl *disk, uint32_t offset, uint32_t val);
+    uint32_t AudioRead(uint32_t offset);
+    void AudioWrite(uint32_t offset, uint32_t val);
 
     DeviceIOAdapter<TestControlDevice, &TestControlDevice::Read,
                     &TestControlDevice::Write> fIo {*this};
@@ -134,7 +140,8 @@ public:
         return true;
     }
 
-    /* The test disks are the host's, and keep their modes and counts. */
+    /* The test disks and audio streams are the host's, and keep their
+       modes and counts. */
     void Reset() override
     {
         for (int i = 0; i < fIrqCount; i++) {
@@ -143,6 +150,8 @@ public:
         }
         fIrqLevel = 0;
         fBlockSelect = 0;
+        fAudioSelect = 0;
+        fAudioPos = 0;
         fResets++;
     }
 
@@ -203,6 +212,10 @@ uint32_t TestControlDevice::Read(uint32_t offset, int size_log2)
     default:
         break;
     }
+    if (offset >= TEST_CONTROL_AUDIO_COUNT &&
+        offset <= TEST_CONTROL_AUDIO_DATA) {
+        return AudioRead(offset);
+    }
     TestBlockControl *disk = test_block_get(fBlockSelect);
     if (disk == nullptr)
         return 0;
@@ -262,7 +275,10 @@ void TestControlDevice::Write(uint32_t offset, uint32_t val, int size_log2)
         fMachine->RequestReset();
         break;
     default:
-        if (TestBlockControl *disk = test_block_get(fBlockSelect))
+        if (offset >= TEST_CONTROL_AUDIO_COUNT &&
+            offset <= TEST_CONTROL_AUDIO_DATA)
+            AudioWrite(offset, val);
+        else if (TestBlockControl *disk = test_block_get(fBlockSelect))
             BlockWrite(disk, offset, val);
         break;
     }
@@ -282,6 +298,72 @@ void TestControlDevice::BlockWrite(TestBlockControl *disk, uint32_t offset,
     case TEST_CONTROL_BLOCK_RELEASE:
         disk->Release(val & ~TEST_BLOCK_RELEASE_NEWEST,
                       (val & TEST_BLOCK_RELEASE_NEWEST) != 0);
+        break;
+    default:
+        break;
+    }
+}
+
+
+uint32_t TestControlDevice::AudioRead(uint32_t offset)
+{
+    switch (offset) {
+    case TEST_CONTROL_AUDIO_COUNT:
+        return test_audio_count();
+    case TEST_CONTROL_AUDIO_SELECT:
+        return fAudioSelect;
+    case TEST_CONTROL_AUDIO_DATA_POS:
+        return fAudioPos;
+    default:
+        break;
+    }
+    TestAudioControl *s = test_audio_get(fAudioSelect);
+    if (s == nullptr)
+        return 0;
+    switch (offset) {
+    case TEST_CONTROL_AUDIO_TAG:
+        return s->Tag();
+    case TEST_CONTROL_AUDIO_DIRECTION:
+        return s->Direction();
+    case TEST_CONTROL_AUDIO_RUNNING:
+        return s->IsRunning() ? 1 : 0;
+    case TEST_CONTROL_AUDIO_STARTS:
+        return s->Starts();
+    case TEST_CONTROL_AUDIO_RATE:
+        return s->FormatRate();
+    case TEST_CONTROL_AUDIO_CHANNELS:
+        return s->FormatChannels();
+    case TEST_CONTROL_AUDIO_BITS:
+        return s->FormatBits();
+    case TEST_CONTROL_AUDIO_CLOCK:
+        return (uint32_t)s->Clock();
+    case TEST_CONTROL_AUDIO_FRAMES:
+        return (uint32_t)s->Frames();
+    case TEST_CONTROL_AUDIO_CRC:
+        return s->Crc();
+    case TEST_CONTROL_AUDIO_DATA: {
+        uint32_t v = s->Data(fAudioPos);
+        fAudioPos += 4;
+        return v;
+    }
+    default:
+        return 0;
+    }
+}
+
+
+void TestControlDevice::AudioWrite(uint32_t offset, uint32_t val)
+{
+    switch (offset) {
+    case TEST_CONTROL_AUDIO_SELECT:
+        fAudioSelect = val;
+        break;
+    case TEST_CONTROL_AUDIO_DATA_POS:
+        fAudioPos = val;
+        break;
+    case TEST_CONTROL_AUDIO_ADVANCE:
+        if (TestAudioControl *s = test_audio_get(fAudioSelect))
+            s->Advance(val);
         break;
     default:
         break;

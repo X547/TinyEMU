@@ -22,6 +22,7 @@
 #include "testctl.h"
 
 #include "console.h"
+#include "klib.h"
 #include "mmio.h"
 #include "test_control.h"
 
@@ -101,6 +102,76 @@ void tc_block_write(uint32_t reg, uint32_t value)
     uint64_t b = base();
     if (b)
         mmio_write32(b + reg, value);
+}
+
+
+int tc_audio_find(uint32_t tag)
+{
+    uint64_t b = base();
+    if (b == 0)
+        return -1;
+    int n = mmio_read32(b + TEST_CONTROL_AUDIO_COUNT);
+    for (int i = 0; i < n; i++) {
+        mmio_write32(b + TEST_CONTROL_AUDIO_SELECT, i);
+        if (mmio_read32(b + TEST_CONTROL_AUDIO_TAG) == tag)
+            return i;
+    }
+    return -1;
+}
+
+
+uint32_t tc_audio_read(uint32_t reg)
+{
+    uint64_t b = base();
+    return b ? mmio_read32(b + reg) : 0;
+}
+
+
+void tc_audio_write(uint32_t reg, uint32_t value)
+{
+    uint64_t b = base();
+    if (b)
+        mmio_write32(b + reg, value);
+}
+
+
+void tc_audio_advance(uint32_t frames)
+{
+    tc_audio_write(TEST_CONTROL_AUDIO_ADVANCE, frames);
+}
+
+
+void tc_audio_data(uint32_t pos, void *buf, uint32_t len)
+{
+    uint8_t *p = (uint8_t *)buf;
+    uint64_t b = base();
+
+    if (b == 0) {
+        memset(buf, 0, len);
+        return;
+    }
+    mmio_write32(b + TEST_CONTROL_AUDIO_DATA_POS, pos & ~3u);
+    uint32_t skip = pos & 3;
+    while (len > 0) {
+        uint32_t v = mmio_read32(b + TEST_CONTROL_AUDIO_DATA);
+        for (uint32_t i = skip; i < 4 && len > 0; i++, len--)
+            *p++ = (uint8_t)(v >> (8 * i));
+        skip = 0;
+    }
+}
+
+
+uint32_t tc_crc32(uint32_t crc, const void *buf, size_t len)
+{
+    const uint8_t *p = (const uint8_t *)buf;
+
+    crc = ~crc;
+    while (len-- > 0) {
+        crc ^= *p++;
+        for (int k = 0; k < 8; k++)
+            crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1)));
+    }
+    return ~crc;
 }
 
 
