@@ -740,12 +740,14 @@ TEST(usb_audio, playback_gain)
         ramp++;
     SNAP("mute_ramp", "%u", ramp);
 
-    /* and comes back up the same way, to 0 dB */
+    /* and comes back up the same way, to 0 dB, however little the host end
+       takes at a time */
     EXPECT_EQ(fu_set(a, p, UAC_FU_MUTE, 0), CC_SUCCESS);
     EXPECT_EQ(fu_set(a, p, UAC_FU_VOLUME, 0), CC_SUCCESS);
     ASSERT_TRUE(play(a, p, 960, 960, 48));
-    tc_audio_advance(960);
-    EXPECT_EQ(compare(p, 1440 * fb, 1440, 480), 0u);
+    for (int i = 0; i < 20; i++)
+        tc_audio_advance(48);
+    EXPECT_EQ(compare(p, 1201 * fb, 1201, 719), 0u);
 }
 
 TEST(usb_audio, underrun)

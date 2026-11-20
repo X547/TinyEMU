@@ -160,7 +160,12 @@ protected:
 
     bool fMute = false;
     int16_t fVolume = UAC_VOLUME_MAX;
+    /* the gain now, and the ramp it is on: from where to where, and how
+       many of its frames have gone */
     float fGain = 1.0f;
+    float fRampFrom = 1.0f;
+    float fRampTo = 1.0f;
+    size_t fRampDone = SIZE_MAX;
     std::vector<uint8_t> fBuf;
 
     uint32_t fUnderruns = 0;
@@ -311,6 +316,8 @@ void USBAudioPort::StartStream()
     fOverruns = 0;
     /* A new stream starts at the volume already set, not ramping to it. */
     fGain = TargetGain();
+    fRampFrom = fRampTo = fGain;
+    fRampDone = SIZE_MAX;
 
     usb_audio_debug("%s: start %u Hz, %d channels\n", Name(), fRate,
                     fConfig.channels);
@@ -382,28 +389,37 @@ float USBAudioPort::TargetGain() const
 }
 
 
+/* A new target starts a ramp from wherever the gain is, which runs on
+   across calls, however few frames each brings, to reach it in
+   GAIN_RAMP_MS. */
 void USBAudioPort::ApplyGain(uint8_t *data, size_t frames)
 {
     float target = TargetGain();
     size_t ramp = (size_t)fRate * GAIN_RAMP_MS / 1000 + 1;
     int channels = fConfig.channels;
 
-    if (fGain == 1.0f && target == 1.0f) {
+    if (target != fRampTo) {
+        fRampFrom = fGain;
+        fRampTo = target;
+        fRampDone = 0;
+    }
+    if (fRampDone >= ramp && fGain == 1.0f) {
         return;
     }
     for (size_t i = 0; i < frames; i++) {
-        float gain = i < ramp ? fGain + (target - fGain) * (float)(i + 1) /
-                                            (float)ramp
-                              : target;
+        if (fRampDone < ramp) {
+            fRampDone++;
+            fGain = fRampFrom + (fRampTo - fRampFrom) * (float)fRampDone /
+                                    (float)ramp;
+        } else {
+            fGain = fRampTo;
+        }
         for (int c = 0; c < channels; c++) {
             uint8_t *p = data + (i * channels + c) * 2;
             int16_t s = (int16_t)get_le16(p);
-            put_le16(p, (uint16_t)(int16_t)lrintf((float)s * gain));
+            put_le16(p, (uint16_t)(int16_t)lrintf((float)s * fGain));
         }
     }
-    fGain = frames >= ramp ? target
-                           : fGain + (target - fGain) * (float)frames /
-                                         (float)ramp;
 }
 
 
