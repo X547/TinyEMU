@@ -193,13 +193,14 @@ what the processor has besides the two 8259s:
 "accel" chooses what runs the processors, on either machine: "auto" (the
 default) a hardware hypervisor when the host has one, and the interpreter
 when it has none; "none" always the interpreter, as -no-accel does. A RISC-V
-machine runs on Linux KVM on a riscv64 host with the H extension. KVM takes
-only riscv64 guests with "sbi" "native", whose SBI the host kernel then
-answers, and "plic" or "aplic" (the guest gets no AIA CSRs). Any other
-configuration stops with an error rather than falling back, so one that runs
-M-mode firmware needs "accel": "none" on such a host. The harts show the
-guest the extensions KVM offers, the host's address translation modes and
-its timebase frequency, in place of the interpreter's.
+machine runs on a riscv64 host with the H extension: on Linux KVM, or on a
+Haiku host with tvmm, TinyEMU's own kernel add-on in kernel/haiku/tvmm,
+installed. Either takes only riscv64 guests with "sbi" "native", whose SBI
+the host kernel then answers, and "plic" or "aplic" (the guest gets no AIA
+CSRs). Any other configuration stops with an error rather than falling back,
+so one that runs M-mode firmware needs "accel": "none" on such a host. The
+harts show the guest the extensions the hypervisor offers, the host's address
+translation modes and its timebase frequency, in place of the interpreter's.
 
 "hypervisor_intc" (true unless given) lets a hardware hypervisor provide the
 interrupt controllers it can, of whatever kind the machine has. With false

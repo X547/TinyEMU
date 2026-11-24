@@ -51,7 +51,7 @@ option('whp',
 option('tvmm',
   type: 'feature',
   value: 'auto',
-  description: 'run the x86 machine on tvmm, TinyEMU\'s own Haiku kernel add-on (Haiku x86-64 hosts only); takes the place of NVMM')
+  description: 'run the x86 machine on tvmm, TinyEMU\'s own Haiku kernel add-on, on Haiku x86-64 hosts, where it takes the place of NVMM; or the RISC-V machine on Haiku riscv64 hosts')
 
 option('nvmm',
   type: 'feature',

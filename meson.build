@@ -211,14 +211,14 @@ if whp_enabled
   emu_deps += whp_deps
 endif
 
-# The x86 machine's processor on tvmm, TinyEMU's own Haiku kernel add-on in
-# kernel/haiku/tvmm, which is built and installed on its own. Its client
-# interface is a header there.
+# The x86 machine's processors on tvmm, TinyEMU's own Haiku kernel add-on in
+# kernel/haiku/tvmm, which is built and installed on its own, or the RISC-V
+# machine's on a riscv64 host. Its client interface is a header there.
 tvmm_opt = get_option('tvmm') \
-  .disable_auto_if(not x86emu) \
+  .disable_auto_if(host_machine.cpu_family() == 'x86_64' and not x86emu) \
   .require(platform_os == 'haiku' and
-           host_machine.cpu_family() == 'x86_64',
-           error_message: 'tvmm needs a Haiku x86-64 host')
+           host_machine.cpu_family() in ['x86_64', 'riscv64'],
+           error_message: 'tvmm needs a Haiku x86-64 or riscv64 host')
 tvmm_enabled = tvmm_opt.allowed()
 if tvmm_enabled
   emu_deps += declare_dependency(include_directories: [
