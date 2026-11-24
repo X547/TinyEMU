@@ -22,20 +22,35 @@ kernel_cpp_args = [
 	'-D_KERNEL_MODE',
 	'-fno-exceptions',
 	'-fno-rtti',
-	'-mno-red-zone',
 	'-fno-omit-frame-pointer',
 	'-Wno-missing-field-initializers',
 ]
+
+cpu_family = host_machine.cpu_family()
+if cpu_family == 'x86_64'
+	kernel_cpp_args += ['-mno-red-zone']
+	kernel_arch = 'x86'
+	kernel_system_arch = 'x86_64'
+	kernel_platform = 'bios_ia32'
+elif cpu_family == 'riscv64'
+	# as Haiku builds the kernel and its add-ons
+	kernel_cpp_args += ['-mcmodel=medany']
+	kernel_arch = 'riscv64'
+	kernel_system_arch = 'riscv64'
+	kernel_platform = 'efi'
+else
+	error('tvmm has no back end for ' + cpu_family)
+endif
 
 # The private kernel headers expect the build configuration headers of the
 # Haiku source tree the kernel was built from, copied to "config_headers".
 kernel_inc = include_directories(
 	'config_headers',
 	kernel_headers / 'kernel',
-	kernel_headers / 'kernel/arch/x86',
-	kernel_headers / 'kernel/boot/platform/bios_ia32',
+	kernel_headers / 'kernel/arch' / kernel_arch,
+	kernel_headers / 'kernel/boot/platform' / kernel_platform,
 	kernel_headers / 'system',
-	kernel_headers / 'system/arch/x86_64',
+	kernel_headers / 'system/arch' / kernel_system_arch,
 	kernel_headers / 'shared',
 	kernel_headers,
 	is_system: true,
@@ -53,8 +68,7 @@ kernel_link_args = [
 
 tvmm_inc = include_directories('include', 'core', 'wrappers')
 
-arch_sources = []
-if host_machine.cpu_family() == 'x86_64'
+if cpu_family == 'x86_64'
 	arch_inc = include_directories('arch/x86')
 	arch_sources = files(
 		'arch/x86/IoApic.cpp',
@@ -66,8 +80,18 @@ if host_machine.cpu_family() == 'x86_64'
 		'arch/x86/SvmVm.cpp',
 		'arch/x86/X86Decoder.cpp',
 	)
+	tests = ['tvmm_smoke', 'tvmm_stress']
 else
-	error('tvmm has no back end for ' + host_machine.cpu_family())
+	arch_inc = include_directories('arch/riscv')
+	arch_sources = files(
+		'arch/riscv/GStage.cpp',
+		'arch/riscv/RiscVDecoder.cpp',
+		'arch/riscv/RiscVEntry.S',
+		'arch/riscv/RiscVHost.cpp',
+		'arch/riscv/RiscVVcpu.cpp',
+		'arch/riscv/RiscVVm.cpp',
+	)
+	tests = ['tvmm_riscv_smoke']
 endif
 
 # `meson install` puts the driver among the add-ons of the prefix, which is
@@ -95,7 +119,7 @@ shared_module('tvmm',
 	name_suffix: '',
 	include_directories: [tvmm_inc, arch_inc, kernel_inc],
 	cpp_args: kernel_cpp_args,
-	c_args: ['-D_KERNEL_MODE'],
+	c_args: ['-D_KERNEL_MODE'] + (cpu_family == 'riscv64' ? ['-mcmodel=medany'] : []),
 	link_args: kernel_link_args,
 	install: true,
 	install_dir: drivers_dir / 'bin',
@@ -106,7 +130,7 @@ install_symlink('tvmm',
 	install_dir: drivers_dir / 'dev/misc',
 )
 
-foreach test: ['tvmm_smoke', 'tvmm_stress']
+foreach test: tests
 	executable(test,
 		'tests' / test + '.cpp',
 		include_directories: [

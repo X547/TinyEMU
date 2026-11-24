@@ -20,6 +20,9 @@ public:
 
 	// 'lock' is B_FULL_LOCK or B_CONTIGUOUS. The memory is zeroed.
 	status_t Create(const char *name, size_t size, uint32 lock);
+	// Physically contiguous, starting at a multiple of 'alignment', a power
+	// of two. The memory is zeroed.
+	status_t CreateAligned(const char *name, size_t size, size_t alignment);
 	status_t MapIntoTeam(team_id team, const char *name, uint64 &address) const;
 
 	// The physical address of the page at 'offset'.

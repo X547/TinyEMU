@@ -337,6 +337,13 @@ status_t Arch::HostStatus()
 }
 
 
+status_t Arch::GetHostIsa(TvmmHostIsa &isa)
+{
+	(void)isa;
+	return B_NOT_SUPPORTED;
+}
+
+
 uint32 Arch::MaxVcpus()
 {
 	return std::min<uint32>(Vm::kMaxVcpus, sProbed.asidCount > 0 ? sProbed.asidCount - 1 : 0);

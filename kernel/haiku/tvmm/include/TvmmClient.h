@@ -67,6 +67,13 @@ public:
 		return Op(TvmmOpGetInfo, info);
 	}
 
+	// RISC-V only
+	status_t GetHostIsa(TvmmHostIsa &isa) const
+	{
+		isa = {};
+		return Op(TvmmOpGetHostIsa, isa);
+	}
+
 	// 'flags' are TvmmVm* flags.
 	status_t CreateVm(uint32 flags = 0) const
 	{
@@ -182,8 +189,10 @@ public:
 		return Op(TvmmOpKick, args);
 	}
 
-	// The classes not asked for keep what 'state' held.
-	status_t GetState(uint32 vcpu, uint32 classes, TvmmX86State &state) const
+	// The classes not asked for keep what 'state' held. 'State' is the
+	// host's: TvmmX86State or TvmmRiscVState.
+	template <typename State>
+	status_t GetState(uint32 vcpu, uint32 classes, State &state) const
 	{
 		TvmmStateOp args {};
 		args.vcpu = vcpu;
@@ -214,7 +223,8 @@ public:
 		return Op(TvmmOpSetCpuid, args);
 	}
 
-	status_t SetState(uint32 vcpu, uint32 classes, const TvmmX86State &state) const
+	template <typename State>
+	status_t SetState(uint32 vcpu, uint32 classes, const State &state) const
 	{
 		TvmmStateOp args {};
 		args.vcpu = vcpu;

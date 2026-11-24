@@ -6,6 +6,11 @@ processors on. It is built on Haiku itself, against the private kernel
 headers of the running system, and checks nothing else about the hrev it is
 loaded on.
 
+It runs the PC machine's processors on x86-64 hosts with AMD SVM, and the
+RISC-V machine's harts on riscv64 hosts with the H extension. A RISC-V host
+describes its harts in the device tree the kernel booted with, which the
+driver reads for their extensions and timebase.
+
 ## Building and installing
 
 ```
@@ -20,8 +25,9 @@ The install puts the driver among the add-ons of the prefix, as
 Haiku loads drivers from: `~/config/non-packaged` for the user's own,
 `/boot/system/non-packaged`, meson's default on Haiku, for the system's, or
 `~/config` and `/boot/system` themselves, which hold what packages install and
-are read only outside of a package. `tvmm_smoke` and `tvmm_stress`, the
-tests, are built but not installed; each runs on the installed driver.
+are read only outside of a package. The tests are built but not installed;
+each runs on the installed driver: `tvmm_smoke` and `tvmm_stress` on x86-64,
+`tvmm_riscv_smoke` on riscv64.
 
 ## Replacing an installed driver
 
@@ -38,7 +44,7 @@ seconds afterwards.** Haiku's devfs can panic the system otherwise.
   through the new driver while its objects point into the old one.
 
 So, before `ninja install`, end every program that uses the device: TinyEMU
-on tvmm, `tvmm_smoke` and `tvmm_stress`. After it, wait until the driver's
+on tvmm and the tests. After it, wait until the driver's
 kernel image is a new one before starting any of them again; its ID in
 
 ```

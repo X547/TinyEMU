@@ -19,6 +19,7 @@ private:
 	status_t GetVcpu(const void *data, size_t length, Vcpu *&vcpu);
 
 	status_t HandleGetInfo(void *data, size_t length);
+	status_t HandleGetHostIsa(void *data, size_t length);
 	status_t HandleCreateVm(void *data, size_t length);
 	status_t HandleAllocRam(void *data, size_t length);
 	status_t HandleFreeRam(void *data, size_t length);

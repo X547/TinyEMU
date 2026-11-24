@@ -77,8 +77,9 @@ elif whp_enabled
   platform_sources += files('win32/whp_x86.cpp',
                             'common/hypervisor_memory_map.cpp',
                             'common/x86_cpuid_topology.cpp')
-elif tvmm_enabled
+elif tvmm_enabled and host_machine.cpu_family() == 'x86_64'
   platform_sources += files('haiku/tvmm_x86.cpp',
+                            'haiku/tvmm_common.cpp',
                             'common/hypervisor_memory_map.cpp')
 elif nvmm_enabled
   platform_sources += files('haiku/nvmm_x86.cpp',
@@ -88,6 +89,10 @@ else
 endif
 if platform_os == 'linux' and host_machine.cpu_family() == 'riscv64'
   platform_sources += files('linux/kvm_riscv.cpp',
+                            'common/hypervisor_memory_map.cpp')
+elif tvmm_enabled and host_machine.cpu_family() == 'riscv64'
+  platform_sources += files('haiku/tvmm_riscv.cpp',
+                            'haiku/tvmm_common.cpp',
                             'common/hypervisor_memory_map.cpp')
 else
   platform_sources += files('common/no_riscv_hypervisor.cpp')

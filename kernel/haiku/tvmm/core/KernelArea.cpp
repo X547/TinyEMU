@@ -40,6 +40,35 @@ status_t KernelArea::Create(const char *name, size_t size, uint32 lock)
 }
 
 
+status_t KernelArea::CreateAligned(const char *name, size_t size, size_t alignment)
+{
+	size = RoundUpToPage(size);
+	virtual_address_restrictions virtualRestrictions = {};
+	virtualRestrictions.address_specification = B_ANY_KERNEL_ADDRESS;
+	physical_address_restrictions physicalRestrictions = {};
+	physicalRestrictions.alignment = alignment;
+	void *address = nullptr;
+	const area_id area = create_area_etc(
+		B_SYSTEM_TEAM,
+		name,
+		size,
+		B_CONTIGUOUS,
+		B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA,
+		0,
+		0,
+		&virtualRestrictions,
+		&physicalRestrictions,
+		&address
+	);
+	CHECK_RET(area);
+	fArea = area;
+	fAddress = address;
+	fSize = size;
+	memset(fAddress, 0, fSize);
+	return B_OK;
+}
+
+
 status_t KernelArea::MapIntoTeam(team_id team, const char *name, uint64 &address) const
 {
 	void *clientAddress = nullptr;

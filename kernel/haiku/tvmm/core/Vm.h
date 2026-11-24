@@ -29,8 +29,6 @@ private:
 	int64 fTlbGeneration = 1;
 	int32 fClosing = 0;
 
-	void FlushGuestTlbs();
-
 public:
 	explicit Vm(team_id team);
 	~Vm();
@@ -56,6 +54,10 @@ public:
 	bool IsRam(uint64 gpa, bool write);
 	bool ReadGuest(uint64 gpa, void *buffer, size_t size);
 	bool WriteGuest(uint64 gpa, const void *buffer, size_t size);
+
+	// Returns once no vcpu runs with the guest TLBs it had: each flushes them
+	// before it enters again. Any thread but one inside the guest.
+	void FlushGuestTlbs();
 
 	// Every vcpu leaves its run, and none enters again.
 	void Close();

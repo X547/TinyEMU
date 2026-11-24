@@ -38,6 +38,7 @@
 #include "device_lock.h"
 #include "host_x86_hypervisor.h"
 #include "hypervisor_memory_map.h"
+#include "tvmm_common.h"
 
 
 #define CPUID_APIC bit_at(9)
@@ -48,20 +49,6 @@
 #define RFLAGS_IF bit_at(9)
 #define MSR_IA32_APIC_BASE 0x1b
 
-#define TVMM_PAGE_SIZE 4096
-
-
-static void tvmm_fail(const char *what, status_t err)
-{
-    fprintf(stderr, "tvmm: %s failed: %s\n", what, strerror(err));
-    exit(1);
-}
-
-static void tvmm_check(const char *what, status_t err)
-{
-    if (err < B_OK)
-        tvmm_fail(what, err);
-}
 
 /* The host processor's physical address width, which the machine's
    processor reports unless told otherwise. */
@@ -77,11 +64,6 @@ static int host_phys_address_bits()
 static bool is_x2apic_msr(uint32_t msr)
 {
     return msr >= X86_MSR_X2APIC_FIRST && msr <= X86_MSR_X2APIC_LAST;
-}
-
-static uint64_t round_to_page(uint64_t size)
-{
-    return (size + TVMM_PAGE_SIZE - 1) & ~(uint64_t)(TVMM_PAGE_SIZE - 1);
 }
 
 
@@ -165,20 +147,7 @@ private:
     uint64_t fPat;
     TvmmDevice fDevice;
     std::vector<std::unique_ptr<TvmmX86Vcpu>> fVcpus;
-    /* the RAM the kernel holds, which the platform knows by address */
-    struct Ram {
-        uint8_t *ptr;
-        uint64_t size;
-        uint32 id;
-    };
-    std::vector<Ram> fRam;
-    /* what each slot maps, for the dirty log and for freeing the RAM */
-    struct Slot {
-        uint64_t size;
-        uint32 ram_id;
-        bool log_dirty;
-    };
-    std::vector<Slot> fSlots;
+    TvmmRamMap fRam {fDevice};
     std::unique_ptr<HypervisorPhysMemoryMap> fMemoryMap;
     /* with TVMM_STATS in the environment: the statistics are printed at the
        end, the TSC timed against the clock from the start */
@@ -209,11 +178,21 @@ public:
     }
     int PhysAddressBits() override {return fPhysAddressBits;}
     PhysMemoryMap &MemoryMap() override {return *fMemoryMap;}
-    uint8_t *AllocRam(size_t size) override;
-    void FreeRam(uint8_t *ptr, size_t size) override;
+    uint8_t *AllocRam(size_t size) override {return fRam.Alloc(size);}
+    void FreeRam(uint8_t *ptr, size_t size) override
+    {
+        (void)size;
+        fRam.Free(ptr);
+    }
     void MapRam(int slot, uint64_t addr, uint64_t size, uint8_t *host_mem,
-                bool read_only, bool log_dirty) override;
-    void GetDirtyLog(int slot, uint32_t *bitmap) override;
+                bool read_only, bool log_dirty) override
+    {
+        fRam.Map(slot, addr, size, host_mem, read_only, log_dirty);
+    }
+    void GetDirtyLog(int slot, uint32_t *bitmap) override
+    {
+        fRam.GetDirtyLog(slot, bitmap);
+    }
     void SetIRQ(int irq, int level) override;
     void SendMsi(uint64_t addr, uint32_t data) override;
     X86Vcpu &Vcpu(int index) override {return *fVcpus[index];}
@@ -239,32 +218,13 @@ TvmmX86Hypervisor::~TvmmX86Hypervisor()
 
 bool TvmmX86Hypervisor::Init()
 {
-    status_t err = fDevice.Open();
-    if (err < B_OK) {
-        fprintf(stderr, "tvmm not available: %s\n", strerror(err));
-        return false;
-    }
     TvmmInfo info;
-    tvmm_check("reading the capabilities", fDevice.GetInfo(info));
-    if (info.abiVersion != kTvmmAbiVersion) {
-        fprintf(stderr, "tvmm: the kernel add-on has interface version %u, "
-                "this needs %u\n", info.abiVersion, kTvmmAbiVersion);
+    if (!tvmm_open(fDevice, TvmmArch::X86Svm,
+                   fApicEmulation ? TvmmVmLocalApic | TvmmVmIoApic : 0, info))
         return false;
-    }
-    if (info.hostStatus < B_OK) {
-        fprintf(stderr, "tvmm: this host cannot run guests: %s\n",
-                strerror(info.hostStatus));
-        return false;
-    }
     if (fCpuCount > (int)info.maxVcpus) {
         fprintf(stderr, "tvmm runs no more than %u processors\n",
                 info.maxVcpus);
-        return false;
-    }
-    err = fDevice.CreateVm(fApicEmulation ? TvmmVmLocalApic | TvmmVmIoApic
-                                          : 0);
-    if (err < B_OK) {
-        fprintf(stderr, "tvmm: cannot create a machine: %s\n", strerror(err));
         return false;
     }
 
@@ -352,7 +312,7 @@ void TvmmX86Hypervisor::PrintStats()
     static const char *const client_names[] = {
         "none", "canceled", "port", "mmio", "msr", "halted",
         "interrupt window", "tpr changed", "eoi", "extint accepted",
-        "shutdown", "failed entry", "unhandled",
+        "shutdown", "failed entry", "unhandled", "sbi", "system event",
     };
     static_assert(std::size(arch_names) == TvmmX86StatCount);
     static_assert(std::size(client_names) == kTvmmExitCount);
@@ -490,85 +450,6 @@ void TvmmX86Hypervisor::SetCpuid()
     }
     tvmm_check("configuring CPUID",
                fDevice.SetCpuid(leaves.data(), leaves.size()));
-}
-
-
-/* The RAM comes zeroed from the kernel, which keeps it mapped where the
-   guest has it. */
-uint8_t *TvmmX86Hypervisor::AllocRam(size_t size)
-{
-    uint64_t rounded = round_to_page(size);
-    uint32 id;
-    uint8 *ptr;
-    if (fDevice.AllocRam(rounded, id, ptr) < B_OK)
-        return nullptr;
-    fRam.push_back(Ram {ptr, rounded, id});
-    return ptr;
-}
-
-
-/* The kernel keeps RAM a slot maps, so the slots go first. */
-void TvmmX86Hypervisor::FreeRam(uint8_t *ptr, size_t size)
-{
-    (void)size;
-    for (auto it = fRam.begin(); it != fRam.end(); ++it) {
-        if (it->ptr == ptr) {
-            for (size_t slot = 0; slot < fSlots.size(); slot++) {
-                if (fSlots[slot].size != 0 && fSlots[slot].ram_id == it->id)
-                    MapRam(slot, 0, 0, nullptr, false, false);
-            }
-            tvmm_check("freeing RAM", fDevice.FreeRam(it->id, ptr));
-            fRam.erase(it);
-            return;
-        }
-    }
-}
-
-
-void TvmmX86Hypervisor::MapRam(int slot, uint64_t addr, uint64_t size,
-                               uint8_t *host_mem, bool read_only,
-                               bool log_dirty)
-{
-    if (slot >= (int)fSlots.size())
-        fSlots.resize(slot + 1, Slot {0, 0, false});
-    if (size == 0) {
-        tvmm_check("unmapping RAM", fDevice.MapRam(slot, 0, 0, 0, 0, 0));
-        fSlots[slot] = Slot {0, 0, false};
-        return;
-    }
-    uint32 flags = 0;
-    if (read_only)
-        flags |= TvmmMapReadOnly;
-    if (log_dirty)
-        flags |= TvmmMapLogDirty;
-    for (const Ram &ram: fRam) {
-        if (host_mem >= ram.ptr && host_mem < ram.ptr + ram.size) {
-            uint64_t offset = host_mem - ram.ptr;
-            tvmm_check("mapping RAM",
-                       fDevice.MapRam(slot, addr, round_to_page(size), ram.id,
-                                      offset, flags));
-            fSlots[slot] = Slot {size, ram.id, log_dirty};
-            return;
-        }
-    }
-    fprintf(stderr, "tvmm: RAM at %p is not the kernel's\n", host_mem);
-    exit(1);
-}
-
-
-/* From the kernel for a slot mapped with its log; a slot without one counts
-   as written all over. */
-void TvmmX86Hypervisor::GetDirtyLog(int slot, uint32_t *bitmap)
-{
-    uint64_t pages = round_to_page(fSlots[slot].size) / TVMM_PAGE_SIZE;
-    size_t words = (pages + 63) / 64;
-    if (!fSlots[slot].log_dirty) {
-        memset(bitmap, 0xff, words * 8);
-        return;
-    }
-    tvmm_check("reading the dirty log",
-               fDevice.GetDirtyLog(slot, reinterpret_cast<uint64 *>(bitmap),
-                                   words));
 }
 
 

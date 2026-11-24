@@ -32,7 +32,7 @@
 // The structures have the same layout in the kernel and in the client, which
 // the static_asserts below hold to.
 
-constexpr uint32 kTvmmAbiVersion = 9;
+constexpr uint32 kTvmmAbiVersion = 10;
 constexpr const char *kTvmmDevicePath = "/dev/misc/tvmm";
 
 
@@ -54,6 +54,7 @@ enum TvmmOp: uint32 {
 	TvmmOpGetDirtyLog,
 	TvmmOpSetIrqLine,
 	TvmmOpResetIoApic,
+	TvmmOpGetHostIsa,
 };
 
 
@@ -79,6 +80,19 @@ enum {
 };
 
 
+// TvmmInfo::features, RISC-V H. TvmmInfo::archId holds the VMID bits and
+// the guest physical address bits.
+enum {
+	// the G-stage translation in use
+	TvmmRiscVFeatureSv39x4 = 1 << 0,
+	TvmmRiscVFeatureSv48x4 = 1 << 1,
+	// henvcfg takes what the guest's cache block instructions need
+	TvmmRiscVFeatureCbo    = 1 << 2,
+	// the host's device tree describes its harts
+	TvmmRiscVFeatureFdt    = 1 << 3,
+};
+
+
 struct TvmmInfo {
 	uint32 abiVersion;
 	TvmmArch arch;
@@ -89,6 +103,26 @@ struct TvmmInfo {
 	uint32 features;
 	// the processor's own description of its virtualization, for diagnostics
 	uint32 archId[4];
+};
+
+
+constexpr size_t kTvmmHostIsaExtensionsSize = 1024;
+
+
+// RISC-V: what the guests' harts are, as their device tree is to describe
+// them: the host's harts less what the kernel cannot give a guest.
+struct TvmmHostIsa {
+	// the time counter's, the host's
+	uint64 timebaseFrequency;
+	// the single letter extensions, as misa holds them, S and U included
+	uint32 misa;
+	// the widest translation of the guest's own, as satp's MODE names it
+	uint32 satpMode;
+	// the bytes of a cache block instruction, 0 without the extension
+	uint32 cbomBlockSize;
+	uint32 cbozBlockSize;
+	// the multi-letter extensions, each ended by a NUL, the list by another
+	char extensions[kTvmmHostIsaExtensionsSize];
 };
 
 
@@ -112,7 +146,7 @@ struct TvmmCreateVm {
 
 
 // x86 with TvmmVmIoApic: input 'pin' of the IOAPIC, below 24, at 'level'.
-// Any thread.
+// RISC-V: the supervisor external interrupt of vcpu 'pin'. Any thread.
 struct TvmmSetIrqLine {
 	uint32 pin;
 	uint32 level;
@@ -203,7 +237,7 @@ struct TvmmVcpuOp {
 
 struct TvmmStateOp {
 	uint32 vcpu;
-	// TvmmX86State* classes
+	// TvmmX86State* or TvmmRiscVState* classes
 	uint32 classes;
 	uint64 stateAddress;
 	uint64 stateSize;
@@ -257,6 +291,11 @@ enum class TvmmExit: uint32 {
 	FailEntry,
 	// an exit the kernel has no handling for
 	Unhandled,
+	// RISC-V: an SBI call the kernel does not answer
+	Sbi,
+	// RISC-V: the guest asked the SBI for a reset or a shutdown; the vcpu is
+	// stopped
+	SystemEvent,
 };
 
 
@@ -307,6 +346,8 @@ struct TvmmExitFailEntry {
 };
 
 
+// RISC-V: scause, stval and the guest physical address of a guest page
+// fault, with the instruction where it was read
 struct TvmmExitUnhandled {
 	uint64 code;
 	uint64 info1;
@@ -314,6 +355,21 @@ struct TvmmExitUnhandled {
 	uint64 rip;
 	uint8 insnLength;
 	uint8 insnBytes[15];
+};
+
+
+// RISC-V: a0 to a7 of the call. The client stores what the call returns in
+// a[0] and a[1], which the kernel puts in the guest's a0 and a1; a legacy
+// call leaves a[1] as it was.
+struct TvmmExitSbi {
+	uint64 a[8];
+};
+
+
+// RISC-V: the SBI system reset's type and reason
+struct TvmmExitSystemEvent {
+	uint32 type;
+	uint32 reason;
 };
 
 
@@ -368,6 +424,8 @@ struct TvmmRun {
 		TvmmExitEoi eoi;
 		TvmmExitFailEntry failEntry;
 		TvmmExitUnhandled unhandled;
+		TvmmExitSbi sbi;
+		TvmmExitSystemEvent systemEvent;
 		uint8 raw[256];
 	} exit;
 };
@@ -424,13 +482,36 @@ enum {
 };
 
 
-constexpr uint32 kTvmmExitCount = uint32(TvmmExit::Unhandled) + 1;
+// TvmmVcpuStats::archExits, RISC-V H: the guest's traps to the hypervisor by
+// kind
+enum {
+	// a host interrupt, kicks and timers included
+	TvmmRiscVStatIntr,
+	TvmmRiscVStatWfi,
+	// an SBI call the kernel answered
+	TvmmRiscVStatSbi,
+	// one the client answers
+	TvmmRiscVStatSbiClient,
+	// a guest page fault on what is RAM by now, or on a page the dirty log
+	// keeps from writes until it is written
+	TvmmRiscVStatGpfRam,
+	TvmmRiscVStatMmio,
+	// an instruction the guest gets an illegal instruction exception for
+	TvmmRiscVStatVirtualInsn,
+	// anything else, the exits the client gets as Unhandled included
+	TvmmRiscVStatOther,
+	TvmmRiscVStatCount
+};
+
+
+constexpr uint32 kTvmmExitCount = uint32(TvmmExit::SystemEvent) + 1;
 constexpr uint32 kTvmmMaxClientExits = 16;
 constexpr uint32 kTvmmMaxArchExits = 32;
 // x86: the local APIC's registers, by xAPIC offset / 16 (x2APIC MSR - 0x800)
 constexpr uint32 kTvmmApicRegCount = 64;
 static_assert(kTvmmExitCount <= kTvmmMaxClientExits);
 static_assert(TvmmX86StatCount <= kTvmmMaxArchExits);
+static_assert(TvmmRiscVStatCount <= kTvmmMaxArchExits);
 
 
 // What a vcpu did since it was created. A run's cycles are counted when it
@@ -570,3 +651,71 @@ struct TvmmX86State {
 static_assert(offsetof(TvmmX86State, segs) == 144);
 static_assert(offsetof(TvmmX86State, cr0) == 304);
 static_assert(offsetof(TvmmX86State, fpu) % 64 == 0);
+
+
+//#pragma mark - RISC-V state
+
+
+enum {
+	TvmmRiscVStateCore  = 1 << 0,
+	TvmmRiscVStateCsrs  = 1 << 1,
+	TvmmRiscVStateFp    = 1 << 2,
+	TvmmRiscVStateTimer = 1 << 3,
+	TvmmRiscVStateMp    = 1 << 4,
+	TvmmRiscVStateAll   = (1 << 5) - 1,
+};
+
+
+// TvmmRiscVState::mode
+enum {
+	TvmmRiscVModeUser = 0,
+	TvmmRiscVModeSupervisor = 1,
+};
+
+
+// TvmmRiscVState::mpState, as the SBI's HSM extension numbers it
+enum {
+	TvmmRiscVHartStarted = 0,
+	TvmmRiscVHartStopped = 1,
+	TvmmRiscVHartStartPending = 2,
+};
+
+
+// A guest hart, which always runs virtualized, in VS- or VU-mode.
+struct TvmmRiscVState {
+	// Core: x[0] reads as 0
+	uint64 x[32];
+	uint64 pc;
+	uint64 mode;
+
+	// Csrs: the guest's supervisor CSRs
+	uint64 sstatus;
+	uint64 sie;
+	uint64 stvec;
+	uint64 sscratch;
+	uint64 sepc;
+	uint64 scause;
+	uint64 stval;
+	uint64 satp;
+	uint64 scounteren;
+	uint64 senvcfg;
+	// the guest's pending interrupts, in sip's layout: SSIP, STIP and SEIP
+	uint64 sip;
+
+	// Fp
+	uint64 f[32];
+	uint64 fcsr;
+
+	// Timer: when on the guest's time counter its timer interrupt is due,
+	// UINT64_MAX for never
+	uint64 timerDeadline;
+	// read only: the guest's time counter less the host's
+	uint64 timeDelta;
+
+	// Mp: TvmmRiscVHart*
+	uint32 mpState;
+	uint32 reserved;
+};
+
+static_assert(offsetof(TvmmRiscVState, pc) == 256);
+static_assert(sizeof(TvmmRiscVState) == 648);

@@ -128,6 +128,9 @@ status_t VmHandle::Control(uint32 op, void *data, size_t length)
 		case TvmmOpResetIoApic:
 			res = HandleResetIoApic(data, length);
 			break;
+		case TvmmOpGetHostIsa:
+			res = HandleGetHostIsa(data, length);
+			break;
 		default:
 			break;
 	}
@@ -144,6 +147,21 @@ status_t VmHandle::HandleGetInfo(void *data, size_t length)
 	info.maxSlots = GuestMemory::kMaxSlots;
 	Arch::Probe(info);
 	return CopyArgsOut(data, info);
+}
+
+
+status_t VmHandle::HandleGetHostIsa(void *data, size_t length)
+{
+	// too large for the kernel stack
+	ObjectDeleter<TvmmHostIsa> deleter(new(std::nothrow) TvmmHostIsa);
+	if (!deleter.IsSet()) {
+		return B_NO_MEMORY;
+	}
+	TvmmHostIsa &isa = *deleter.Get();
+	CHECK_RET(CopyArgsIn(isa, data, length));
+	isa = {};
+	CHECK_RET(Arch::GetHostIsa(isa));
+	return CopyArgsOut(data, isa);
 }
 
 

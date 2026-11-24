@@ -6,6 +6,7 @@ class RamObject;
 class Vcpu;
 class Vm;
 struct TvmmCpuidEntry;
+struct TvmmHostIsa;
 struct TvmmInfo;
 struct TvmmRun;
 
@@ -36,7 +37,8 @@ public:
 	// As at power on, with what the VM's flags give it.
 	virtual void Reset() = 0;
 
-	// The architecture's state structure, TvmmX86State for x86.
+	// The architecture's state structure, TvmmX86State for x86,
+	// TvmmRiscVState for RISC-V.
 	virtual size_t StateSize() const = 0;
 	virtual void GetState(uint32 classes, void *state) = 0;
 	virtual status_t SetState(uint32 classes, const void *state) = 0;
@@ -64,7 +66,7 @@ public:
 	virtual status_t SetCpuid(const TvmmCpuidEntry *entries, uint32 count) = 0;
 	// x86 with local APICs; any thread
 	virtual status_t SendMsi(uint64 address, uint32 data) = 0;
-	// x86 with the IOAPIC; any thread
+	// x86 with the IOAPIC, RISC-V a vcpu's external interrupt; any thread
 	virtual status_t SetIrqLine(uint32 pin, bool level) = 0;
 	virtual status_t ResetIoApic() = 0;
 };
@@ -78,6 +80,8 @@ namespace Arch {
 void Probe(TvmmInfo &info);
 // Whether the host can run guests, as Probe() found.
 status_t HostStatus();
+// RISC-V: what the guests' harts are; B_NOT_SUPPORTED elsewhere.
+status_t GetHostIsa(TvmmHostIsa &isa);
 uint32 MaxVcpus();
 
 // Held by each VM: the processors are set up to run guests while one is.
@@ -87,7 +91,8 @@ void Release();
 // 'flags' are TvmmCreateVm::flags.
 status_t CreateVm(Vm &vm, uint32 flags, ArchVm *&arch);
 
-// Host cycles, which agree between the CPUs; while a VM is held.
+// Host cycles, which agree between the CPUs; while a VM is held. On RISC-V
+// the ticks of the time counter.
 uint64 Cycles();
 
 
