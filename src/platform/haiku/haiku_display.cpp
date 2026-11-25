@@ -32,6 +32,7 @@
 #include <Bitmap.h>
 #include <Cursor.h>
 #include <Messenger.h>
+#include <Region.h>
 #include <View.h>
 #include <Window.h>
 
@@ -213,8 +214,9 @@ ScreenView::ScreenView(BRect frame, HaikuDisplay &display):
     BView(frame, "screen", B_FOLLOW_ALL, B_WILL_DRAW | B_FRAME_EVENTS),
     fDisplay(display)
 {
-    /* everything is drawn here, so nothing is erased first */
-    SetViewColor(B_TRANSPARENT_COLOR);
+    /* the server erases to black, which is what lies past the frame
+       buffer */
+    SetViewColor(0, 0, 0);
 }
 
 
@@ -480,9 +482,9 @@ ScreenRect HaikuDisplay::CursorRect() const
 }
 
 
-/* With fMutex held, on the window's thread: draws the frame buffer, black
-   past its edges, and the cursor over both, into one rectangle of the
-   view. */
+/* With fMutex held, from the view's Draw(): draws the frame buffer and the
+   cursor over it, and over the black that the server erased past the frame
+   buffer's edges, into one rectangle of the view. */
 void HaikuDisplay::Paint(BView *view, const ScreenRect &area,
                          const ScreenRect &cursor)
 {
@@ -493,12 +495,6 @@ void HaikuDisplay::Paint(BView *view, const ScreenRect &area,
     ScreenRect fb = r & ScreenRect(0, 0, fFbWidth, fFbHeight);
     if (!fb.Empty())
         view->DrawBitmap(fFb.get(), to_brect(fb), to_brect(fb));
-
-    ScreenRect outside[2];
-    int count = screen_rect_outside(r, fFbWidth, fFbHeight, outside);
-    view->SetHighColor(0, 0, 0);
-    for (int i = 0; i < count; i++)
-        view->FillRect(to_brect(outside[i]));
 
     ScreenRect c = r & cursor;
     if (c.Empty())
@@ -571,7 +567,16 @@ void HaikuDisplay::UpdateHostCursor(BView *view)
 }
 
 
-/* Redraws what changed since the last time. */
+/* Has the view draw a rectangle of itself. */
+static void invalidate(BView *view, const ScreenRect &r)
+{
+    if (!r.Empty())
+        view->Invalidate(to_brect(r));
+}
+
+
+/* Invalidates what changed since the last time; the view's Draw() then
+   draws it. */
 void HaikuDisplay::DrawUpdate(BView *view)
 {
     std::lock_guard<std::mutex> locker(fMutex);
@@ -594,23 +599,32 @@ void HaikuDisplay::DrawUpdate(BView *view)
         fCursorImageChanged = false;
         UpdateHostCursor(view);
     }
-    ScreenRect cursor = CursorRect();
-    Paint(view, dirty, cursor);
+    invalidate(view, dirty);
     if (fCursorChanged) {
         fCursorChanged = false;
-        Paint(view, fCursorDrawn, cursor);
-        Paint(view, cursor, cursor);
+        ScreenRect cursor = CursorRect();
+        invalidate(view, fCursorDrawn);
+        invalidate(view, cursor);
         fCursorDrawn = cursor;
     }
-    /* the server has read the pixels before the source may change them */
-    view->Sync();
 }
 
 
+/* The view's Draw(): paints each rectangle of the region being updated. */
 void HaikuDisplay::DrawView(BView *view, BRect update)
 {
     std::lock_guard<std::mutex> locker(fMutex);
-    Paint(view, from_brect(update), CursorRect());
+    ScreenRect cursor = CursorRect();
+    BRegion region;
+
+    /* the update rectangle bounds the region, which is all that is drawn */
+    view->GetClippingRegion(&region);
+    BRegion bounds(update);
+    region.IntersectWith(&bounds);
+    for (int32 i = 0; i < region.CountRects(); i++)
+        Paint(view, from_brect(region.RectAt(i)), cursor);
+    /* the server has read the pixels before the source may change them */
+    view->Sync();
 }
 
 
